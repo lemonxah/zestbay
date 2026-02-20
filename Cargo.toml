@@ -1,0 +1,37 @@
+[package]
+name = "zestbay"
+version = "0.1.0"
+edition = "2024"
+description = "A PipeWire patchbay application"
+license = "MIT"
+
+[dependencies]
+# UI
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+egui = "0.31"
+
+# PipeWire
+pipewire = "0.9"
+libspa = "0.9"
+
+# LV2 Plugin Hosting
+lilv = "0.2"
+lv2_raw = "0.2"
+
+# Threading & Sync
+parking_lot = "0.12"
+
+# Serialization (for config)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# System tray (KDE StatusNotifierItem via DBus)
+ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
+
+# Window handle (for X11 _NET_WM_STATE_SKIP_TASKBAR)
+raw-window-handle = "0.6"
+
+# Utilities
+log = "0.4"
+env_logger = "0.11"
+dirs = "6"
