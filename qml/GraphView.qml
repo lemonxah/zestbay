@@ -718,6 +718,7 @@ Item {
         property real lastY: 0
 
         onPressed: (mouse) => {
+            graphView.forceActiveFocus()
             lastX = mouse.x
             lastY = mouse.y
 
@@ -818,9 +819,9 @@ Item {
                         selectedLinks = newSelLinks
                     } else {
                         // Single click: select only this link
-                        selectedLinks = {}
-                        selectedLinks[clickedLinkId] = true
-                        selectedLinks = selectedLinks  // trigger reactivity
+                        var freshSel = {}
+                        freshSel[clickedLinkId] = true
+                        selectedLinks = freshSel
                         selectedNodes = {}
                     }
                     canvas.requestPaint()

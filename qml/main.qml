@@ -93,6 +93,7 @@ ApplicationWindow {
             mainWindow.requestActivate();
             controller.set_window_visible(true);
             graphView.refreshData();
+            graphView.forceActiveFocus();
         }
         function onHide_window_requested() {
             mainWindow.visible = false;
