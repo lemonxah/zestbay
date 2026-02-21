@@ -61,10 +61,7 @@ unsafe extern "C" {
 
     /// Query the UI for extension data by URI.
     /// Returns a pointer to the extension struct, or null if unsupported.
-    fn suil_instance_extension_data(
-        instance: *mut c_void,
-        uri: *const c_char,
-    ) -> *const c_void;
+    fn suil_instance_extension_data(instance: *mut c_void, uri: *const c_char) -> *const c_void;
 }
 
 type SuilPortWriteFunc = unsafe extern "C" fn(
@@ -279,8 +276,9 @@ struct UiTimerData {
     ui_handle: *mut c_void,
     /// Set to true when the window is closing — tells the timer callback
     /// to stop (return 0) so it doesn't touch the suil instance after
-    /// it has been freed.
-    closing: std::sync::atomic::AtomicBool,
+    /// it has been freed.  Uses Arc so the destroy signal handler can
+    /// set it immediately without going through the command channel.
+    closing: Arc<std::sync::atomic::AtomicBool>,
     /// The instance_id, used to close the correct window from the idle callback
     /// when the plugin UI requests close via the idle interface.
     instance_id: u64,
@@ -296,9 +294,7 @@ unsafe extern "C" fn ui_timer_callback(data: *mut c_void) -> c_int {
         return 0; // stop
     }
     let td = unsafe { &*(data as *const UiTimerData) };
-    if td.suil_instance.is_null()
-        || td.closing.load(std::sync::atomic::Ordering::Acquire)
-    {
+    if td.suil_instance.is_null() || td.closing.load(std::sync::atomic::Ordering::Acquire) {
         return 0; // stop the timer
     }
 
@@ -338,9 +334,8 @@ unsafe extern "C" fn ui_timer_callback(data: *mut c_void) -> c_int {
                 if data.len() < 16 {
                     continue;
                 }
-                let seq_body_size = u32::from_ne_bytes(
-                    [data[0], data[1], data[2], data[3]]
-                ) as usize;
+                let seq_body_size =
+                    u32::from_ne_bytes([data[0], data[1], data[2], data[3]]) as usize;
                 let events_end = (8 + seq_body_size).min(data.len());
                 let mut offset = 16usize;
 
@@ -375,22 +370,19 @@ unsafe extern "C" fn ui_timer_callback(data: *mut c_void) -> c_int {
     }
 
     // Call the plugin UI's idle interface if it supports one.
-    if let Some(idle_iface) = td.idle_iface {
-        if let Some(idle_fn) = idle_iface.idle {
-            let result = unsafe { idle_fn(td.ui_handle) };
-            if result != 0 {
-                // Plugin wants to close — schedule a close via g_idle_add
-                // instead of directly manipulating the window here.
-                let instance_id = td.instance_id;
-                let close_data = Box::into_raw(Box::new(instance_id));
-                unsafe {
-                    g_idle_add(
-                        Some(close_window_idle_callback),
-                        close_data as *mut c_void,
-                    );
-                }
-                return 0; // stop the timer
+    if let Some(idle_iface) = td.idle_iface
+        && let Some(idle_fn) = idle_iface.idle
+    {
+        let result = unsafe { idle_fn(td.ui_handle) };
+        if result != 0 {
+            // Plugin wants to close — schedule a close via g_idle_add
+            // instead of directly manipulating the window here.
+            let instance_id = td.instance_id;
+            let close_data = Box::into_raw(Box::new(instance_id));
+            unsafe {
+                g_idle_add(Some(close_window_idle_callback), close_data as *mut c_void);
             }
+            return 0; // stop the timer
         }
     }
 
@@ -406,7 +398,10 @@ enum GtkCommand {
     /// Close a plugin UI window by instance_id.
     /// `destroyed_by_gtk` is true when this comes from the GTK "destroy"
     /// signal (window already being destroyed — don't call gtk_widget_destroy).
-    Close { instance_id: u64, destroyed_by_gtk: bool },
+    Close {
+        instance_id: u64,
+        destroyed_by_gtk: bool,
+    },
     /// Shut down the GTK thread (quit gtk_main).
     Shutdown,
 }
@@ -421,14 +416,24 @@ struct OpenUiRequest {
     port_updates: super::types::SharedPortUpdates,
     urid_mapper: Arc<UridMapper>,
 }
-
+type OnceArcMutex<A> = OnceLock<Arc<Mutex<A>>>;
 /// Sender half of the GTK command channel.  Initialized once when the
 /// persistent GTK thread is spawned.
 static GTK_CMD_TX: OnceLock<Mutex<Sender<GtkCommand>>> = OnceLock::new();
 
 /// Set of instance IDs that currently have their UI open.
 /// Shared between the GTK thread and the rest of the app.
-static OPEN_UI_SET: OnceLock<Arc<Mutex<std::collections::HashSet<u64>>>> = OnceLock::new();
+static OPEN_UI_SET: OnceArcMutex<std::collections::HashSet<u64>> = OnceLock::new();
+
+/// Map of instance_id → closing flag.  The "destroy" signal handler sets
+/// this immediately so the timer callback stops before `gtk_poll_commands`
+/// processes the deferred Close command.
+static CLOSING_FLAGS: OnceArcMutex<HashMap<u64, Arc<std::sync::atomic::AtomicBool>>> =
+    OnceLock::new();
+
+fn closing_flags() -> &'static Arc<Mutex<HashMap<u64, Arc<std::sync::atomic::AtomicBool>>>> {
+    CLOSING_FLAGS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+}
 
 fn open_ui_set() -> &'static Arc<Mutex<std::collections::HashSet<u64>>> {
     OPEN_UI_SET.get_or_init(|| Arc::new(Mutex::new(std::collections::HashSet::new())))
@@ -482,7 +487,10 @@ unsafe extern "C" fn gtk_poll_commands(data: *mut c_void) -> c_int {
                 }
                 handle_open_window(state, req);
             }
-            GtkCommand::Close { instance_id, destroyed_by_gtk } => {
+            GtkCommand::Close {
+                instance_id,
+                destroyed_by_gtk,
+            } => {
                 handle_close_window(state, instance_id, destroyed_by_gtk);
             }
             GtkCommand::Shutdown => {
@@ -491,7 +499,9 @@ unsafe extern "C" fn gtk_poll_commands(data: *mut c_void) -> c_int {
                 for id in ids {
                     handle_close_window(state, id, false);
                 }
-                unsafe { gtk_main_quit(); }
+                unsafe {
+                    gtk_main_quit();
+                }
                 return 0; // stop polling
             }
         }
@@ -505,12 +515,20 @@ unsafe extern "C" fn gtk_poll_commands(data: *mut c_void) -> c_int {
 unsafe extern "C" fn close_window_idle_callback(data: *mut c_void) -> c_int {
     if !data.is_null() {
         let instance_id = unsafe { *Box::from_raw(data as *mut u64) };
-        // We can't directly access GtkThreadState from here, so we send
-        // a close command through the channel.
-        if let Some(tx) = GTK_CMD_TX.get() {
-            if let Ok(tx) = tx.lock() {
-                let _ = tx.send(GtkCommand::Close { instance_id, destroyed_by_gtk: false });
-            }
+        // Immediately set the closing flag to stop the timer
+        if let Ok(flags) = closing_flags().lock()
+            && let Some(flag) = flags.get(&instance_id)
+        {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        }
+        // Send close command through the channel for resource cleanup.
+        if let Some(tx) = GTK_CMD_TX.get()
+            && let Ok(tx) = tx.lock()
+        {
+            let _ = tx.send(GtkCommand::Close {
+                instance_id,
+                destroyed_by_gtk: false,
+            });
         }
     }
     0 // G_SOURCE_REMOVE — run once
@@ -526,13 +544,25 @@ unsafe extern "C" fn on_window_destroy_multi(_widget: *mut c_void, data: *mut c_
     let instance_id = unsafe { *(data as *const u64) };
     log::info!("Plugin UI window destroyed for instance {}", instance_id);
 
+    // IMMEDIATELY set the closing flag so the timer callback stops before
+    // the next tick.  This prevents use-after-free when the timer fires
+    // between the destroy signal and processing the Close command.
+    if let Ok(flags) = closing_flags().lock()
+        && let Some(flag) = flags.get(&instance_id)
+    {
+        flag.store(true, std::sync::atomic::Ordering::Release);
+    }
+
     // Send a close command to clean up resources.  The GTK window widget
     // itself is already being destroyed by GTK, so handle_close_window
     // will skip gtk_widget_destroy but still free suil resources.
-    if let Some(tx) = GTK_CMD_TX.get() {
-        if let Ok(tx) = tx.lock() {
-            let _ = tx.send(GtkCommand::Close { instance_id, destroyed_by_gtk: true });
-        }
+    if let Some(tx) = GTK_CMD_TX.get()
+        && let Ok(tx) = tx.lock()
+    {
+        let _ = tx.send(GtkCommand::Close {
+            instance_id,
+            destroyed_by_gtk: true,
+        });
     }
 }
 
@@ -588,8 +618,13 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
 
     // If already open, just present (focus) the existing window
     if let Some(ws) = state.windows.get(&instance_id) {
-        log::info!("Plugin UI already open for instance {} — focusing", instance_id);
-        unsafe { gtk_window_present(ws.gtk_window); }
+        log::info!(
+            "Plugin UI already open for instance {} — focusing",
+            instance_id
+        );
+        unsafe {
+            gtk_window_present(ws.gtk_window);
+        }
         return;
     }
 
@@ -597,7 +632,11 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
     let world = lilv::World::with_load_all();
     let uri_node = world.new_uri(&req.plugin_uri);
 
-    let plugin = match world.plugins().iter().find(|p| p.uri().as_uri() == uri_node.as_uri()) {
+    let plugin = match world
+        .plugins()
+        .iter()
+        .find(|p| p.uri().as_uri() == uri_node.as_uri())
+    {
         Some(p) => p,
         None => {
             log::error!("Plugin not found: {}", req.plugin_uri);
@@ -619,12 +658,11 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
     let mut symbol_to_index: Vec<(String, usize)> = Vec::new();
     let port_ranges = plugin.port_ranges_float();
     for (i, _) in port_ranges.iter().enumerate() {
-        if let Some(port) = plugin.port_by_index(i) {
-            if let Some(sym_node) = port.symbol() {
-                if let Some(sym) = sym_node.as_str() {
-                    symbol_to_index.push((sym.to_string(), i));
-                }
-            }
+        if let Some(port) = plugin.port_by_index(i)
+            && let Some(sym_node) = port.symbol()
+            && let Some(sym) = sym_node.as_str()
+        {
+            symbol_to_index.push((sym.to_string(), i));
         }
     }
 
@@ -691,33 +729,54 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
 
     log::info!(
         "Opening UI: uri={}, type={}, bundle={}, binary={}",
-        ui_uri, ui_type_uri, bundle_path, binary_path
+        ui_uri,
+        ui_type_uri,
+        bundle_path,
+        binary_path
     );
 
     // Build CStrings
     let host_type = match CString::new(HOST_TYPE_URI) {
         Ok(s) => s,
-        Err(e) => { log::error!("CString error: {}", e); return; }
+        Err(e) => {
+            log::error!("CString error: {}", e);
+            return;
+        }
     };
     let c_plugin_uri = match CString::new(req.plugin_uri.as_str()) {
         Ok(s) => s,
-        Err(e) => { log::error!("CString error: {}", e); return; }
+        Err(e) => {
+            log::error!("CString error: {}", e);
+            return;
+        }
     };
     let c_ui_uri = match CString::new(ui_uri) {
         Ok(s) => s,
-        Err(e) => { log::error!("CString error: {}", e); return; }
+        Err(e) => {
+            log::error!("CString error: {}", e);
+            return;
+        }
     };
     let c_ui_type_uri = match CString::new(ui_type_uri) {
         Ok(s) => s,
-        Err(e) => { log::error!("CString error: {}", e); return; }
+        Err(e) => {
+            log::error!("CString error: {}", e);
+            return;
+        }
     };
     let c_bundle_path = match CString::new(bundle_path) {
         Ok(s) => s,
-        Err(e) => { log::error!("CString error: {}", e); return; }
+        Err(e) => {
+            log::error!("CString error: {}", e);
+            return;
+        }
     };
     let c_binary_path = match CString::new(binary_path) {
         Ok(s) => s,
-        Err(e) => { log::error!("CString error: {}", e); return; }
+        Err(e) => {
+            log::error!("CString error: {}", e);
+            return;
+        }
     };
 
     // Create controller
@@ -769,7 +828,10 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
         if instance.is_null() {
             suil_host_free(host);
             let _ = Box::from_raw(controller_ptr as *mut UiController);
-            log::error!("Failed to create suil instance for instance {}", instance_id);
+            log::error!(
+                "Failed to create suil instance for instance {}",
+                instance_id
+            );
             let _ = req.event_tx.send(PwEvent::Lv2(Lv2Event::PluginError {
                 instance_id: Some(instance_id),
                 message: "Failed to create suil instance".into(),
@@ -837,14 +899,12 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
         gtk_widget_show_all(window);
 
         // Set up periodic DSP → UI sync
-        let atom_event_transfer_urid =
-            req.urid_mapper.map("http://lv2plug.in/ns/ext/atom#eventTransfer");
+        let atom_event_transfer_urid = req
+            .urid_mapper
+            .map("http://lv2plug.in/ns/ext/atom#eventTransfer");
 
         let idle_iface: Option<&'static Lv2UiIdleInterface> = {
-            let ext = suil_instance_extension_data(
-                instance,
-                LV2_UI_IDLE_INTERFACE.as_ptr(),
-            );
+            let ext = suil_instance_extension_data(instance, LV2_UI_IDLE_INTERFACE.as_ptr());
             if ext.is_null() {
                 None
             } else {
@@ -857,27 +917,36 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
             log::info!("Plugin supports ui:idleInterface");
         }
 
+        let closing_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Register the closing flag so the destroy signal can set it immediately
+        if let Ok(mut flags) = closing_flags().lock() {
+            flags.insert(instance_id, closing_flag.clone());
+        }
+
         let timer_data = Box::into_raw(Box::new(UiTimerData {
             suil_instance: instance,
             port_updates: req.port_updates,
             atom_event_transfer_urid,
             idle_iface,
             ui_handle,
-            closing: std::sync::atomic::AtomicBool::new(false),
+            closing: closing_flag,
             instance_id,
         }));
         let timer_source_id = g_timeout_add(33, Some(ui_timer_callback), timer_data as *mut c_void);
 
         // Track the window
-        state.windows.insert(instance_id, WindowState {
+        state.windows.insert(
             instance_id,
-            gtk_window: window,
-            suil_instance: instance,
-            suil_host: host,
-            controller_ptr,
-            timer_data,
-            timer_source_id,
-        });
+            WindowState {
+                instance_id,
+                gtk_window: window,
+                suil_instance: instance,
+                suil_host: host,
+                controller_ptr,
+                timer_data,
+                timer_source_id,
+            },
+        );
 
         // Update the shared open-UI set
         open_ui_set().lock().unwrap().insert(instance_id);
@@ -885,7 +954,9 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
         log::info!("Plugin UI window opened for instance {}", instance_id);
 
         // Notify the UI that a plugin window opened
-        let _ = req.event_tx.send(PwEvent::Lv2(Lv2Event::PluginUiOpened { instance_id }));
+        let _ = req
+            .event_tx
+            .send(PwEvent::Lv2(Lv2Event::PluginUiOpened { instance_id }));
     }
 }
 
@@ -902,36 +973,48 @@ fn handle_close_window(state: &mut GtkThreadState, instance_id: u64, destroyed_b
     };
 
     unsafe {
-        // Remove the GLib timer source first — this guarantees the timer
-        // callback won't fire again, so it's safe to free timer_data.
-        // g_source_remove returns TRUE if the source was found and removed.
-        g_source_remove(ws.timer_source_id);
-
-        // Signal closing as well (belt-and-suspenders with g_source_remove)
+        // 1. Signal closing FIRST — the timer callback checks this at the
+        //    very start, so even if a tick is about to fire it will bail out.
         (*ws.timer_data)
             .closing
             .store(true, std::sync::atomic::Ordering::Release);
 
-        // Only destroy the GTK window if this is a programmatic close.
-        // When called from the "destroy" signal, the window is already
-        // mid-destruction — calling gtk_widget_destroy would be a double-free.
+        // 2. Remove the GLib timer source — after this, no new timer ticks
+        //    will be scheduled.
+        g_source_remove(ws.timer_source_id);
+
+        // 3. Only destroy the GTK window if this is a programmatic close.
+        //    When called from the "destroy" signal, the window is already
+        //    mid-destruction — calling gtk_widget_destroy would be a double-free.
         if !destroyed_by_gtk {
             gtk_widget_destroy(ws.gtk_window);
         }
 
-        // Free suil instance and host
+        // 4. Null out the suil pointer in timer_data so that if any stale
+        //    reference somehow fires, it sees null and bails out.
+        (*ws.timer_data).suil_instance = ptr::null_mut();
+
+        // 5. Free suil instance and host
         suil_instance_free(ws.suil_instance);
         suil_host_free(ws.suil_host);
 
-        // Free timer data and controller
+        // 6. Free timer data and controller
         let _ = Box::from_raw(ws.timer_data);
         let _ = Box::from_raw(ws.controller_ptr as *mut UiController);
+    }
+
+    // Remove the closing flag from the global map
+    if let Ok(mut flags) = closing_flags().lock() {
+        flags.remove(&instance_id);
     }
 
     // Update the shared open-UI set
     open_ui_set().lock().unwrap().remove(&instance_id);
 
-    log::info!("Plugin UI window closed and resources freed for instance {}", instance_id);
+    log::info!(
+        "Plugin UI window closed and resources freed for instance {}",
+        instance_id
+    );
 
     // Notify the UI
     if let Some(ref event_tx) = state.event_tx_cache {
@@ -975,18 +1058,21 @@ pub fn open_plugin_ui(
 ///
 /// Non-blocking — sends a close command to the GTK thread.
 pub fn close_plugin_ui(instance_id: u64) {
-    if let Some(tx) = GTK_CMD_TX.get() {
-        if let Ok(tx) = tx.lock() {
-            let _ = tx.send(GtkCommand::Close { instance_id, destroyed_by_gtk: false });
-        }
+    if let Some(tx) = GTK_CMD_TX.get()
+        && let Ok(tx) = tx.lock()
+    {
+        let _ = tx.send(GtkCommand::Close {
+            instance_id,
+            destroyed_by_gtk: false,
+        });
     }
 }
 
 /// Shut down the persistent GTK thread.  Call this during application exit.
 pub fn shutdown_gtk_thread() {
-    if let Some(tx) = GTK_CMD_TX.get() {
-        if let Ok(tx) = tx.lock() {
-            let _ = tx.send(GtkCommand::Shutdown);
-        }
+    if let Some(tx) = GTK_CMD_TX.get()
+        && let Ok(tx) = tx.lock()
+    {
+        let _ = tx.send(GtkCommand::Shutdown);
     }
 }

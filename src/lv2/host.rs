@@ -5,8 +5,8 @@
 //! Each hosted plugin runs inside a PipeWire filter node.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use lilv::World;
 
@@ -384,20 +384,21 @@ impl Lv2PluginInstance {
         {
             init_atom_sequence(&mut ab.data, ATOM_BUF_SIZE, false, self.atom_sequence_urid);
             // If the UI wrote atom data, inject it as an event at frame 0
-            if let Some(ui_atom) = shared.read() {
-                if !ui_atom.is_empty() && ui_atom.len() >= 8 {
-                    // We need: 8-byte timestamp + the LV2_Atom data
-                    let event_size = 8 + ui_atom.len(); // timestamp + atom
-                    let padded_event_size = (event_size + 7) & !7;
-                    if 16 + padded_event_size <= ab.data.len() {
-                        // Write timestamp = 0 at offset 16
-                        ab.data[16..24].copy_from_slice(&0i64.to_ne_bytes());
-                        // Write the LV2_Atom (header + body) at offset 24
-                        ab.data[24..24 + ui_atom.len()].copy_from_slice(&ui_atom);
-                        // Update sequence body size: 8 (Sequence_Body header) + event data
-                        let body_size = 8u32 + padded_event_size as u32;
-                        ab.data[0..4].copy_from_slice(&body_size.to_ne_bytes());
-                    }
+            let Some(ui_atom) = shared.read() else {
+                continue;
+            };
+            if !ui_atom.is_empty() && ui_atom.len() >= 8 {
+                // We need: 8-byte timestamp + the LV2_Atom data
+                let event_size = 8 + ui_atom.len(); // timestamp + atom
+                let padded_event_size = (event_size + 7) & !7;
+                if 16 + padded_event_size <= ab.data.len() {
+                    // Write timestamp = 0 at offset 16
+                    ab.data[16..24].copy_from_slice(&0i64.to_ne_bytes());
+                    // Write the LV2_Atom (header + body) at offset 24
+                    ab.data[24..24 + ui_atom.len()].copy_from_slice(&ui_atom);
+                    // Update sequence body size: 8 (Sequence_Body header) + event data
+                    let body_size = 8u32 + padded_event_size as u32;
+                    ab.data[0..4].copy_from_slice(&body_size.to_ne_bytes());
                 }
             }
         }
@@ -497,6 +498,7 @@ impl Lv2PluginInstance {
     pub fn get_info(&self, pw_node_id: Option<u32>) -> Lv2InstanceInfo {
         Lv2InstanceInfo {
             id: self.id,
+            stable_id: String::new(), // filled by the UI layer
             plugin_uri: self.plugin_uri.clone(),
             display_name: self.display_name.clone(),
             pw_node_id,
@@ -578,7 +580,9 @@ impl Lv2Manager {
         self.active_instances.remove(&instance_id);
     }
 
-    /// Update parameter value in our cached state
+    /// Update parameter value in our cached state.
+    /// If the parameter doesn't exist yet (e.g. initial population from
+    /// ParameterChanged events), it is inserted.
     pub fn update_parameter(
         &mut self,
         instance_id: PluginInstanceId,
@@ -592,6 +596,19 @@ impl Lv2Manager {
                 .find(|p| p.port_index == port_index)
             {
                 param.value = value;
+            } else {
+                // Parameter not in our list yet — insert it with minimal info.
+                // The symbol/name will be empty but the port_index and value
+                // are correct, which is enough for persistence and restore.
+                info.parameters.push(super::types::Lv2ParameterValue {
+                    port_index,
+                    symbol: String::new(),
+                    name: String::new(),
+                    value,
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                });
             }
         }
     }

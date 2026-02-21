@@ -73,32 +73,32 @@ impl GraphState {
     }
 
     pub fn mark_node_ready(&self, id: ObjectId) {
-        if let Some(node) = self.nodes.write().get_mut(&id) {
-            if !node.ready {
-                node.ready = true;
-                self.mark_changed();
-            }
+        if let Some(node) = self.nodes.write().get_mut(&id)
+            && !node.ready
+        {
+            node.ready = true;
+            self.mark_changed();
         }
     }
 
     /// Update a node's type (e.g. when an LV2 plugin is identified after
     /// the node was initially registered with a generic type like Duplex).
     pub fn set_node_type(&self, id: ObjectId, node_type: NodeType) {
-        if let Some(node) = self.nodes.write().get_mut(&id) {
-            if node.node_type != Some(node_type) {
-                node.node_type = Some(node_type);
-                self.mark_changed();
-            }
+        if let Some(node) = self.nodes.write().get_mut(&id)
+            && node.node_type != Some(node_type)
+        {
+            node.node_type = Some(node_type);
+            self.mark_changed();
         }
     }
 
     /// Update the display description of a node (used when renaming LV2 plugins).
     pub fn set_node_description(&self, id: ObjectId, description: &str) {
-        if let Some(node) = self.nodes.write().get_mut(&id) {
-            if node.description != description {
-                node.description = description.to_string();
-                self.mark_changed();
-            }
+        if let Some(node) = self.nodes.write().get_mut(&id)
+            && node.description != description
+        {
+            node.description = description.to_string();
+            self.mark_changed();
         }
     }
 

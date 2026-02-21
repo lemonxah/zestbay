@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=ZestBay
+Comment=PipeWire patchbay and audio routing manager
+Exec=zestbay
+Icon=zestbay
+Terminal=false
+Type=Application
+Categories=AudioVideo;Audio;Mixer;
+Keywords=pipewire;patchbay;audio;routing;

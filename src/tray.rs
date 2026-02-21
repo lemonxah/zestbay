@@ -14,6 +14,8 @@ use ksni::blocking::TrayMethods;
 pub struct TrayState {
     /// Set to true by the tray when the window should be shown.
     pub show_requested: Arc<AtomicBool>,
+    /// Set to true by the tray when the window should be hidden.
+    pub hide_requested: Arc<AtomicBool>,
     /// Set to true by the tray when the application should quit.
     pub quit_requested: Arc<AtomicBool>,
     /// Current visibility state — the app sets this so the tray
@@ -25,6 +27,7 @@ impl TrayState {
     pub fn new() -> Self {
         Self {
             show_requested: Arc::new(AtomicBool::new(false)),
+            hide_requested: Arc::new(AtomicBool::new(false)),
             quit_requested: Arc::new(AtomicBool::new(false)),
             window_visible: Arc::new(AtomicBool::new(true)),
         }
@@ -34,6 +37,8 @@ impl TrayState {
 /// The ksni Tray implementation for ZestBay.
 struct ZestBayTray {
     state: TrayState,
+    /// Extra icon theme search path (for development builds).
+    icon_theme_path: String,
 }
 
 impl ksni::Tray for ZestBayTray {
@@ -41,10 +46,12 @@ impl ksni::Tray for ZestBayTray {
         "zestbay".into()
     }
 
+    fn icon_theme_path(&self) -> String {
+        self.icon_theme_path.clone()
+    }
+
     fn icon_name(&self) -> String {
-        // Use a standard audio icon from the system icon theme.
-        // KDE/freedesktop icon themes provide this.
-        "audio-card".into()
+        "zestbay-tray".into()
     }
 
     fn title(&self) -> String {
@@ -61,7 +68,7 @@ impl ksni::Tray for ZestBayTray {
         log::info!("Tray: activate (left-click), currently_visible={currently_visible}");
         if currently_visible {
             self.state.window_visible.store(false, Ordering::Release);
-            self.state.show_requested.store(false, Ordering::Release);
+            self.state.hide_requested.store(true, Ordering::Release);
         } else {
             self.state.window_visible.store(true, Ordering::Release);
             self.state.show_requested.store(true, Ordering::Release);
@@ -105,10 +112,33 @@ pub fn spawn_tray() -> TrayState {
     let state = TrayState::new();
     let tray_state = state.clone();
 
+    // Determine the icon theme path.
+    // When installed, icons live in /usr/share/icons so the system theme
+    // finds them automatically. For development, we add the local `icons/`
+    // directory next to the executable (or relative to the working dir).
+    let icon_theme_path = {
+        // Try <exe_dir>/icons first, then <cwd>/icons
+        let mut path = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("icons")))
+            .unwrap_or_default();
+        if !path.exists() {
+            path = std::path::PathBuf::from("icons");
+        }
+        if path.exists() {
+            path.to_string_lossy().into_owned()
+        } else {
+            String::new()
+        }
+    };
+
     std::thread::Builder::new()
         .name("zestbay-tray".into())
         .spawn(move || {
-            let tray = ZestBayTray { state: tray_state };
+            let tray = ZestBayTray {
+                state: tray_state,
+                icon_theme_path,
+            };
             match tray.spawn() {
                 Ok(_handle) => {
                     // The handle keeps the tray alive. Park this thread

@@ -259,8 +259,10 @@ pub struct Lv2ParameterValue {
 /// State of an active LV2 plugin instance
 #[derive(Debug, Clone)]
 pub struct Lv2InstanceInfo {
-    /// Our internal instance ID
+    /// Our internal instance ID (changes each session)
     pub id: PluginInstanceId,
+    /// Stable UUID that persists across sessions for matching saved state
+    pub stable_id: String,
     /// Plugin URI
     pub plugin_uri: String,
     /// Human-readable name (user can rename)

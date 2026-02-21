@@ -108,10 +108,10 @@ impl AutoConnectRule {
 
     /// Check if a node display name (and optionally type) matches the source.
     pub fn matches_source(&self, display_name: &str, node_type: Option<NodeType>) -> bool {
-        if let Some(expected) = self.source_node_type {
-            if node_type != Some(expected) {
-                return false;
-            }
+        if let Some(expected) = self.source_node_type
+            && node_type != Some(expected)
+        {
+            return false;
         }
         pattern_matches(&self.source_pattern, display_name)
     }
@@ -126,17 +126,17 @@ impl AutoConnectRule {
         node_id: ObjectId,
     ) -> bool {
         // Exact node ID match is highest priority
-        if let Some(expected_id) = self.target_node_id {
-            if node_id == expected_id {
-                return true;
-            }
+        if let Some(expected_id) = self.target_node_id
+            && node_id == expected_id
+        {
+            return true;
         }
 
         // Fall back to display name + node type matching
-        if let Some(expected) = self.target_node_type {
-            if node_type != Some(expected) {
-                return false;
-            }
+        if let Some(expected) = self.target_node_type
+            && node_type != Some(expected)
+        {
+            return false;
         }
         pattern_matches(&self.target_pattern, display_name)
     }

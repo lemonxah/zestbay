@@ -5,8 +5,8 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use libspa::utils::dict::DictRef;
@@ -115,22 +115,16 @@ fn run_pipewire_thread(
                             if let Some(node) = parse_node(global) {
                                 // If this is an LV2 plugin node created by us,
                                 // send the PW node ID back so the UI can map it
-                                if node.node_type == Some(NodeType::Lv2Plugin) {
-                                    if let Some(props) = global.props.as_ref() {
-                                        if let Some(id_str) = props.get("zestbay.lv2.instance_id") {
-                                            if let Ok(instance_id) = id_str.parse::<u64>() {
-                                                let _ = event_tx.send(PwEvent::Lv2(
-                                                    Lv2Event::PluginAdded {
-                                                        instance_id,
-                                                        pw_node_id: global.id,
-                                                        display_name: node
-                                                            .display_name()
-                                                            .to_string(),
-                                                    },
-                                                ));
-                                            }
-                                        }
-                                    }
+                                if node.node_type == Some(NodeType::Lv2Plugin)
+                                    && let Some(props) = global.props.as_ref()
+                                    && let Some(id_str) = props.get("zestbay.lv2.instance_id")
+                                    && let Ok(instance_id) = id_str.parse::<u64>()
+                                {
+                                    let _ = event_tx.send(PwEvent::Lv2(Lv2Event::PluginAdded {
+                                        instance_id,
+                                        pw_node_id: global.id,
+                                        display_name: node.display_name().to_string(),
+                                    }));
                                 }
                                 graph.insert_node(node.clone());
                                 let _ = event_tx.send(PwEvent::NodeChanged(node));
@@ -263,7 +257,7 @@ fn run_pipewire_thread(
                     }
                 }
                 // ── Queued path: rate-limited via timer ─────────────────
-                PwCommand::Shutdown => return,
+                PwCommand::Shutdown => (),
                 cmd => {
                     let op = match cmd {
                         PwCommand::Connect {
@@ -594,13 +588,14 @@ fn parse_link_from_props(global: &GlobalObject<&DictRef>) -> Option<Link> {
     })
 }
 
+type GlobalSharedMutHashMap<K, V> = Rc<RefCell<HashMap<K, Rc<RefCell<V>>>>>;
+
 /// Handle adding a new LV2 plugin as a PipeWire filter node
+#[allow(clippy::too_many_arguments)]
 fn handle_add_plugin(
     core: &pipewire::core::CoreRc,
     event_tx: &Sender<PwEvent>,
-    lv2_instances: &Rc<
-        RefCell<HashMap<u64, std::rc::Rc<RefCell<crate::lv2::host::Lv2PluginInstance>>>>,
-    >,
+    lv2_instances: &GlobalSharedMutHashMap<u64, crate::lv2::host::Lv2PluginInstance>,
     lv2_filters: &Rc<RefCell<HashMap<u64, crate::lv2::filter::Lv2FilterNode>>>,
     urid_mapper: &Arc<crate::lv2::urid::UridMapper>,
     plugin_uri: &str,

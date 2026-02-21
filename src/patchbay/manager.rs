@@ -131,6 +131,60 @@ impl PatchbayManager {
         true
     }
 
+    // ── Auto-unlearn ────────────────────────────────────────────────────────
+
+    /// Remove a port mapping from rules when a user manually disconnects a link.
+    ///
+    /// Finds rules matching this source→target pair and removes the specific
+    /// port mapping.  If the rule has no remaining port mappings, the entire
+    /// rule is removed.
+    ///
+    /// Returns `true` if the rule set changed.
+    pub fn unlearn_from_link(
+        &mut self,
+        source_node: &Node,
+        target_node: &Node,
+        output_port: &Port,
+        input_port: &Port,
+    ) -> bool {
+        let source_name = source_node.display_name();
+        let mut changed = false;
+
+        for rule in &mut self.rules {
+            if !rule.matches_source(source_name, source_node.node_type) {
+                continue;
+            }
+            if !rule.matches_target(
+                target_node.display_name(),
+                target_node.node_type,
+                target_node.id,
+            ) {
+                continue;
+            }
+
+            // Remove the specific port mapping
+            let before = rule.port_mappings.len();
+            rule.port_mappings.retain(|m| {
+                !(m.output_port_name == output_port.name && m.input_port_name == input_port.name)
+            });
+            if rule.port_mappings.len() != before {
+                changed = true;
+            }
+        }
+
+        // Remove rules that have no port mappings left
+        let before = self.rules.len();
+        self.rules.retain(|r| !r.port_mappings.is_empty());
+        if self.rules.len() != before {
+            changed = true;
+        }
+
+        if changed {
+            self.rules_dirty = true;
+        }
+        changed
+    }
+
     // ── Snapshot current connections ────────────────────────────────────────
 
     /// Replace all rules with a snapshot of the current graph connections.
@@ -255,17 +309,16 @@ impl PatchbayManager {
         if rule.port_mappings.is_empty() {
             // Heuristic fallback: match by channel/name/position
             for source_port in source_ports {
-                if let Some(target_port) = self.find_matching_port(source_port, &target_ports) {
-                    if self
+                if let Some(target_port) = self.find_matching_port(source_port, &target_ports)
+                    && self
                         .graph
                         .find_link(source_port.id, target_port.id)
                         .is_none()
-                    {
-                        commands.push(PwCommand::Connect {
-                            output_port_id: source_port.id,
-                            input_port_id: target_port.id,
-                        });
-                    }
+                {
+                    commands.push(PwCommand::Connect {
+                        output_port_id: source_port.id,
+                        input_port_id: target_port.id,
+                    });
                 }
             }
         } else {
@@ -278,13 +331,13 @@ impl PatchbayManager {
                     .iter()
                     .find(|p| p.name == mapping.input_port_name);
 
-                if let (Some(out_port), Some(in_port)) = (out_port, in_port) {
-                    if self.graph.find_link(out_port.id, in_port.id).is_none() {
-                        commands.push(PwCommand::Connect {
-                            output_port_id: out_port.id,
-                            input_port_id: in_port.id,
-                        });
-                    }
+                if let (Some(out_port), Some(in_port)) = (out_port, in_port)
+                    && self.graph.find_link(out_port.id, in_port.id).is_none()
+                {
+                    commands.push(PwCommand::Connect {
+                        output_port_id: out_port.id,
+                        input_port_id: in_port.id,
+                    });
                 }
             }
         }
@@ -295,10 +348,10 @@ impl PatchbayManager {
     /// Find a matching target port for a source port.
     fn find_matching_port<'a>(&self, source: &Port, targets: &'a [Port]) -> Option<&'a Port> {
         // First try exact channel name match
-        if let Some(ref channel) = source.channel {
-            if let Some(target) = targets.iter().find(|p| p.channel.as_ref() == Some(channel)) {
-                return Some(target);
-            }
+        if let Some(ref channel) = source.channel
+            && let Some(target) = targets.iter().find(|p| p.channel.as_ref() == Some(channel))
+        {
+            return Some(target);
         }
 
         // Try port name match
@@ -323,13 +376,11 @@ impl PatchbayManager {
         nodes: &'a [Node],
     ) -> Option<&'a Node> {
         // First: try exact node ID match (if the rule has one)
-        if let Some(target_id) = rule.target_node_id {
-            if let Some(node) = nodes.iter().find(|n| n.id == target_id && n.ready) {
-                // Verify the node still has input ports
-                if node.node_type.map(|t| t.has_inputs()).unwrap_or(false) {
-                    return Some(node);
-                }
-            }
+        if let Some(target_id) = rule.target_node_id 
+            && let Some(node) = nodes.iter().find(|n| n.id == target_id && n.ready) 
+            // Verify the node still has input ports
+            && node.node_type.map(|t| t.has_inputs()).unwrap_or(false) {
+                return Some(node);
         }
 
         // Fallback: display name + node type matching
