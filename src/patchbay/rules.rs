@@ -1,19 +1,3 @@
-//! Patchbay routing rules
-//!
-//! Defines rules for automatic connection management.
-//! Rules match nodes by display name (the human-readable name shown in the UI).
-//!
-//! ## Source matching
-//! Source side uses `NodeType` + display name pattern (glob).
-//! All nodes with the same display name are routed identically — e.g. every
-//! "Firefox" window routes to the same target.
-//!
-//! ## Target matching
-//! Target side uses `NodeType` + display name + PipeWire node ID.
-//! The node ID is the most specific — if the target disappears and reappears
-//! with a different ID (e.g. USB replug), we fall back to display name +
-//! node type matching.
-
 use serde::{Deserialize, Serialize};
 
 use crate::pipewire::{NodeType, ObjectId};

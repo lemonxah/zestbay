@@ -1,11 +1,3 @@
-//! ZestBay - A PipeWire patchbay application
-//!
-//! A visual audio routing manager for PipeWire, inspired by qpwgraph.
-//! Uses Qt6/QML for the user interface via cxx-qt.
-
-// Allow dead code during development - skeleton APIs will be used later
-#![allow(dead_code)]
-
 mod lv2;
 mod patchbay;
 mod pipewire;

@@ -1,14 +1,3 @@
-//! LV2 Plugin Native UI Support
-//!
-//! Uses suil to instantiate native LV2 plugin UIs and embeds them in GTK3
-//! windows.  A single persistent GTK thread handles all plugin UI windows —
-//! `gtk_init()` is called exactly once, and `gtk_main()` runs for the entire
-//! application lifetime.  Individual plugin windows are created and destroyed
-//! via a command channel, allowing multiple plugin UIs to coexist.
-//!
-//! This avoids the crash-on-reopen bug caused by calling `gtk_init()` from
-//! different threads and running multiple `gtk_main()` loops.
-
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_uint, c_ulong, c_void};

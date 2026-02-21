@@ -1,20 +1,3 @@
-//! Patchbay manager
-//!
-//! Handles automatic connection management based on rules.
-//! Independent of UI — works purely with PipeWire types.
-//!
-//! ## Auto-learn
-//! When the user manually connects two ports in the graph, `learn_from_link()`
-//! creates or updates a rule:  source display name → target (display name +
-//! node type + node ID).  All nodes with the same display name as the source
-//! are then routed identically by `scan()`.
-//!
-//! ## Scan
-//! Iterates all nodes that have output ports and a matching rule, then
-//! generates Connect commands for missing links and Disconnect commands for
-//! links that no longer match any rule.  Connections are generated before
-//! disconnections ("make-before-break") to avoid audio dropouts.
-
 use std::sync::Arc;
 
 use super::rules::AutoConnectRule;

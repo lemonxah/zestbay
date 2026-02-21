@@ -1,11 +1,5 @@
-//! LV2 URID (URI-to-ID) mapping
-//!
-//! Provides the LV2_URID__map feature required by most LV2 plugins.
-//! Maps URI strings to compact integer IDs so plugins can use fast
-//! integer comparisons instead of string comparisons at runtime.
-
 use std::collections::HashMap;
-use std::ffi::{c_char, c_void, CStr};
+use std::ffi::{CStr, c_char, c_void};
 use std::sync::Mutex;
 
 use lv2_raw::urid::{LV2Urid, LV2UridMap, LV2UridMapHandle};

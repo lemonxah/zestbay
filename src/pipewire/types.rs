@@ -1,5 +1,3 @@
-//! Core types for PipeWire graph representation
-
 use serde::{Deserialize, Serialize};
 
 /// Unique identifier for PipeWire objects
@@ -61,11 +59,9 @@ pub struct Node {
     pub id: ObjectId,
     pub name: String,
     pub description: String,
-    pub media_class: String,
     pub media_type: Option<MediaType>,
     pub node_type: Option<NodeType>,
     /// Application name (for stream nodes)
-    pub application_name: Option<String>,
     /// True when the node has received its first info event and is ready
     pub ready: bool,
 }
@@ -79,22 +75,6 @@ impl Node {
         } else {
             "Unknown"
         }
-    }
-
-    /// Returns true if this is an application stream (not a hardware device)
-    pub fn is_application(&self) -> bool {
-        matches!(
-            self.node_type,
-            Some(NodeType::StreamOutput | NodeType::StreamInput)
-        )
-    }
-
-    /// Returns true if this is a hardware device
-    pub fn is_device(&self) -> bool {
-        matches!(
-            self.node_type,
-            Some(NodeType::Sink | NodeType::Source | NodeType::Duplex)
-        )
     }
 }
 
@@ -136,6 +116,7 @@ pub struct Link {
 }
 
 /// Messages from the PipeWire thread to the UI
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum PwEvent {
     /// A node was added or updated
@@ -162,6 +143,7 @@ pub enum PwEvent {
 }
 
 /// Commands from the UI to the PipeWire thread
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum PwCommand {
     /// Create a link between two ports
@@ -200,8 +182,6 @@ pub enum PwCommand {
     OpenPluginUI { instance_id: u64 },
     /// Close the native LV2 plugin UI (if open)
     ClosePluginUI { instance_id: u64 },
-    /// Shutdown the PipeWire thread
-    Shutdown,
 }
 
 /// Events specific to LV2 plugin hosting (PipeWire thread -> UI)

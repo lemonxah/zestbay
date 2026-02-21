@@ -1,11 +1,3 @@
-//! CXX-Qt bridge: exposes Rust application state to QML as QObjects.
-//!
-//! This module defines the QObject types that QML interacts with.
-//! The actual business logic lives in the existing Rust modules
-//! (pipewire, lv2, patchbay); this bridge just exposes the
-//! relevant state and actions.
-
-/// CXX-Qt bridge for the main application controller.
 #[cxx_qt::bridge]
 pub mod qobject {
     unsafe extern "C++" {

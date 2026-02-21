@@ -1,29 +1,3 @@
-//! PipeWire Filter Node for LV2 Plugins
-//!
-//! Uses the pw_filter API (via raw FFI) to create a proper filter node
-//! with explicit input and output ports. This allows the LV2 plugin
-//! to appear as an inline effect that can be wired between other nodes.
-//!
-//! # Thread safety
-//!
-//! The process callback runs on PipeWire's real-time data thread via
-//! `PW_FILTER_FLAG_RT_PROCESS`. The `Lv2PluginInstance` is accessed from
-//! two threads:
-//!
-//! 1. **RT data thread** — `on_process` calls `instance.process()` which
-//!    reads control port values and processes audio. PipeWire guarantees
-//!    this is never called concurrently with itself.
-//!
-//! 2. **Main loop thread** — `set_parameter` / `set_bypass` writes f32
-//!    control port values. On x86_64, aligned f32 writes are atomic, so
-//!    the RT thread sees a consistent value (either old or new).
-//!
-//! We use a raw pointer (`*mut Lv2PluginInstance`) in the FilterData to
-//! express this shared access pattern. The instance is owned by the
-//! `Lv2FilterNode` via `Rc<RefCell<>>` (same as before), but the process
-//! callback accesses it through the raw pointer without going through
-//! RefCell's borrow checking.
-
 use std::cell::RefCell;
 use std::ffi::CString;
 use std::rc::Rc;

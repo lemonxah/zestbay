@@ -1,8 +1,3 @@
-//! LV2 Plugin Scanner
-//!
-//! Uses lilv to discover all installed LV2 plugins on the system
-//! and extract their metadata (ports, parameters, categories).
-
 use lilv::World;
 
 use super::types::*;

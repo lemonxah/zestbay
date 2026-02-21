@@ -1,11 +1,5 @@
-//! System tray icon using KDE StatusNotifierItem protocol.
-//!
-//! Provides a tray icon with "Show" and "Quit" context menu items.
-//! Left-clicking the tray icon toggles window visibility.
-//! The tray runs on its own background thread via ksni's blocking API.
-
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ksni::blocking::TrayMethods;
 

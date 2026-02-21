@@ -1,7 +1,3 @@
-//! PipeWire connection manager
-//!
-//! This module handles the connection to PipeWire and processes registry events.
-
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -87,8 +83,6 @@ fn run_pipewire_thread(
     let registry = core.get_registry_rc()?;
 
     // Shared state
-    let proxies: Rc<RefCell<HashMap<ObjectId, ProxyHolder>>> =
-        Rc::new(RefCell::new(HashMap::new()));
     let pending_ops: Rc<RefCell<Vec<InternalOp>>> = Rc::new(RefCell::new(Vec::new()));
     let last_op_time: Rc<RefCell<Instant>> =
         Rc::new(RefCell::new(Instant::now() - Duration::from_secs(1)));
@@ -98,7 +92,6 @@ fn run_pipewire_thread(
     let _registry_listener = {
         let graph = graph.clone();
         let event_tx = event_tx.clone();
-        let _proxies = proxies.clone();
         let changes_pending = changes_pending.clone();
 
         registry
@@ -106,7 +99,6 @@ fn run_pipewire_thread(
             .global({
                 let graph = graph.clone();
                 let event_tx = event_tx.clone();
-                let _proxies = proxies.clone();
                 let changes_pending = changes_pending.clone();
 
                 move |global| {
@@ -166,7 +158,6 @@ fn run_pipewire_thread(
             .global_remove({
                 let graph = graph.clone();
                 let event_tx = event_tx.clone();
-                let _proxies = proxies.clone();
                 let changes_pending = changes_pending.clone();
 
                 move |id| {
@@ -184,7 +175,6 @@ fn run_pipewire_thread(
                         let _ = event_tx.send(PwEvent::LinkRemoved(id));
                         *changes_pending.borrow_mut() = true;
                     }
-                    proxies.borrow_mut().remove(&id);
                 }
             })
             .register()
@@ -257,7 +247,6 @@ fn run_pipewire_thread(
                     }
                 }
                 // ── Queued path: rate-limited via timer ─────────────────
-                PwCommand::Shutdown => (),
                 cmd => {
                     let op = match cmd {
                         PwCommand::Connect {
@@ -288,8 +277,7 @@ fn run_pipewire_thread(
                         }
                         // Already handled above
                         PwCommand::SetPluginParameter { .. }
-                        | PwCommand::SetPluginBypass { .. }
-                        | PwCommand::Shutdown => unreachable!(),
+                        | PwCommand::SetPluginBypass { .. } => unreachable!(),
                     };
                     pending_ops.borrow_mut().push(op);
                 }
@@ -426,14 +414,6 @@ fn run_pipewire_thread(
     Ok(())
 }
 
-/// Holder for PipeWire proxies
-enum ProxyHolder {
-    Link {
-        _proxy: PwLink,
-        _listener: pipewire::link::LinkListener,
-    },
-}
-
 fn parse_node(global: &GlobalObject<&DictRef>) -> Option<Node> {
     let props = global.props.as_ref()?;
 
@@ -444,7 +424,6 @@ fn parse_node(global: &GlobalObject<&DictRef>) -> Option<Node> {
         .unwrap_or_default()
         .to_string();
     let media_class = props.get("media.class").unwrap_or_default().to_string();
-    let application_name = props.get("application.name").map(String::from);
 
     let media_type = if media_class.contains("Audio") {
         Some(MediaType::Audio)
@@ -480,10 +459,8 @@ fn parse_node(global: &GlobalObject<&DictRef>) -> Option<Node> {
         id: global.id,
         name,
         description,
-        media_class,
         media_type,
         node_type,
-        application_name,
         ready: true,
     })
 }

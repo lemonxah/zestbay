@@ -1,10 +1,5 @@
-//! LV2 plugin types
-//!
-//! Data types for describing LV2 plugins and their ports,
-//! independent of the lilv library (these are our own serializable types).
-
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use serde::{Deserialize, Serialize};
 

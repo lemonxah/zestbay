@@ -1,9 +1,3 @@
-//! LV2 Plugin Host
-//!
-//! Manages the lifecycle of LV2 plugin instances: instantiation,
-//! port connection, parameter control, and audio processing.
-//! Each hosted plugin runs inside a PipeWire filter node.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
