@@ -146,20 +146,6 @@ PKGBUILD files are provided in the `pkg/` directory:
 
 ZestBay uses a multi-threaded architecture with clean separation between components:
 
-```
-Qt/QML Main Thread          PipeWire Thread           Tray Thread       GTK Thread
- (UI rendering)          (audio graph + DSP)        (D-Bus tray)     (plugin UIs)
-       |                        |                       |                  |
-       |-- PwCommand ---------->|                       |                  |
-       |<-- PwEvent ------------|                       |                  |
-       |                        |                       |                  |
-       |-- AtomicBool --------------------------------->|                  |
-       |<-- AtomicBool ---------------------------------|                  |
-       |                        |                       |                  |
-       |                        |-- GtkCommand --------------------------->|
-       |                        |<-- (port updates via lock-free atomics) -|
-```
-
 - The **Qt/QML thread** runs the UI and polls for events at a configurable interval
 - The **PipeWire thread** owns the graph state, processes audio in RT callbacks, and handles all PipeWire API calls
 - The **tray thread** runs the D-Bus StatusNotifier service independently
