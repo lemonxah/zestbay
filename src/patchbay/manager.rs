@@ -79,8 +79,8 @@ impl PatchbayManager {
         output_port: &Port,
         input_port: &Port,
     ) -> bool {
-        // Only learn rules for audio nodes
-        if !Self::is_audio_node(source_node) || !Self::is_audio_node(target_node) {
+        // Only learn rules for routable nodes (skip video)
+        if !Self::is_routable_node(source_node) || !Self::is_routable_node(target_node) {
             return false;
         }
 
@@ -135,8 +135,8 @@ impl PatchbayManager {
         output_port: &Port,
         input_port: &Port,
     ) -> bool {
-        // Only unlearn rules for audio nodes
-        if !Self::is_audio_node(source_node) || !Self::is_audio_node(target_node) {
+        // Only unlearn rules for routable nodes (skip video)
+        if !Self::is_routable_node(source_node) || !Self::is_routable_node(target_node) {
             return false;
         }
 
@@ -204,8 +204,8 @@ impl PatchbayManager {
             if let (Some(source), Some(target), Some(out_port), Some(in_port)) =
                 (source, target, out_port, in_port)
             {
-                // Only snapshot audio links
-                if !Self::is_audio_node(&source) || !Self::is_audio_node(&target) {
+                // Only snapshot routable links (skip video)
+                if !Self::is_routable_node(&source) || !Self::is_routable_node(&target) {
                     continue;
                 }
                 let key = (
@@ -309,14 +309,14 @@ impl PatchbayManager {
         let mut commands = Vec::new();
         let nodes = self.graph.get_all_nodes();
 
-        // 1. Generate connection commands (audio nodes only)
+        // 1. Generate connection commands (skip video-only nodes)
         for node in &nodes {
             if !node.ready {
                 continue;
             }
 
-            // Only process audio nodes — leave video/midi nodes alone
-            if !Self::is_audio_node(node) {
+            // Only process routable nodes — leave video nodes alone
+            if !Self::is_routable_node(node) {
                 continue;
             }
 
@@ -455,13 +455,12 @@ impl PatchbayManager {
         })
     }
 
-    /// Returns true if the node is an audio node (or has unknown media type,
-    /// which we conservatively treat as audio for backward compatibility).
-    /// Video and Midi nodes are explicitly excluded from patchbay management.
-    fn is_audio_node(node: &Node) -> bool {
+    /// Returns true if the node should be managed by the patchbay.
+    /// Only Video nodes are excluded — audio and MIDI are both managed.
+    fn is_routable_node(node: &Node) -> bool {
         match node.media_type {
-            Some(MediaType::Video) | Some(MediaType::Midi) => false,
-            _ => true, // Audio or unknown → managed by patchbay
+            Some(MediaType::Video) => false,
+            _ => true, // Audio, Midi, or unknown → managed by patchbay
         }
     }
 
@@ -497,10 +496,10 @@ impl PatchbayManager {
             None => return false,
         };
 
-        // Never touch non-audio links (Video, Midi, or unknown media types).
-        // The patchbay only manages Audio routing — other media types are left
-        // to whatever created them (e.g. screen capture portals, MIDI apps).
-        if !Self::is_audio_node(&source_node) || !Self::is_audio_node(&target_node) {
+        // Never touch video links — the patchbay manages audio and MIDI
+        // routing but leaves video links to whatever created them
+        // (e.g. screen capture portals).
+        if !Self::is_routable_node(&source_node) || !Self::is_routable_node(&target_node) {
             return false;
         }
 

@@ -8,6 +8,7 @@ fn main() {
             .qml_file("qml/PluginBrowser.qml")
             .qml_file("qml/PluginParams.qml")
             .qml_file("qml/RuleEditor.qml")
+            .qml_file("qml/PluginManager.qml")
             .qml_file("qml/Preferences.qml"),
     )
     // Link Qt modules we need beyond the defaults

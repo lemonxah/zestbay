@@ -135,6 +135,10 @@ ApplicationWindow {
                 text: "Add &Plugin..."
                 onTriggered: pluginBrowser.open()
             }
+            Action {
+                text: "&Manage Plugins..."
+                onTriggered: pluginManagerDialog.open()
+            }
             MenuSeparator {}
             Action {
                 text: "&Preferences..."
@@ -214,6 +218,12 @@ ApplicationWindow {
 
     RuleEditor {
         id: ruleEditor
+        controller: controller
+        anchors.centerIn: parent
+    }
+
+    PluginManager {
+        id: pluginManagerDialog
         controller: controller
         anchors.centerIn: parent
     }

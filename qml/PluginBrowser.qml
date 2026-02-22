@@ -16,6 +16,7 @@ Dialog {
     property var filteredPlugins: []
     property var categories: []
     property string selectedCategory: "All"
+    property bool showCompatibleOnly: true
 
     function loadPlugins() {
         try {
@@ -46,6 +47,10 @@ Dialog {
         var result = []
         for (var i = 0; i < allPlugins.length; i++) {
             var p = allPlugins[i]
+
+            // Compatible filter
+            if (showCompatibleOnly && !p.compatible)
+                continue
 
             // Category filter
             if (selectedCategory !== "All" && p.category !== selectedCategory)
@@ -102,11 +107,28 @@ Dialog {
             }
         }
 
-        // Plugin count label
-        Label {
-            text: filteredPlugins.length + " of " + allPlugins.length + " plugins"
-            font.italic: true
-            opacity: 0.7
+        // Filter bar
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+
+            Label {
+                text: filteredPlugins.length + " of " + allPlugins.length + " plugins"
+                font.italic: true
+                opacity: 0.7
+            }
+
+            Item { Layout.fillWidth: true }
+
+            CheckBox {
+                id: compatibleCheck
+                text: "Compatible only"
+                checked: showCompatibleOnly
+                onToggled: {
+                    showCompatibleOnly = checked
+                    filterPlugins()
+                }
+            }
         }
 
         // Plugin list
@@ -125,6 +147,7 @@ Dialog {
                 width: pluginList.width
                 height: 64
                 color: pluginMouseArea.containsMouse ? "#3a3a3a" : (index % 2 === 0 ? "#2a2a2a" : "#252525")
+                opacity: plugin.compatible ? 1.0 : 0.5
 
                 property var plugin: filteredPlugins[index] || {}
 
@@ -137,12 +160,21 @@ Dialog {
                         Layout.fillWidth: true
                         spacing: 2
 
-                        Label {
-                            text: plugin.name || ""
-                            font.bold: true
-                            font.pointSize: 10
-                            elide: Text.ElideRight
-                            Layout.fillWidth: true
+                        RowLayout {
+                            spacing: 6
+                            Label {
+                                text: plugin.name || ""
+                                font.bold: true
+                                font.pointSize: 10
+                                elide: Text.ElideRight
+                                Layout.fillWidth: true
+                            }
+                            Label {
+                                visible: !plugin.compatible
+                                text: "incompatible"
+                                font.pointSize: 8
+                                color: "#e06060"
+                            }
                         }
 
                         Label {
@@ -176,6 +208,7 @@ Dialog {
 
                     Button {
                         text: "Add"
+                        enabled: plugin.compatible !== false
                         onClicked: {
                             if (plugin.uri) {
                                 controller.add_plugin(plugin.uri)

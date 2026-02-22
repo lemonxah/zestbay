@@ -61,7 +61,10 @@ pub struct Node {
     pub description: String,
     pub media_type: Option<MediaType>,
     pub node_type: Option<NodeType>,
-    /// Application name (for stream nodes)
+    /// True if this is a virtual sink/source (e.g. created by WirePlumber module-loopback)
+    pub is_virtual: bool,
+    /// True if this is a JACK client (e.g. Pianoteq, Hydrogen)
+    pub is_jack: bool,
     /// True when the node has received its first info event and is ready
     pub ready: bool,
 }

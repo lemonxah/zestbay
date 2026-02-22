@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -181,6 +181,17 @@ pub struct Lv2PluginInfo {
     pub control_inputs: usize,
     /// Number of control output ports
     pub control_outputs: usize,
+    /// LV2 feature URIs that this plugin requires (must be provided by host)
+    #[serde(default)]
+    pub required_features: Vec<String>,
+    /// Whether this plugin is compatible with ZestBay (all required features
+    /// are provided by the host)
+    #[serde(default = "default_true")]
+    pub compatible: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Lv2PluginInfo {

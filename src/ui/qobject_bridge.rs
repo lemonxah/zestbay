@@ -99,6 +99,30 @@ pub mod qobject {
         #[qinvokable]
         fn set_plugin_bypass(self: Pin<&mut Self>, node_id: u32, bypassed: bool);
 
+        // ── Plugin manager (persisted plugins) ─────────────────────
+
+        /// Get all active/persisted plugin instances as JSON array.
+        #[qinvokable]
+        fn get_active_plugins_json(self: Pin<&mut Self>) -> QString;
+
+        /// Remove a persisted plugin by its stable_id (does NOT remove the
+        /// live PipeWire node — use remove_plugin for that).
+        #[qinvokable]
+        fn remove_plugin_by_stable_id(self: Pin<&mut Self>, stable_id: QString);
+
+        /// Reset all parameters of a plugin instance to defaults (by stable_id).
+        #[qinvokable]
+        fn reset_plugin_params_by_stable_id(self: Pin<&mut Self>, stable_id: QString);
+
+        /// Set a plugin parameter by stable_id + port_index.
+        #[qinvokable]
+        fn set_plugin_param_by_stable_id(
+            self: Pin<&mut Self>,
+            stable_id: QString,
+            port_index: u32,
+            value: f32,
+        );
+
         // ── Patchbay rules ─────────────────────────────────────────
 
         /// Get all patchbay rules as a JSON array.
@@ -909,6 +933,8 @@ impl qobject::AppController {
                         "name": n.display_name(),
                         "type": type_str,
                         "mediaType": media_str,
+                        "isVirtual": n.is_virtual,
+                        "isJack": n.is_jack,
                         "layoutKey": layout_key(n),
                         "ready": n.ready,
                     })
@@ -953,11 +979,18 @@ impl qobject::AppController {
             let json_ports: Vec<serde_json::Value> = ports
                 .iter()
                 .map(|p| {
+                    let media_str = match p.media_type {
+                        Some(crate::pipewire::MediaType::Audio) => "Audio",
+                        Some(crate::pipewire::MediaType::Video) => "Video",
+                        Some(crate::pipewire::MediaType::Midi) => "Midi",
+                        None => "Unknown",
+                    };
                     serde_json::json!({
                         "id": p.id,
                         "name": p.display_name(),
                         "direction": format!("{:?}", p.direction),
                         "nodeId": p.node_id,
+                        "mediaType": media_str,
                     })
                 })
                 .collect();
@@ -1181,6 +1214,8 @@ impl qobject::AppController {
                         "audioOut": p.audio_outputs,
                         "controlIn": p.control_inputs,
                         "controlOut": p.control_outputs,
+                        "compatible": p.compatible,
+                        "requiredFeatures": p.required_features,
                     })
                 })
                 .collect();
@@ -1416,6 +1451,170 @@ impl qobject::AppController {
                 && let Some(info) = mgr.get_instance_mut(instance_id)
             {
                 info.bypassed = bypassed;
+            }
+            self.as_mut().rust_mut().params_dirty = true;
+            if self.rust().params_dirty_since.is_none() {
+                self.as_mut().rust_mut().params_dirty_since = Some(Instant::now());
+            }
+        }
+    }
+
+    // ── Plugin manager (persisted plugins) ───────────────────────
+
+    /// Get all active/persisted plugin instances as JSON array.
+    pub fn get_active_plugins_json(self: Pin<&mut Self>) -> QString {
+        if let Some(ref mgr) = self.rust().lv2_manager {
+            let mut entries: Vec<serde_json::Value> = mgr
+                .active_instances()
+                .values()
+                .map(|info| {
+                    let params: Vec<serde_json::Value> = info
+                        .parameters
+                        .iter()
+                        .map(|p| {
+                            serde_json::json!({
+                                "portIndex": p.port_index,
+                                "symbol": p.symbol,
+                                "name": p.name,
+                                "value": p.value,
+                                "min": p.min,
+                                "max": p.max,
+                                "default": p.default,
+                            })
+                        })
+                        .collect();
+                    serde_json::json!({
+                        "instanceId": info.id,
+                        "stableId": info.stable_id,
+                        "pluginUri": info.plugin_uri,
+                        "displayName": info.display_name,
+                        "bypassed": info.bypassed,
+                        "active": info.pw_node_id.is_some(),
+                        "parameters": params,
+                    })
+                })
+                .collect();
+            entries.sort_by(|a, b| {
+                let a_name = a["displayName"].as_str().unwrap_or("");
+                let b_name = b["displayName"].as_str().unwrap_or("");
+                a_name.cmp(b_name)
+            });
+            let json = serde_json::to_string(&entries).unwrap_or_default();
+            QString::from(&json)
+        } else {
+            QString::from("[]")
+        }
+    }
+
+    /// Remove a persisted plugin by its stable_id.
+    /// This removes it from the LV2 manager AND sends a RemovePlugin
+    /// command if it has a live PipeWire node.
+    pub fn remove_plugin_by_stable_id(mut self: Pin<&mut Self>, stable_id: QString) {
+        let sid: String = stable_id.to_string();
+
+        // Find the instance ID and check if it has a live node
+        let instance_id = self
+            .rust()
+            .lv2_manager
+            .as_ref()
+            .and_then(|mgr| mgr.instance_id_for_stable_id(&sid));
+
+        if let Some(instance_id) = instance_id {
+            // Send RemovePlugin to tear down the live PipeWire filter node
+            if let Some(ref tx) = self.rust().cmd_tx {
+                let _ = tx.send(PwCommand::RemovePlugin { instance_id });
+            }
+            // Remove from manager
+            if let Some(ref mut mgr) = self.as_mut().rust_mut().lv2_manager {
+                mgr.remove_instance(instance_id);
+            }
+            persist_active_plugins(self.rust().lv2_manager.as_ref());
+            log::info!("Removed plugin instance (stable_id={})", sid);
+        } else {
+            log::warn!(
+                "remove_plugin_by_stable_id: no instance found for stable_id={}",
+                sid
+            );
+        }
+    }
+
+    /// Reset all parameters of a plugin instance to their defaults.
+    pub fn reset_plugin_params_by_stable_id(mut self: Pin<&mut Self>, stable_id: QString) {
+        let sid: String = stable_id.to_string();
+
+        // Collect the resets we need to apply
+        let resets: Vec<(u64, usize, f32)> = if let Some(ref mgr) = self.rust().lv2_manager {
+            if let Some(info) = mgr.find_by_stable_id(&sid) {
+                info.parameters
+                    .iter()
+                    .map(|p| (info.id, p.port_index, p.default))
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
+        if resets.is_empty() {
+            return;
+        }
+
+        // Apply the resets
+        let instance_id = resets[0].0;
+        for (_, port_index, default) in &resets {
+            // Update in-memory
+            if let Some(ref mut mgr) = self.as_mut().rust_mut().lv2_manager {
+                mgr.update_parameter(instance_id, *port_index, *default);
+            }
+            // Send to PipeWire RT thread
+            if let Some(ref tx) = self.rust().cmd_tx {
+                let _ = tx.send(PwCommand::SetPluginParameter {
+                    instance_id,
+                    port_index: *port_index,
+                    value: *default,
+                });
+            }
+        }
+
+        self.as_mut().rust_mut().params_dirty = true;
+        if self.rust().params_dirty_since.is_none() {
+            self.as_mut().rust_mut().params_dirty_since = Some(Instant::now());
+        }
+        log::info!(
+            "Reset {} params to defaults for stable_id={}",
+            resets.len(),
+            sid
+        );
+    }
+
+    /// Set a plugin parameter by stable_id + port_index.
+    pub fn set_plugin_param_by_stable_id(
+        mut self: Pin<&mut Self>,
+        stable_id: QString,
+        port_index: u32,
+        value: f32,
+    ) {
+        let sid: String = stable_id.to_string();
+
+        let instance_id = self
+            .rust()
+            .lv2_manager
+            .as_ref()
+            .and_then(|mgr| mgr.instance_id_for_stable_id(&sid));
+
+        if let Some(instance_id) = instance_id {
+            // Update in-memory
+            if let Some(ref mut mgr) = self.as_mut().rust_mut().lv2_manager {
+                mgr.update_parameter(instance_id, port_index as usize, value);
+            }
+            // Send to PipeWire RT thread
+            if let Some(ref tx) = self.rust().cmd_tx {
+                let _ = tx.send(PwCommand::SetPluginParameter {
+                    instance_id,
+                    port_index: port_index as usize,
+                    value,
+                });
             }
             self.as_mut().rust_mut().params_dirty = true;
             if self.rust().params_dirty_since.is_none() {
@@ -1860,16 +2059,22 @@ fn load_saved_links() -> Vec<SavedPluginLink> {
     }
 }
 
-/// Build the list of links that involve at least one LV2 plugin node.
-fn build_lv2_links(graph: &GraphState) -> Vec<SavedPluginLink> {
+/// Build the list of links that should be persisted.
+///
+/// This includes links that involve at least one LV2 plugin node,
+/// as well as MIDI links (which are not managed by session managers
+/// like WirePlumber and would be lost on restart).
+fn build_persistable_links(graph: &GraphState) -> Vec<SavedPluginLink> {
     let links = graph.get_all_links();
     let mut saved_links = Vec::new();
 
     for link in &links {
         let out_node = graph.get_node(link.output_node_id);
         let in_node = graph.get_node(link.input_node_id);
+        let out_port = graph.get_port(link.output_port_id);
+        let in_port = graph.get_port(link.input_port_id);
 
-        // Only save links where at least one endpoint is an LV2 plugin
+        // Check if at least one endpoint is an LV2 plugin
         let involves_lv2 = out_node
             .as_ref()
             .map(|n| n.node_type == Some(NodeType::Lv2Plugin))
@@ -1879,12 +2084,19 @@ fn build_lv2_links(graph: &GraphState) -> Vec<SavedPluginLink> {
                 .map(|n| n.node_type == Some(NodeType::Lv2Plugin))
                 .unwrap_or(false);
 
-        if !involves_lv2 {
+        // Check if either port is MIDI
+        let involves_midi = out_port
+            .as_ref()
+            .map(|p| p.media_type == Some(crate::pipewire::MediaType::Midi))
+            .unwrap_or(false)
+            || in_port
+                .as_ref()
+                .map(|p| p.media_type == Some(crate::pipewire::MediaType::Midi))
+                .unwrap_or(false);
+
+        if !involves_lv2 && !involves_midi {
             continue;
         }
-
-        let out_port = graph.get_port(link.output_port_id);
-        let in_port = graph.get_port(link.input_port_id);
 
         if let (Some(out_node), Some(in_node), Some(out_port), Some(in_port)) =
             (out_node, in_node, out_port, in_port)
@@ -1901,10 +2113,10 @@ fn build_lv2_links(graph: &GraphState) -> Vec<SavedPluginLink> {
     saved_links
 }
 
-/// Save links involving LV2 plugin nodes to disk.
+/// Save persistable links (LV2 + MIDI) to disk.
 fn persist_lv2_links(graph: Option<&Arc<GraphState>>) {
     let links = if let Some(graph) = graph {
-        build_lv2_links(graph)
+        build_persistable_links(graph)
     } else {
         Vec::new()
     };

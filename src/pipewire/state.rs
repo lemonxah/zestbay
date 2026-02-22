@@ -1,8 +1,64 @@
 use parking_lot::RwLock;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::types::*;
+
+/// Natural sort comparison for strings containing numbers.
+/// Splits strings into text and numeric segments and compares them
+/// so that "out_2" < "out_10" instead of the lexicographic "out_10" < "out_2".
+fn natural_cmp(a: &str, b: &str) -> Ordering {
+    let mut ai = a.as_bytes().iter().peekable();
+    let mut bi = b.as_bytes().iter().peekable();
+
+    loop {
+        match (ai.peek(), bi.peek()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(&&ac), Some(&&bc)) => {
+                let a_digit = ac.is_ascii_digit();
+                let b_digit = bc.is_ascii_digit();
+
+                if a_digit && b_digit {
+                    // Both are in a numeric segment — extract full numbers
+                    let mut an: u64 = 0;
+                    while let Some(&&c) = ai.peek() {
+                        if c.is_ascii_digit() {
+                            an = an * 10 + (c - b'0') as u64;
+                            ai.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    let mut bn: u64 = 0;
+                    while let Some(&&c) = bi.peek() {
+                        if c.is_ascii_digit() {
+                            bn = bn * 10 + (c - b'0') as u64;
+                            bi.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    match an.cmp(&bn) {
+                        Ordering::Equal => continue,
+                        ord => return ord,
+                    }
+                } else {
+                    // Compare as characters
+                    match ac.cmp(&bc) {
+                        Ordering::Equal => {
+                            ai.next();
+                            bi.next();
+                        }
+                        ord => return ord,
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// Shared graph state accessible from multiple threads
 #[derive(Debug, Default)]
@@ -105,34 +161,43 @@ impl GraphState {
         self.ports.read().get(&id).cloned()
     }
 
-    /// Get all ports for a specific node
+    /// Get all ports for a specific node, sorted by direction then natural name order.
     pub fn get_ports_for_node(&self, node_id: ObjectId) -> Vec<Port> {
-        self.ports
+        let mut ports: Vec<Port> = self
+            .ports
             .read()
             .values()
             .filter(|p| p.node_id == node_id)
             .cloned()
-            .collect()
+            .collect();
+        ports.sort_by(|a, b| a.direction.cmp(&b.direction).then_with(|| natural_cmp(&a.name, &b.name)));
+        ports
     }
 
-    /// Get input ports for a node
+    /// Get input ports for a node, sorted by natural name order.
     pub fn get_input_ports(&self, node_id: ObjectId) -> Vec<Port> {
-        self.ports
+        let mut ports: Vec<Port> = self
+            .ports
             .read()
             .values()
             .filter(|p| p.node_id == node_id && p.direction == PortDirection::Input)
             .cloned()
-            .collect()
+            .collect();
+        ports.sort_by(|a, b| natural_cmp(&a.name, &b.name));
+        ports
     }
 
-    /// Get output ports for a node
+    /// Get output ports for a node, sorted by natural name order.
     pub fn get_output_ports(&self, node_id: ObjectId) -> Vec<Port> {
-        self.ports
+        let mut ports: Vec<Port> = self
+            .ports
             .read()
             .values()
             .filter(|p| p.node_id == node_id && p.direction == PortDirection::Output)
             .cloned()
-            .collect()
+            .collect();
+        ports.sort_by(|a, b| natural_cmp(&a.name, &b.name));
+        ports
     }
 
     // === Link operations ===

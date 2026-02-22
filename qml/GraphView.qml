@@ -40,6 +40,7 @@ Item {
     property var links: []
     property var portsByNode: ({})  // nodeId -> [ports]
     property var portPositions: ({})  // portId -> {cx, cy} in canvas coords
+    property var portMediaTypes: ({})  // portId -> "Audio"|"Midi"|"Video"|"Unknown"
     property int refreshCount: 0
 
     // Layout persistence: layoutKey -> [x, y]
@@ -70,7 +71,9 @@ Item {
     property var contextNode: null
 
     // ── Constants ─────────────────────────────────────────────────
-    readonly property real nodeWidth: 240
+    readonly property real minNodeWidth: 180
+    readonly property real maxNodeWidth: 400
+    property var nodeWidths: ({})  // nodeId -> calculated width
     readonly property real headerHeight: 26
     readonly property real portHeight: 18
     readonly property real portSpacing: 3
@@ -81,17 +84,23 @@ Item {
     // ── Colors ────────────────────────────────────────────────────
     readonly property color colSink: "#4682B4"
     readonly property color colSource: "#3CB371"
+    readonly property color colVirtualSink: "#2E5A88"
+    readonly property color colVirtualSource: "#2A7A52"
     readonly property color colStreamOut: "#FFA500"
     readonly property color colStreamIn: "#BA55D3"
     readonly property color colDuplex: "#FFD700"
+    readonly property color colJack: "#E04040"
     readonly property color colLv2: "#00BFFF"
     readonly property color colDefault: "#808080"
     readonly property color colNodeBg: "#282828"
     readonly property color colNodeBorder: "#3c3c3c"
     readonly property color colPortIn: "#6495ED"
     readonly property color colPortOut: "#90EE90"
+    readonly property color colMidi: "#FF69B4"
+    readonly property color colMidiPort: "#FF69B4"
     readonly property color colLinkActive: "#32CD32"
     readonly property color colLinkInactive: "#555555"
+    readonly property color colLinkMidi: "#FF69B4"
     readonly property color colLinkConnecting: "#FFFF00"
 
     // ── Data refresh ──────────────────────────────────────────────
@@ -150,6 +159,16 @@ Item {
             }
         }
         portsByNode = newPorts
+
+        // Build a flat lookup: portId -> mediaType (for link coloring)
+        var newPortMedia = {}
+        for (var nid in newPorts) {
+            var pp = newPorts[nid]
+            for (var pi2 = 0; pi2 < pp.length; pi2++) {
+                newPortMedia[pp[pi2].id] = pp[pi2].mediaType || "Unknown"
+            }
+        }
+        portMediaTypes = newPortMedia
 
         // Auto-layout nodes without positions, using saved layout if available
         for (var ni = 0; ni < nodes.length; ni++) {
@@ -386,10 +405,13 @@ Item {
         return "stream"
     }
 
-    function getNodeColor(type) {
+    function getNodeColor(node) {
+        if (node.mediaType === "Midi") return colMidi
+        if (node.isJack) return colJack
+        var type = node.type
         if (!type) return colDefault
-        if (type === "Sink") return colSink
-        if (type === "Source") return colSource
+        if (type === "Sink") return node.isVirtual ? colVirtualSink : colSink
+        if (type === "Source") return node.isVirtual ? colVirtualSource : colSource
         if (type === "StreamOutput") return colStreamOut
         if (type === "StreamInput") return colStreamIn
         if (type === "Duplex") return colDuplex
@@ -407,6 +429,47 @@ Item {
         if (node.type === "Lv2Plugin")
             h += buttonRowHeight + nodePadding
         return h
+    }
+
+    /// Calculate node width based on the longest port name and node title.
+    /// Uses a canvas context to measure text. Call once during paint setup.
+    function calculateNodeWidths(ctx) {
+        var newWidths = {}
+        ctx.save()
+        for (var ni = 0; ni < nodes.length; ni++) {
+            var node = nodes[ni]
+            var ports = portsByNode[node.id] || []
+
+            // Measure title (bold 11px)
+            ctx.font = "bold 11px sans-serif"
+            var titleW = ctx.measureText(node.name || "").width + nodePadding * 2
+
+            // Measure port names (10px) — inputs need left margin, outputs need right
+            ctx.font = "10px sans-serif"
+            var maxInputW = 0
+            var maxOutputW = 0
+            for (var pi = 0; pi < ports.length; pi++) {
+                var pw = ctx.measureText(ports[pi].name || "").width
+                if (ports[pi].direction === "Input") {
+                    if (pw > maxInputW) maxInputW = pw
+                } else {
+                    if (pw > maxOutputW) maxOutputW = pw
+                }
+            }
+
+            // Total port width: left port dot + padding + left label + gap + right label + padding + right port dot
+            var portW = portRadius + 4 + maxInputW + nodePadding * 2 + maxOutputW + 4 + portRadius
+
+            var w = Math.max(titleW, portW, minNodeWidth)
+            w = Math.min(w, maxNodeWidth)
+            newWidths[node.id] = Math.ceil(w)
+        }
+        ctx.restore()
+        nodeWidths = newWidths
+    }
+
+    function getNodeWidth(nodeId) {
+        return nodeWidths[nodeId] || minNodeWidth
     }
 
     // Screen coords -> canvas coords
@@ -459,7 +522,7 @@ Item {
             var pos = nodePositions[n.id]
             if (!pos) continue
             var h = calculateNodeHeight(n)
-            if (c.x >= pos.x && c.x <= pos.x + nodeWidth &&
+            if (c.x >= pos.x && c.x <= pos.x + getNodeWidth(n.id) &&
                 c.y >= pos.y && c.y <= pos.y + h) {
                 return n.id
             }
@@ -477,9 +540,10 @@ Item {
             var pos = nodePositions[n.id]
             if (!pos) continue
             var h = calculateNodeHeight(n)
+            var nw = getNodeWidth(n.id)
             var btnY = pos.y + h - buttonRowHeight - nodePadding
             var btnH = buttonRowHeight
-            var btnW = (nodeWidth - nodePadding * 3) / 2
+            var btnW = (nw - nodePadding * 3) / 2
             // UI button (left)
             if (c.x >= pos.x + nodePadding && c.x <= pos.x + nodePadding + btnW &&
                 c.y >= btnY && c.y <= btnY + btnH) {
@@ -503,6 +567,9 @@ Item {
             var ctx = getContext("2d")
             ctx.reset()
 
+            // Calculate per-node widths based on port name text measurement
+            calculateNodeWidths(ctx)
+
             // Background
             ctx.fillStyle = "#1e1e1e"
             ctx.fillRect(0, 0, width, height)
@@ -520,7 +587,11 @@ Item {
                 var toPos = portPositions[link.inputPortId]
                 if (fromPos && toPos) {
                     var isSelected = selectedLinks[link.id] === true
-                    var linkColor = isSelected ? "#FF4444" : (link.active ? colLinkActive : colLinkInactive)
+                    var isMidiLink = portMediaTypes[link.outputPortId] === "Midi"
+                                  || portMediaTypes[link.inputPortId] === "Midi"
+                    var linkColor = isSelected ? "#FF4444"
+                                  : isMidiLink ? colLinkMidi
+                                  : (link.active ? colLinkActive : colLinkInactive)
                     var linkWidth = isSelected ? 3 : 2
                     drawBezier(ctx, fromPos.cx, fromPos.cy, toPos.cx, toPos.cy,
                         linkColor, linkWidth)
@@ -574,24 +645,25 @@ Item {
                     .sort(function(a, b) { return a.name.localeCompare(b.name) })
                 var rows = Math.max(inputs.length, outputs.length, 1)
                 var h = calculateNodeHeight(node)
+                var nw = getNodeWidth(node.id)
 
                 // Node body
                 var isNodeSelected = selectedNodes[node.id] === true
                 ctx.fillStyle = "" + colNodeBg
                 ctx.strokeStyle = isNodeSelected ? "#FFFF00" : ("" + colNodeBorder)
                 ctx.lineWidth = isNodeSelected ? 2.5 : 1.5
-                roundRect(ctx, x, y, nodeWidth, h, 5)
+                roundRect(ctx, x, y, nw, h, 5)
 
                 // Header
-                ctx.fillStyle = "" + getNodeColor(node.type)
-                roundRectTop(ctx, x, y, nodeWidth, headerHeight, 5)
+                ctx.fillStyle = "" + getNodeColor(node)
+                roundRectTop(ctx, x, y, nw, headerHeight, 5)
 
                 // Title
                 ctx.fillStyle = "#ffffff"
                 ctx.font = "bold 11px sans-serif"
                 ctx.textAlign = "center"
                 ctx.textBaseline = "middle"
-                ctx.fillText(truncate(node.name, 30), x + nodeWidth / 2, y + headerHeight / 2)
+                ctx.fillText(truncate(node.name, 30), x + nw / 2, y + headerHeight / 2)
 
                 // Input ports (left side)
                 var portBaseY = y + headerHeight + nodePadding
@@ -599,8 +671,8 @@ Item {
                     var py = portBaseY + pi * (portHeight + portSpacing) + portHeight / 2
                     var px = x
 
-                    // Port dot
-                    ctx.fillStyle = "" + colPortIn
+                    // Port dot (pink for MIDI ports)
+                    ctx.fillStyle = inputs[pi].mediaType === "Midi" ? ("" + colMidiPort) : ("" + colPortIn)
                     ctx.beginPath()
                     ctx.arc(px, py, portRadius, 0, Math.PI * 2)
                     ctx.fill()
@@ -633,10 +705,10 @@ Item {
                 // Output ports (right side)
                 for (var po = 0; po < outputs.length; po++) {
                     var pyo = portBaseY + po * (portHeight + portSpacing) + portHeight / 2
-                    var pxo = x + nodeWidth
+                    var pxo = x + nw
 
-                    // Port dot
-                    ctx.fillStyle = "" + colPortOut
+                    // Port dot (pink for MIDI ports)
+                    ctx.fillStyle = outputs[po].mediaType === "Midi" ? ("" + colMidiPort) : ("" + colPortOut)
                     ctx.beginPath()
                     ctx.arc(pxo, pyo, portRadius, 0, Math.PI * 2)
                     ctx.fill()
@@ -668,7 +740,7 @@ Item {
                 // ── LV2 button row ─────────────────────────────────
                 if (node.type === "Lv2Plugin") {
                     var btnY = y + h - buttonRowHeight - nodePadding
-                    var btnW = (nodeWidth - nodePadding * 3) / 2
+                    var btnW = (nw - nodePadding * 3) / 2
                     var btnH = buttonRowHeight
 
                     // "UI" button (left)
@@ -1141,7 +1213,7 @@ Item {
             // Check if node rect overlaps selection rect
             var nx = pos.x
             var ny = pos.y
-            var nr = nx + nodeWidth
+            var nr = nx + getNodeWidth(n.id)
             var nb = ny + h
             if (nx < rr && nr > rx && ny < rb && nb > ry) {
                 result[n.id] = true

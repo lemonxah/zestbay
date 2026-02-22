@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use lilv::World;
 
@@ -457,18 +457,45 @@ impl Lv2PluginInstance {
             .iter_mut()
             .find(|cp| cp.index == port_index)
         {
-            cp.value = value.clamp(cp.min, cp.max);
+            let clamped = value.clamp(cp.min, cp.max);
+            cp.value = clamped;
+
+            // Also update the shared port_updates immediately so the
+            // native UI timer reads the new value instead of a stale one.
+            // Without this, the timer can echo the old value back to the
+            // plugin UI which then fires port_write_callback, snapping
+            // the parameter back to its previous value.
+            if let Some(slot) = self
+                .port_updates
+                .control_inputs
+                .iter()
+                .find(|s| s.port_index == port_index)
+            {
+                slot.value.store(clamped);
+            }
         }
     }
 
     /// Set a control parameter value by port symbol
     pub fn set_parameter_by_symbol(&mut self, symbol: &str, value: f32) {
-        if let Some(cp) = self
+        if let Some(idx) = self
             .control_inputs
-            .iter_mut()
-            .find(|cp| cp.symbol == symbol)
+            .iter()
+            .position(|cp| cp.symbol == symbol)
         {
-            cp.value = value.clamp(cp.min, cp.max);
+            let cp = &mut self.control_inputs[idx];
+            let clamped = value.clamp(cp.min, cp.max);
+            cp.value = clamped;
+            let port_index = cp.index;
+
+            if let Some(slot) = self
+                .port_updates
+                .control_inputs
+                .iter()
+                .find(|s| s.port_index == port_index)
+            {
+                slot.value.store(clamped);
+            }
         }
     }
 
@@ -620,5 +647,27 @@ impl Lv2Manager {
     /// Get a mutable reference to a specific instance (for renaming, etc.)
     pub fn get_instance_mut(&mut self, id: PluginInstanceId) -> Option<&mut Lv2InstanceInfo> {
         self.active_instances.get_mut(&id)
+    }
+
+    /// Find an instance by its stable_id (UUID that persists across sessions).
+    pub fn find_by_stable_id(&self, stable_id: &str) -> Option<&Lv2InstanceInfo> {
+        self.active_instances
+            .values()
+            .find(|info| info.stable_id == stable_id)
+    }
+
+    /// Find an instance by its stable_id (mutable).
+    pub fn find_by_stable_id_mut(&mut self, stable_id: &str) -> Option<&mut Lv2InstanceInfo> {
+        self.active_instances
+            .values_mut()
+            .find(|info| info.stable_id == stable_id)
+    }
+
+    /// Find the instance ID for a given stable_id.
+    pub fn instance_id_for_stable_id(&self, stable_id: &str) -> Option<PluginInstanceId> {
+        self.active_instances
+            .iter()
+            .find(|(_, info)| info.stable_id == stable_id)
+            .map(|(id, _)| *id)
     }
 }

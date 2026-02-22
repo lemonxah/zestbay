@@ -425,11 +425,26 @@ fn parse_node(global: &GlobalObject<&DictRef>) -> Option<Node> {
         .to_string();
     let media_class = props.get("media.class").unwrap_or_default().to_string();
 
-    let media_type = if media_class.contains("Audio") {
+    // JACK clients (e.g. Pianoteq, Hydrogen) don't set media.class.
+    // They use separate media.type and media.category properties instead.
+    // When media.class is empty, synthesize an equivalent string from those.
+    let effective_class = if !media_class.is_empty() {
+        media_class.clone()
+    } else {
+        let mt = props.get("media.type").unwrap_or_default();
+        let mc = props.get("media.category").unwrap_or_default();
+        if !mt.is_empty() || !mc.is_empty() {
+            format!("{}/{}", mt, mc)
+        } else {
+            String::new()
+        }
+    };
+
+    let media_type = if effective_class.contains("Audio") {
         Some(MediaType::Audio)
-    } else if media_class.contains("Video") {
+    } else if effective_class.contains("Video") {
         Some(MediaType::Video)
-    } else if media_class.contains("Midi") {
+    } else if effective_class.contains("Midi") {
         Some(MediaType::Midi)
     } else {
         None
@@ -441,19 +456,28 @@ fn parse_node(global: &GlobalObject<&DictRef>) -> Option<Node> {
 
     let node_type = if is_lv2 {
         Some(NodeType::Lv2Plugin)
-    } else if media_class.contains("Sink") {
+    } else if effective_class.contains("Sink") {
         Some(NodeType::Sink)
-    } else if media_class.contains("Source") && !media_class.contains("Stream") {
+    } else if effective_class.contains("Source") && !effective_class.contains("Stream") {
         Some(NodeType::Source)
-    } else if media_class.contains("Stream/Output") || media_class.contains("Playback") {
+    } else if effective_class.contains("Stream/Output") || effective_class.contains("Playback") {
         Some(NodeType::StreamOutput)
-    } else if media_class.contains("Stream/Input") || media_class.contains("Record") {
+    } else if effective_class.contains("Stream/Input") || effective_class.contains("Record") {
         Some(NodeType::StreamInput)
-    } else if media_class.contains("Duplex") {
+    } else if effective_class.contains("Duplex") || effective_class.contains("Bridge") {
         Some(NodeType::Duplex)
     } else {
         None
     };
+
+    let is_virtual = props
+        .get("node.virtual")
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let is_jack = props
+        .get("client.api")
+        .map(|v| v == "jack")
+        .unwrap_or(false);
 
     Some(Node {
         id: global.id,
@@ -461,6 +485,8 @@ fn parse_node(global: &GlobalObject<&DictRef>) -> Option<Node> {
         description,
         media_type,
         node_type,
+        is_virtual,
+        is_jack,
         ready: true,
     })
 }
@@ -767,6 +793,8 @@ fn build_plugin_info(
         audio_outputs,
         control_inputs,
         control_outputs,
+        required_features: Vec::new(),
+        compatible: true,
     })
 }
 

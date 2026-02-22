@@ -2,6 +2,10 @@ use lilv::World;
 
 use super::types::*;
 
+/// LV2 feature URIs that ZestBay provides to plugins.
+/// Plugins requiring only these features (or a subset) are considered compatible.
+const PROVIDED_FEATURES: &[&str] = &["http://lv2plug.in/ns/ext/urid#map"];
+
 /// Scan all installed LV2 plugins and return their metadata
 pub fn scan_plugins() -> Vec<Lv2PluginInfo> {
     let world = World::with_load_all();
@@ -107,6 +111,17 @@ pub fn scan_plugins_with_world(world: &World) -> Vec<Lv2PluginInfo> {
             });
         }
 
+        // Extract required features and check compatibility
+        let required_features: Vec<String> = plugin
+            .required_features()
+            .iter()
+            .filter_map(|n| n.as_uri().map(String::from))
+            .collect();
+
+        let compatible = required_features
+            .iter()
+            .all(|req| PROVIDED_FEATURES.iter().any(|provided| provided == req));
+
         plugins.push(Lv2PluginInfo {
             uri,
             name,
@@ -117,6 +132,8 @@ pub fn scan_plugins_with_world(world: &World) -> Vec<Lv2PluginInfo> {
             audio_outputs,
             control_inputs,
             control_outputs,
+            required_features,
+            compatible,
         });
     }
 
