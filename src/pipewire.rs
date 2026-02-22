@@ -1,5 +1,5 @@
 mod manager;
-mod state;
+pub mod state;
 mod types;
 
 pub use state::GraphState;

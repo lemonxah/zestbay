@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use super::types::*;
 
-fn natural_cmp(a: &str, b: &str) -> Ordering {
+pub fn natural_cmp(a: &str, b: &str) -> Ordering {
     let mut ai = a.as_bytes().iter().peekable();
     let mut bi = b.as_bytes().iter().peekable();
 

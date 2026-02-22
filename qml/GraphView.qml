@@ -899,6 +899,13 @@ Item {
                 }
 
                 if (dragNodeId >= 0) {
+                    var linkUnder = findLinkUnderNode(dragNodeId)
+                    if (linkUnder >= 0) {
+                        var draggedNode = findNodeData(dragNodeId)
+                        if (draggedNode && draggedNode.type === "Lv2Plugin") {
+                            controller.insert_node_on_link(linkUnder, dragNodeId)
+                        }
+                    }
                     persistLayout()
                 }
                 dragNodeId = -1
@@ -996,6 +1003,54 @@ Item {
             }
         }
         return bestDist <= threshold ? bestId : -1
+    }
+
+    function findLinkUnderNode(nodeId) {
+        var pos = nodePositions[nodeId]
+        if (!pos) return -1
+        var node = findNodeData(nodeId)
+        if (!node) return -1
+        var nw = getNodeWidth(nodeId)
+        var nh = calculateNodeHeight(node)
+        var nx = pos.x
+        var ny = pos.y
+
+        var bestId = -1
+        var bestDist = Infinity
+
+        for (var li = 0; li < links.length; li++) {
+            var link = links[li]
+            if (link.outputPortId === undefined) continue
+            var fromPos = portPositions[link.outputPortId]
+            var toPos = portPositions[link.inputPortId]
+            if (!fromPos || !toPos) continue
+
+            var ctrlDist = Math.max(Math.abs(toPos.cx - fromPos.cx) / 2, 50)
+            var cx1 = fromPos.cx + ctrlDist
+            var cy1 = fromPos.cy
+            var cx2 = toPos.cx - ctrlDist
+            var cy2 = toPos.cy
+            var steps = 30
+            for (var i = 0; i <= steps; i++) {
+                var t = i / steps
+                var u = 1 - t
+                var bx = u*u*u*fromPos.cx + 3*u*u*t*cx1 + 3*u*t*t*cx2 + t*t*t*toPos.cx
+                var by = u*u*u*fromPos.cy + 3*u*u*t*cy1 + 3*u*t*t*cy2 + t*t*t*toPos.cy
+                if (bx >= nx && bx <= nx + nw && by >= ny && by <= ny + nh) {
+                    var cx = nx + nw / 2
+                    var cy = ny + nh / 2
+                    var dx = bx - cx
+                    var dy = by - cy
+                    var d = dx*dx + dy*dy
+                    if (d < bestDist) {
+                        bestDist = d
+                        bestId = link.id
+                    }
+                    break
+                }
+            }
+        }
+        return bestId
     }
 
     function distToBezier(px, py, x1, y1, x2, y2) {

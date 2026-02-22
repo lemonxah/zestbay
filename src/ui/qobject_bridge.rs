@@ -40,6 +40,9 @@ pub mod qobject {
         fn disconnect_link(self: Pin<&mut Self>, link_id: u32);
 
         #[qinvokable]
+        fn insert_node_on_link(self: Pin<&mut Self>, link_id: u32, node_id: u32);
+
+        #[qinvokable]
         fn get_layout_json(self: Pin<&mut Self>) -> QString;
 
         #[qinvokable]
@@ -179,7 +182,7 @@ use std::path::PathBuf;
 
 use crate::lv2::Lv2Manager;
 use crate::patchbay::{PatchbayManager, rules};
-use crate::pipewire::{GraphState, Lv2Event, Node, NodeType, PortDirection, PwCommand, PwEvent};
+use crate::pipewire::{GraphState, Lv2Event, Node, NodeType, Port, PortDirection, PwCommand, PwEvent};
 use crate::tray::TrayState;
 
 pub struct AppControllerRust {
@@ -1027,6 +1030,203 @@ impl qobject::AppController {
             if unlearned {
                 save_rules(self.rust().patchbay.as_ref());
             }
+        }
+
+        self.as_mut().rust_mut().links_dirty = true;
+        if self.rust().links_dirty_since.is_none() {
+            self.as_mut().rust_mut().links_dirty_since = Some(Instant::now());
+        }
+    }
+
+    pub fn insert_node_on_link(mut self: Pin<&mut Self>, link_id: u32, node_id: u32) {
+        let graph = self.rust().graph.clone();
+        let Some(ref graph) = graph else { return };
+
+        let Some(link) = graph.get_link(link_id) else {
+            log::warn!("insert_node_on_link: link {} not found", link_id);
+            return;
+        };
+
+        let Some(node) = graph.get_node(node_id) else {
+            log::warn!("insert_node_on_link: node {} not found", node_id);
+            return;
+        };
+
+        if node.node_type != Some(NodeType::Lv2Plugin) {
+            log::warn!("insert_node_on_link: node {} is not an LV2 plugin, ignoring", node_id);
+            return;
+        }
+
+        let node_ports = graph.get_ports_for_node(node_id);
+        let mut node_inputs: Vec<_> = node_ports
+            .iter()
+            .filter(|p| p.direction == PortDirection::Input && p.media_type == Some(crate::pipewire::MediaType::Audio))
+            .collect();
+        let mut node_outputs: Vec<_> = node_ports
+            .iter()
+            .filter(|p| p.direction == PortDirection::Output && p.media_type == Some(crate::pipewire::MediaType::Audio))
+            .collect();
+
+        if node_inputs.is_empty() || node_outputs.is_empty() {
+            log::warn!("insert_node_on_link: node {} has no audio input/output ports", node_id);
+            return;
+        }
+
+        node_inputs.sort_by(|a, b| crate::pipewire::state::natural_cmp(&a.name, &b.name));
+        node_outputs.sort_by(|a, b| crate::pipewire::state::natural_cmp(&a.name, &b.name));
+
+        let upstream_out = link.output_port_id;
+        let downstream_in = link.input_port_id;
+
+        let upstream_node_id = link.output_node_id;
+        let downstream_node_id = link.input_node_id;
+
+        let upstream_ports: Vec<_> = graph
+            .get_ports_for_node(upstream_node_id)
+            .into_iter()
+            .filter(|p| p.direction == PortDirection::Output && p.media_type == Some(crate::pipewire::MediaType::Audio))
+            .collect();
+        let downstream_ports: Vec<_> = graph
+            .get_ports_for_node(downstream_node_id)
+            .into_iter()
+            .filter(|p| p.direction == PortDirection::Input && p.media_type == Some(crate::pipewire::MediaType::Audio))
+            .collect();
+
+        let upstream_idx = upstream_ports.iter().position(|p| p.id == upstream_out).unwrap_or(0);
+        let downstream_idx = downstream_ports.iter().position(|p| p.id == downstream_in).unwrap_or(0);
+
+        let all_links = graph.get_all_links();
+        let mut links_to_remove = Vec::new();
+        let mut rewire_pairs: Vec<(u32, usize, u32, usize)> = Vec::new();
+
+        for existing in &all_links {
+            if existing.output_node_id == upstream_node_id && existing.input_node_id == downstream_node_id {
+                let u_idx = upstream_ports.iter().position(|p| p.id == existing.output_port_id);
+                let d_idx = downstream_ports.iter().position(|p| p.id == existing.input_port_id);
+                if let (Some(ui), Some(di)) = (u_idx, d_idx) {
+                    links_to_remove.push(existing.id);
+                    rewire_pairs.push((existing.output_port_id, ui, existing.input_port_id, di));
+                }
+            }
+        }
+
+        if links_to_remove.is_empty() {
+            links_to_remove.push(link_id);
+            rewire_pairs.push((upstream_out, upstream_idx, downstream_in, downstream_idx));
+        }
+
+        if let Some(ref tx) = self.rust().cmd_tx {
+            for lid in &links_to_remove {
+                let _ = tx.send(PwCommand::Disconnect { link_id: *lid });
+            }
+
+            let max_in = node_inputs.len() - 1;
+            let max_out = node_outputs.len() - 1;
+            for (up_port, up_idx, down_port, down_idx) in &rewire_pairs {
+                let in_idx = *up_idx.min(&max_in);
+                let out_idx = *down_idx.min(&max_out);
+
+                let _ = tx.send(PwCommand::Connect {
+                    output_port_id: *up_port,
+                    input_port_id: node_inputs[in_idx].id,
+                });
+                let _ = tx.send(PwCommand::Connect {
+                    output_port_id: node_outputs[out_idx].id,
+                    input_port_id: *down_port,
+                });
+            }
+        }
+
+        log::info!(
+            "insert_node_on_link: inserted node {} on {} links between nodes {} and {}",
+            node_id,
+            links_to_remove.len(),
+            upstream_node_id,
+            downstream_node_id
+        );
+
+        let mut rule_data: Vec<(Node, Node, Port, Port)> = Vec::new();
+        let mut new_link_data: Vec<(Node, Node, Port, Port, Node, Node, Port, Port)> = Vec::new();
+
+        {
+            let max_in = node_inputs.len() - 1;
+            let max_out = node_outputs.len() - 1;
+
+            for (up_port_id, up_idx, down_port_id, down_idx) in &rewire_pairs {
+                if let (Some(source_node), Some(target_node), Some(out_port), Some(in_port)) = (
+                    graph.get_node(upstream_node_id),
+                    graph.get_node(downstream_node_id),
+                    graph.get_port(*up_port_id),
+                    graph.get_port(*down_port_id),
+                ) {
+                    rule_data.push((source_node, target_node, out_port, in_port));
+                }
+
+                let in_idx = *up_idx.min(&max_in);
+                let out_idx = *down_idx.min(&max_out);
+
+                if let (Some(up_node), Some(ins_node), Some(up_port), Some(ins_in_port)) = (
+                    graph.get_node(upstream_node_id),
+                    graph.get_node(node_id),
+                    graph.get_port(*up_port_id),
+                    graph.get_port(node_inputs[in_idx].id),
+                ) {
+                    if let (Some(ins_node2), Some(dn_node), Some(ins_out_port), Some(dn_port)) = (
+                        graph.get_node(node_id),
+                        graph.get_node(downstream_node_id),
+                        graph.get_port(node_outputs[out_idx].id),
+                        graph.get_port(*down_port_id),
+                    ) {
+                        new_link_data.push((
+                            up_node, ins_node, up_port, ins_in_port,
+                            ins_node2, dn_node, ins_out_port, dn_port,
+                        ));
+                    }
+                }
+            }
+        }
+
+        let mut rules_changed = false;
+        if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
+            for (source_node, target_node, out_port, in_port) in &rule_data {
+                if patchbay.unlearn_from_link(source_node, target_node, out_port, in_port) {
+                    log::info!(
+                        "insert_node_on_link: unlearned rule {}:{} -> {}:{}",
+                        source_node.display_name(),
+                        out_port.name,
+                        target_node.display_name(),
+                        in_port.name,
+                    );
+                    rules_changed = true;
+                }
+            }
+
+            for (up_node, ins_node, up_port, ins_in_port, ins_node2, dn_node, ins_out_port, dn_port) in &new_link_data {
+                if patchbay.learn_from_link(up_node, ins_node, up_port, ins_in_port) {
+                    log::info!(
+                        "insert_node_on_link: learned rule {}:{} -> {}:{}",
+                        up_node.display_name(),
+                        up_port.name,
+                        ins_node.display_name(),
+                        ins_in_port.name,
+                    );
+                    rules_changed = true;
+                }
+                if patchbay.learn_from_link(ins_node2, dn_node, ins_out_port, dn_port) {
+                    log::info!(
+                        "insert_node_on_link: learned rule {}:{} -> {}:{}",
+                        ins_node2.display_name(),
+                        ins_out_port.name,
+                        dn_node.display_name(),
+                        dn_port.name,
+                    );
+                    rules_changed = true;
+                }
+            }
+        }
+
+        if rules_changed {
+            save_rules(self.rust().patchbay.as_ref());
         }
 
         self.as_mut().rust_mut().links_dirty = true;
