@@ -13,7 +13,6 @@ ApplicationWindow {
 
     required property var controller
 
-    // Signal emitted when poll interval changes so main.qml can update its timer
     signal pollIntervalChanged(int intervalMs)
 
     property var prefs: ({})
@@ -58,7 +57,6 @@ ApplicationWindow {
             color: "#3c3c3c"
         }
 
-        // Scrollable settings area
         Flickable {
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -74,10 +72,6 @@ ApplicationWindow {
                 width: parent.width
                 spacing: 16
 
-                // ══════════════════════════════════════════════
-                // Toggle settings (shown first)
-                // ══════════════════════════════════════════════
-
                 Label {
                     text: "General"
                     font.bold: true
@@ -85,7 +79,6 @@ ApplicationWindow {
                     opacity: 0.8
                 }
 
-                // ── Start Minimized to Tray ──────────────────
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 12
@@ -119,7 +112,6 @@ ApplicationWindow {
                     color: "#2c2c2c"
                 }
 
-                // ── Close to Tray ────────────────────────────
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 12
@@ -153,7 +145,6 @@ ApplicationWindow {
                     color: "#2c2c2c"
                 }
 
-                // ── Auto-learn Rules Toggle ───────────────────
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 12
@@ -187,10 +178,6 @@ ApplicationWindow {
                     color: "#3c3c3c"
                 }
 
-                // ══════════════════════════════════════════════
-                // Timing settings
-                // ══════════════════════════════════════════════
-
                 Label {
                     text: "Timing"
                     font.bold: true
@@ -206,7 +193,6 @@ ApplicationWindow {
                     wrapMode: Text.WordWrap
                 }
 
-                // ── Rule Settle Time ──────────────────────────
                 ColumnLayout {
                     Layout.fillWidth: true
                     spacing: 4
@@ -271,7 +257,6 @@ ApplicationWindow {
                     color: "#2c2c2c"
                 }
 
-                // ── Poll Interval ──────────────────────────────
                 ColumnLayout {
                     Layout.fillWidth: true
                     spacing: 4
@@ -336,7 +321,6 @@ ApplicationWindow {
                     color: "#2c2c2c"
                 }
 
-                // ── Params Persist Debounce ────────────────────
                 ColumnLayout {
                     Layout.fillWidth: true
                     spacing: 4
@@ -401,7 +385,134 @@ ApplicationWindow {
                     color: "#2c2c2c"
                 }
 
-                // ── Links Persist Debounce ─────────────────────
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label {
+                            text: "PipeWire tick interval"
+                            font.bold: true
+                        }
+                        Item {
+                            Layout.fillWidth: true
+                        }
+                        Label {
+                            text: pwTickSlider.value + " ms"
+                            font.family: "monospace"
+                            opacity: 0.8
+                        }
+                    }
+
+                    Label {
+                        text: "How often the PipeWire thread checks for pending operations. Lower values reduce link latency. Requires restart."
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                        font.pointSize: 9
+                        opacity: 0.5
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        Label {
+                            text: "1"
+                            opacity: 0.4
+                            font.pointSize: 8
+                        }
+                        Slider {
+                            id: pwTickSlider
+                            Layout.fillWidth: true
+                            from: 1
+                            to: 200
+                            stepSize: 1
+                            value: prefs.pw_tick_interval_ms || 10
+                            onPressedChanged: {
+                                if (!pressed) {
+                                    setPref("pw_tick_interval_ms", value);
+                                }
+                            }
+                        }
+                        Label {
+                            text: "200"
+                            opacity: 0.4
+                            font.pointSize: 8
+                        }
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: 1
+                    color: "#2c2c2c"
+                }
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label {
+                            text: "Plugin operation cooldown"
+                            font.bold: true
+                        }
+                        Item {
+                            Layout.fillWidth: true
+                        }
+                        Label {
+                            text: pwCooldownSlider.value + " ms"
+                            font.family: "monospace"
+                            opacity: 0.8
+                        }
+                    }
+
+                    Label {
+                        text: "Minimum gap between heavy operations (plugin add/remove). Connect/disconnect are always instant. Requires restart."
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                        font.pointSize: 9
+                        opacity: 0.5
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        Label {
+                            text: "10"
+                            opacity: 0.4
+                            font.pointSize: 8
+                        }
+                        Slider {
+                            id: pwCooldownSlider
+                            Layout.fillWidth: true
+                            from: 10
+                            to: 1000
+                            stepSize: 10
+                            value: prefs.pw_operation_cooldown_ms || 50
+                            onPressedChanged: {
+                                if (!pressed) {
+                                    setPref("pw_operation_cooldown_ms", value);
+                                }
+                            }
+                        }
+                        Label {
+                            text: "1000"
+                            opacity: 0.4
+                            font.pointSize: 8
+                        }
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: 1
+                    color: "#2c2c2c"
+                }
+
                 ColumnLayout {
                     Layout.fillWidth: true
                     spacing: 4
@@ -460,7 +571,6 @@ ApplicationWindow {
                     }
                 }
 
-                // Spacer at bottom
                 Item {
                     Layout.fillHeight: true
                 }
@@ -473,7 +583,6 @@ ApplicationWindow {
             color: "#3c3c3c"
         }
 
-        // Bottom buttons
         RowLayout {
             Layout.fillWidth: true
 

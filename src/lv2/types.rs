@@ -3,19 +3,14 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-/// Unique identifier for an active plugin instance within ZestBay
 pub type PluginInstanceId = u64;
 
-/// Classification of an LV2 port
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Lv2PortType {
-    /// Audio sample data (f32 buffer)
     AudioInput,
     AudioOutput,
-    /// Control value (single f32)
     ControlInput,
     ControlOutput,
-    /// Atom / event port (MIDI, etc.) - not yet supported
     AtomInput,
     AtomOutput,
 }
@@ -44,26 +39,17 @@ impl Lv2PortType {
     }
 }
 
-/// Metadata for a single LV2 port
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Lv2PortInfo {
-    /// Port index within the plugin
     pub index: usize,
-    /// Port symbol (short identifier)
     pub symbol: String,
-    /// Port human-readable name
     pub name: String,
-    /// Port type
     pub port_type: Lv2PortType,
-    /// Default value (for control ports)
     pub default_value: f32,
-    /// Minimum value (for control ports)
     pub min_value: f32,
-    /// Maximum value (for control ports)
     pub max_value: f32,
 }
 
-/// Classification of an LV2 plugin
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Lv2PluginCategory {
     Amplifier,
@@ -160,32 +146,19 @@ impl Lv2PluginCategory {
     }
 }
 
-/// Metadata describing an available (but not instantiated) LV2 plugin
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Lv2PluginInfo {
-    /// Plugin URI (globally unique identifier)
     pub uri: String,
-    /// Human-readable name
     pub name: String,
-    /// Plugin category/class
     pub category: Lv2PluginCategory,
-    /// Author name
     pub author: Option<String>,
-    /// Port descriptions
     pub ports: Vec<Lv2PortInfo>,
-    /// Number of audio input ports
     pub audio_inputs: usize,
-    /// Number of audio output ports
     pub audio_outputs: usize,
-    /// Number of control input ports
     pub control_inputs: usize,
-    /// Number of control output ports
     pub control_outputs: usize,
-    /// LV2 feature URIs that this plugin requires (must be provided by host)
     #[serde(default)]
     pub required_features: Vec<String>,
-    /// Whether this plugin is compatible with ZestBay (all required features
-    /// are provided by the host)
     #[serde(default = "default_true")]
     pub compatible: bool,
 }
@@ -195,36 +168,27 @@ fn default_true() -> bool {
 }
 
 impl Lv2PluginInfo {
-    /// Check if this is an effect (has both audio in and out)
     pub fn is_effect(&self) -> bool {
         self.audio_inputs > 0 && self.audio_outputs > 0
     }
 
-    /// Check if this is an instrument/generator (has audio out but no audio in)
     pub fn is_instrument(&self) -> bool {
         self.audio_inputs == 0 && self.audio_outputs > 0
     }
 
-    /// Check if this is an analyser (has audio in but no audio out)
     pub fn is_analyser(&self) -> bool {
         self.audio_inputs > 0 && self.audio_outputs == 0
     }
 }
 
-/// Saved state of a single plugin instance (for session persistence)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedPluginInstance {
-    /// Plugin URI to re-instantiate
     pub plugin_uri: String,
-    /// Display name
     pub display_name: String,
-    /// Whether the plugin was bypassed
     pub bypassed: bool,
-    /// Saved parameter values (port_index -> value)
     pub parameters: Vec<SavedParameter>,
 }
 
-/// A single saved parameter value
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedParameter {
     pub port_index: usize,
@@ -232,7 +196,6 @@ pub struct SavedParameter {
     pub value: f32,
 }
 
-/// Saved link between two nodes (by node name + port name)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedPluginLink {
     pub output_node_name: String,
@@ -241,16 +204,12 @@ pub struct SavedPluginLink {
     pub input_port_name: String,
 }
 
-/// Full session state that gets persisted to disk
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedSession {
-    /// Active plugin instances to restore
     pub plugins: Vec<SavedPluginInstance>,
-    /// Links involving LV2 plugin nodes to restore
     pub links: Vec<SavedPluginLink>,
 }
 
-/// Current parameter values for an active plugin instance
 #[derive(Debug, Clone)]
 pub struct Lv2ParameterValue {
     pub port_index: usize,
@@ -262,31 +221,18 @@ pub struct Lv2ParameterValue {
     pub default: f32,
 }
 
-/// State of an active LV2 plugin instance
 #[derive(Debug, Clone)]
 pub struct Lv2InstanceInfo {
-    /// Our internal instance ID (changes each session)
     pub id: PluginInstanceId,
-    /// Stable UUID that persists across sessions for matching saved state
     pub stable_id: String,
-    /// Plugin URI
     pub plugin_uri: String,
-    /// Human-readable name (user can rename)
     pub display_name: String,
-    /// PipeWire node ID once registered (None until the filter is created)
     pub pw_node_id: Option<u32>,
-    /// Current parameter values
     pub parameters: Vec<Lv2ParameterValue>,
-    /// Whether the plugin is currently active/processing
     pub active: bool,
-    /// Whether the plugin is bypassed
     pub bypassed: bool,
 }
 
-// ─── Lock-free DSP ↔ UI port value sharing ───────────────────────────────────
-
-/// An f32 stored as atomic u32 bits — safe for lock-free sharing between
-/// the PipeWire RT thread and the UI thread.
 #[derive(Debug)]
 pub struct AtomicF32(AtomicU32);
 
@@ -302,37 +248,19 @@ impl AtomicF32 {
     }
 }
 
-/// A single port slot in the shared buffer.
 pub struct PortSlot {
-    /// LV2 port index
     pub port_index: usize,
-    /// Current value (written by DSP, read by UI)
     pub value: AtomicF32,
 }
 
-/// Shared, lock-free buffer of control port values for communication
-/// between the DSP thread and the plugin UI window.
-///
-/// Created when a plugin is instantiated, stored as `Arc` so both the
-/// `FilterData` (RT thread) and the UI thread can hold a reference.
 pub struct PortUpdates {
-    /// Control input ports (UI → DSP direction is handled via PwCommand,
-    /// but DSP → UI needs these so the UI can show the current values
-    /// even after host-side automation changes them).
     pub control_inputs: Vec<PortSlot>,
-    /// Control output ports (meters, gain reduction, etc.)
     pub control_outputs: Vec<PortSlot>,
-    /// Atom output ports — double-buffered for lock-free DSP → UI transfer.
     pub atom_outputs: Vec<AtomPortBuffer>,
-    /// Atom input ports — double-buffered for lock-free UI → DSP transfer.
-    /// The plugin UI writes atom data here (e.g. patch:Set messages);
-    /// the DSP thread reads and copies into the plugin's atom input buffers.
     pub atom_inputs: Vec<AtomPortBuffer>,
 }
 
 impl PortUpdates {
-    /// Snapshot all control port values as (port_index, value) pairs.
-    /// Includes both inputs and outputs.
     pub fn snapshot_all(&self) -> Vec<(usize, f32)> {
         self.control_inputs
             .iter()
@@ -342,16 +270,9 @@ impl PortUpdates {
     }
 }
 
-/// Double-buffered atom port data for lock-free DSP → UI transfer.
-///
-/// The DSP thread writes into the "write" buffer and flips the index.
-/// The UI thread reads from the other buffer. Since the UI runs at
-/// ~30 Hz and the DSP at ~1000 Hz, occasional dropped frames are fine.
 pub struct AtomPortBuffer {
     pub port_index: usize,
     bufs: [parking_lot::Mutex<Vec<u8>>; 2],
-    /// Which buffer the UI should read from (0 or 1).
-    /// The DSP writes to the *other* buffer, then flips this.
     read_idx: AtomicU32,
 }
 
@@ -367,21 +288,15 @@ impl AtomPortBuffer {
         }
     }
 
-    /// Called by the DSP thread after `run()` to publish atom output data.
-    /// Copies `data` into the write buffer and flips the read index.
     pub fn write(&self, data: &[u8]) {
         let write_idx = 1 - self.read_idx.load(Ordering::Acquire);
         if let Some(mut buf) = self.bufs[write_idx as usize].try_lock() {
             buf.clear();
             buf.extend_from_slice(data);
-            // Flip: make the UI read from this buffer now
             self.read_idx.store(write_idx, Ordering::Release);
         }
-        // If try_lock fails, the UI is reading — just skip this frame
     }
 
-    /// Called by the UI thread to read the latest atom data.
-    /// Returns None if the buffer is empty.
     pub fn read(&self) -> Option<Vec<u8>> {
         let idx = self.read_idx.load(Ordering::Acquire);
         if let Some(buf) = self.bufs[idx as usize].try_lock() {
@@ -391,10 +306,9 @@ impl AtomPortBuffer {
                 Some(buf.clone())
             }
         } else {
-            None // DSP is writing, skip
+            None
         }
     }
 }
 
-/// Convenience alias
 pub type SharedPortUpdates = Arc<PortUpdates>;

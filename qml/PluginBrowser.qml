@@ -25,7 +25,6 @@ Dialog {
             allPlugins = []
         }
 
-        // Build category list
         var catSet = {}
         for (var i = 0; i < allPlugins.length; i++) {
             var cat = allPlugins[i].category || "Other"
@@ -48,15 +47,12 @@ Dialog {
         for (var i = 0; i < allPlugins.length; i++) {
             var p = allPlugins[i]
 
-            // Compatible filter
             if (showCompatibleOnly && !p.compatible)
                 continue
 
-            // Category filter
             if (selectedCategory !== "All" && p.category !== selectedCategory)
                 continue
 
-            // Text filter — match name, author, or URI
             if (query.length > 0) {
                 var name = (p.name || "").toLowerCase()
                 var author = (p.author || "").toLowerCase()
@@ -70,7 +66,6 @@ Dialog {
             result.push(p)
         }
 
-        // Sort by name
         result.sort(function(a, b) {
             return a.name.localeCompare(b.name)
         })
@@ -83,7 +78,6 @@ Dialog {
     contentItem: ColumnLayout {
         spacing: 8
 
-        // Search bar and category filter
         RowLayout {
             Layout.fillWidth: true
             spacing: 8
@@ -107,7 +101,6 @@ Dialog {
             }
         }
 
-        // Filter bar
         RowLayout {
             Layout.fillWidth: true
             spacing: 8
@@ -131,7 +124,6 @@ Dialog {
             }
         }
 
-        // Plugin list
         ListView {
             id: pluginList
             Layout.fillWidth: true

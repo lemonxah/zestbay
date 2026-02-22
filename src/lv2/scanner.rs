@@ -2,17 +2,13 @@ use lilv::World;
 
 use super::types::*;
 
-/// LV2 feature URIs that ZestBay provides to plugins.
-/// Plugins requiring only these features (or a subset) are considered compatible.
 const PROVIDED_FEATURES: &[&str] = &["http://lv2plug.in/ns/ext/urid#map"];
 
-/// Scan all installed LV2 plugins and return their metadata
 pub fn scan_plugins() -> Vec<Lv2PluginInfo> {
     let world = World::with_load_all();
     scan_plugins_with_world(&world)
 }
 
-/// Scan plugins using an existing lilv World
 pub fn scan_plugins_with_world(world: &World) -> Vec<Lv2PluginInfo> {
     let input_class = world.new_uri("http://lv2plug.in/ns/lv2core#InputPort");
     let output_class = world.new_uri("http://lv2plug.in/ns/lv2core#OutputPort");
@@ -45,7 +41,6 @@ pub fn scan_plugins_with_world(world: &World) -> Vec<Lv2PluginInfo> {
             .author_name()
             .and_then(|n| n.as_str().map(String::from));
 
-        // Parse ports
         let mut ports = Vec::new();
         let mut audio_inputs = 0usize;
         let mut audio_outputs = 0usize;
@@ -93,7 +88,7 @@ pub fn scan_plugins_with_world(world: &World) -> Vec<Lv2PluginInfo> {
             } else if is_atom && is_output {
                 Lv2PortType::AtomOutput
             } else {
-                continue; // Skip unknown port types
+                continue;
             };
 
             let default_value = port_range.default;
@@ -111,7 +106,6 @@ pub fn scan_plugins_with_world(world: &World) -> Vec<Lv2PluginInfo> {
             });
         }
 
-        // Extract required features and check compatibility
         let required_features: Vec<String> = plugin
             .required_features()
             .iter()
@@ -137,7 +131,6 @@ pub fn scan_plugins_with_world(world: &World) -> Vec<Lv2PluginInfo> {
         });
     }
 
-    // Sort by name for predictable ordering
     plugins.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     plugins
 }

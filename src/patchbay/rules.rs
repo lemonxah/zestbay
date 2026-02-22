@@ -2,60 +2,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::pipewire::{NodeType, ObjectId};
 
-/// A specific port-to-port mapping within a rule.
-///
-/// Uses port names (e.g. `playback_FL`, `monitor_FR`) which are stable
-/// across sessions — unlike port IDs which change every time PipeWire
-/// restarts or a node reappears.
-///
-/// Multiple mappings per rule are allowed:
-/// - FL → FL, FR → FR (stereo)
-/// - FL → AUX_L, FR → AUX_R (cross-wiring)
-/// - FL → mono (fan-in)
-///
-/// One output port can appear in multiple mappings (fan-out to several
-/// input ports on the same target node).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct PortMapping {
-    /// PipeWire port name on the source node (output port)
     pub output_port_name: String,
-    /// PipeWire port name on the target node (input port)
     pub input_port_name: String,
 }
 
-/// A rule for automatically connecting nodes.
-///
-/// Created either by auto-learning from user drag-to-connect actions
-/// or by snapshotting all current connections.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutoConnectRule {
-    /// Unique identifier for this rule
     pub id: String,
-    /// Pattern to match source node display name (supports wildcards)
     pub source_pattern: String,
-    /// Expected source node type (StreamOutput, Lv2Plugin, etc.)
     pub source_node_type: Option<NodeType>,
-    /// Pattern to match target node display name (supports wildcards)
     pub target_pattern: String,
-    /// Expected target node type (Sink, Lv2Plugin, Duplex, etc.)
     pub target_node_type: Option<NodeType>,
-    /// Specific PipeWire node ID for the target (most precise match).
-    /// Falls back to target_pattern + target_node_type when this node
-    /// is not present in the graph.
     pub target_node_id: Option<ObjectId>,
-    /// Explicit port-to-port mappings.
-    ///
-    /// When non-empty, only these specific port pairs are connected.
-    /// When empty, falls back to heuristic matching (channel name,
-    /// port name, then positional).
     #[serde(default)]
     pub port_mappings: Vec<PortMapping>,
-    /// Whether this rule is enabled
     pub enabled: bool,
 }
 
 impl AutoConnectRule {
-    /// Create a new auto-connect rule from concrete node information.
     pub fn new(
         source_pattern: impl Into<String>,
         source_node_type: Option<NodeType>,
@@ -75,8 +41,6 @@ impl AutoConnectRule {
         }
     }
 
-    /// Add a port mapping to this rule, deduplicating.
-    /// Returns true if a new mapping was added.
     pub fn add_port_mapping(&mut self, output_port_name: String, input_port_name: String) -> bool {
         let mapping = PortMapping {
             output_port_name,
@@ -90,7 +54,6 @@ impl AutoConnectRule {
         }
     }
 
-    /// Check if a node display name (and optionally type) matches the source.
     pub fn matches_source(&self, display_name: &str, node_type: Option<NodeType>) -> bool {
         if let Some(expected) = self.source_node_type
             && node_type != Some(expected)
@@ -100,23 +63,18 @@ impl AutoConnectRule {
         pattern_matches(&self.source_pattern, display_name)
     }
 
-    /// Check if a node matches the target of this rule.
-    ///
-    /// Priority: node ID match > display name + node type match.
     pub fn matches_target(
         &self,
         display_name: &str,
         node_type: Option<NodeType>,
         node_id: ObjectId,
     ) -> bool {
-        // Exact node ID match is highest priority
         if let Some(expected_id) = self.target_node_id
             && node_id == expected_id
         {
             return true;
         }
 
-        // Fall back to display name + node type matching
         if let Some(expected) = self.target_node_type
             && node_type != Some(expected)
         {
@@ -125,7 +83,6 @@ impl AutoConnectRule {
         pattern_matches(&self.target_pattern, display_name)
     }
 
-    /// Human-readable description of the target for display in the UI.
     pub fn target_label(&self) -> String {
         let type_str = self
             .target_node_type
@@ -139,7 +96,6 @@ impl AutoConnectRule {
         format!("{}{}{}", self.target_pattern, type_str, ports_str)
     }
 
-    /// Human-readable description of the source for display in the UI.
     pub fn source_label(&self) -> String {
         let type_str = self
             .source_node_type
@@ -149,7 +105,6 @@ impl AutoConnectRule {
     }
 }
 
-/// Short human-readable label for a NodeType.
 pub fn node_type_label(nt: NodeType) -> &'static str {
     match nt {
         NodeType::Sink => "Sink",
@@ -161,22 +116,15 @@ pub fn node_type_label(nt: NodeType) -> &'static str {
     }
 }
 
-/// Simple pattern matching with wildcards.
-/// Supports:
-/// - `*` matches any sequence of characters
-/// - `?` matches any single character
-/// - Plain strings: exact match or substring match
 pub fn pattern_matches(pattern: &str, text: &str) -> bool {
     if pattern == "*" {
         return true;
     }
 
     if !pattern.contains('*') && !pattern.contains('?') {
-        // Exact match or substring match
         return text == pattern || text.contains(pattern);
     }
 
-    // Simple glob matching using dynamic programming approach
     let pattern_bytes = pattern.as_bytes();
     let text_bytes = text.as_bytes();
     let m = pattern_bytes.len();
@@ -204,7 +152,6 @@ pub fn pattern_matches(pattern: &str, text: &str) -> bool {
     dp[m][n]
 }
 
-/// Generate a simple unique ID
 pub fn uuid_simple() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let duration = SystemTime::now()
@@ -236,7 +183,6 @@ mod tests {
             Some(NodeType::Sink),
             Some(42),
         );
-        // Source matches by display name + type
         assert!(rule.matches_source("Firefox", Some(NodeType::StreamOutput)));
         assert!(rule.matches_source("Firefox on YouTube", Some(NodeType::StreamOutput)));
         assert!(!rule.matches_source("Firefox", Some(NodeType::StreamInput)));
@@ -252,13 +198,9 @@ mod tests {
             Some(NodeType::Sink),
             Some(42),
         );
-        // Exact node ID match
         assert!(rule.matches_target("Headphones", Some(NodeType::Sink), 42));
-        // Node ID match even with wrong name (ID takes priority)
         assert!(rule.matches_target("Speakers", Some(NodeType::Source), 42));
-        // Fallback to name + type
         assert!(rule.matches_target("Headphones", Some(NodeType::Sink), 99));
-        // Wrong type, wrong ID
         assert!(!rule.matches_target("Headphones", Some(NodeType::Source), 99));
     }
 }

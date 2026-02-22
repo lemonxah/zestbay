@@ -1,19 +1,13 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use ksni::blocking::TrayMethods;
 
-/// Shared state between the tray icon and the eframe application.
 #[derive(Clone)]
 pub struct TrayState {
-    /// Set to true by the tray when the window should be shown.
     pub show_requested: Arc<AtomicBool>,
-    /// Set to true by the tray when the window should be hidden.
     pub hide_requested: Arc<AtomicBool>,
-    /// Set to true by the tray when the application should quit.
     pub quit_requested: Arc<AtomicBool>,
-    /// Current visibility state — the app sets this so the tray
-    /// knows whether "activate" should show or hide.
     pub window_visible: Arc<AtomicBool>,
 }
 
@@ -28,10 +22,8 @@ impl TrayState {
     }
 }
 
-/// The ksni Tray implementation for ZestBay.
 struct ZestBayTray {
     state: TrayState,
-    /// Extra icon theme search path (for development builds).
     icon_theme_path: String,
 }
 
@@ -57,7 +49,6 @@ impl ksni::Tray for ZestBayTray {
     }
 
     fn activate(&mut self, _x: i32, _y: i32) {
-        // Left-click: toggle window visibility
         let currently_visible = self.state.window_visible.load(Ordering::Acquire);
         log::info!("Tray: activate (left-click), currently_visible={currently_visible}");
         if currently_visible {
@@ -98,20 +89,11 @@ impl ksni::Tray for ZestBayTray {
     }
 }
 
-/// Spawn the system tray icon on a background thread.
-///
-/// Returns the shared `TrayState` for communicating with the tray.
-/// The tray runs until the application exits.
 pub fn spawn_tray() -> TrayState {
     let state = TrayState::new();
     let tray_state = state.clone();
 
-    // Determine the icon theme path.
-    // When installed, icons live in /usr/share/icons so the system theme
-    // finds them automatically. For development, we add the local `icons/`
-    // directory next to the executable (or relative to the working dir).
     let icon_theme_path = {
-        // Try <exe_dir>/icons first, then <cwd>/icons
         let mut path = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.join("icons")))
@@ -134,14 +116,9 @@ pub fn spawn_tray() -> TrayState {
                 icon_theme_path,
             };
             match tray.spawn() {
-                Ok(_handle) => {
-                    // The handle keeps the tray alive. Park this thread
-                    // indefinitely — the tray's DBus service runs in the
-                    // background via ksni's internal async runtime.
-                    loop {
-                        std::thread::park();
-                    }
-                }
+                Ok(_handle) => loop {
+                    std::thread::park();
+                },
                 Err(e) => {
                     log::warn!("Failed to create system tray icon: {}", e);
                     log::warn!("The application will still run but won't have a tray icon.");

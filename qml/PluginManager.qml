@@ -22,7 +22,6 @@ Dialog {
         } catch(e) {
             plugins = []
         }
-        // Keep selection if still valid
         if (selectedIndex >= plugins.length) {
             selectedIndex = -1
         }
@@ -33,7 +32,6 @@ Dialog {
         loadPlugins()
     }
 
-    // Refresh while open to pick up parameter changes
     Timer {
         id: refreshTimer
         interval: 500
@@ -45,7 +43,6 @@ Dialog {
     contentItem: RowLayout {
         spacing: 8
 
-        // Left: plugin list
         ColumnLayout {
             Layout.preferredWidth: 260
             Layout.fillHeight: true
@@ -118,20 +115,17 @@ Dialog {
             }
         }
 
-        // Divider
         Rectangle {
             Layout.fillHeight: true
             width: 1
             color: "#3c3c3c"
         }
 
-        // Right: selected plugin details + params
         ColumnLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
             spacing: 8
 
-            // No selection message
             Label {
                 visible: !selectedPlugin
                 text: "Select a plugin from the list"
@@ -141,14 +135,12 @@ Dialog {
                 Layout.fillHeight: true
             }
 
-            // Plugin details
             ColumnLayout {
                 visible: !!selectedPlugin
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 spacing: 6
 
-                // Header
                 Label {
                     text: selectedPlugin ? selectedPlugin.displayName : ""
                     font.bold: true
@@ -165,7 +157,6 @@ Dialog {
                     Layout.fillWidth: true
                 }
 
-                // Action buttons
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
@@ -200,7 +191,6 @@ Dialog {
                     color: "#3c3c3c"
                 }
 
-                // Parameter count
                 Label {
                     text: {
                         if (!selectedPlugin || !selectedPlugin.parameters) return ""
@@ -218,7 +208,6 @@ Dialog {
                     Layout.alignment: Qt.AlignHCenter
                 }
 
-                // Parameter list
                 ListView {
                     id: paramList
                     Layout.fillWidth: true

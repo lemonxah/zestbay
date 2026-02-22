@@ -1,79 +1,61 @@
 import QtQuick
 import QtQuick.Controls
 
-// Graph visualization canvas — renders PipeWire nodes, ports, and links
-// with zoom, pan, node dragging, and drag-to-connect support.
 Item {
     id: graphView
 
-    // Reference to the Rust AppController
     required property var controller
 
-    // Signals to parent
     signal openPluginBrowser()
     signal openPluginParams(int nodeId)
 
-    // ── State ─────────────────────────────────────────────────────
     property real zoom: 1.0
     property real panX: 0
     property real panY: 0
     property bool viewportLoaded: false
 
-    // Node positions: { nodeId: {x, y} }
     property var nodePositions: ({})
-    // Layout cursor for auto-placement
     property var layoutCursors: ({ "source": {x: 50, y: 50}, "stream": {x: 350, y: 50}, "sink": {x: 650, y: 50} })
 
-    // Drag state
     property int dragNodeId: -1
     property real dragOffsetX: 0
     property real dragOffsetY: 0
 
-    // Connection drag state
     property int connectFromPortId: -1
     property string connectFromDir: ""
     property real connectMouseX: 0
     property real connectMouseY: 0
 
-    // Cached graph data
     property var nodes: []
     property var links: []
-    property var portsByNode: ({})  // nodeId -> [ports]
-    property var portPositions: ({})  // portId -> {cx, cy} in canvas coords
-    property var portMediaTypes: ({})  // portId -> "Audio"|"Midi"|"Video"|"Unknown"
+    property var portsByNode: ({})
+    property var portPositions: ({})
+    property var portMediaTypes: ({})
     property int refreshCount: 0
 
-    // Layout persistence: layoutKey -> [x, y]
     property var savedLayout: ({})
     property bool layoutLoaded: false
 
-    // Hidden nodes: set of layoutKey strings
     property var hiddenNodes: ({})
     property bool hiddenLoaded: false
 
-    // Selection box state (screen coords)
     property bool selectDragging: false
     property real selectStartX: 0
     property real selectStartY: 0
     property real selectEndX: 0
     property real selectEndY: 0
-    // Set of selected link IDs: { linkId: true }
     property var selectedLinks: ({})
-    // Set of selected node IDs: { nodeId: true }
     property var selectedNodes: ({})
-    // Group drag state
     property bool groupDragging: false
     property real groupDragLastX: 0
     property real groupDragLastY: 0
 
-    // Context menu state
     property int contextNodeId: -1
     property var contextNode: null
 
-    // ── Constants ─────────────────────────────────────────────────
     readonly property real minNodeWidth: 180
     readonly property real maxNodeWidth: 400
-    property var nodeWidths: ({})  // nodeId -> calculated width
+    property var nodeWidths: ({})
     readonly property real headerHeight: 26
     readonly property real portHeight: 18
     readonly property real portSpacing: 3
@@ -81,7 +63,6 @@ Item {
     readonly property real nodePadding: 8
     readonly property real buttonRowHeight: 22
 
-    // ── Colors ────────────────────────────────────────────────────
     readonly property color colSink: "#4682B4"
     readonly property color colSource: "#3CB371"
     readonly property color colVirtualSink: "#2E5A88"
@@ -103,9 +84,7 @@ Item {
     readonly property color colLinkMidi: "#FF69B4"
     readonly property color colLinkConnecting: "#FFFF00"
 
-    // ── Data refresh ──────────────────────────────────────────────
     function refreshData() {
-        // Restore saved viewport (pan/zoom) on first refresh
         if (!viewportLoaded) {
             try {
                 var vp = JSON.parse(controller.get_viewport_json())
@@ -116,7 +95,6 @@ Item {
             viewportLoaded = true
         }
 
-        // Load saved layout and hidden nodes on first refresh
         if (!layoutLoaded) {
             try {
                 savedLayout = JSON.parse(controller.get_layout_json())
@@ -149,7 +127,6 @@ Item {
             links = []
         }
 
-        // Fetch ports for each node
         var newPorts = {}
         for (var i = 0; i < nodes.length; i++) {
             try {
@@ -160,7 +137,6 @@ Item {
         }
         portsByNode = newPorts
 
-        // Build a flat lookup: portId -> mediaType (for link coloring)
         var newPortMedia = {}
         for (var nid in newPorts) {
             var pp = newPorts[nid]
@@ -170,11 +146,9 @@ Item {
         }
         portMediaTypes = newPortMedia
 
-        // Auto-layout nodes without positions, using saved layout if available
         for (var ni = 0; ni < nodes.length; ni++) {
             var n = nodes[ni]
             if (!(n.id in nodePositions)) {
-                // Check if we have a saved position for this node's layoutKey
                 var key = n.layoutKey || ""
                 if (key && savedLayout[key]) {
                     var saved = savedLayout[key]
@@ -188,24 +162,15 @@ Item {
             }
         }
 
-        // First paint populates portPositions, second paint draws links
-        // using the updated positions.
         canvas.requestPaint()
         repaintTimer.restart()
     }
 
-    /// Save current node positions to disk via the controller.
-    /// Merges current positions into savedLayout so that positions of
-    /// nodes that are temporarily offline (e.g. a game that restarted)
-    /// are preserved rather than discarded.
     function persistLayout() {
-        // Start from the existing saved layout to keep positions of
-        // nodes that aren't currently in the graph.
         var layoutObj = {}
         for (var existingKey in savedLayout) {
             layoutObj[existingKey] = savedLayout[existingKey]
         }
-        // Update / add positions for all currently visible nodes
         for (var ni = 0; ni < nodes.length; ni++) {
             var n = nodes[ni]
             var key = n.layoutKey || ""
@@ -218,15 +183,13 @@ Item {
         controller.save_layout(JSON.stringify(layoutObj))
     }
 
-    // Deferred second repaint so links render with correct port positions
     Timer {
         id: repaintTimer
-        interval: 16  // ~1 frame at 60fps
+        interval: 16
         repeat: false
         onTriggered: canvas.requestPaint()
     }
 
-    // Debounced viewport (pan/zoom) persistence
     Timer {
         id: viewportSaveTimer
         interval: 500
@@ -241,9 +204,6 @@ Item {
     onPanXChanged: if (viewportLoaded) viewportSaveTimer.restart()
     onPanYChanged: if (viewportLoaded) viewportSaveTimer.restart()
 
-    // ── Context Menus ──────────────────────────────────────────────
-
-    // Node context menu (right-click on a node)
     Menu {
         id: nodeContextMenu
 
@@ -252,7 +212,6 @@ Item {
             onTriggered: {
                 if (contextNode && contextNode.layoutKey) {
                     hiddenNodes[contextNode.layoutKey] = true
-                    // Trigger reactive update
                     hiddenNodes = hiddenNodes
                     persistHidden()
                     canvas.requestPaint()
@@ -299,7 +258,6 @@ Item {
         }
     }
 
-    // Canvas context menu (right-click on empty space)
     Menu {
         id: canvasContextMenu
 
@@ -356,7 +314,6 @@ Item {
         }
     }
 
-    // Rename dialog
     Dialog {
         id: renameDialog
         title: "Rename Plugin"
@@ -380,7 +337,6 @@ Item {
         }
     }
 
-    // ── Hidden persistence helper ──────────────────────────────────
     function persistHidden() {
         var arr = []
         for (var k in hiddenNodes) {
@@ -389,7 +345,6 @@ Item {
         controller.save_hidden(JSON.stringify(arr))
     }
 
-    // ── Node lookup by ID ──────────────────────────────────────────
     function findNodeData(nodeId) {
         for (var i = 0; i < nodes.length; i++) {
             if (nodes[i].id === nodeId) return nodes[i]
@@ -401,7 +356,6 @@ Item {
         if (!type) return "stream"
         if (type === "Source") return "source"
         if (type === "Sink" || type === "Duplex") return "sink"
-        // StreamOutput, StreamInput, Lv2Plugin, Unknown → middle column
         return "stream"
     }
 
@@ -425,14 +379,11 @@ Item {
         var outputs = ports.filter(function(p) { return p.direction === "Output" }).length
         var rows = Math.max(inputs, outputs, 1)
         var h = headerHeight + nodePadding * 2 + rows * (portHeight + portSpacing)
-        // Add button row for LV2 plugins
         if (node.type === "Lv2Plugin")
             h += buttonRowHeight + nodePadding
         return h
     }
 
-    /// Calculate node width based on the longest port name and node title.
-    /// Uses a canvas context to measure text. Call once during paint setup.
     function calculateNodeWidths(ctx) {
         var newWidths = {}
         ctx.save()
@@ -440,11 +391,9 @@ Item {
             var node = nodes[ni]
             var ports = portsByNode[node.id] || []
 
-            // Measure title (bold 11px)
             ctx.font = "bold 11px sans-serif"
             var titleW = ctx.measureText(node.name || "").width + nodePadding * 2
 
-            // Measure port names (10px) — inputs need left margin, outputs need right
             ctx.font = "10px sans-serif"
             var maxInputW = 0
             var maxOutputW = 0
@@ -457,7 +406,6 @@ Item {
                 }
             }
 
-            // Total port width: left port dot + padding + left label + gap + right label + padding + right port dot
             var portW = portRadius + 4 + maxInputW + nodePadding * 2 + maxOutputW + 4 + portRadius
 
             var w = Math.max(titleW, portW, minNodeWidth)
@@ -472,17 +420,14 @@ Item {
         return nodeWidths[nodeId] || minNodeWidth
     }
 
-    // Screen coords -> canvas coords
     function toCanvas(sx, sy) {
         return { x: (sx - panX) / zoom, y: (sy - panY) / zoom }
     }
 
-    // Canvas coords -> screen coords
     function toScreen(cx, cy) {
         return { x: cx * zoom + panX, y: cy * zoom + panY }
     }
 
-    // Find port at screen position (portPositions stores canvas coords)
     function findPortAt(sx, sy) {
         var hitRadius = portRadius * zoom * 2.5
         var bestId = -1
@@ -512,12 +457,10 @@ Item {
         return ""
     }
 
-    // Find node at screen position
     function findNodeAt(sx, sy) {
         var c = toCanvas(sx, sy)
         for (var i = nodes.length - 1; i >= 0; i--) {
             var n = nodes[i]
-            // Skip hidden nodes
             if (n.layoutKey && hiddenNodes[n.layoutKey]) continue
             var pos = nodePositions[n.id]
             if (!pos) continue
@@ -530,7 +473,6 @@ Item {
         return -1
     }
 
-    // Check if screen position hits an LV2 button. Returns "ui", "params", or ""
     function findButtonAt(sx, sy) {
         var c = toCanvas(sx, sy)
         for (var i = nodes.length - 1; i >= 0; i--) {
@@ -544,12 +486,10 @@ Item {
             var btnY = pos.y + h - buttonRowHeight - nodePadding
             var btnH = buttonRowHeight
             var btnW = (nw - nodePadding * 3) / 2
-            // UI button (left)
             if (c.x >= pos.x + nodePadding && c.x <= pos.x + nodePadding + btnW &&
                 c.y >= btnY && c.y <= btnY + btnH) {
                 return { button: "ui", nodeId: n.id }
             }
-            // Params button (right)
             if (c.x >= pos.x + nodePadding * 2 + btnW && c.x <= pos.x + nodePadding * 2 + btnW * 2 &&
                 c.y >= btnY && c.y <= btnY + btnH) {
                 return { button: "params", nodeId: n.id }
@@ -558,7 +498,6 @@ Item {
         return null
     }
 
-    // ── Canvas ────────────────────────────────────────────────────
     Canvas {
         id: canvas
         anchors.fill: parent
@@ -567,10 +506,8 @@ Item {
             var ctx = getContext("2d")
             ctx.reset()
 
-            // Calculate per-node widths based on port name text measurement
             calculateNodeWidths(ctx)
 
-            // Background
             ctx.fillStyle = "#1e1e1e"
             ctx.fillRect(0, 0, width, height)
 
@@ -580,7 +517,6 @@ Item {
 
             var newPortPositions = {}
 
-            // ── Draw links ────────────────────────────────────────
             for (var li = 0; li < links.length; li++) {
                 var link = links[li]
                 var fromPos = portPositions[link.outputPortId]
@@ -598,7 +534,6 @@ Item {
                 }
             }
 
-            // ── Draw in-progress connection ───────────────────────
             if (connectFromPortId >= 0) {
                 var dragFrom = portPositions[connectFromPortId]
                 if (dragFrom) {
@@ -611,7 +546,6 @@ Item {
                 }
             }
 
-            // ── Draw selection box ─────────────────────────────────
             if (selectDragging) {
                 var sc1 = graphView.toCanvas(selectStartX, selectStartY)
                 var sc2 = graphView.toCanvas(selectEndX, selectEndY)
@@ -628,10 +562,8 @@ Item {
                 ctx.stroke()
             }
 
-            // ── Draw nodes ────────────────────────────────────────
             for (var ni = 0; ni < nodes.length; ni++) {
                 var node = nodes[ni]
-                // Skip hidden nodes
                 if (node.layoutKey && hiddenNodes[node.layoutKey]) continue
                 var pos = nodePositions[node.id]
                 if (!pos) continue
@@ -647,37 +579,31 @@ Item {
                 var h = calculateNodeHeight(node)
                 var nw = getNodeWidth(node.id)
 
-                // Node body
                 var isNodeSelected = selectedNodes[node.id] === true
                 ctx.fillStyle = "" + colNodeBg
                 ctx.strokeStyle = isNodeSelected ? "#FFFF00" : ("" + colNodeBorder)
                 ctx.lineWidth = isNodeSelected ? 2.5 : 1.5
                 roundRect(ctx, x, y, nw, h, 5)
 
-                // Header
                 ctx.fillStyle = "" + getNodeColor(node)
                 roundRectTop(ctx, x, y, nw, headerHeight, 5)
 
-                // Title
                 ctx.fillStyle = "#ffffff"
                 ctx.font = "bold 11px sans-serif"
                 ctx.textAlign = "center"
                 ctx.textBaseline = "middle"
                 ctx.fillText(truncate(node.name, 30), x + nw / 2, y + headerHeight / 2)
 
-                // Input ports (left side)
                 var portBaseY = y + headerHeight + nodePadding
                 for (var pi = 0; pi < inputs.length; pi++) {
                     var py = portBaseY + pi * (portHeight + portSpacing) + portHeight / 2
                     var px = x
 
-                    // Port dot (pink for MIDI ports)
                     ctx.fillStyle = inputs[pi].mediaType === "Midi" ? ("" + colMidiPort) : ("" + colPortIn)
                     ctx.beginPath()
                     ctx.arc(px, py, portRadius, 0, Math.PI * 2)
                     ctx.fill()
 
-                    // Hover highlight when dragging from an output port
                     if (connectFromPortId >= 0 && connectFromDir === "Output") {
                         var sxIn = px * zoom + panX
                         var syIn = py * zoom + panY
@@ -691,29 +617,24 @@ Item {
                         }
                     }
 
-                    // Port label
                     ctx.fillStyle = "#bbbbbb"
                     ctx.font = "10px sans-serif"
                     ctx.textAlign = "left"
                     ctx.textBaseline = "middle"
                     ctx.fillText(truncate(inputs[pi].name, 24), px + portRadius + 4, py)
 
-                    // Store canvas position for link drawing and hit-testing
                     newPortPositions[inputs[pi].id] = { cx: px, cy: py }
                 }
 
-                // Output ports (right side)
                 for (var po = 0; po < outputs.length; po++) {
                     var pyo = portBaseY + po * (portHeight + portSpacing) + portHeight / 2
                     var pxo = x + nw
 
-                    // Port dot (pink for MIDI ports)
                     ctx.fillStyle = outputs[po].mediaType === "Midi" ? ("" + colMidiPort) : ("" + colPortOut)
                     ctx.beginPath()
                     ctx.arc(pxo, pyo, portRadius, 0, Math.PI * 2)
                     ctx.fill()
 
-                    // Hover highlight when dragging from an input port
                     if (connectFromPortId >= 0 && connectFromDir === "Input") {
                         var sxOut = pxo * zoom + panX
                         var syOut = pyo * zoom + panY
@@ -727,7 +648,6 @@ Item {
                         }
                     }
 
-                    // Port label
                     ctx.fillStyle = "#bbbbbb"
                     ctx.font = "10px sans-serif"
                     ctx.textAlign = "right"
@@ -737,13 +657,11 @@ Item {
                     newPortPositions[outputs[po].id] = { cx: pxo, cy: pyo }
                 }
 
-                // ── LV2 button row ─────────────────────────────────
                 if (node.type === "Lv2Plugin") {
                     var btnY = y + h - buttonRowHeight - nodePadding
                     var btnW = (nw - nodePadding * 3) / 2
                     var btnH = buttonRowHeight
 
-                    // "UI" button (left)
                     ctx.fillStyle = "#373737"
                     ctx.strokeStyle = "#5a5a5a"
                     ctx.lineWidth = 1
@@ -755,7 +673,6 @@ Item {
                     ctx.textBaseline = "middle"
                     ctx.fillText("UI", x + nodePadding + btnW / 2, btnY + btnH / 2)
 
-                    // "Params" button (right)
                     ctx.fillStyle = "#373737"
                     ctx.strokeStyle = "#5a5a5a"
                     ctx.lineWidth = 1
@@ -774,8 +691,6 @@ Item {
         }
     }
 
-    // ── Keyboard handling ──────────────────────────────────────────
-    // focus must be on the graphView Item so Keys work
     focus: true
 
     Keys.onPressed: (event) => {
@@ -789,7 +704,6 @@ Item {
         }
     }
 
-    // ── Mouse interaction ─────────────────────────────────────────
     MouseArea {
         id: mouseArea
         anchors.fill: parent
@@ -805,12 +719,10 @@ Item {
             lastY = mouse.y
 
             if (mouse.button === Qt.MiddleButton) {
-                // Middle mouse: start pan
                 return
             }
 
             if (mouse.button === Qt.RightButton) {
-                // Right-click: context menu
                 var nodeId = findNodeAt(mouse.x, mouse.y)
                 if (nodeId >= 0) {
                     contextNodeId = nodeId
@@ -825,7 +737,6 @@ Item {
             }
 
             if (mouse.button === Qt.LeftButton) {
-                // Check if clicking on an LV2 button
                 var btnHit = findButtonAt(mouse.x, mouse.y)
                 if (btnHit) {
                     if (btnHit.button === "ui") {
@@ -836,7 +747,6 @@ Item {
                     return
                 }
 
-                // Check if clicking on a port (start connection)
                 var portId = findPortAt(mouse.x, mouse.y)
                 if (portId >= 0) {
                     connectFromPortId = portId
@@ -846,14 +756,12 @@ Item {
                     return
                 }
 
-                // Check if clicking on a node (start drag)
                 var nodeIdDrag = findNodeAt(mouse.x, mouse.y)
                 if (nodeIdDrag >= 0) {
                     var ctrlHeld = (mouse.modifiers & Qt.ControlModifier)
                     var nodeIsSelected = selectedNodes[nodeIdDrag] === true
 
                     if (ctrlHeld) {
-                        // Ctrl+click: toggle this node in selection
                         var newSel = Object.assign({}, selectedNodes)
                         if (nodeIsSelected) {
                             delete newSel[nodeIdDrag]
@@ -867,13 +775,11 @@ Item {
                     }
 
                     if (nodeIsSelected) {
-                        // Click on an already-selected node: start group drag
                         groupDragging = true
                         var cg = toCanvas(mouse.x, mouse.y)
                         groupDragLastX = cg.x
                         groupDragLastY = cg.y
                     } else {
-                        // Click on unselected node without Ctrl: clear selection, single drag
                         selectedNodes = {}
                         selectedLinks = {}
                         dragNodeId = nodeIdDrag
@@ -886,12 +792,10 @@ Item {
                     return
                 }
 
-                // Check if clicking on a link
                 var clickedLinkId = findLinkAt(mouse.x, mouse.y)
                 if (clickedLinkId >= 0) {
                     var ctrlHeldLink = (mouse.modifiers & Qt.ControlModifier)
                     if (ctrlHeldLink) {
-                        // Ctrl+click: toggle this link in selection
                         var newSelLinks = Object.assign({}, selectedLinks)
                         if (newSelLinks[clickedLinkId]) {
                             delete newSelLinks[clickedLinkId]
@@ -900,7 +804,6 @@ Item {
                         }
                         selectedLinks = newSelLinks
                     } else {
-                        // Single click: select only this link
                         var freshSel = {}
                         freshSel[clickedLinkId] = true
                         selectedLinks = freshSel
@@ -910,7 +813,6 @@ Item {
                     return
                 }
 
-                // Click on empty space — start selection box
                 clearSelection()
                 selectDragging = true
                 selectStartX = mouse.x
@@ -921,7 +823,6 @@ Item {
         }
 
         onPositionChanged: (mouse) => {
-            // Pan with middle mouse
             if (mouse.buttons & Qt.MiddleButton) {
                 panX += mouse.x - lastX
                 panY += mouse.y - lastY
@@ -931,7 +832,6 @@ Item {
                 return
             }
 
-            // Group dragging (multiple selected nodes)
             if (groupDragging && (mouse.buttons & Qt.LeftButton)) {
                 var cg = toCanvas(mouse.x, mouse.y)
                 var deltaX = cg.x - groupDragLastX
@@ -950,7 +850,6 @@ Item {
                 return
             }
 
-            // Single node dragging
             if (dragNodeId >= 0 && (mouse.buttons & Qt.LeftButton)) {
                 var c = toCanvas(mouse.x, mouse.y)
                 nodePositions[dragNodeId] = {
@@ -961,7 +860,6 @@ Item {
                 return
             }
 
-            // Connection dragging
             if (connectFromPortId >= 0) {
                 connectMouseX = mouse.x
                 connectMouseY = mouse.y
@@ -969,7 +867,6 @@ Item {
                 return
             }
 
-            // Selection box dragging
             if (selectDragging) {
                 selectEndX = mouse.x
                 selectEndY = mouse.y
@@ -979,13 +876,11 @@ Item {
 
         onReleased: (mouse) => {
             if (mouse.button === Qt.LeftButton) {
-                // Finish connection
                 if (connectFromPortId >= 0) {
                     var targetId = findPortAt(mouse.x, mouse.y)
                     if (targetId >= 0 && targetId !== connectFromPortId) {
                         var targetDir = getPortDirection(targetId)
                         if (targetDir !== connectFromDir) {
-                            // Connect!
                             if (connectFromDir === "Output") {
                                 controller.connect_ports(connectFromPortId, targetId)
                             } else {
@@ -998,22 +893,18 @@ Item {
                     canvas.requestPaint()
                 }
 
-                // Persist layout if we were group-dragging
                 if (groupDragging) {
                     groupDragging = false
                     persistLayout()
                 }
 
-                // Persist layout if we were dragging a single node
                 if (dragNodeId >= 0) {
                     persistLayout()
                 }
                 dragNodeId = -1
 
-                // Finish selection box
                 if (selectDragging) {
                     selectDragging = false
-                    // Only select if the box is bigger than a small threshold (avoid click-select)
                     var dx = Math.abs(selectEndX - selectStartX)
                     var dy = Math.abs(selectEndY - selectStartY)
                     if (dx > 5 || dy > 5) {
@@ -1030,7 +921,6 @@ Item {
             var factor = wheel.angleDelta.y > 0 ? 1.1 : 0.9
             var newZoom = Math.max(0.25, Math.min(3.0, oldZoom * factor))
 
-            // Zoom centered on mouse position
             var mx = wheel.x
             var my = wheel.y
             var canvasX = (mx - panX) / oldZoom
@@ -1043,10 +933,6 @@ Item {
         }
     }
 
-    // Zoom with mouse wheel — handled via MouseArea.onWheel which is
-    // more reliable across Qt 6 versions than WheelHandler.
-
-    // ── Helper functions ──────────────────────────────────────────
     function drawBezier(ctx, x1, y1, x2, y2, color, lineWidth) {
         var ctrlDist = Math.max(Math.abs(x2 - x1) / 2, 50)
         ctx.strokeStyle = "" + color
@@ -1091,13 +977,9 @@ Item {
         return str.length > maxLen ? str.substring(0, maxLen - 1) + "\u2026" : str
     }
 
-    // ── Link hit-testing ─────────────────────────────────────────
-
-    /// Test if a screen point is close to a bezier link curve.
-    /// Returns the link id of the closest link within threshold, or -1.
     function findLinkAt(sx, sy) {
         var c = toCanvas(sx, sy)
-        var threshold = 6 / zoom  // pixel tolerance in canvas coords
+        var threshold = 6 / zoom
         var bestId = -1
         var bestDist = threshold + 1
 
@@ -1116,8 +998,6 @@ Item {
         return bestDist <= threshold ? bestId : -1
     }
 
-    /// Compute the minimum distance from point (px,py) to a cubic bezier
-    /// with the same control-point logic as drawBezier.
     function distToBezier(px, py, x1, y1, x2, y2) {
         var ctrlDist = Math.max(Math.abs(x2 - x1) / 2, 50)
         var cx1 = x1 + ctrlDist
@@ -1139,11 +1019,6 @@ Item {
         return minDist
     }
 
-    // ── Selection box helpers ─────────────────────────────────────
-
-    /// Test if a cubic bezier (same control-point logic as drawBezier)
-    /// passes through a rectangle given in canvas coords.
-    /// We sample N points along the curve and check if any fall inside.
     function bezierIntersectsRect(x1, y1, x2, y2, rx, ry, rw, rh) {
         var ctrlDist = Math.max(Math.abs(x2 - x1) / 2, 50)
         var cx1 = x1 + ctrlDist
@@ -1163,14 +1038,11 @@ Item {
         return false
     }
 
-    /// Find all links that intersect a selection rectangle (in screen coords).
     function findLinksInRect(sx1, sy1, sx2, sy2) {
-        // Normalize rect
         var minSx = Math.min(sx1, sx2)
         var minSy = Math.min(sy1, sy2)
         var maxSx = Math.max(sx1, sx2)
         var maxSy = Math.max(sy1, sy2)
-        // Convert to canvas coords
         var c1 = toCanvas(minSx, minSy)
         var c2 = toCanvas(maxSx, maxSy)
         var rx = c1.x
@@ -1193,9 +1065,7 @@ Item {
         return result
     }
 
-    /// Find all nodes whose bounding box intersects a selection rectangle (in screen coords).
     function findNodesInRect(sx1, sy1, sx2, sy2) {
-        // Convert to canvas coords
         var c1 = toCanvas(Math.min(sx1, sx2), Math.min(sy1, sy2))
         var c2 = toCanvas(Math.max(sx1, sx2), Math.max(sy1, sy2))
         var rx = c1.x
@@ -1210,7 +1080,6 @@ Item {
             var pos = nodePositions[n.id]
             if (!pos) continue
             var h = calculateNodeHeight(n)
-            // Check if node rect overlaps selection rect
             var nx = pos.x
             var ny = pos.y
             var nr = nx + getNodeWidth(n.id)
@@ -1222,7 +1091,6 @@ Item {
         return result
     }
 
-    /// Delete all currently selected links.
     function deleteSelectedLinks() {
         var count = 0
         for (var linkId in selectedLinks) {
@@ -1237,7 +1105,6 @@ Item {
         }
     }
 
-    /// Clear all selection (links and nodes).
     function clearSelection() {
         var hadSelection = false
         for (var k in selectedLinks) { hadSelection = true; break }

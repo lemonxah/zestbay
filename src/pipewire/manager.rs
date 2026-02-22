@@ -14,15 +14,6 @@ use pipewire::{
 use super::state::GraphState;
 use super::types::*;
 
-/// Configuration for timing/delays
-const TICK_INTERVAL_MS: u64 = 50;
-const OPERATION_COOLDOWN_MS: u64 = 50;
-
-/// Internal operation for the pipewire thread.
-///
-/// Only "heavy" operations that touch the PipeWire registry go through
-/// the rate-limited queue. Fast operations (parameter changes, bypass)
-/// are handled immediately in the command receiver.
 #[derive(Debug)]
 enum InternalOp {
     Connect {
@@ -48,18 +39,23 @@ enum InternalOp {
     },
 }
 
-/// Start the PipeWire manager thread
-pub fn start(graph: Arc<GraphState>) -> (Receiver<PwEvent>, Sender<PwCommand>) {
+pub fn start(
+    graph: Arc<GraphState>,
+    tick_interval_ms: u64,
+    operation_cooldown_ms: u64,
+) -> (Receiver<PwEvent>, Sender<PwCommand>) {
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
 
-    // Clone cmd_tx so the PW thread can pass it to plugin UI windows.
-    // Those windows run on their own threads and need to send
-    // SetPluginParameter commands back through the same channel.
     let cmd_tx_for_pw = cmd_tx.clone();
 
+    let tick = tick_interval_ms.max(1);
+    let cooldown = operation_cooldown_ms.max(1);
+
     std::thread::spawn(move || {
-        if let Err(e) = run_pipewire_thread(graph, event_tx.clone(), cmd_rx, cmd_tx_for_pw) {
+        if let Err(e) =
+            run_pipewire_thread(graph, event_tx.clone(), cmd_rx, cmd_tx_for_pw, tick, cooldown)
+        {
             log::error!("PipeWire thread error: {}", e);
             let _ = event_tx.send(PwEvent::Error(e.to_string()));
         }
@@ -68,12 +64,13 @@ pub fn start(graph: Arc<GraphState>) -> (Receiver<PwEvent>, Sender<PwCommand>) {
     (event_rx, cmd_tx)
 }
 
-/// Main PipeWire thread function
 fn run_pipewire_thread(
     graph: Arc<GraphState>,
     event_tx: Sender<PwEvent>,
     cmd_rx: Receiver<PwCommand>,
     cmd_tx: Sender<PwCommand>,
+    tick_interval_ms: u64,
+    operation_cooldown_ms: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     pipewire::init();
 
@@ -82,13 +79,11 @@ fn run_pipewire_thread(
     let core = context.connect_rc(None)?;
     let registry = core.get_registry_rc()?;
 
-    // Shared state
     let pending_ops: Rc<RefCell<Vec<InternalOp>>> = Rc::new(RefCell::new(Vec::new()));
     let last_op_time: Rc<RefCell<Instant>> =
         Rc::new(RefCell::new(Instant::now() - Duration::from_secs(1)));
     let changes_pending: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
 
-    // Set up registry listener
     let _registry_listener = {
         let graph = graph.clone();
         let event_tx = event_tx.clone();
@@ -105,8 +100,6 @@ fn run_pipewire_thread(
                     match global.type_ {
                         ObjectType::Node => {
                             if let Some(node) = parse_node(global) {
-                                // If this is an LV2 plugin node created by us,
-                                // send the PW node ID back so the UI can map it
                                 if node.node_type == Some(NodeType::Lv2Plugin)
                                     && let Some(props) = global.props.as_ref()
                                     && let Some(id_str) = props.get("zestbay.lv2.instance_id")
@@ -144,7 +137,6 @@ fn run_pipewire_thread(
                             }
                         }
                         ObjectType::Link => {
-                            // Parse link from properties (we'll get detailed info from the listener)
                             if let Some(link) = parse_link_from_props(global) {
                                 graph.insert_link(link.clone());
                                 let _ = event_tx.send(PwEvent::LinkChanged(link));
@@ -180,7 +172,6 @@ fn run_pipewire_thread(
             .register()
     };
 
-    // Bridge std channel to pipewire channel for commands
     let (pw_cmd_tx, pw_cmd_rx) = pipewire::channel::channel();
     std::thread::spawn({
         let pw_cmd_tx = pw_cmd_tx.clone();
@@ -193,29 +184,15 @@ fn run_pipewire_thread(
         }
     });
 
-    // Internal channel for operations that need registry access
     let (internal_tx, internal_rx) = pipewire::channel::channel::<InternalOp>();
 
-    // LV2 plugin instance storage (lives on the PipeWire thread)
     let lv2_instances: Rc<
         RefCell<HashMap<u64, std::rc::Rc<RefCell<crate::lv2::host::Lv2PluginInstance>>>>,
     > = Rc::new(RefCell::new(HashMap::new()));
     let lv2_filters: Rc<RefCell<HashMap<u64, crate::lv2::filter::Lv2FilterNode>>> =
         Rc::new(RefCell::new(HashMap::new()));
-    // Shared URID mapper — lives as long as the PW thread. Arc so it can
-    // be shared with plugin UI threads (which run on their own OS threads).
-    // UridMapper uses Mutex internally so it's already thread-safe.
     let urid_mapper = Arc::new(crate::lv2::urid::UridMapper::new());
 
-    // Handle incoming commands.
-    //
-    // "Fast" commands (parameter changes, bypass toggle) are executed
-    // immediately on arrival — they are just f32 writes and don't touch
-    // the PipeWire registry, so there's no need for rate-limiting.
-    //
-    // "Heavy" commands (Connect, Disconnect, AddPlugin, RemovePlugin,
-    // OpenPluginUI) go into the pending_ops queue and are processed one
-    // at a time by the timer below, with a cooldown between each.
     let _cmd_receiver = pw_cmd_rx.attach(mainloop.loop_(), {
         let pending_ops = pending_ops.clone();
         let lv2_instances = lv2_instances.clone();
@@ -223,7 +200,6 @@ fn run_pipewire_thread(
 
         move |cmd| {
             match cmd {
-                // ── Fast path: execute immediately ─────────────────────
                 PwCommand::SetPluginParameter {
                     instance_id,
                     port_index,
@@ -246,7 +222,6 @@ fn run_pipewire_thread(
                         instance.borrow_mut().bypassed = bypassed;
                     }
                 }
-                // ── Queued path: rate-limited via timer ─────────────────
                 cmd => {
                     let op = match cmd {
                         PwCommand::Connect {
@@ -275,7 +250,6 @@ fn run_pipewire_thread(
                         PwCommand::ClosePluginUI { instance_id } => {
                             InternalOp::ClosePluginUI { instance_id }
                         }
-                        // Already handled above
                         PwCommand::SetPluginParameter { .. }
                         | PwCommand::SetPluginBypass { .. } => unreachable!(),
                     };
@@ -285,7 +259,6 @@ fn run_pipewire_thread(
         }
     });
 
-    // Timer to process pending operations
     let _timer = mainloop.loop_().add_timer({
         let pending_ops = pending_ops.clone();
         let last_op_time = last_op_time.clone();
@@ -296,14 +269,32 @@ fn run_pipewire_thread(
         move |_| {
             let now = Instant::now();
 
-            // Check cooldown
-            if now.duration_since(*last_op_time.borrow())
-                < Duration::from_millis(OPERATION_COOLDOWN_MS)
             {
+                let mut ops = pending_ops.borrow_mut();
+                let mut i = 0;
+                while i < ops.len() {
+                    match &ops[i] {
+                        InternalOp::Connect { .. } | InternalOp::Disconnect { .. } => {
+                            let op = ops.remove(i);
+                            let _ = internal_tx.send(op);
+                        }
+                        _ => {
+                            i += 1;
+                        }
+                    }
+                }
+            }
+
+            if now.duration_since(*last_op_time.borrow())
+                < Duration::from_millis(operation_cooldown_ms)
+            {
+                if *changes_pending.borrow() {
+                    *changes_pending.borrow_mut() = false;
+                    let _ = event_tx.send(PwEvent::BatchComplete);
+                }
                 return;
             }
 
-            // Process one pending operation (FIFO)
             let op = if !pending_ops.borrow().is_empty() {
                 Some(pending_ops.borrow_mut().remove(0))
             } else {
@@ -314,7 +305,6 @@ fn run_pipewire_thread(
                 *last_op_time.borrow_mut() = now;
             }
 
-            // Send batch complete
             if *changes_pending.borrow() {
                 *changes_pending.borrow_mut() = false;
                 let _ = event_tx.send(PwEvent::BatchComplete);
@@ -323,11 +313,10 @@ fn run_pipewire_thread(
     });
 
     let _ = _timer.update_timer(
-        Some(Duration::from_millis(TICK_INTERVAL_MS)),
-        Some(Duration::from_millis(TICK_INTERVAL_MS)),
+        Some(Duration::from_millis(tick_interval_ms)),
+        Some(Duration::from_millis(tick_interval_ms)),
     );
 
-    // Handle internal operations (these have access to registry/core)
     let _internal_receiver = internal_rx.attach(mainloop.loop_(), {
         let graph = graph.clone();
         let core = core.clone();
@@ -365,13 +354,7 @@ fn run_pipewire_thread(
                 );
             }
             InternalOp::RemovePlugin { instance_id } => {
-                // Close the native UI window if it's open
                 crate::lv2::ui::close_plugin_ui(instance_id);
-                // Drop the filter first — its Drop impl calls
-                // pw_filter_destroy() which disconnects the RT processing
-                // and ensures no more on_process callbacks will fire.
-                // Only THEN drop the plugin instance (which the RT callback
-                // accesses via raw pointer).
                 lv2_filters.borrow_mut().remove(&instance_id);
                 lv2_instances.borrow_mut().remove(&instance_id);
                 let _ = event_tx.send(PwEvent::Lv2(Lv2Event::PluginRemoved { instance_id }));
@@ -382,8 +365,6 @@ fn run_pipewire_thread(
                     let inst = instance.borrow();
                     let plugin_uri = inst.plugin_uri.clone();
                     let port_updates = inst.port_updates.clone();
-                    // Snapshot current control port values so the UI opens
-                    // with the same state as the running DSP instance.
                     let control_values: Vec<(usize, f32)> = inst
                         .control_inputs
                         .iter()
@@ -425,9 +406,6 @@ fn parse_node(global: &GlobalObject<&DictRef>) -> Option<Node> {
         .to_string();
     let media_class = props.get("media.class").unwrap_or_default().to_string();
 
-    // JACK clients (e.g. Pianoteq, Hydrogen) don't set media.class.
-    // They use separate media.type and media.category properties instead.
-    // When media.class is empty, synthesize an equivalent string from those.
     let effective_class = if !media_class.is_empty() {
         media_class.clone()
     } else {
@@ -450,8 +428,6 @@ fn parse_node(global: &GlobalObject<&DictRef>) -> Option<Node> {
         None
     };
 
-    // Check for ZestBay LV2 plugin nodes first (they use media.class=Audio/Duplex
-    // but have our custom property)
     let is_lv2 = props.get("zestbay.lv2.instance_id").is_some();
 
     let node_type = if is_lv2 {
@@ -524,7 +500,6 @@ fn parse_port(global: &GlobalObject<&DictRef>, graph: &Arc<GraphState>) -> Optio
             return None;
         }
         None => {
-            // Fallback: try to infer direction from port name
             if name.starts_with("input") || name.starts_with("playback") {
                 log::debug!(
                     "Port {} (node {}): missing port.direction, inferred Input from name {:?}",
@@ -570,7 +545,6 @@ fn parse_port(global: &GlobalObject<&DictRef>, graph: &Arc<GraphState>) -> Optio
     })
 }
 
-/// Helper to dump port properties for debugging
 fn props_to_debug(props: &DictRef) -> Vec<(String, String)> {
     props
         .iter()
@@ -593,7 +567,6 @@ fn parse_link_from_props(global: &GlobalObject<&DictRef>) -> Option<Link> {
 
 type GlobalSharedMutHashMap<K, V> = Rc<RefCell<HashMap<K, Rc<RefCell<V>>>>>;
 
-/// Handle adding a new LV2 plugin as a PipeWire filter node
 #[allow(clippy::too_many_arguments)]
 fn handle_add_plugin(
     core: &pipewire::core::CoreRc,
@@ -605,8 +578,6 @@ fn handle_add_plugin(
     instance_id: u64,
     display_name: &str,
 ) {
-    // We need a lilv World to instantiate the plugin
-    // Create a temporary world for this instantiation
     let world = lilv::World::with_load_all();
     let uri_node = world.new_uri(plugin_uri);
 
@@ -626,7 +597,6 @@ fn handle_add_plugin(
         }
     };
 
-    // Build plugin info from lilv metadata
     let plugin_info = match build_plugin_info(&world, &lilv_plugin) {
         Some(info) => info,
         None => {
@@ -638,12 +608,8 @@ fn handle_add_plugin(
         }
     };
 
-    let sample_rate = 48000.0; // TODO: get from PipeWire context
+    let sample_rate = 48000.0;
 
-    // Create the LV2 plugin instance.
-    // The World is moved into the instance so it stays alive as long as
-    // the plugin — lilv plugin descriptors reference World-owned memory.
-    // The URID map feature is heap-allocated inside the instance.
     let lv2_instance = unsafe {
         crate::lv2::host::Lv2PluginInstance::new(
             world,
@@ -665,11 +631,8 @@ fn handle_add_plugin(
         }
     };
 
-    // Use the display name from the UI (which may include auto-numbering
-    // like " #2") rather than the canonical lilv plugin name.
     let instance_rc = std::rc::Rc::new(RefCell::new(lv2_instance));
 
-    // Create the PipeWire filter node
     let filter_config = crate::lv2::filter::FilterConfig {
         instance_id,
         display_name: display_name.to_string(),
@@ -688,9 +651,6 @@ fn handle_add_plugin(
             lv2_instances.borrow_mut().insert(instance_id, instance_rc);
             lv2_filters.borrow_mut().insert(instance_id, filter);
 
-            // The PluginAdded event with the real PW node ID will be sent
-            // from the filter's on_state_changed callback once the node
-            // reaches Paused state and we can query pw_filter_get_node_id.
             log::info!(
                 "LV2 filter created for instance {}, waiting for node ID...",
                 instance_id
@@ -705,7 +665,6 @@ fn handle_add_plugin(
     }
 }
 
-/// Build an Lv2PluginInfo from a lilv Plugin
 fn build_plugin_info(
     world: &lilv::World,
     plugin: &lilv::plugin::Plugin,
@@ -798,9 +757,6 @@ fn build_plugin_info(
     })
 }
 
-/// Open the native LV2 plugin UI via the persistent GTK thread.
-/// Non-blocking — sends a request to the GTK thread which handles
-/// window creation asynchronously.
 fn handle_open_plugin_ui(
     event_tx: &Sender<PwEvent>,
     cmd_tx: &Sender<PwCommand>,

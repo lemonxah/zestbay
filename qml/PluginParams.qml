@@ -19,7 +19,6 @@ Dialog {
     property var parameters: []
     property int instanceId: -1
 
-    // Refresh timer — polls parameter values while open
     Timer {
         id: refreshTimer
         interval: 200
@@ -52,7 +51,6 @@ Dialog {
     contentItem: ColumnLayout {
         spacing: 8
 
-        // Plugin info header
         RowLayout {
             Layout.fillWidth: true
             spacing: 8
@@ -91,14 +89,12 @@ Dialog {
             color: "#3c3c3c"
         }
 
-        // Parameter count
         Label {
             text: parameters.length + " parameter" + (parameters.length !== 1 ? "s" : "")
             opacity: 0.6
             visible: parameters.length > 0
         }
 
-        // No parameters message
         Label {
             text: "No control parameters"
             opacity: 0.5
@@ -106,7 +102,6 @@ Dialog {
             Layout.alignment: Qt.AlignHCenter
         }
 
-        // Parameter list
         ListView {
             id: paramList
             Layout.fillWidth: true

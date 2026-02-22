@@ -8,25 +8,16 @@ use pipewire::core::CoreRc;
 use super::host::Lv2PluginInstance;
 use super::types::*;
 
-/// Represents a running PipeWire filter wrapping an LV2 plugin
 pub struct Lv2FilterNode {
-    /// Raw pw_filter pointer (we own this)
     filter: *mut pipewire::sys::pw_filter,
-    /// Listener hook (must be kept alive)
     _hook: Box<libspa::sys::spa_hook>,
-    /// The events struct (must be kept alive as long as the listener is active)
     _events: Box<pipewire::sys::pw_filter_events>,
-    /// Boxed user data kept alive for the process callback
     _user_data: *mut FilterData,
-    /// Keep the core alive so it outlives the filter
     _core: CoreRc,
-    /// Instance ID
     pub instance_id: PluginInstanceId,
-    /// Name for display
     pub display_name: String,
 }
 
-/// Configuration for creating a filter node
 pub struct FilterConfig {
     pub instance_id: PluginInstanceId,
     pub display_name: String,
@@ -35,31 +26,18 @@ pub struct FilterConfig {
     pub sample_rate: u32,
 }
 
-/// Per-port user data returned by pw_filter_add_port.
-/// We store only a port index here; the actual audio data
-/// is fetched via pw_filter_get_dsp_buffer during process().
 #[repr(C)]
 struct PortData {
-    /// Index into our input_ports or output_ports vec
     index: u32,
 }
 
-/// User data passed to the filter callbacks.
-///
-/// The `instance_ptr` is a raw pointer to the Lv2PluginInstance, accessed
-/// from the RT thread in on_process(). The instance itself is kept alive
-/// by the PipeWire manager's `lv2_instances` map.
 struct FilterData {
     instance_ptr: *mut Lv2PluginInstance,
     filter: *mut pipewire::sys::pw_filter,
     instance_id: PluginInstanceId,
     display_name: String,
-    /// Event sender to notify the UI about the PW node ID.
     event_tx: std::sync::mpsc::Sender<crate::pipewire::PwEvent>,
-    /// Whether we already sent the node ID
     node_id_sent: bool,
-    /// Set to true before disconnect/destroy so the RT process callback
-    /// can bail out immediately without touching the plugin instance.
     shutting_down: AtomicBool,
     input_port_ptrs: Vec<*mut std::ffi::c_void>,
     output_port_ptrs: Vec<*mut std::ffi::c_void>,
@@ -67,16 +45,9 @@ struct FilterData {
     n_audio_outputs: usize,
 }
 
-// FilterData is accessed from the RT thread via raw pointer.
-// This is safe because PipeWire guarantees on_process is not called
-// concurrently, and we only do atomic-width writes from the main thread.
 unsafe impl Send for FilterData {}
 
 impl Lv2FilterNode {
-    /// Create a new PipeWire filter node that wraps an LV2 plugin.
-    ///
-    /// The filter gets explicit input and output audio ports so it can be
-    /// wired inline between other nodes in the PipeWire graph.
     pub fn new(
         core: &CoreRc,
         config: FilterConfig,
@@ -87,7 +58,6 @@ impl Lv2FilterNode {
             .unwrap_or_else(|_| CString::new("LV2 Plugin").unwrap());
         let instance_id_str = config.instance_id.to_string();
 
-        // Build properties
         let props = unsafe {
             let p = pipewire::sys::pw_properties_new(
                 c_str(b"media.type\0"),
@@ -102,7 +72,6 @@ impl Lv2FilterNode {
                 c_str(b"true\0"),
                 std::ptr::null::<std::os::raw::c_char>(),
             );
-            // Set additional properties with dynamic values
             let key = CString::new("node.name").unwrap();
             let val = CString::new(config.display_name.as_str()).unwrap();
             pipewire::sys::pw_properties_set(p, key.as_ptr(), val.as_ptr());
@@ -114,19 +83,14 @@ impl Lv2FilterNode {
             p
         };
 
-        // Create the filter (takes ownership of props)
         let core_raw = core.as_raw_ptr();
         let filter = unsafe { pipewire::sys::pw_filter_new(core_raw, c_name.as_ptr(), props) };
         if filter.is_null() {
             return Err("Failed to create pw_filter".into());
         }
 
-        // Get a raw pointer to the plugin instance for use in the RT callback.
-        // The instance is kept alive by the caller (lv2_instances map in manager.rs).
         let instance_ptr = plugin_instance.as_ptr();
 
-        // Allocate user data with a stable pointer using Box::into_raw
-        // so we can safely mutate it during port setup.
         let user_data = Box::into_raw(Box::new(FilterData {
             instance_ptr,
             filter,
@@ -141,7 +105,6 @@ impl Lv2FilterNode {
             n_audio_outputs: config.audio_outputs,
         }));
 
-        // Set up the events struct
         let events = Box::new(pipewire::sys::pw_filter_events {
             version: pipewire::sys::PW_VERSION_FILTER_EVENTS,
             destroy: None,
@@ -155,7 +118,6 @@ impl Lv2FilterNode {
             command: None,
         });
 
-        // Register the listener
         let mut hook = Box::new(unsafe { std::mem::zeroed::<libspa::sys::spa_hook>() });
         unsafe {
             pipewire::sys::pw_filter_add_listener(
@@ -166,7 +128,6 @@ impl Lv2FilterNode {
             );
         }
 
-        // Add input ports
         for i in 0..config.audio_inputs {
             let port_name = CString::new(format!("input_{}", i)).unwrap();
             let port_props = unsafe {
@@ -192,7 +153,6 @@ impl Lv2FilterNode {
             if port_data.is_null() {
                 log::error!("Failed to add input port {}", i);
             } else {
-                // Initialize the PortData
                 let pd = port_data as *mut PortData;
                 unsafe {
                     (*pd).index = i as u32;
@@ -201,7 +161,6 @@ impl Lv2FilterNode {
             }
         }
 
-        // Add output ports
         for i in 0..config.audio_outputs {
             let port_name = CString::new(format!("output_{}", i)).unwrap();
             let port_props = unsafe {
@@ -235,13 +194,10 @@ impl Lv2FilterNode {
             }
         }
 
-        // Connect the filter with RT_PROCESS so on_process runs directly
-        // on the data thread where pw_filter_get_dsp_buffer is valid.
         let flags = pipewire::sys::pw_filter_flags_PW_FILTER_FLAG_RT_PROCESS;
         let ret =
             unsafe { pipewire::sys::pw_filter_connect(filter, flags, std::ptr::null_mut(), 0) };
         if ret < 0 {
-            // Clean up on failure
             unsafe {
                 pipewire::sys::pw_filter_destroy(filter);
                 drop(Box::from_raw(user_data));
@@ -268,8 +224,6 @@ impl Lv2FilterNode {
         })
     }
 
-    /// Get the PipeWire node ID for this filter.
-    /// Returns 0 if the node hasn't been registered yet.
     pub fn node_id(&self) -> u32 {
         if self.filter.is_null() {
             return 0;
@@ -277,14 +231,7 @@ impl Lv2FilterNode {
         unsafe { pipewire::sys::pw_filter_get_node_id(self.filter) }
     }
 
-    /// Disconnect the filter without destroying it.
-    ///
-    /// Sets the `shutting_down` flag first so the RT process callback
-    /// stops touching the plugin instance before we tear things down.
-    /// Normally you should just drop the `Lv2FilterNode` instead of
-    /// calling this — Drop handles everything.
     pub fn disconnect(&mut self) {
-        // Signal the RT callback to stop processing
         if !self._user_data.is_null() {
             unsafe {
                 (*self._user_data)
@@ -302,8 +249,6 @@ impl Lv2FilterNode {
 
 impl Drop for Lv2FilterNode {
     fn drop(&mut self) {
-        // 1) Signal shutdown with a full fence so the RT thread sees it
-        //    before we touch anything else.
         if !self._user_data.is_null() {
             unsafe {
                 (*self._user_data)
@@ -311,16 +256,14 @@ impl Drop for Lv2FilterNode {
                     .store(true, Ordering::SeqCst);
             }
         }
-        // 2) Destroy the filter. pw_filter_destroy disconnects AND
-        //    guarantees no more callbacks will fire after it returns.
+
         if !self.filter.is_null() {
             unsafe {
                 pipewire::sys::pw_filter_destroy(self.filter);
             }
             self.filter = std::ptr::null_mut();
         }
-        // 3) Now it's safe to reclaim the user data — no callbacks can
-        //    access it after pw_filter_destroy returned.
+
         if !self._user_data.is_null() {
             unsafe {
                 drop(Box::from_raw(self._user_data));
@@ -330,13 +273,10 @@ impl Drop for Lv2FilterNode {
     }
 }
 
-/// Helper to get a `*const c_char` from a byte literal with null terminator
 #[inline]
 fn c_str(bytes: &[u8]) -> *const std::os::raw::c_char {
     bytes.as_ptr() as *const std::os::raw::c_char
 }
-
-// ─── Filter callbacks ──────────────────────────────────────────────────────────
 
 unsafe extern "C" fn on_state_changed(
     data: *mut std::ffi::c_void,
@@ -359,8 +299,6 @@ unsafe extern "C" fn on_state_changed(
         log::info!("LV2 filter state: {}", state_str);
     }
 
-    // When the filter reaches Paused state, the PW node is fully registered
-    // and we can query its node ID reliably.
     if state == pipewire::sys::pw_filter_state_PW_FILTER_STATE_PAUSED
         || state == pipewire::sys::pw_filter_state_PW_FILTER_STATE_STREAMING
     {
@@ -386,14 +324,6 @@ unsafe extern "C" fn on_state_changed(
     }
 }
 
-/// Process callback — runs on the PipeWire real-time data thread.
-/// Reads from input port buffers, runs the LV2 plugin, writes to output port buffers.
-///
-/// # Safety
-/// - Called from the RT data thread (PW_FILTER_FLAG_RT_PROCESS).
-/// - `data` is a valid `*mut FilterData` allocated with Box::into_raw.
-/// - `instance_ptr` points to a live Lv2PluginInstance (kept alive by manager).
-/// - PipeWire guarantees this is not called concurrently with itself.
 unsafe extern "C" fn on_process(
     data: *mut std::ffi::c_void,
     position: *mut libspa::sys::spa_io_position,
@@ -401,21 +331,18 @@ unsafe extern "C" fn on_process(
     unsafe {
         let fd = &*(data as *const FilterData);
 
-        // Bail out immediately if we're shutting down — the instance may
-        // already be freed or about to be freed on the main thread.
         if fd.shutting_down.load(Ordering::Acquire) {
             return;
         }
 
-        // Get sample count from the position clock
         let n_samples = if !position.is_null() {
             (*position).clock.duration as u32
         } else {
-            return; // No position info, can't process
+            return;
         };
 
         if n_samples == 0 || n_samples > 8192 {
-            return; // Sanity check
+            return;
         }
 
         let inst = &mut *fd.instance_ptr;
@@ -423,7 +350,6 @@ unsafe extern "C" fn on_process(
         let n_in = fd.n_audio_inputs;
         let n_out = fd.n_audio_outputs;
 
-        // Get DSP buffers for input ports
         let mut input_bufs: Vec<&[f32]> = Vec::with_capacity(n_in);
         for port_ptr in &fd.input_port_ptrs {
             let buf = pipewire::sys::pw_filter_get_dsp_buffer(*port_ptr, n_samples);
@@ -433,13 +359,11 @@ unsafe extern "C" fn on_process(
                     n_samples as usize,
                 ));
             } else {
-                // No buffer available — use silence (static to avoid allocation)
                 static SILENCE: [f32; 8192] = [0.0; 8192];
                 input_bufs.push(&SILENCE[..n_samples as usize]);
             }
         }
 
-        // Get DSP buffers for output ports
         let mut output_bufs: Vec<&mut [f32]> = Vec::with_capacity(n_out);
         for port_ptr in &fd.output_port_ptrs {
             let buf = pipewire::sys::pw_filter_get_dsp_buffer(*port_ptr, n_samples);
@@ -451,12 +375,10 @@ unsafe extern "C" fn on_process(
             }
         }
 
-        // If we didn't get all output buffers, skip processing
         if output_bufs.len() < n_out {
             return;
         }
 
-        // Run the LV2 plugin
         inst.process(&input_bufs, &mut output_bufs, n_samples as usize);
     }
 }

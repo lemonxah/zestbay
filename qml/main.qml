@@ -10,12 +10,6 @@ ApplicationWindow {
     height: 600
     title: "ZestBay - Qt6"
 
-    // System tray icon is handled on the Rust side via ksni (D-Bus StatusNotifier).
-    // The tray communicates with QML through the AppController poll loop,
-    // which checks tray flags (show_requested / quit_requested) each tick.
-
-    // Restore saved window geometry, then show unless start_minimized is on.
-    // Window starts hidden (visible: false) to avoid a flash.
     Component.onCompleted: {
         try {
             var geo = JSON.parse(controller.get_window_geometry_json());
@@ -29,7 +23,6 @@ ApplicationWindow {
             }
         } catch (e) {}
 
-        // Show the window unless "start minimized to tray" is enabled
         try {
             var prefs = JSON.parse(controller.get_preferences_json());
             if (prefs.start_minimized) {
@@ -40,7 +33,6 @@ ApplicationWindow {
         mainWindow.visible = true;
     }
 
-    // Intercept window close: hide to tray instead of quitting (if pref enabled)
     onClosing: function(close) {
         try {
             var prefs = JSON.parse(controller.get_preferences_json());
@@ -51,12 +43,9 @@ ApplicationWindow {
                 return;
             }
         } catch (e) {}
-        // close_to_tray is off — let Qt close normally, then request_quit
-        // persists state and shuts down cleanly.
         controller.request_quit();
     }
 
-    // Save window geometry on resize/move (debounced)
     onWidthChanged: saveGeometryTimer.restart()
     onHeightChanged: saveGeometryTimer.restart()
     onXChanged: saveGeometryTimer.restart()
@@ -187,6 +176,91 @@ ApplicationWindow {
 
             Item {
                 Layout.fillWidth: true
+            }
+
+            Canvas {
+                id: cpuSparkline
+                width: 80
+                height: 40
+                Layout.alignment: Qt.AlignVCenter
+
+                property var cpuData: []
+
+                Connections {
+                    target: controller
+                    function onCpu_usageChanged() {
+                        try {
+                            cpuSparkline.cpuData = JSON.parse(controller.get_cpu_history())
+                        } catch(e) {
+                            cpuSparkline.cpuData = []
+                        }
+                        cpuSparkline.requestPaint()
+                    }
+                }
+
+                onPaint: {
+                    var ctx = getContext("2d")
+                    ctx.reset()
+                    var d = cpuData
+                    var w = width
+                    var h = height
+
+                    ctx.fillStyle = "#1a1a1a"
+                    ctx.fillRect(0, 0, w, h)
+
+                    ctx.setLineDash([2, 2])
+
+                    ctx.strokeStyle = "#4466AA"
+                    ctx.lineWidth = 0.5
+                    ctx.beginPath()
+                    ctx.moveTo(0, h * 0.75)
+                    ctx.lineTo(w, h * 0.75)
+                    ctx.stroke()
+                    ctx.beginPath()
+                    ctx.moveTo(0, h * 0.25)
+                    ctx.lineTo(w, h * 0.25)
+                    ctx.stroke()
+
+                    ctx.strokeStyle = "#AA4444"
+                    ctx.lineWidth = 0.5
+                    ctx.beginPath()
+                    ctx.moveTo(0, h * 0.5)
+                    ctx.lineTo(w, h * 0.5)
+                    ctx.stroke()
+
+                    ctx.setLineDash([])
+
+                    if (d.length >= 2) {
+                        ctx.strokeStyle = "#4CAF50"
+                        ctx.lineWidth = 1
+                        ctx.beginPath()
+                        var step = w / (d.length - 1)
+                        for (var j = 0; j < d.length; j++) {
+                            var x = j * step
+                            var y = h - (d[j] / 100.0) * (h - 2) - 1
+                            if (j === 0) ctx.moveTo(x, y)
+                            else ctx.lineTo(x, y)
+                        }
+                        ctx.stroke()
+                    }
+
+                    ctx.strokeStyle = "#333333"
+                    ctx.lineWidth = 1
+                    ctx.strokeRect(0, 0, w, h)
+                }
+            }
+
+            Label {
+                text: "CPU: " + controller.cpu_usage
+                font.family: "monospace"
+                opacity: 0.7
+            }
+
+            Rectangle {
+                width: 1
+                height: parent.height * 0.6
+                color: "#3c3c3c"
+                Layout.alignment: Qt.AlignVCenter
             }
 
             Label {

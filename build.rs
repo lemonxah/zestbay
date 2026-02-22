@@ -11,10 +11,7 @@ fn main() {
             .qml_file("qml/PluginManager.qml")
             .qml_file("qml/Preferences.qml"),
     )
-    // Link Qt modules we need beyond the defaults
-    // Qt Core is always linked; Qt Gui and Qt Qml are linked by cxx-qt-lib features
-    .qt_module("Network") // Required by Qt Qml on some platforms
-    // Our bridge file(s)
+    .qt_module("Network")
     .files(["src/ui/qobject_bridge.rs"])
     .build();
 }

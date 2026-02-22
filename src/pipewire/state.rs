@@ -5,9 +5,6 @@ use std::sync::Arc;
 
 use super::types::*;
 
-/// Natural sort comparison for strings containing numbers.
-/// Splits strings into text and numeric segments and compares them
-/// so that "out_2" < "out_10" instead of the lexicographic "out_10" < "out_2".
 fn natural_cmp(a: &str, b: &str) -> Ordering {
     let mut ai = a.as_bytes().iter().peekable();
     let mut bi = b.as_bytes().iter().peekable();
@@ -22,7 +19,6 @@ fn natural_cmp(a: &str, b: &str) -> Ordering {
                 let b_digit = bc.is_ascii_digit();
 
                 if a_digit && b_digit {
-                    // Both are in a numeric segment — extract full numbers
                     let mut an: u64 = 0;
                     while let Some(&&c) = ai.peek() {
                         if c.is_ascii_digit() {
@@ -46,7 +42,6 @@ fn natural_cmp(a: &str, b: &str) -> Ordering {
                         ord => return ord,
                     }
                 } else {
-                    // Compare as characters
                     match ac.cmp(&bc) {
                         Ordering::Equal => {
                             ai.next();
@@ -60,14 +55,11 @@ fn natural_cmp(a: &str, b: &str) -> Ordering {
     }
 }
 
-/// Shared graph state accessible from multiple threads
 #[derive(Debug, Default)]
 pub struct GraphState {
     nodes: RwLock<HashMap<ObjectId, Node>>,
     ports: RwLock<HashMap<ObjectId, Port>>,
     links: RwLock<HashMap<ObjectId, Link>>,
-    /// Change counter - incremented on any modification
-    /// UI can poll this to know when to refresh
     change_counter: RwLock<u64>,
 }
 
@@ -76,25 +68,20 @@ impl GraphState {
         Arc::new(Self::default())
     }
 
-    /// Increment the change counter
     fn mark_changed(&self) {
         let mut counter = self.change_counter.write();
         *counter = counter.wrapping_add(1);
     }
 
-    /// Get the current change counter value
     pub fn change_counter(&self) -> u64 {
         *self.change_counter.read()
     }
-
-    // === Node operations ===
 
     pub fn insert_node(&self, node: Node) {
         let media_type = node.media_type;
         let node_id = node.id;
         self.nodes.write().insert(node_id, node);
 
-        // Backfill media_type on any ports that arrived before this node
         if let Some(mt) = media_type {
             let mut ports = self.ports.write();
             for port in ports.values_mut() {
@@ -123,8 +110,6 @@ impl GraphState {
         self.nodes.read().values().cloned().collect()
     }
 
-    /// Update a node's type (e.g. when an LV2 plugin is identified after
-    /// the node was initially registered with a generic type like Duplex).
     pub fn set_node_type(&self, id: ObjectId, node_type: NodeType) {
         if let Some(node) = self.nodes.write().get_mut(&id)
             && node.node_type != Some(node_type)
@@ -134,7 +119,6 @@ impl GraphState {
         }
     }
 
-    /// Update the display description of a node (used when renaming LV2 plugins).
     pub fn set_node_description(&self, id: ObjectId, description: &str) {
         if let Some(node) = self.nodes.write().get_mut(&id)
             && node.description != description
@@ -161,7 +145,6 @@ impl GraphState {
         self.ports.read().get(&id).cloned()
     }
 
-    /// Get all ports for a specific node, sorted by direction then natural name order.
     pub fn get_ports_for_node(&self, node_id: ObjectId) -> Vec<Port> {
         let mut ports: Vec<Port> = self
             .ports
@@ -174,7 +157,6 @@ impl GraphState {
         ports
     }
 
-    /// Get input ports for a node, sorted by natural name order.
     pub fn get_input_ports(&self, node_id: ObjectId) -> Vec<Port> {
         let mut ports: Vec<Port> = self
             .ports
@@ -187,7 +169,6 @@ impl GraphState {
         ports
     }
 
-    /// Get output ports for a node, sorted by natural name order.
     pub fn get_output_ports(&self, node_id: ObjectId) -> Vec<Port> {
         let mut ports: Vec<Port> = self
             .ports
@@ -199,8 +180,6 @@ impl GraphState {
         ports.sort_by(|a, b| natural_cmp(&a.name, &b.name));
         ports
     }
-
-    // === Link operations ===
 
     pub fn insert_link(&self, link: Link) {
         self.links.write().insert(link.id, link);
@@ -223,7 +202,6 @@ impl GraphState {
         self.links.read().values().cloned().collect()
     }
 
-    /// Find a link between two specific ports
     pub fn find_link(&self, output_port_id: ObjectId, input_port_id: ObjectId) -> Option<Link> {
         self.links
             .read()
@@ -232,9 +210,7 @@ impl GraphState {
             .cloned()
     }
 
-    /// Remove all ports belonging to a node and their associated links
     pub fn cleanup_node(&self, node_id: ObjectId) {
-        // Get ports to remove
         let port_ids: Vec<ObjectId> = self
             .ports
             .read()
@@ -243,7 +219,6 @@ impl GraphState {
             .map(|p| p.id)
             .collect();
 
-        // Remove links involving these ports
         {
             let mut links = self.links.write();
             links.retain(|_, l| {
@@ -251,7 +226,6 @@ impl GraphState {
             });
         }
 
-        // Remove the ports
         {
             let mut ports = self.ports.write();
             for port_id in port_ids {

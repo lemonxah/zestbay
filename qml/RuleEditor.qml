@@ -31,7 +31,6 @@ Dialog {
 
     onOpened: loadRules()
 
-    // Re-load rules when graph changes (while editor is open)
     Connections {
         target: controller
         function onGraph_changed() {
@@ -44,7 +43,6 @@ Dialog {
     contentItem: ColumnLayout {
         spacing: 8
 
-        // Header with patchbay toggle
         RowLayout {
             Layout.fillWidth: true
             spacing: 12
@@ -75,7 +73,6 @@ Dialog {
             Layout.fillWidth: true
         }
 
-        // Rule count
         Label {
             text: rules.length + " rule" + (rules.length !== 1 ? "s" : "")
             opacity: 0.6
@@ -87,7 +84,6 @@ Dialog {
             color: "#3c3c3c"
         }
 
-        // Rule list
         ListView {
             id: ruleList
             Layout.fillWidth: true
@@ -113,7 +109,6 @@ Dialog {
                     anchors.margins: 8
                     spacing: 8
 
-                    // Rule info
                     ColumnLayout {
                         Layout.fillWidth: true
                         spacing: 2
@@ -156,7 +151,6 @@ Dialog {
                         }
                     }
 
-                    // Enable/Disable toggle
                     Switch {
                         checked: rule.enabled || false
                         onToggled: {
@@ -170,7 +164,6 @@ Dialog {
                         ToolTip.text: rule.enabled ? "Enabled" : "Disabled"
                     }
 
-                    // Delete button
                     Button {
                         text: "X"
                         flat: true
@@ -196,7 +189,6 @@ Dialog {
                 }
             }
 
-            // Empty state
             Label {
                 anchors.centerIn: parent
                 text: "No rules yet.\nConnect some ports to create rules automatically,\nor use 'Add Rule' below."
@@ -212,7 +204,6 @@ Dialog {
             color: "#3c3c3c"
         }
 
-        // Add Rule section (collapsible)
         ColumnLayout {
             id: addRuleSection
             Layout.fillWidth: true
@@ -250,7 +241,6 @@ Dialog {
                 }
             }
 
-            // Expandable add-rule form
             GridLayout {
                 visible: addRuleSection.expanded
                 Layout.fillWidth: true
@@ -286,7 +276,7 @@ Dialog {
                     implicitWidth: 120
                 }
 
-                Item {} // spacer
+                Item {}
                 Button {
                     text: "Create Rule"
                     enabled: sourcePatternField.text.length > 0 && targetPatternField.text.length > 0
@@ -302,11 +292,10 @@ Dialog {
                         loadRules()
                     }
                 }
-                Item {} // spacer
-                Item {} // spacer
+                Item {}
+                Item {}
             }
 
-            // Quick-add from existing nodes
             GridLayout {
                 visible: addRuleSection.expanded && nodeNames.length > 0
                 Layout.fillWidth: true
@@ -332,10 +321,8 @@ Dialog {
                             flat: true
                             font.pointSize: 8
                             onClicked: {
-                                // Fill source if empty, otherwise target
                                 if (sourcePatternField.text.length === 0) {
                                     sourcePatternField.text = nodeInfo.name || ""
-                                    // Try to set the matching type
                                     var srcIdx = nodeTypes.indexOf(nodeInfo.type || "")
                                     if (srcIdx >= 0) sourceTypeCombo.currentIndex = srcIdx
                                 } else {
