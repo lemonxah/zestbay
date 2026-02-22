@@ -611,7 +611,38 @@ impl qobject::AppController {
                         instance_id,
                         message
                     );
-                    error_msg = Some(message);
+
+                    // Remove the failed plugin from the manager so it won't
+                    // be re-persisted (and thus won't fail again on next start).
+                    if let Some(id) = instance_id {
+                        let plugin_name = self
+                            .rust()
+                            .lv2_manager
+                            .as_ref()
+                            .and_then(|mgr| mgr.get_instance(id))
+                            .map(|info| info.display_name.clone());
+
+                        if let Some(ref mut mgr) = self.as_mut().rust_mut().lv2_manager {
+                            mgr.remove_instance(id);
+                        }
+                        persist_active_plugins(self.rust().lv2_manager.as_ref());
+
+                        // If we're restoring plugins at startup, decrement
+                        // the pending count so link restoration isn't blocked.
+                        if self.rust().pending_restore_count > 0 {
+                            let count = self.rust().pending_restore_count - 1;
+                            self.as_mut().rust_mut().pending_restore_count = count;
+                        }
+
+                        if let Some(name) = plugin_name {
+                            error_msg =
+                                Some(format!("Plugin \"{}\" failed to load: {}", name, message));
+                        } else {
+                            error_msg = Some(format!("Plugin failed to load: {}", message));
+                        }
+                    } else {
+                        error_msg = Some(message);
+                    }
                 }
             }
         }
@@ -663,7 +694,7 @@ impl qobject::AppController {
 
         if should_apply {
             self.as_mut().rust_mut().rules_apply_pending = false;
-            let commands = if let Some(ref patchbay) = self.rust().patchbay {
+            let commands = if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
                 patchbay.scan()
             } else {
                 Vec::new()
@@ -675,6 +706,19 @@ impl qobject::AppController {
                         let _ = tx.send(cmd);
                     }
                 }
+            }
+            // Persist rules if scan refreshed stale target node IDs
+            if self
+                .rust()
+                .patchbay
+                .as_ref()
+                .map(|p| p.rules_dirty)
+                .unwrap_or(false)
+            {
+                if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
+                    patchbay.rules_dirty = false;
+                }
+                save_rules(self.rust().patchbay.as_ref());
             }
         }
 
@@ -854,10 +898,17 @@ impl qobject::AppController {
                         Some(NodeType::Lv2Plugin) => "Lv2Plugin",
                         None => "Unknown",
                     };
+                    let media_str = match n.media_type {
+                        Some(crate::pipewire::MediaType::Audio) => "Audio",
+                        Some(crate::pipewire::MediaType::Video) => "Video",
+                        Some(crate::pipewire::MediaType::Midi) => "Midi",
+                        None => "Unknown",
+                    };
                     serde_json::json!({
                         "id": n.id,
                         "name": n.display_name(),
                         "type": type_str,
+                        "mediaType": media_str,
                         "layoutKey": layout_key(n),
                         "ready": n.ready,
                     })
@@ -1477,8 +1528,8 @@ impl qobject::AppController {
     }
 
     /// Apply all enabled rules now.
-    pub fn apply_rules(self: Pin<&mut Self>) {
-        let commands = if let Some(ref patchbay) = self.rust().patchbay {
+    pub fn apply_rules(mut self: Pin<&mut Self>) {
+        let commands = if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
             patchbay.scan()
         } else {
             Vec::new()
@@ -1524,9 +1575,16 @@ impl qobject::AppController {
                         Some(NodeType::Lv2Plugin) => "Plugin",
                         None => "Unknown",
                     };
+                    let media_str = match n.media_type {
+                        Some(crate::pipewire::MediaType::Audio) => "Audio",
+                        Some(crate::pipewire::MediaType::Video) => "Video",
+                        Some(crate::pipewire::MediaType::Midi) => "Midi",
+                        None => "Unknown",
+                    };
                     serde_json::json!({
                         "name": n.display_name(),
                         "type": type_str,
+                        "mediaType": media_str,
                     })
                 })
                 .collect();

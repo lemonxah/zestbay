@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use super::rules::AutoConnectRule;
-use crate::pipewire::{GraphState, Link, Node, NodeType, ObjectId, Port, PwCommand};
+use super::rules::{pattern_matches, AutoConnectRule};
+use crate::pipewire::{GraphState, Link, MediaType, Node, NodeType, ObjectId, Port, PwCommand};
 
 /// Patchbay manager that applies routing rules
 pub struct PatchbayManager {
@@ -79,6 +79,11 @@ impl PatchbayManager {
         output_port: &Port,
         input_port: &Port,
     ) -> bool {
+        // Only learn rules for audio nodes
+        if !Self::is_audio_node(source_node) || !Self::is_audio_node(target_node) {
+            return false;
+        }
+
         let source_name = source_node.display_name().to_string();
 
         // Look for an existing rule matching this exact source → target pair
@@ -130,6 +135,11 @@ impl PatchbayManager {
         output_port: &Port,
         input_port: &Port,
     ) -> bool {
+        // Only unlearn rules for audio nodes
+        if !Self::is_audio_node(source_node) || !Self::is_audio_node(target_node) {
+            return false;
+        }
+
         let source_name = source_node.display_name();
         let mut changed = false;
 
@@ -194,6 +204,10 @@ impl PatchbayManager {
             if let (Some(source), Some(target), Some(out_port), Some(in_port)) =
                 (source, target, out_port, in_port)
             {
+                // Only snapshot audio links
+                if !Self::is_audio_node(&source) || !Self::is_audio_node(&target) {
+                    continue;
+                }
                 let key = (
                     source.display_name().to_string(),
                     target.display_name().to_string(),
@@ -219,23 +233,90 @@ impl PatchbayManager {
         self.rules_dirty = true;
     }
 
+    // ── Node ID refresh ──────────────────────────────────────────────────
+
+    /// Refresh stale `target_node_id` values in rules.
+    ///
+    /// When a node (e.g. a game) restarts, it gets a new PipeWire node ID.
+    /// Rules that stored the old ID would fail to match on exact ID and
+    /// fall back to name+type matching — but worse, the stale ID could be
+    /// reused by a completely different node, causing false matches.
+    ///
+    /// This method checks each rule's `target_node_id`:
+    /// - If the ID still points to a node whose display name matches the
+    ///   rule's target pattern, it's fine.
+    /// - Otherwise, search all nodes for one matching the target pattern +
+    ///   type and update the ID (or clear it if no match is found).
+    pub fn refresh_target_ids(&mut self) {
+        let nodes = self.graph.get_all_nodes();
+        let mut dirty = false;
+
+        for rule in &mut self.rules {
+            if let Some(old_id) = rule.target_node_id {
+                // Check if the stored ID still points to the right node
+                let id_still_valid = nodes.iter().any(|n| {
+                    n.id == old_id
+                        && n.ready
+                        && pattern_matches(&rule.target_pattern, n.display_name())
+                });
+
+                if !id_still_valid {
+                    // Find the node by name + type instead
+                    let new_match = nodes.iter().find(|n| {
+                        n.ready
+                            && n.node_type.map(|t| t.has_inputs()).unwrap_or(false)
+                            && pattern_matches(&rule.target_pattern, n.display_name())
+                            && (rule.target_node_type.is_none()
+                                || n.node_type == rule.target_node_type)
+                    });
+
+                    let new_id = new_match.map(|n| n.id);
+                    if rule.target_node_id != new_id {
+                        log::info!(
+                            "Rule '{}→{}': updating stale target_node_id {:?} → {:?}",
+                            rule.source_pattern,
+                            rule.target_pattern,
+                            rule.target_node_id,
+                            new_id,
+                        );
+                        rule.target_node_id = new_id;
+                        dirty = true;
+                    }
+                }
+            }
+        }
+
+        if dirty {
+            self.rules_dirty = true;
+        }
+    }
+
     // ── Scan & apply ───────────────────────────────────────────────────────
 
     /// Scan the graph and generate commands to apply rules.
     ///
     /// Returns a list of Connect/Disconnect commands.  Connections are
     /// generated before disconnections ("make-before-break").
-    pub fn scan(&self) -> Vec<PwCommand> {
+    pub fn scan(&mut self) -> Vec<PwCommand> {
         if !self.enabled || self.rules.is_empty() {
             return Vec::new();
         }
 
+        // Refresh stale target node IDs before evaluating rules.
+        // Nodes get new IDs when they restart (e.g. game relaunch).
+        self.refresh_target_ids();
+
         let mut commands = Vec::new();
         let nodes = self.graph.get_all_nodes();
 
-        // 1. Generate connection commands
+        // 1. Generate connection commands (audio nodes only)
         for node in &nodes {
             if !node.ready {
+                continue;
+            }
+
+            // Only process audio nodes — leave video/midi nodes alone
+            if !Self::is_audio_node(node) {
                 continue;
             }
 
@@ -374,13 +455,35 @@ impl PatchbayManager {
         })
     }
 
+    /// Returns true if the node is an audio node (or has unknown media type,
+    /// which we conservatively treat as audio for backward compatibility).
+    /// Video and Midi nodes are explicitly excluded from patchbay management.
+    fn is_audio_node(node: &Node) -> bool {
+        match node.media_type {
+            Some(MediaType::Video) | Some(MediaType::Midi) => false,
+            _ => true, // Audio or unknown → managed by patchbay
+        }
+    }
+
     /// Check if a link should be removed according to rules.
     ///
-    /// A link is removed only if:
-    /// 1. We have at least one enabled rule for the source node, AND
-    /// 2. No rule authorizes this specific connection (node match + port mapping).
+    /// A link is removed if **either** of these conditions holds:
     ///
-    /// Links from nodes that have no rules at all are left untouched.
+    /// **Source-side check (existing):**
+    /// 1. We have at least one enabled rule for the source node, AND
+    /// 2. No rule authorizes this specific connection.
+    ///
+    /// **Target-side check (new):**
+    /// 1. The target node is the target of at least one enabled rule, AND
+    /// 2. No rule authorizes this specific link's source→target pair.
+    ///
+    /// The target-side check handles the case where WirePlumber (or another
+    /// session manager) connects a default source to a target node, but
+    /// our rules say that target should receive from a different source
+    /// (e.g. rule says "LSP Mixer → Game Input" but WirePlumber connected
+    /// "Mic → Game Input").
+    ///
+    /// Links involving nodes that have no rules at all are left untouched.
     fn should_remove_link(&self, link: &Link) -> bool {
         // Get the source node
         let source_node = match self.graph.get_node(link.output_node_id) {
@@ -394,21 +497,18 @@ impl PatchbayManager {
             None => return false,
         };
 
-        // Do we have any rules for this source?
-        let has_any_rule_for_source = self.rules.iter().any(|r| {
-            r.enabled && r.matches_source(source_node.display_name(), source_node.node_type)
-        });
-
-        if !has_any_rule_for_source {
-            return false; // No rules for this source — don't touch its links
+        // Never touch non-audio links (Video, Midi, or unknown media types).
+        // The patchbay only manages Audio routing — other media types are left
+        // to whatever created them (e.g. screen capture portals, MIDI apps).
+        if !Self::is_audio_node(&source_node) || !Self::is_audio_node(&target_node) {
+            return false;
         }
 
-        // We have rules for this source. Check if any rule authorizes this
-        // specific link (node match + port mapping check).
         let out_port = self.graph.get_port(link.output_port_id);
         let in_port = self.graph.get_port(link.input_port_id);
 
-        let link_authorized = self.rules.iter().any(|rule| {
+        // Helper: check if any rule authorizes this exact link
+        let link_authorized_by = |rule: &AutoConnectRule| -> bool {
             if !rule.enabled {
                 return false;
             }
@@ -437,9 +537,42 @@ impl PatchbayManager {
             } else {
                 false
             }
+        };
+
+        // ── Source-side check ───────────────────────────────────────────
+        // If the source has rules, this link must be authorized by one.
+        let has_any_rule_for_source = self.rules.iter().any(|r| {
+            r.enabled && r.matches_source(source_node.display_name(), source_node.node_type)
         });
 
-        // Remove the link if no rule authorizes it
-        !link_authorized
+        if has_any_rule_for_source {
+            let authorized = self.rules.iter().any(|r| link_authorized_by(r));
+            if !authorized {
+                return true;
+            }
+        }
+
+        // ── Target-side check ───────────────────────────────────────────
+        // If the target is claimed by any rule (i.e. some rule says
+        // "X → this target"), then only links from authorized sources
+        // are allowed.  This removes links created by WirePlumber or
+        // other session managers that don't match our rules.
+        let has_any_rule_for_target = self.rules.iter().any(|r| {
+            r.enabled
+                && r.matches_target(
+                    target_node.display_name(),
+                    target_node.node_type,
+                    target_node.id,
+                )
+        });
+
+        if has_any_rule_for_target {
+            let authorized = self.rules.iter().any(|r| link_authorized_by(r));
+            if !authorized {
+                return true;
+            }
+        }
+
+        false
     }
 }

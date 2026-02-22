@@ -176,8 +176,17 @@ Item {
     }
 
     /// Save current node positions to disk via the controller.
+    /// Merges current positions into savedLayout so that positions of
+    /// nodes that are temporarily offline (e.g. a game that restarted)
+    /// are preserved rather than discarded.
     function persistLayout() {
+        // Start from the existing saved layout to keep positions of
+        // nodes that aren't currently in the graph.
         var layoutObj = {}
+        for (var existingKey in savedLayout) {
+            layoutObj[existingKey] = savedLayout[existingKey]
+        }
+        // Update / add positions for all currently visible nodes
         for (var ni = 0; ni < nodes.length; ni++) {
             var n = nodes[ni]
             var key = n.layoutKey || ""
@@ -320,6 +329,7 @@ Item {
             text: "Auto Layout"
             onTriggered: {
                 nodePositions = {}
+                savedLayout = {}
                 layoutCursors = { "source": {x: 50, y: 50}, "stream": {x: 350, y: 50}, "sink": {x: 650, y: 50} }
                 refreshData()
                 persistLayout()

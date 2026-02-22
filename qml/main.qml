@@ -87,6 +87,10 @@ ApplicationWindow {
         function onGraph_changed() {
             graphView.refreshData();
         }
+        function onError_occurred(message) {
+            errorDialogText.text = message;
+            errorDialog.open();
+        }
         function onShow_window_requested() {
             mainWindow.visible = true;
             mainWindow.raise();
@@ -98,6 +102,21 @@ ApplicationWindow {
         function onHide_window_requested() {
             mainWindow.visible = false;
             controller.set_window_visible(false);
+        }
+    }
+
+    Dialog {
+        id: errorDialog
+        title: "Error"
+        anchors.centerIn: parent
+        modal: true
+        standardButtons: Dialog.Ok
+        width: Math.min(mainWindow.width * 0.6, 500)
+
+        Label {
+            id: errorDialogText
+            width: parent.width
+            wrapMode: Text.WordWrap
         }
     }
 
