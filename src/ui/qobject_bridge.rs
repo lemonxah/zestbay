@@ -535,10 +535,12 @@ impl qobject::AppController {
                 Lv2Event::PluginError {
                     instance_id,
                     message,
+                    fatal,
                 } => {
                     log::error!(
-                        "LV2 plugin error: instance={:?} msg={}",
+                        "LV2 plugin error: instance={:?} fatal={} msg={}",
                         instance_id,
+                        fatal,
                         message
                     );
 
@@ -550,14 +552,16 @@ impl qobject::AppController {
                             .and_then(|mgr| mgr.get_instance(id))
                             .map(|info| info.display_name.clone());
 
-                        if let Some(ref mut mgr) = self.as_mut().rust_mut().lv2_manager {
-                            mgr.remove_instance(id);
-                        }
-                        persist_active_plugins(self.rust().lv2_manager.as_ref());
+                        if fatal {
+                            if let Some(ref mut mgr) = self.as_mut().rust_mut().lv2_manager {
+                                mgr.remove_instance(id);
+                            }
+                            persist_active_plugins(self.rust().lv2_manager.as_ref());
 
-                        if self.rust().pending_restore_count > 0 {
-                            let count = self.rust().pending_restore_count - 1;
-                            self.as_mut().rust_mut().pending_restore_count = count;
+                            if self.rust().pending_restore_count > 0 {
+                                let count = self.rust().pending_restore_count - 1;
+                                self.as_mut().rust_mut().pending_restore_count = count;
+                            }
                         }
 
                         if let Some(name) = plugin_name {
@@ -673,54 +677,58 @@ impl qobject::AppController {
             if let Some(ref graph) = self.rust().graph {
                 for saved_link in &links {
                     let all_nodes = graph.get_all_nodes();
-                    let out_node = all_nodes
-                        .iter()
-                        .find(|n| n.display_name() == saved_link.output_node_name);
-                    let in_node = all_nodes
-                        .iter()
-                        .find(|n| n.display_name() == saved_link.input_node_name);
 
-                    if let (Some(out_node), Some(in_node)) = (out_node, in_node) {
-                        let out_ports = graph.get_ports_for_node(out_node.id);
-                        let in_ports = graph.get_ports_for_node(in_node.id);
-
-                        let out_port = out_ports.iter().find(|p| {
+                    let mut out_port_id = None;
+                    for n in all_nodes
+                        .iter()
+                        .filter(|n| n.display_name() == saved_link.output_node_name)
+                    {
+                        let ports = graph.get_ports_for_node(n.id);
+                        if let Some(p) = ports.iter().find(|p| {
                             p.name == saved_link.output_port_name
                                 && p.direction == PortDirection::Output
-                        });
-                        let in_port = in_ports.iter().find(|p| {
+                        }) {
+                            out_port_id = Some(p.id);
+                            break;
+                        }
+                    }
+
+                    let mut in_port_id = None;
+                    for n in all_nodes
+                        .iter()
+                        .filter(|n| n.display_name() == saved_link.input_node_name)
+                    {
+                        let ports = graph.get_ports_for_node(n.id);
+                        if let Some(p) = ports.iter().find(|p| {
                             p.name == saved_link.input_port_name
                                 && p.direction == PortDirection::Input
-                        });
+                        }) {
+                            in_port_id = Some(p.id);
+                            break;
+                        }
+                    }
 
-                        if let (Some(out_port), Some(in_port)) = (out_port, in_port) {
-                            log::info!(
-                                "Restoring link: {}:{} -> {}:{}",
-                                saved_link.output_node_name,
-                                saved_link.output_port_name,
-                                saved_link.input_node_name,
-                                saved_link.input_port_name
-                            );
-                            if let Some(ref tx) = self.rust().cmd_tx {
-                                let _ = tx.send(PwCommand::Connect {
-                                    output_port_id: out_port.id,
-                                    input_port_id: in_port.id,
-                                });
-                            }
-                        } else {
-                            log::warn!(
-                                "Could not find ports for saved link: {}:{} -> {}:{}",
-                                saved_link.output_node_name,
-                                saved_link.output_port_name,
-                                saved_link.input_node_name,
-                                saved_link.input_port_name
-                            );
+                    if let (Some(out_id), Some(in_id)) = (out_port_id, in_port_id) {
+                        log::info!(
+                            "Restoring link: {}:{} -> {}:{}",
+                            saved_link.output_node_name,
+                            saved_link.output_port_name,
+                            saved_link.input_node_name,
+                            saved_link.input_port_name
+                        );
+                        if let Some(ref tx) = self.rust().cmd_tx {
+                            let _ = tx.send(PwCommand::Connect {
+                                output_port_id: out_id,
+                                input_port_id: in_id,
+                            });
                         }
                     } else {
                         log::warn!(
-                            "Could not find nodes for saved link: {} -> {}",
+                            "Could not find ports for saved link: {}:{} -> {}:{}",
                             saved_link.output_node_name,
-                            saved_link.input_node_name
+                            saved_link.output_port_name,
+                            saved_link.input_node_name,
+                            saved_link.input_port_name
                         );
                     }
                 }

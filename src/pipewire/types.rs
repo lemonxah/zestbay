@@ -174,5 +174,6 @@ pub enum Lv2Event {
     PluginError {
         instance_id: Option<u64>,
         message: String,
+        fatal: bool,
     },
 }

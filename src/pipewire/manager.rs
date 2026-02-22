@@ -592,6 +592,7 @@ fn handle_add_plugin(
             let _ = event_tx.send(PwEvent::Lv2(Lv2Event::PluginError {
                 instance_id: Some(instance_id),
                 message: format!("Plugin not found: {}", plugin_uri),
+                fatal: true,
             }));
             return;
         }
@@ -603,6 +604,7 @@ fn handle_add_plugin(
             let _ = event_tx.send(PwEvent::Lv2(Lv2Event::PluginError {
                 instance_id: Some(instance_id),
                 message: format!("Failed to parse plugin info: {}", plugin_uri),
+                fatal: true,
             }));
             return;
         }
@@ -626,6 +628,7 @@ fn handle_add_plugin(
             let _ = event_tx.send(PwEvent::Lv2(Lv2Event::PluginError {
                 instance_id: Some(instance_id),
                 message: format!("Failed to instantiate plugin: {}", plugin_uri),
+                fatal: true,
             }));
             return;
         }
@@ -660,6 +663,7 @@ fn handle_add_plugin(
             let _ = event_tx.send(PwEvent::Lv2(Lv2Event::PluginError {
                 instance_id: Some(instance_id),
                 message: format!("Failed to create filter node: {}", e),
+                fatal: true,
             }));
         }
     }

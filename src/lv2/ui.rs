@@ -511,6 +511,7 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
             let _ = req.event_tx.send(PwEvent::Lv2(Lv2Event::PluginError {
                 instance_id: Some(instance_id),
                 message: format!("Plugin not found: {}", req.plugin_uri),
+                fatal: false,
             }));
             return;
         }
@@ -588,6 +589,7 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
             let _ = req.event_tx.send(PwEvent::Lv2(Lv2Event::PluginError {
                 instance_id: Some(instance_id),
                 message: format!("No supported UI found for plugin: {}", req.plugin_uri),
+                fatal: false,
             }));
             return;
         }
@@ -697,6 +699,7 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
             let _ = req.event_tx.send(PwEvent::Lv2(Lv2Event::PluginError {
                 instance_id: Some(instance_id),
                 message: "Failed to create suil instance".into(),
+                fatal: false,
             }));
             return;
         }
