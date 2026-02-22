@@ -122,7 +122,7 @@ pub fn pattern_matches(pattern: &str, text: &str) -> bool {
     }
 
     if !pattern.contains('*') && !pattern.contains('?') {
-        return text == pattern || text.contains(pattern);
+        return text == pattern;
     }
 
     let pattern_bytes = pattern.as_bytes();
@@ -166,11 +166,20 @@ mod tests {
 
     #[test]
     fn test_pattern_matching() {
+        // Exact match (no globs)
         assert!(pattern_matches("Firefox", "Firefox"));
-        assert!(pattern_matches("Firefox", "Firefox on YouTube"));
+        assert!(!pattern_matches("Firefox", "Firefox on YouTube")); // exact: no substring
+        assert!(!pattern_matches("Chromium", "Chromium Sink"));     // exact: no substring
+        assert!(!pattern_matches("Chromium Sink", "Chromium"));     // exact: no substring
+
+        // Wildcard
         assert!(pattern_matches("*", "anything"));
+
+        // Glob patterns
         assert!(pattern_matches("Fire*", "Firefox"));
         assert!(pattern_matches("*fox", "Firefox"));
+        assert!(pattern_matches("Firefox*", "Firefox on YouTube")); // glob for substring
+        assert!(pattern_matches("*Chromium*", "Chromium Sink"));    // glob for contains
         assert!(!pattern_matches("Chrome", "Firefox"));
     }
 

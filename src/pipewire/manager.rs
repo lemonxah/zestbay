@@ -803,6 +803,14 @@ fn create_link(
         }
     };
 
+    if output_port.node_id == input_port.node_id {
+        log::warn!(
+            "Rejected self-loop: port {} and port {} belong to the same node {}",
+            output_port_id, input_port_id, output_port.node_id
+        );
+        return;
+    }
+
     log::debug!("Creating link {} -> {}", output_port_id, input_port_id);
 
     let props = pipewire::properties::properties! {

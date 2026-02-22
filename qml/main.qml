@@ -122,7 +122,11 @@ ApplicationWindow {
             title: "&File"
             Action {
                 text: "Add &Plugin..."
-                onTriggered: pluginBrowser.open()
+                onTriggered: {
+                    var center = graphView.toCanvas(graphView.width / 2, graphView.height / 2)
+                    graphView.pendingPluginPosition = { x: center.x, y: center.y }
+                    pluginBrowser.open()
+                }
             }
             Action {
                 text: "&Manage Plugins..."

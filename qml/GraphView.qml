@@ -52,6 +52,7 @@ Item {
 
     property int contextNodeId: -1
     property var contextNode: null
+    property var pendingPluginPosition: null
 
     readonly property real minNodeWidth: 180
     readonly property real maxNodeWidth: 400
@@ -153,6 +154,10 @@ Item {
                 if (key && savedLayout[key]) {
                     var saved = savedLayout[key]
                     nodePositions[n.id] = { x: saved[0], y: saved[1] }
+                } else if (n.type === "Lv2Plugin" && pendingPluginPosition) {
+                    nodePositions[n.id] = { x: pendingPluginPosition.x, y: pendingPluginPosition.y }
+                    pendingPluginPosition = null
+                    persistLayout()
                 } else {
                     var col = getNodeColumn(n.type)
                     var cursor = layoutCursors[col]
@@ -457,6 +462,16 @@ Item {
         return ""
     }
 
+    function getPortNodeId(portId) {
+        for (var nid in portsByNode) {
+            var ports = portsByNode[nid]
+            for (var i = 0; i < ports.length; i++) {
+                if (ports[i].id === portId) return parseInt(nid)
+            }
+        }
+        return -1
+    }
+
     function findNodeAt(sx, sy) {
         var c = toCanvas(sx, sy)
         for (var i = nodes.length - 1; i >= 0; i--) {
@@ -731,6 +746,8 @@ Item {
                 } else {
                     contextNodeId = -1
                     contextNode = null
+                    var cPos = toCanvas(mouse.x, mouse.y)
+                    pendingPluginPosition = { x: cPos.x, y: cPos.y }
                     canvasContextMenu.popup()
                 }
                 return
@@ -880,7 +897,9 @@ Item {
                     var targetId = findPortAt(mouse.x, mouse.y)
                     if (targetId >= 0 && targetId !== connectFromPortId) {
                         var targetDir = getPortDirection(targetId)
-                        if (targetDir !== connectFromDir) {
+                        var fromNodeId = getPortNodeId(connectFromPortId)
+                        var toNodeId = getPortNodeId(targetId)
+                        if (targetDir !== connectFromDir && fromNodeId !== toNodeId) {
                             if (connectFromDir === "Output") {
                                 controller.connect_ports(connectFromPortId, targetId)
                             } else {
@@ -1021,6 +1040,8 @@ Item {
         for (var li = 0; li < links.length; li++) {
             var link = links[li]
             if (link.outputPortId === undefined) continue
+            // Skip links connected to the node itself to prevent self-loops
+            if (link.outputNodeId === nodeId || link.inputNodeId === nodeId) continue
             var fromPos = portPositions[link.outputPortId]
             var toPos = portPositions[link.inputPortId]
             if (!fromPos || !toPos) continue

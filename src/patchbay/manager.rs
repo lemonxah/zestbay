@@ -56,6 +56,9 @@ impl PatchbayManager {
         output_port: &Port,
         input_port: &Port,
     ) -> bool {
+        if source_node.id == target_node.id {
+            return false;
+        }
         if !Self::is_routable_node(source_node) || !Self::is_routable_node(target_node) {
             return false;
         }
@@ -156,6 +159,9 @@ impl PatchbayManager {
             if let (Some(source), Some(target), Some(out_port), Some(in_port)) =
                 (source, target, out_port, in_port)
             {
+                if source.id == target.id {
+                    continue;
+                }
                 if !Self::is_routable_node(&source) || !Self::is_routable_node(&target) {
                     continue;
                 }
@@ -261,7 +267,7 @@ impl PatchbayManager {
                 .collect();
 
             for rule in &matching_rules {
-                if let Some(target) = self.find_matching_target(rule, &nodes) {
+                if let Some(target) = self.find_matching_target(rule, &nodes, node.id) {
                     commands.extend(self.generate_connections(rule, target, &output_ports));
                 }
             }
@@ -345,15 +351,18 @@ impl PatchbayManager {
         &self,
         rule: &AutoConnectRule,
         nodes: &'a [Node],
+        exclude_node_id: ObjectId,
     ) -> Option<&'a Node> {
         if let Some(target_id) = rule.target_node_id
+            && target_id != exclude_node_id
             && let Some(node) = nodes.iter().find(|n| n.id == target_id && n.ready)
             && node.node_type.map(|t| t.has_inputs()).unwrap_or(false) {
                 return Some(node);
         }
 
         nodes.iter().find(|n| {
-            n.ready
+            n.id != exclude_node_id
+                && n.ready
                 && n.node_type.map(|t| t.has_inputs()).unwrap_or(false)
                 && rule.matches_target(n.display_name(), n.node_type, n.id)
         })

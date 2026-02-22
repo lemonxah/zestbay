@@ -914,6 +914,19 @@ impl qobject::AppController {
     }
 
     pub fn connect_ports(mut self: Pin<&mut Self>, output_port_id: u32, input_port_id: u32) {
+        // Reject self-loops: don't connect a node's output to its own input
+        if let Some(ref graph) = self.rust().graph {
+            let out_node = graph.get_port(output_port_id).map(|p| p.node_id);
+            let in_node = graph.get_port(input_port_id).map(|p| p.node_id);
+            if out_node.is_some() && out_node == in_node {
+                log::warn!(
+                    "Rejected self-loop connect: ports {} and {} belong to the same node",
+                    output_port_id, input_port_id
+                );
+                return;
+            }
+        }
+
         if let Some(ref tx) = self.rust().cmd_tx {
             log::info!("Connect request: {} -> {}", output_port_id, input_port_id);
             let _ = tx.send(PwCommand::Connect {
@@ -1051,6 +1064,11 @@ impl qobject::AppController {
             log::warn!("insert_node_on_link: node {} not found", node_id);
             return;
         };
+
+        if link.output_node_id == node_id || link.input_node_id == node_id {
+            log::warn!("insert_node_on_link: node {} is already part of link {}, ignoring", node_id, link_id);
+            return;
+        }
 
         if node.node_type != Some(NodeType::Lv2Plugin) {
             log::warn!("insert_node_on_link: node {} is not an LV2 plugin, ignoring", node_id);
@@ -2305,6 +2323,18 @@ fn clock_ticks_per_sec() -> f64 {
     })
 }
 
+fn num_cpus() -> f64 {
+    static CPUS: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *CPUS.get_or_init(|| {
+        unsafe extern "C" {
+            fn sysconf(name: i32) -> i64;
+        }
+        const _SC_NPROCESSORS_ONLN: i32 = 84;
+        let val = unsafe { sysconf(_SC_NPROCESSORS_ONLN) };
+        if val > 0 { val as f64 } else { 1.0 }
+    })
+}
+
 fn measure_cpu_usage(
     prev_ticks: &mut u64,
     prev_time: &mut Option<Instant>,
@@ -2320,7 +2350,7 @@ fn measure_cpu_usage(
         if elapsed > 0.0 {
             let delta_ticks = current_ticks.saturating_sub(*prev_ticks) as f64;
             let cpu_secs = delta_ticks / clock_ticks_per_sec();
-            let sample = (cpu_secs / elapsed) * 100.0;
+            let sample = (cpu_secs / elapsed / num_cpus()) * 100.0;
             *avg = *avg * (1.0 - ALPHA) + sample * ALPHA;
         }
     }
