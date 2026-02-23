@@ -4,7 +4,7 @@ import QtQuick.Layouts
 
 Dialog {
     id: pluginBrowser
-    title: "Add LV2 Plugin"
+    title: "Add Plugin"
     width: 700
     height: 500
     modal: true
@@ -160,6 +160,25 @@ Dialog {
                                 font.pointSize: 10
                                 elide: Text.ElideRight
                                 Layout.fillWidth: true
+                            }
+                            Label {
+                                visible: plugin.format !== undefined
+                                text: plugin.format || ""
+                                font.pointSize: 7
+                                color: plugin.format === "CLAP" ? "#60e0a0" : plugin.format === "VST3" ? "#e0a060" : "#60a0e0"
+                                padding: 2
+                                background: Rectangle {
+                                    color: plugin.format === "CLAP" ? "#1a3a2a" : plugin.format === "VST3" ? "#3a2a1a" : "#1a3a5a"
+                                    radius: 3
+                                }
+                            }
+                            Label {
+                                visible: plugin.hasUi === false
+                                text: "no UI"
+                                font.pointSize: 7
+                                color: "#a0a060"
+                                padding: 2
+                                background: Rectangle { color: "#3a3a1a"; radius: 3 }
                             }
                             Label {
                                 visible: !plugin.compatible

@@ -1,3 +1,8 @@
+//! PipeWire filter node that wraps a VST3 plugin instance.
+//!
+//! This is structurally identical to `clap::filter::ClapFilterNode`, but uses
+//! `Vst3PluginInstance` for the process callback.
+
 use std::cell::RefCell;
 use std::ffi::CString;
 use std::rc::Rc;
@@ -5,10 +10,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use pipewire::core::CoreRc;
 
-use super::host::Lv2PluginInstance;
-use super::types::*;
+use super::host::Vst3PluginInstance;
+use crate::plugin::types::PluginInstanceId;
 
-pub struct Lv2FilterNode {
+pub struct Vst3FilterNode {
     filter: *mut pipewire::sys::pw_filter,
     _hook: Box<libspa::sys::spa_hook>,
     _events: Box<pipewire::sys::pw_filter_events>,
@@ -23,7 +28,6 @@ pub struct FilterConfig {
     pub display_name: String,
     pub audio_inputs: usize,
     pub audio_outputs: usize,
-    pub sample_rate: u32,
 }
 
 #[repr(C)]
@@ -32,7 +36,7 @@ struct PortData {
 }
 
 struct FilterData {
-    instance_ptr: *mut Lv2PluginInstance,
+    instance_ptr: *mut Vst3PluginInstance,
     filter: *mut pipewire::sys::pw_filter,
     instance_id: PluginInstanceId,
     display_name: String,
@@ -47,15 +51,15 @@ struct FilterData {
 
 unsafe impl Send for FilterData {}
 
-impl Lv2FilterNode {
+impl Vst3FilterNode {
     pub fn new(
         core: &CoreRc,
         config: FilterConfig,
-        plugin_instance: Rc<RefCell<Lv2PluginInstance>>,
+        plugin_instance: Rc<RefCell<Vst3PluginInstance>>,
         event_tx: std::sync::mpsc::Sender<crate::pipewire::PwEvent>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let c_name = CString::new(config.display_name.as_str())
-            .unwrap_or_else(|_| CString::new("LV2 Plugin").unwrap());
+            .unwrap_or_else(|_| CString::new("VST3 Plugin").unwrap());
         let instance_id_str = config.instance_id.to_string();
 
         let props = unsafe {
@@ -128,6 +132,7 @@ impl Lv2FilterNode {
             );
         }
 
+        // Add audio input ports
         for i in 0..config.audio_inputs {
             let port_name = CString::new(format!("input_{}", i)).unwrap();
             let port_props = unsafe {
@@ -150,9 +155,7 @@ impl Lv2FilterNode {
                     0,
                 )
             };
-            if port_data.is_null() {
-                log::error!("Failed to add input port {}", i);
-            } else {
+            if !port_data.is_null() {
                 let pd = port_data as *mut PortData;
                 unsafe {
                     (*pd).index = i as u32;
@@ -161,6 +164,7 @@ impl Lv2FilterNode {
             }
         }
 
+        // Add audio output ports
         for i in 0..config.audio_outputs {
             let port_name = CString::new(format!("output_{}", i)).unwrap();
             let port_props = unsafe {
@@ -183,9 +187,7 @@ impl Lv2FilterNode {
                     0,
                 )
             };
-            if port_data.is_null() {
-                log::error!("Failed to add output port {}", i);
-            } else {
+            if !port_data.is_null() {
                 let pd = port_data as *mut PortData;
                 unsafe {
                     (*pd).index = i as u32;
@@ -206,7 +208,7 @@ impl Lv2FilterNode {
         }
 
         log::info!(
-            "LV2 filter node created: {} (instance {}, {} in / {} out)",
+            "VST3 filter node created: {} (instance {}, {} in / {} out)",
             config.display_name,
             config.instance_id,
             config.audio_inputs,
@@ -223,31 +225,9 @@ impl Lv2FilterNode {
             display_name: config.display_name,
         })
     }
-
-    pub fn node_id(&self) -> u32 {
-        if self.filter.is_null() {
-            return 0;
-        }
-        unsafe { pipewire::sys::pw_filter_get_node_id(self.filter) }
-    }
-
-    pub fn disconnect(&mut self) {
-        if !self._user_data.is_null() {
-            unsafe {
-                (*self._user_data)
-                    .shutting_down
-                    .store(true, Ordering::SeqCst);
-            }
-        }
-        if !self.filter.is_null() {
-            unsafe {
-                pipewire::sys::pw_filter_disconnect(self.filter);
-            }
-        }
-    }
 }
 
-impl Drop for Lv2FilterNode {
+impl Drop for Vst3FilterNode {
     fn drop(&mut self) {
         if !self._user_data.is_null() {
             unsafe {
@@ -282,23 +262,8 @@ unsafe extern "C" fn on_state_changed(
     data: *mut std::ffi::c_void,
     _old: pipewire::sys::pw_filter_state,
     state: pipewire::sys::pw_filter_state,
-    error: *const std::os::raw::c_char,
+    _error: *const std::os::raw::c_char,
 ) {
-    let state_str = match state {
-        pipewire::sys::pw_filter_state_PW_FILTER_STATE_ERROR => "Error",
-        pipewire::sys::pw_filter_state_PW_FILTER_STATE_UNCONNECTED => "Unconnected",
-        pipewire::sys::pw_filter_state_PW_FILTER_STATE_CONNECTING => "Connecting",
-        pipewire::sys::pw_filter_state_PW_FILTER_STATE_PAUSED => "Paused",
-        pipewire::sys::pw_filter_state_PW_FILTER_STATE_STREAMING => "Streaming",
-        _ => "Unknown",
-    };
-    if !error.is_null() {
-        let err = unsafe { std::ffi::CStr::from_ptr(error) }.to_string_lossy();
-        log::info!("LV2 filter state: {} ({})", state_str, err);
-    } else {
-        log::info!("LV2 filter state: {}", state_str);
-    }
-
     if state == pipewire::sys::pw_filter_state_PW_FILTER_STATE_PAUSED
         || state == pipewire::sys::pw_filter_state_PW_FILTER_STATE_STREAMING
     {
@@ -307,7 +272,7 @@ unsafe extern "C" fn on_state_changed(
             let node_id = unsafe { pipewire::sys::pw_filter_get_node_id(fd.filter) };
             if node_id != 0 && node_id != u32::MAX {
                 log::info!(
-                    "LV2 filter node ID resolved: instance {} -> pw_node {}",
+                    "VST3 filter node ID resolved: instance {} -> pw_node {}",
                     fd.instance_id,
                     node_id
                 );
@@ -347,10 +312,7 @@ unsafe extern "C" fn on_process(
 
         let inst = &mut *fd.instance_ptr;
 
-        let n_in = fd.n_audio_inputs;
-        let n_out = fd.n_audio_outputs;
-
-        let mut input_bufs: Vec<&[f32]> = Vec::with_capacity(n_in);
+        let mut input_bufs: Vec<&[f32]> = Vec::with_capacity(fd.n_audio_inputs);
         for port_ptr in &fd.input_port_ptrs {
             let buf = pipewire::sys::pw_filter_get_dsp_buffer(*port_ptr, n_samples);
             if !buf.is_null() {
@@ -364,7 +326,7 @@ unsafe extern "C" fn on_process(
             }
         }
 
-        let mut output_bufs: Vec<&mut [f32]> = Vec::with_capacity(n_out);
+        let mut output_bufs: Vec<&mut [f32]> = Vec::with_capacity(fd.n_audio_outputs);
         for port_ptr in &fd.output_port_ptrs {
             let buf = pipewire::sys::pw_filter_get_dsp_buffer(*port_ptr, n_samples);
             if !buf.is_null() {
@@ -375,7 +337,7 @@ unsafe extern "C" fn on_process(
             }
         }
 
-        if output_bufs.len() < n_out {
+        if output_bufs.len() < fd.n_audio_outputs {
             return;
         }
 

@@ -1,6 +1,6 @@
 use parking_lot::RwLock;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use super::types::*;
@@ -208,6 +208,56 @@ impl GraphState {
             .values()
             .find(|l| l.output_port_id == output_port_id && l.input_port_id == input_port_id)
             .cloned()
+    }
+
+    /// For a bridge node, returns the distinct port groups and a display name
+    /// derived from the port.alias of the first port in each group.
+    /// Returns a map from port_group -> device display name.
+    pub fn get_bridge_port_groups(&self, node_id: ObjectId) -> BTreeMap<String, String> {
+        let ports = self.ports.read();
+        let mut groups: BTreeMap<String, String> = BTreeMap::new();
+        for port in ports.values() {
+            if port.node_id != node_id {
+                continue;
+            }
+            if let Some(ref group) = port.port_group {
+                if groups.contains_key(group) {
+                    continue;
+                }
+                // Derive device name from port.alias: "DeviceName:PortName" -> "DeviceName"
+                let device_name = if let Some(ref alias) = port.port_alias {
+                    if let Some(colon_pos) = alias.find(':') {
+                        alias[..colon_pos].to_string()
+                    } else {
+                        alias.clone()
+                    }
+                } else {
+                    group.clone()
+                };
+                groups.insert(group.clone(), device_name);
+            }
+        }
+        groups
+    }
+
+    /// Get ports for a bridge node filtered to a specific port group.
+    pub fn get_ports_for_bridge_group(&self, node_id: ObjectId, group: &str) -> Vec<Port> {
+        let mut ports: Vec<Port> = self
+            .ports
+            .read()
+            .values()
+            .filter(|p| {
+                p.node_id == node_id
+                    && p.port_group.as_deref() == Some(group)
+            })
+            .cloned()
+            .collect();
+        ports.sort_by(|a, b| {
+            a.direction
+                .cmp(&b.direction)
+                .then_with(|| natural_cmp(&a.name, &b.name))
+        });
+        ports
     }
 
     pub fn cleanup_node(&self, node_id: ObjectId) {

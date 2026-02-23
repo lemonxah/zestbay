@@ -112,7 +112,7 @@ pub fn node_type_label(nt: NodeType) -> &'static str {
         NodeType::StreamOutput => "App Out",
         NodeType::StreamInput => "App In",
         NodeType::Duplex => "Duplex",
-        NodeType::Lv2Plugin => "Plugin",
+        NodeType::Plugin => "Plugin",
     }
 }
 

@@ -16,21 +16,21 @@ pub enum NodeType {
     StreamOutput,
     StreamInput,
     Duplex,
-    Lv2Plugin,
+    Plugin,
 }
 
 impl NodeType {
     pub fn has_outputs(&self) -> bool {
         matches!(
             self,
-            NodeType::Source | NodeType::StreamOutput | NodeType::Duplex | NodeType::Lv2Plugin
+            NodeType::Source | NodeType::StreamOutput | NodeType::Duplex | NodeType::Plugin
         )
     }
 
     pub fn has_inputs(&self) -> bool {
         matches!(
             self,
-            NodeType::Sink | NodeType::StreamInput | NodeType::Duplex | NodeType::Lv2Plugin
+            NodeType::Sink | NodeType::StreamInput | NodeType::Duplex | NodeType::Plugin
         )
     }
 }
@@ -50,6 +50,7 @@ pub struct Node {
     pub node_type: Option<NodeType>,
     pub is_virtual: bool,
     pub is_jack: bool,
+    pub is_bridge: bool,
     pub ready: bool,
 }
 
@@ -74,6 +75,8 @@ pub struct Port {
     pub media_type: Option<MediaType>,
     pub channel: Option<String>,
     pub physical_index: Option<u32>,
+    pub port_group: Option<String>,
+    pub port_alias: Option<String>,
 }
 
 impl Port {
@@ -112,7 +115,7 @@ pub enum PwEvent {
     LinkRemoved(ObjectId),
     Error(String),
     BatchComplete,
-    Lv2(Lv2Event),
+    Plugin(PluginEvent),
 }
 
 #[allow(dead_code)]
@@ -129,6 +132,8 @@ pub enum PwCommand {
         plugin_uri: String,
         instance_id: u64,
         display_name: String,
+        /// "LV2", "CLAP", or "VST3"
+        format: String,
     },
     RemovePlugin {
         instance_id: u64,
@@ -151,7 +156,7 @@ pub enum PwCommand {
 }
 
 #[derive(Debug, Clone)]
-pub enum Lv2Event {
+pub enum PluginEvent {
     PluginAdded {
         instance_id: u64,
         pw_node_id: ObjectId,
@@ -177,3 +182,6 @@ pub enum Lv2Event {
         fatal: bool,
     },
 }
+
+/// Backward-compatible alias for `PluginEvent`.
+pub type Lv2Event = PluginEvent;

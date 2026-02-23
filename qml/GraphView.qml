@@ -154,7 +154,7 @@ Item {
                 if (key && savedLayout[key]) {
                     var saved = savedLayout[key]
                     nodePositions[n.id] = { x: saved[0], y: saved[1] }
-                } else if (n.type === "Lv2Plugin" && pendingPluginPosition) {
+                } else if (n.type === "Plugin" && pendingPluginPosition) {
                     nodePositions[n.id] = { x: pendingPluginPosition.x, y: pendingPluginPosition.y }
                     pendingPluginPosition = null
                     persistLayout()
@@ -225,12 +225,12 @@ Item {
         }
 
         MenuSeparator {
-            visible: contextNode && contextNode.type === "Lv2Plugin"
+            visible: contextNode && contextNode.type === "Plugin"
         }
 
         MenuItem {
             text: "Rename..."
-            visible: contextNode !== null && contextNode.type === "Lv2Plugin"
+            visible: contextNode !== null && contextNode.type === "Plugin"
             height: visible ? implicitHeight : 0
             onTriggered: {
                 renameField.text = contextNode ? contextNode.name : ""
@@ -240,7 +240,7 @@ Item {
 
         MenuItem {
             text: "Open UI..."
-            visible: contextNode !== null && contextNode.type === "Lv2Plugin"
+            visible: contextNode !== null && contextNode.type === "Plugin" && contextNode.pluginHasUi !== false
             height: visible ? implicitHeight : 0
             onTriggered: {
                 if (contextNodeId >= 0)
@@ -249,12 +249,12 @@ Item {
         }
 
         MenuSeparator {
-            visible: contextNode !== null && contextNode.type === "Lv2Plugin"
+            visible: contextNode !== null && contextNode.type === "Plugin"
         }
 
         MenuItem {
             text: "Remove Plugin"
-            visible: contextNode !== null && contextNode.type === "Lv2Plugin"
+            visible: contextNode !== null && contextNode.type === "Plugin"
             height: visible ? implicitHeight : 0
             onTriggered: {
                 if (contextNodeId >= 0)
@@ -374,7 +374,7 @@ Item {
         if (type === "StreamOutput") return colStreamOut
         if (type === "StreamInput") return colStreamIn
         if (type === "Duplex") return colDuplex
-        if (type === "Lv2Plugin") return colLv2
+        if (type === "Plugin") return colLv2
         return colDefault
     }
 
@@ -384,7 +384,7 @@ Item {
         var outputs = ports.filter(function(p) { return p.direction === "Output" }).length
         var rows = Math.max(inputs, outputs, 1)
         var h = headerHeight + nodePadding * 2 + rows * (portHeight + portSpacing)
-        if (node.type === "Lv2Plugin")
+        if (node.type === "Plugin")
             h += buttonRowHeight + nodePadding
         return h
     }
@@ -492,7 +492,7 @@ Item {
         var c = toCanvas(sx, sy)
         for (var i = nodes.length - 1; i >= 0; i--) {
             var n = nodes[i]
-            if (n.type !== "Lv2Plugin") continue
+            if (n.type !== "Plugin") continue
             if (n.layoutKey && hiddenNodes[n.layoutKey]) continue
             var pos = nodePositions[n.id]
             if (!pos) continue
@@ -503,7 +503,7 @@ Item {
             var btnW = (nw - nodePadding * 3) / 2
             if (c.x >= pos.x + nodePadding && c.x <= pos.x + nodePadding + btnW &&
                 c.y >= btnY && c.y <= btnY + btnH) {
-                return { button: "ui", nodeId: n.id }
+                return { button: "ui", nodeId: n.id, hasUi: n.pluginHasUi !== false }
             }
             if (c.x >= pos.x + nodePadding * 2 + btnW && c.x <= pos.x + nodePadding * 2 + btnW * 2 &&
                 c.y >= btnY && c.y <= btnY + btnH) {
@@ -609,6 +609,27 @@ Item {
                 ctx.textBaseline = "middle"
                 ctx.fillText(truncate(node.name, 30), x + nw / 2, y + headerHeight / 2)
 
+                // Draw format badge (LV2/CLAP/VST3) for plugin nodes
+                if (node.type === "Plugin" && node.pluginFormat) {
+                    var fmt = node.pluginFormat
+                    var badgeColor = fmt === "CLAP" ? "#1a3a2a" : fmt === "VST3" ? "#3a2a1a" : "#1a3a5a"
+                    var badgeTextCol = fmt === "CLAP" ? "#60e0a0" : fmt === "VST3" ? "#e0a060" : "#60a0e0"
+                    ctx.font = "bold 8px sans-serif"
+                    var badgeW = ctx.measureText(fmt).width + 6
+                    var badgeH = 12
+                    var badgeX = x + nw - badgeW - 4
+                    var badgeY = y + 3
+                    var br = 2
+                    ctx.fillStyle = badgeColor
+                    ctx.strokeStyle = badgeColor
+                    ctx.lineWidth = 1
+                    roundRect(ctx, badgeX, badgeY, badgeW, badgeH, br)
+                    ctx.fillStyle = badgeTextCol
+                    ctx.textAlign = "center"
+                    ctx.textBaseline = "middle"
+                    ctx.fillText(fmt, badgeX + badgeW / 2, badgeY + badgeH / 2)
+                }
+
                 var portBaseY = y + headerHeight + nodePadding
                 for (var pi = 0; pi < inputs.length; pi++) {
                     var py = portBaseY + pi * (portHeight + portSpacing) + portHeight / 2
@@ -672,22 +693,25 @@ Item {
                     newPortPositions[outputs[po].id] = { cx: pxo, cy: pyo }
                 }
 
-                if (node.type === "Lv2Plugin") {
+                if (node.type === "Plugin") {
                     var btnY = y + h - buttonRowHeight - nodePadding
                     var btnW = (nw - nodePadding * 3) / 2
                     var btnH = buttonRowHeight
+                    var hasUi = node.pluginHasUi !== false
 
-                    ctx.fillStyle = "#373737"
-                    ctx.strokeStyle = "#5a5a5a"
+                    // UI button — disabled (dimmed) when plugin has no UI
+                    ctx.fillStyle = hasUi ? "#373737" : "#2a2a2a"
+                    ctx.strokeStyle = hasUi ? "#5a5a5a" : "#3a3a3a"
                     ctx.lineWidth = 1
                     roundRect(ctx, x + nodePadding, btnY, btnW, btnH, 3)
 
-                    ctx.fillStyle = "#ffffff"
+                    ctx.fillStyle = hasUi ? "#ffffff" : "#555555"
                     ctx.font = "10px sans-serif"
                     ctx.textAlign = "center"
                     ctx.textBaseline = "middle"
                     ctx.fillText("UI", x + nodePadding + btnW / 2, btnY + btnH / 2)
 
+                    // Params button — always active
                     ctx.fillStyle = "#373737"
                     ctx.strokeStyle = "#5a5a5a"
                     ctx.lineWidth = 1
@@ -756,7 +780,7 @@ Item {
             if (mouse.button === Qt.LeftButton) {
                 var btnHit = findButtonAt(mouse.x, mouse.y)
                 if (btnHit) {
-                    if (btnHit.button === "ui") {
+                    if (btnHit.button === "ui" && btnHit.hasUi) {
                         controller.open_plugin_ui(btnHit.nodeId)
                     } else if (btnHit.button === "params") {
                         graphView.openPluginParams(btnHit.nodeId)
@@ -921,7 +945,7 @@ Item {
                     var linkUnder = findLinkUnderNode(dragNodeId)
                     if (linkUnder >= 0) {
                         var draggedNode = findNodeData(dragNodeId)
-                        if (draggedNode && draggedNode.type === "Lv2Plugin") {
+                        if (draggedNode && draggedNode.type === "Plugin") {
                             controller.insert_node_on_link(linkUnder, dragNodeId)
                         }
                     }

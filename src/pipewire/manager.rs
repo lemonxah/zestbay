@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -27,6 +28,7 @@ enum InternalOp {
         plugin_uri: String,
         instance_id: u64,
         display_name: String,
+        format: String,
     },
     RemovePlugin {
         instance_id: u64,
@@ -79,6 +81,28 @@ fn run_pipewire_thread(
     let core = context.connect_rc(None)?;
     let registry = core.get_registry_rc()?;
 
+    // Detect the PipeWire graph sample rate from core properties.
+    // Default to 48000; updated when the core info callback fires.
+    let pw_sample_rate = Rc::new(AtomicU32::new(48000));
+
+    let _core_listener = {
+        let pw_sample_rate = pw_sample_rate.clone();
+        core.add_listener_local()
+            .info(move |info| {
+                if let Some(props) = info.props() {
+                    if let Some(rate_str) = props.get("default.clock.rate") {
+                        if let Ok(rate) = rate_str.parse::<u32>() {
+                            let prev = pw_sample_rate.swap(rate, Ordering::Relaxed);
+                            if prev != rate {
+                                log::info!("PipeWire sample rate detected: {} Hz", rate);
+                            }
+                        }
+                    }
+                }
+            })
+            .register()
+    };
+
     let pending_ops: Rc<RefCell<Vec<InternalOp>>> = Rc::new(RefCell::new(Vec::new()));
     let last_op_time: Rc<RefCell<Instant>> =
         Rc::new(RefCell::new(Instant::now() - Duration::from_secs(1)));
@@ -100,12 +124,12 @@ fn run_pipewire_thread(
                     match global.type_ {
                         ObjectType::Node => {
                             if let Some(node) = parse_node(global) {
-                                if node.node_type == Some(NodeType::Lv2Plugin)
+                                if node.node_type == Some(NodeType::Plugin)
                                     && let Some(props) = global.props.as_ref()
-                                    && let Some(id_str) = props.get("zestbay.lv2.instance_id")
+                                    && let Some(id_str) = props.get("zestbay.plugin.instance_id")
                                     && let Ok(instance_id) = id_str.parse::<u64>()
                                 {
-                                    let _ = event_tx.send(PwEvent::Lv2(Lv2Event::PluginAdded {
+                                    let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginAdded {
                                         instance_id,
                                         pw_node_id: global.id,
                                         display_name: node.display_name().to_string(),
@@ -193,9 +217,23 @@ fn run_pipewire_thread(
         Rc::new(RefCell::new(HashMap::new()));
     let urid_mapper = Arc::new(crate::lv2::urid::UridMapper::new());
 
+    let clap_instances: Rc<
+        RefCell<HashMap<u64, std::rc::Rc<RefCell<crate::clap::host::ClapPluginInstance>>>>,
+    > = Rc::new(RefCell::new(HashMap::new()));
+    let clap_filters: Rc<RefCell<HashMap<u64, crate::clap::filter::ClapFilterNode>>> =
+        Rc::new(RefCell::new(HashMap::new()));
+
+    let vst3_instances: Rc<
+        RefCell<HashMap<u64, std::rc::Rc<RefCell<crate::vst3::host::Vst3PluginInstance>>>>,
+    > = Rc::new(RefCell::new(HashMap::new()));
+    let vst3_filters: Rc<RefCell<HashMap<u64, crate::vst3::filter::Vst3FilterNode>>> =
+        Rc::new(RefCell::new(HashMap::new()));
+
     let _cmd_receiver = pw_cmd_rx.attach(mainloop.loop_(), {
         let pending_ops = pending_ops.clone();
         let lv2_instances = lv2_instances.clone();
+        let clap_instances = clap_instances.clone();
+        let vst3_instances = vst3_instances.clone();
         let event_tx = event_tx.clone();
 
         move |cmd| {
@@ -207,7 +245,21 @@ fn run_pipewire_thread(
                 } => {
                     if let Some(instance) = lv2_instances.borrow().get(&instance_id) {
                         instance.borrow_mut().set_parameter(port_index, value);
-                        let _ = event_tx.send(PwEvent::Lv2(Lv2Event::ParameterChanged {
+                        let _ = event_tx.send(PwEvent::Plugin(PluginEvent::ParameterChanged {
+                            instance_id,
+                            port_index,
+                            value,
+                        }));
+                    } else if let Some(instance) = clap_instances.borrow().get(&instance_id) {
+                        instance.borrow_mut().set_parameter(port_index, value);
+                        let _ = event_tx.send(PwEvent::Plugin(PluginEvent::ParameterChanged {
+                            instance_id,
+                            port_index,
+                            value,
+                        }));
+                    } else if let Some(instance) = vst3_instances.borrow().get(&instance_id) {
+                        instance.borrow_mut().set_parameter(port_index, value);
+                        let _ = event_tx.send(PwEvent::Plugin(PluginEvent::ParameterChanged {
                             instance_id,
                             port_index,
                             value,
@@ -219,6 +271,10 @@ fn run_pipewire_thread(
                     bypassed,
                 } => {
                     if let Some(instance) = lv2_instances.borrow().get(&instance_id) {
+                        instance.borrow_mut().bypassed = bypassed;
+                    } else if let Some(instance) = clap_instances.borrow().get(&instance_id) {
+                        instance.borrow_mut().bypassed = bypassed;
+                    } else if let Some(instance) = vst3_instances.borrow().get(&instance_id) {
                         instance.borrow_mut().bypassed = bypassed;
                     }
                 }
@@ -236,10 +292,12 @@ fn run_pipewire_thread(
                             plugin_uri,
                             instance_id,
                             display_name,
+                            format,
                         } => InternalOp::AddPlugin {
                             plugin_uri,
                             instance_id,
                             display_name,
+                            format,
                         },
                         PwCommand::RemovePlugin { instance_id } => {
                             InternalOp::RemovePlugin { instance_id }
@@ -325,7 +383,12 @@ fn run_pipewire_thread(
         let cmd_tx = cmd_tx.clone();
         let lv2_instances = lv2_instances.clone();
         let lv2_filters = lv2_filters.clone();
+        let clap_instances = clap_instances.clone();
+        let clap_filters = clap_filters.clone();
+        let vst3_instances = vst3_instances.clone();
+        let vst3_filters = vst3_filters.clone();
         let urid_mapper = urid_mapper.clone();
+        let pw_sample_rate = pw_sample_rate.clone();
 
         move |op| match op {
             InternalOp::Connect {
@@ -341,23 +404,42 @@ fn run_pipewire_thread(
                 plugin_uri,
                 instance_id,
                 display_name,
+                format,
             } => {
+                let sample_rate = pw_sample_rate.load(Ordering::Relaxed) as f64;
                 handle_add_plugin(
                     &core,
                     &event_tx,
                     &lv2_instances,
                     &lv2_filters,
+                    &clap_instances,
+                    &clap_filters,
+                    &vst3_instances,
+                    &vst3_filters,
                     &urid_mapper,
                     &plugin_uri,
                     instance_id,
                     &display_name,
+                    &format,
+                    sample_rate,
                 );
             }
             InternalOp::RemovePlugin { instance_id } => {
-                crate::lv2::ui::close_plugin_ui(instance_id);
-                lv2_filters.borrow_mut().remove(&instance_id);
-                lv2_instances.borrow_mut().remove(&instance_id);
-                let _ = event_tx.send(PwEvent::Lv2(Lv2Event::PluginRemoved { instance_id }));
+                // Try LV2 first, then CLAP, then VST3
+                if lv2_instances.borrow().contains_key(&instance_id) {
+                    crate::lv2::ui::close_plugin_ui(instance_id);
+                    lv2_filters.borrow_mut().remove(&instance_id);
+                    lv2_instances.borrow_mut().remove(&instance_id);
+                } else if clap_instances.borrow().contains_key(&instance_id) {
+                    crate::clap::ui::close_clap_gui(instance_id, &event_tx);
+                    clap_filters.borrow_mut().remove(&instance_id);
+                    clap_instances.borrow_mut().remove(&instance_id);
+                } else {
+                    crate::vst3::ui::close_vst3_gui(instance_id, &event_tx);
+                    vst3_filters.borrow_mut().remove(&instance_id);
+                    vst3_instances.borrow_mut().remove(&instance_id);
+                }
+                let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginRemoved { instance_id }));
             }
 
             InternalOp::OpenPluginUI { instance_id } => {
@@ -380,11 +462,41 @@ fn run_pipewire_thread(
                         port_updates,
                         urid_mapper.clone(),
                     );
+                } else if let Some(instance) = clap_instances.borrow().get(&instance_id) {
+                    let inst = instance.borrow();
+                    let plugin_ptr = inst.plugin_ptr();
+                    let display_name = inst.display_name.clone();
+                    drop(inst);
+                    unsafe {
+                        crate::clap::ui::open_clap_gui(
+                            plugin_ptr,
+                            instance_id,
+                            &display_name,
+                            &event_tx,
+                            &cmd_tx,
+                        );
+                    }
+                } else if let Some(instance) = vst3_instances.borrow().get(&instance_id) {
+                    let inst = instance.borrow();
+                    let controller_ptr = inst.controller_ptr();
+                    let display_name = inst.display_name.clone();
+                    drop(inst);
+                    unsafe {
+                        crate::vst3::ui::open_vst3_gui(
+                            controller_ptr,
+                            instance_id,
+                            &display_name,
+                            &event_tx,
+                            &cmd_tx,
+                        );
+                    }
                 }
             }
 
             InternalOp::ClosePluginUI { instance_id } => {
                 crate::lv2::ui::close_plugin_ui(instance_id);
+                crate::clap::ui::close_clap_gui(instance_id, &event_tx);
+                crate::vst3::ui::close_vst3_gui(instance_id, &event_tx);
             }
         }
     });
@@ -428,10 +540,10 @@ fn parse_node(global: &GlobalObject<&DictRef>) -> Option<Node> {
         None
     };
 
-    let is_lv2 = props.get("zestbay.lv2.instance_id").is_some();
+    let is_plugin = props.get("zestbay.plugin.instance_id").is_some();
 
-    let node_type = if is_lv2 {
-        Some(NodeType::Lv2Plugin)
+    let node_type = if is_plugin {
+        Some(NodeType::Plugin)
     } else if effective_class.contains("Sink") {
         Some(NodeType::Sink)
     } else if effective_class.contains("Source") && !effective_class.contains("Stream") {
@@ -454,6 +566,7 @@ fn parse_node(global: &GlobalObject<&DictRef>) -> Option<Node> {
         .get("client.api")
         .map(|v| v == "jack")
         .unwrap_or(false);
+    let is_bridge = effective_class.contains("Bridge");
 
     Some(Node {
         id: global.id,
@@ -463,6 +576,7 @@ fn parse_node(global: &GlobalObject<&DictRef>) -> Option<Node> {
         node_type,
         is_virtual,
         is_jack,
+        is_bridge,
         ready: true,
     })
 }
@@ -533,6 +647,8 @@ fn parse_port(global: &GlobalObject<&DictRef>, graph: &Arc<GraphState>) -> Optio
     };
 
     let media_type = graph.get_node(node_id).and_then(|n| n.media_type);
+    let port_group = props.get("port.group").map(String::from);
+    let port_alias = props.get("port.alias").map(String::from);
 
     Some(Port {
         id: global.id,
@@ -542,6 +658,8 @@ fn parse_port(global: &GlobalObject<&DictRef>, graph: &Arc<GraphState>) -> Optio
         media_type,
         channel,
         physical_index,
+        port_group,
+        port_alias,
     })
 }
 
@@ -573,10 +691,62 @@ fn handle_add_plugin(
     event_tx: &Sender<PwEvent>,
     lv2_instances: &GlobalSharedMutHashMap<u64, crate::lv2::host::Lv2PluginInstance>,
     lv2_filters: &Rc<RefCell<HashMap<u64, crate::lv2::filter::Lv2FilterNode>>>,
+    clap_instances: &GlobalSharedMutHashMap<u64, crate::clap::host::ClapPluginInstance>,
+    clap_filters: &Rc<RefCell<HashMap<u64, crate::clap::filter::ClapFilterNode>>>,
+    vst3_instances: &GlobalSharedMutHashMap<u64, crate::vst3::host::Vst3PluginInstance>,
+    vst3_filters: &Rc<RefCell<HashMap<u64, crate::vst3::filter::Vst3FilterNode>>>,
     urid_mapper: &Arc<crate::lv2::urid::UridMapper>,
     plugin_uri: &str,
     instance_id: u64,
     display_name: &str,
+    format: &str,
+    sample_rate: f64,
+) {
+    match format {
+        "CLAP" => handle_add_clap_plugin(
+            core,
+            event_tx,
+            clap_instances,
+            clap_filters,
+            plugin_uri,
+            instance_id,
+            display_name,
+            sample_rate,
+        ),
+        "VST3" => handle_add_vst3_plugin(
+            core,
+            event_tx,
+            vst3_instances,
+            vst3_filters,
+            plugin_uri,
+            instance_id,
+            display_name,
+            sample_rate,
+        ),
+        _ => handle_add_lv2_plugin(
+            core,
+            event_tx,
+            lv2_instances,
+            lv2_filters,
+            urid_mapper,
+            plugin_uri,
+            instance_id,
+            display_name,
+            sample_rate,
+        ),
+    }
+}
+
+fn handle_add_lv2_plugin(
+    core: &pipewire::core::CoreRc,
+    event_tx: &Sender<PwEvent>,
+    lv2_instances: &GlobalSharedMutHashMap<u64, crate::lv2::host::Lv2PluginInstance>,
+    lv2_filters: &Rc<RefCell<HashMap<u64, crate::lv2::filter::Lv2FilterNode>>>,
+    urid_mapper: &Arc<crate::lv2::urid::UridMapper>,
+    plugin_uri: &str,
+    instance_id: u64,
+    display_name: &str,
+    sample_rate: f64,
 ) {
     let world = lilv::World::with_load_all();
     let uri_node = world.new_uri(plugin_uri);
@@ -589,7 +759,7 @@ fn handle_add_plugin(
     let lilv_plugin = match lilv_plugin {
         Some(p) => p,
         None => {
-            let _ = event_tx.send(PwEvent::Lv2(Lv2Event::PluginError {
+            let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
                 instance_id: Some(instance_id),
                 message: format!("Plugin not found: {}", plugin_uri),
                 fatal: true,
@@ -601,7 +771,7 @@ fn handle_add_plugin(
     let plugin_info = match build_plugin_info(&world, &lilv_plugin) {
         Some(info) => info,
         None => {
-            let _ = event_tx.send(PwEvent::Lv2(Lv2Event::PluginError {
+            let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
                 instance_id: Some(instance_id),
                 message: format!("Failed to parse plugin info: {}", plugin_uri),
                 fatal: true,
@@ -609,8 +779,6 @@ fn handle_add_plugin(
             return;
         }
     };
-
-    let sample_rate = 48000.0;
 
     let lv2_instance = unsafe {
         crate::lv2::host::Lv2PluginInstance::new(
@@ -625,7 +793,7 @@ fn handle_add_plugin(
     let lv2_instance = match lv2_instance {
         Some(inst) => inst,
         None => {
-            let _ = event_tx.send(PwEvent::Lv2(Lv2Event::PluginError {
+            let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
                 instance_id: Some(instance_id),
                 message: format!("Failed to instantiate plugin: {}", plugin_uri),
                 fatal: true,
@@ -660,9 +828,185 @@ fn handle_add_plugin(
             );
         }
         Err(e) => {
-            let _ = event_tx.send(PwEvent::Lv2(Lv2Event::PluginError {
+            let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
                 instance_id: Some(instance_id),
                 message: format!("Failed to create filter node: {}", e),
+                fatal: true,
+            }));
+        }
+    }
+}
+
+fn handle_add_clap_plugin(
+    core: &pipewire::core::CoreRc,
+    event_tx: &Sender<PwEvent>,
+    clap_instances: &GlobalSharedMutHashMap<u64, crate::clap::host::ClapPluginInstance>,
+    clap_filters: &Rc<RefCell<HashMap<u64, crate::clap::filter::ClapFilterNode>>>,
+    plugin_uri: &str,
+    instance_id: u64,
+    display_name: &str,
+    sample_rate: f64,
+) {
+    // For CLAP, the plugin_uri is the CLAP plugin-id string.
+    // We need to find the library_path from the plugin catalog.
+    // The PluginManager lives on the UI thread, so we pass the library_path
+    // via an alternative mechanism.  For now, we scan CLAP directories
+    // to find the plugin.
+    let all_clap = crate::clap::scanner::scan_plugins();
+    let clap_info = all_clap.iter().find(|p| p.uri == plugin_uri);
+
+    let clap_info = match clap_info {
+        Some(info) => info,
+        None => {
+            let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
+                instance_id: Some(instance_id),
+                message: format!("CLAP plugin not found: {}", plugin_uri),
+                fatal: true,
+            }));
+            return;
+        }
+    };
+
+    let library_path = &clap_info.library_path;
+
+    let clap_instance = unsafe {
+        crate::clap::host::ClapPluginInstance::new(
+            library_path,
+            plugin_uri,
+            clap_info,
+            sample_rate,
+        )
+    };
+
+    let clap_instance = match clap_instance {
+        Some(inst) => inst,
+        None => {
+            let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
+                instance_id: Some(instance_id),
+                message: format!("Failed to instantiate CLAP plugin: {}", plugin_uri),
+                fatal: true,
+            }));
+            return;
+        }
+    };
+
+    let audio_inputs = clap_instance.audio_input_channels;
+    let audio_outputs = clap_instance.audio_output_channels;
+    let instance_rc = std::rc::Rc::new(RefCell::new(clap_instance));
+
+    let filter_config = crate::clap::filter::FilterConfig {
+        instance_id,
+        display_name: display_name.to_string(),
+        audio_inputs,
+        audio_outputs,
+    };
+
+    match crate::clap::filter::ClapFilterNode::new(
+        core,
+        filter_config,
+        instance_rc.clone(),
+        event_tx.clone(),
+    ) {
+        Ok(filter) => {
+            clap_instances.borrow_mut().insert(instance_id, instance_rc);
+            clap_filters.borrow_mut().insert(instance_id, filter);
+
+            log::info!(
+                "CLAP filter created for instance {}, waiting for node ID...",
+                instance_id
+            );
+        }
+        Err(e) => {
+            let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
+                instance_id: Some(instance_id),
+                message: format!("Failed to create CLAP filter node: {}", e),
+                fatal: true,
+            }));
+        }
+    }
+}
+
+fn handle_add_vst3_plugin(
+    core: &pipewire::core::CoreRc,
+    event_tx: &Sender<PwEvent>,
+    vst3_instances: &GlobalSharedMutHashMap<u64, crate::vst3::host::Vst3PluginInstance>,
+    vst3_filters: &Rc<RefCell<HashMap<u64, crate::vst3::filter::Vst3FilterNode>>>,
+    plugin_uri: &str,
+    instance_id: u64,
+    display_name: &str,
+    sample_rate: f64,
+) {
+    // For VST3, the plugin_uri is the hex-encoded TUID.
+    // We need to find the library_path (bundle path) from the plugin catalog.
+    // Re-scan to find the plugin info (same approach as CLAP).
+    let all_vst3 = crate::vst3::scanner::scan_plugins();
+    let vst3_info = all_vst3.iter().find(|p| p.uri == plugin_uri);
+
+    let vst3_info = match vst3_info {
+        Some(info) => info,
+        None => {
+            let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
+                instance_id: Some(instance_id),
+                message: format!("VST3 plugin not found: {}", plugin_uri),
+                fatal: true,
+            }));
+            return;
+        }
+    };
+
+    let library_path = &vst3_info.library_path;
+
+    let vst3_instance = unsafe {
+        crate::vst3::host::Vst3PluginInstance::new(
+            library_path,
+            plugin_uri,
+            vst3_info,
+            sample_rate,
+        )
+    };
+
+    let vst3_instance = match vst3_instance {
+        Some(inst) => inst,
+        None => {
+            let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
+                instance_id: Some(instance_id),
+                message: format!("Failed to instantiate VST3 plugin: {}", plugin_uri),
+                fatal: true,
+            }));
+            return;
+        }
+    };
+
+    let audio_inputs = vst3_instance.audio_input_channels;
+    let audio_outputs = vst3_instance.audio_output_channels;
+    let instance_rc = std::rc::Rc::new(RefCell::new(vst3_instance));
+
+    let filter_config = crate::vst3::filter::FilterConfig {
+        instance_id,
+        display_name: display_name.to_string(),
+        audio_inputs,
+        audio_outputs,
+    };
+
+    match crate::vst3::filter::Vst3FilterNode::new(
+        core,
+        filter_config,
+        instance_rc.clone(),
+        event_tx.clone(),
+    ) {
+        Ok(filter) => {
+            vst3_instances.borrow_mut().insert(instance_id, instance_rc);
+            vst3_filters.borrow_mut().insert(instance_id, filter);
+
+            log::info!(
+                "VST3 filter created for instance {}, waiting for node ID...",
+                instance_id
+            );
+        }
+        Err(e) => {
+            let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
+                instance_id: Some(instance_id),
+                message: format!("Failed to create VST3 filter node: {}", e),
                 fatal: true,
             }));
         }
@@ -758,6 +1102,9 @@ fn build_plugin_info(
         control_outputs,
         required_features: Vec::new(),
         compatible: true,
+        has_ui: false,
+        format: crate::lv2::PluginFormat::Lv2,
+        library_path: String::new(),
     })
 }
 

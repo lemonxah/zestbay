@@ -6,7 +6,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::lv2::urid::UridMapper;
-use crate::pipewire::{Lv2Event, PwCommand, PwEvent};
+use crate::pipewire::{PluginEvent, PwCommand, PwEvent};
 
 #[link(name = "suil-0")]
 unsafe extern "C" {
@@ -217,40 +217,64 @@ struct UiTimerData {
     ui_handle: *mut c_void,
     closing: Arc<std::sync::atomic::AtomicBool>,
     instance_id: u64,
+    /// Set to true when the timer callback returns 0 (auto-removed by GLib),
+    /// so handle_close_window knows not to call g_source_remove again.
+    timer_removed: std::sync::atomic::AtomicBool,
+    /// Cached control output values for change detection — only forward to
+    /// the UI when a value actually changed, to avoid overwhelming plugin UIs.
+    prev_control_outputs: Vec<f32>,
+    /// Cached control input values for change detection.
+    prev_control_inputs: Vec<f32>,
 }
 
 unsafe extern "C" fn ui_timer_callback(data: *mut c_void) -> c_int {
     if data.is_null() {
         return 0;
     }
-    let td = unsafe { &*(data as *const UiTimerData) };
+    // SAFETY: we need mutable access for the prev_control caches
+    let td = unsafe { &mut *(data as *mut UiTimerData) };
     if td.suil_instance.is_null() || td.closing.load(std::sync::atomic::Ordering::Acquire) {
+        td.timer_removed.store(true, std::sync::atomic::Ordering::Release);
         return 0;
     }
 
-    for slot in td.port_updates.control_outputs.iter() {
+    // Forward control outputs to UI, but only when the value changed
+    for (i, slot) in td.port_updates.control_outputs.iter().enumerate() {
         let val = slot.value.load();
-        unsafe {
-            suil_instance_port_event(
-                td.suil_instance,
-                slot.port_index as c_uint,
-                std::mem::size_of::<f32>() as c_uint,
-                0,
-                &val as *const f32 as *const c_void,
-            );
+        let prev = td.prev_control_outputs.get(i).copied().unwrap_or(f32::NAN);
+        if val.to_bits() != prev.to_bits() {
+            if i < td.prev_control_outputs.len() {
+                td.prev_control_outputs[i] = val;
+            }
+            unsafe {
+                suil_instance_port_event(
+                    td.suil_instance,
+                    slot.port_index as c_uint,
+                    std::mem::size_of::<f32>() as c_uint,
+                    0,
+                    &val as *const f32 as *const c_void,
+                );
+            }
         }
     }
 
-    for slot in td.port_updates.control_inputs.iter() {
+    // Forward control inputs to UI, but only when the value changed
+    for (i, slot) in td.port_updates.control_inputs.iter().enumerate() {
         let val = slot.value.load();
-        unsafe {
-            suil_instance_port_event(
-                td.suil_instance,
-                slot.port_index as c_uint,
-                std::mem::size_of::<f32>() as c_uint,
-                0,
-                &val as *const f32 as *const c_void,
-            );
+        let prev = td.prev_control_inputs.get(i).copied().unwrap_or(f32::NAN);
+        if val.to_bits() != prev.to_bits() {
+            if i < td.prev_control_inputs.len() {
+                td.prev_control_inputs[i] = val;
+            }
+            unsafe {
+                suil_instance_port_event(
+                    td.suil_instance,
+                    slot.port_index as c_uint,
+                    std::mem::size_of::<f32>() as c_uint,
+                    0,
+                    &val as *const f32 as *const c_void,
+                );
+            }
         }
     }
 
@@ -300,6 +324,7 @@ unsafe extern "C" fn ui_timer_callback(data: *mut c_void) -> c_int {
     {
         let result = unsafe { idle_fn(td.ui_handle) };
         if result != 0 {
+            td.timer_removed.store(true, std::sync::atomic::Ordering::Release);
             let instance_id = td.instance_id;
             let close_data = Box::into_raw(Box::new(instance_id));
             unsafe {
@@ -508,7 +533,7 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
         Some(p) => p,
         None => {
             log::error!("Plugin not found: {}", req.plugin_uri);
-            let _ = req.event_tx.send(PwEvent::Lv2(Lv2Event::PluginError {
+            let _ = req.event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
                 instance_id: Some(instance_id),
                 message: format!("Plugin not found: {}", req.plugin_uri),
                 fatal: false,
@@ -586,7 +611,7 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
         Some(f) => f,
         None => {
             log::error!("No supported UI found for plugin: {}", req.plugin_uri);
-            let _ = req.event_tx.send(PwEvent::Lv2(Lv2Event::PluginError {
+            let _ = req.event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
                 instance_id: Some(instance_id),
                 message: format!("No supported UI found for plugin: {}", req.plugin_uri),
                 fatal: false,
@@ -696,7 +721,7 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
                 "Failed to create suil instance for instance {}",
                 instance_id
             );
-            let _ = req.event_tx.send(PwEvent::Lv2(Lv2Event::PluginError {
+            let _ = req.event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
                 instance_id: Some(instance_id),
                 message: "Failed to create suil instance".into(),
                 fatal: false,
@@ -778,6 +803,8 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
             flags.insert(instance_id, closing_flag.clone());
         }
 
+        let n_control_outputs = req.port_updates.control_outputs.len();
+        let n_control_inputs = req.port_updates.control_inputs.len();
         let timer_data = Box::into_raw(Box::new(UiTimerData {
             suil_instance: instance,
             port_updates: req.port_updates,
@@ -786,6 +813,10 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
             ui_handle,
             closing: closing_flag,
             instance_id,
+            timer_removed: std::sync::atomic::AtomicBool::new(false),
+            // Initialize with NaN so the first tick always sends all values
+            prev_control_outputs: vec![f32::NAN; n_control_outputs],
+            prev_control_inputs: vec![f32::NAN; n_control_inputs],
         }));
         let timer_source_id = g_timeout_add(33, Some(ui_timer_callback), timer_data as *mut c_void);
 
@@ -808,7 +839,7 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
 
         let _ = req
             .event_tx
-            .send(PwEvent::Lv2(Lv2Event::PluginUiOpened { instance_id }));
+            .send(PwEvent::Plugin(PluginEvent::PluginUiOpened { instance_id }));
     }
 }
 
@@ -823,7 +854,11 @@ fn handle_close_window(state: &mut GtkThreadState, instance_id: u64, destroyed_b
             .closing
             .store(true, std::sync::atomic::Ordering::Release);
 
-        g_source_remove(ws.timer_source_id);
+        // Only remove the timer source if it hasn't already been auto-removed
+        // by GLib (when the callback returned 0).
+        if !(*ws.timer_data).timer_removed.load(std::sync::atomic::Ordering::Acquire) {
+            g_source_remove(ws.timer_source_id);
+        }
 
         if !destroyed_by_gtk {
             gtk_widget_destroy(ws.gtk_window);
@@ -850,7 +885,7 @@ fn handle_close_window(state: &mut GtkThreadState, instance_id: u64, destroyed_b
     );
 
     if let Some(ref event_tx) = state.event_tx_cache {
-        let _ = event_tx.send(PwEvent::Lv2(Lv2Event::PluginUiClosed { instance_id }));
+        let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginUiClosed { instance_id }));
     }
 }
 

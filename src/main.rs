@@ -1,8 +1,11 @@
+mod clap;
 mod lv2;
 mod patchbay;
 mod pipewire;
+mod plugin;
 mod tray;
 mod ui;
+mod vst3;
 
 use cxx_qt::casting::Upcast;
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QQmlEngine, QString, QUrl};

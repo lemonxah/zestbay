@@ -13,6 +13,16 @@ fn next_instance_id() -> PluginInstanceId {
     NEXT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Clamp a value to [min, max], tolerating NaN bounds (some LV2 plugins
+/// have unset min/max ranges).  If min or max is NaN, the value is returned
+/// as-is.
+fn safe_clamp(value: f32, min: f32, max: f32) -> f32 {
+    if min.is_nan() || max.is_nan() {
+        return value;
+    }
+    value.clamp(min, max)
+}
+
 const ATOM_BUF_SIZE: usize = 65536;
 
 fn init_atom_sequence(buf: &mut [u8], capacity: usize, is_output: bool, sequence_type_urid: u32) {
@@ -326,7 +336,7 @@ impl Lv2PluginInstance {
             .iter_mut()
             .find(|cp| cp.index == port_index)
         {
-            let clamped = value.clamp(cp.min, cp.max);
+            let clamped = safe_clamp(value, cp.min, cp.max);
             cp.value = clamped;
 
             if let Some(slot) = self
@@ -347,7 +357,7 @@ impl Lv2PluginInstance {
             .position(|cp| cp.symbol == symbol)
         {
             let cp = &mut self.control_inputs[idx];
-            let clamped = value.clamp(cp.min, cp.max);
+            let clamped = safe_clamp(value, cp.min, cp.max);
             cp.value = clamped;
             let port_index = cp.index;
 
@@ -382,6 +392,7 @@ impl Lv2PluginInstance {
             id: self.id,
             stable_id: String::new(),
             plugin_uri: self.plugin_uri.clone(),
+            format: PluginFormat::Lv2,
             display_name: self.display_name.clone(),
             pw_node_id,
             parameters: self.get_parameters(),

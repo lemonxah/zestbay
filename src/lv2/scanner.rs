@@ -16,6 +16,14 @@ pub fn scan_plugins_with_world(world: &World) -> Vec<Lv2PluginInfo> {
     let control_class = world.new_uri("http://lv2plug.in/ns/lv2core#ControlPort");
     let atom_class = world.new_uri("http://lv2plug.in/ns/ext/atom#AtomPort");
 
+    // UI class URIs for detecting native UI availability
+    let ui_gtk3 = world.new_uri("http://lv2plug.in/ns/extensions/ui#Gtk3UI");
+    let ui_gtk2 = world.new_uri("http://lv2plug.in/ns/extensions/ui#GtkUI");
+    let ui_gtk4 = world.new_uri("http://lv2plug.in/ns/extensions/ui#Gtk4UI");
+    let ui_x11 = world.new_uri("http://lv2plug.in/ns/extensions/ui#X11UI");
+    let ui_qt5 = world.new_uri("http://lv2plug.in/ns/extensions/ui#Qt5UI");
+    let ui_classes = [&ui_gtk3, &ui_x11, &ui_qt5, &ui_gtk2, &ui_gtk4];
+
     let mut plugins = Vec::new();
 
     for plugin in world.plugins().iter() {
@@ -116,6 +124,15 @@ pub fn scan_plugins_with_world(world: &World) -> Vec<Lv2PluginInfo> {
             .iter()
             .all(|req| PROVIDED_FEATURES.iter().any(|provided| provided == req));
 
+        // Check if the plugin provides a supported native UI
+        let has_ui = plugin
+            .uis()
+            .map(|uis| {
+                uis.iter()
+                    .any(|ui| ui_classes.iter().any(|cls| ui.is_a(cls)))
+            })
+            .unwrap_or(false);
+
         plugins.push(Lv2PluginInfo {
             uri,
             name,
@@ -128,6 +145,9 @@ pub fn scan_plugins_with_world(world: &World) -> Vec<Lv2PluginInfo> {
             control_outputs,
             required_features,
             compatible,
+            has_ui,
+            format: PluginFormat::Lv2,
+            library_path: String::new(),
         });
     }
 
