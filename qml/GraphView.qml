@@ -55,6 +55,10 @@ Item {
     property var pendingPluginPosition: null
     property string defaultNodeKey: ""
 
+    // Snap guides: drawn while dragging
+    readonly property real snapThreshold: 5  // pixels in canvas space
+    property var activeSnapLines: []  // [{axis:"x"|"y", pos: number}]
+
     readonly property real minNodeWidth: 180
     readonly property real maxNodeWidth: 400
     property var nodeWidths: ({})
@@ -243,6 +247,109 @@ Item {
             }
             if (!overlaps) break
         }
+    }
+
+    // Snap a node's position to nearby nodes.
+    // Snaps left-edge to left-edge, and top/bottom edges within snapThreshold.
+    // Returns { x, y, lines } where lines are the snap guide descriptors.
+    function computeSnap(nodeId, rawX, rawY, skipIds) {
+        var w = getNodeWidth(nodeId) || minNodeWidth
+        var node = findNodeData(nodeId)
+        var h = node ? calculateNodeHeight(node) : 80
+        var snappedX = rawX
+        var snappedY = rawY
+        var lines = []
+        var bestDx = snapThreshold + 1
+        var bestDy = snapThreshold + 1
+
+        for (var i = 0; i < nodes.length; i++) {
+            var other = nodes[i]
+            if (other.id === nodeId) continue
+            if (skipIds && skipIds[other.id]) continue
+            if (other.layoutKey && hiddenNodes[other.layoutKey]) continue
+            var opos = nodePositions[other.id]
+            if (!opos) continue
+            var ow = getNodeWidth(other.id) || minNodeWidth
+            var oh = calculateNodeHeight(other)
+
+            // --- X axis: left-edge to left-edge ---
+            var dxLeft = Math.abs(rawX - opos.x)
+            if (dxLeft < bestDx) {
+                bestDx = dxLeft
+                snappedX = opos.x
+            }
+
+            // --- Y axis: top-to-top, top-to-bottom, bottom-to-top, bottom-to-bottom ---
+            // dragged top vs other top
+            var dyTT = Math.abs(rawY - opos.y)
+            if (dyTT < bestDy) {
+                bestDy = dyTT
+                snappedY = opos.y
+            }
+            // dragged top vs other bottom
+            var dyTB = Math.abs(rawY - (opos.y + oh))
+            if (dyTB < bestDy) {
+                bestDy = dyTB
+                snappedY = opos.y + oh
+            }
+            // dragged bottom vs other top
+            var dyBT = Math.abs((rawY + h) - opos.y)
+            if (dyBT < bestDy) {
+                bestDy = dyBT
+                snappedY = opos.y - h
+            }
+            // dragged bottom vs other bottom
+            var dyBB = Math.abs((rawY + h) - (opos.y + oh))
+            if (dyBB < bestDy) {
+                bestDy = dyBB
+                snappedY = opos.y + oh - h
+            }
+        }
+
+        // Only apply snap if within threshold
+        if (bestDx > snapThreshold) snappedX = rawX
+        if (bestDy > snapThreshold) snappedY = rawY
+
+        // Build guide lines for active snaps
+        if (snappedX !== rawX) {
+            lines.push({ axis: "x", pos: snappedX })
+        }
+        if (snappedY !== rawY) {
+            // Determine which y edge snapped
+            var snapYEdge = snappedY  // top edge
+            // Check if bottom edge was closer
+            if (Math.abs((rawY + h) - (snappedY + h)) > 0.01) {
+                // It could be a bottom-edge snap; figure out the guide line y
+                // The snappedY was set such that the matching edge aligns.
+                // We need to find which other-node edge we matched:
+                for (var j = 0; j < nodes.length; j++) {
+                    var o2 = nodes[j]
+                    if (o2.id === nodeId) continue
+                    if (skipIds && skipIds[o2.id]) continue
+                    if (o2.layoutKey && hiddenNodes[o2.layoutKey]) continue
+                    var op2 = nodePositions[o2.id]
+                    if (!op2) continue
+                    var oh2 = calculateNodeHeight(o2)
+                    // Check which edge the snap aligned to
+                    if (Math.abs(snappedY - op2.y) < 0.5) {
+                        lines.push({ axis: "y", pos: op2.y }); break
+                    }
+                    if (Math.abs(snappedY - (op2.y + oh2)) < 0.5) {
+                        lines.push({ axis: "y", pos: op2.y + oh2 }); break
+                    }
+                    if (Math.abs((snappedY + h) - op2.y) < 0.5) {
+                        lines.push({ axis: "y", pos: op2.y }); break
+                    }
+                    if (Math.abs((snappedY + h) - (op2.y + oh2)) < 0.5) {
+                        lines.push({ axis: "y", pos: op2.y + oh2 }); break
+                    }
+                }
+            } else {
+                lines.push({ axis: "y", pos: snappedY })
+            }
+        }
+
+        return { x: snappedX, y: snappedY, lines: lines }
     }
 
     function persistLayout() {
@@ -851,6 +958,32 @@ Item {
                 ctx.stroke()
             }
 
+            // Draw snap guide lines
+            if (activeSnapLines.length > 0) {
+                ctx.save()
+                ctx.setLineDash([4 / zoom, 4 / zoom])
+                ctx.strokeStyle = "#00AAFF"
+                ctx.lineWidth = 1 / zoom
+                // Compute visible canvas bounds
+                var visLeft = -panX / zoom
+                var visTop = -panY / zoom
+                var visRight = (canvas.width - panX) / zoom
+                var visBottom = (canvas.height - panY) / zoom
+                for (var si = 0; si < activeSnapLines.length; si++) {
+                    var sl = activeSnapLines[si]
+                    ctx.beginPath()
+                    if (sl.axis === "x") {
+                        ctx.moveTo(sl.pos, visTop)
+                        ctx.lineTo(sl.pos, visBottom)
+                    } else {
+                        ctx.moveTo(visLeft, sl.pos)
+                        ctx.lineTo(visRight, sl.pos)
+                    }
+                    ctx.stroke()
+                }
+                ctx.restore()
+            }
+
             ctx.restore()
             portPositions = newPortPositions
         }
@@ -1005,6 +1138,8 @@ Item {
                 var deltaY = cg.y - groupDragLastY
                 groupDragLastX = cg.x
                 groupDragLastY = cg.y
+
+                // Move all selected nodes by delta
                 for (var nid in selectedNodes) {
                     if (selectedNodes[nid] && nodePositions[nid]) {
                         nodePositions[nid] = {
@@ -1013,15 +1148,52 @@ Item {
                         }
                     }
                 }
+
+                // Snap only while Shift is held
+                if (mouse.modifiers & Qt.ShiftModifier) {
+                    var refId = -1
+                    for (var rid in selectedNodes) {
+                        if (selectedNodes[rid]) { refId = parseInt(rid); break }
+                    }
+                    if (refId >= 0 && nodePositions[refId]) {
+                        var rawGX = nodePositions[refId].x
+                        var rawGY = nodePositions[refId].y
+                        var gsnap = computeSnap(refId, rawGX, rawGY, selectedNodes)
+                        var sdx = gsnap.x - rawGX
+                        var sdy = gsnap.y - rawGY
+                        if (sdx !== 0 || sdy !== 0) {
+                            for (var sid in selectedNodes) {
+                                if (selectedNodes[sid] && nodePositions[sid]) {
+                                    nodePositions[sid] = {
+                                        x: nodePositions[sid].x + sdx,
+                                        y: nodePositions[sid].y + sdy
+                                    }
+                                }
+                            }
+                        }
+                        activeSnapLines = gsnap.lines
+                    } else {
+                        activeSnapLines = []
+                    }
+                } else {
+                    activeSnapLines = []
+                }
+
                 canvas.requestPaint()
                 return
             }
 
             if (dragNodeId >= 0 && (mouse.buttons & Qt.LeftButton)) {
                 var c = toCanvas(mouse.x, mouse.y)
-                nodePositions[dragNodeId] = {
-                    x: c.x - dragOffsetX,
-                    y: c.y - dragOffsetY
+                var rawX = c.x - dragOffsetX
+                var rawY = c.y - dragOffsetY
+                if (mouse.modifiers & Qt.ShiftModifier) {
+                    var snap = computeSnap(dragNodeId, rawX, rawY, null)
+                    nodePositions[dragNodeId] = { x: snap.x, y: snap.y }
+                    activeSnapLines = snap.lines
+                } else {
+                    nodePositions[dragNodeId] = { x: rawX, y: rawY }
+                    activeSnapLines = []
                 }
                 canvas.requestPaint()
                 return
@@ -1042,6 +1214,7 @@ Item {
         }
 
         onReleased: (mouse) => {
+            activeSnapLines = []
             if (mouse.button === Qt.LeftButton) {
                 if (connectFromPortId >= 0) {
                     var targetId = findPortAt(mouse.x, mouse.y)
