@@ -2,13 +2,14 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-Dialog {
+ApplicationWindow {
     id: pluginBrowser
     title: "Add Plugin"
     width: 700
     height: 500
-    modal: true
-    standardButtons: Dialog.Close
+    minimumWidth: 450
+    minimumHeight: 350
+    visible: false
 
     required property var controller
 
@@ -73,9 +74,16 @@ Dialog {
         filteredPlugins = result
     }
 
-    onOpened: loadPlugins()
+    function open() {
+        loadPlugins()
+        visible = true
+        raise()
+        requestActivate()
+    }
 
-    contentItem: ColumnLayout {
+    ColumnLayout {
+        anchors.fill: parent
+        anchors.margins: 16
         spacing: 8
 
         RowLayout {
@@ -223,7 +231,7 @@ Dialog {
                         onClicked: {
                             if (plugin.uri) {
                                 controller.add_plugin(plugin.uri)
-                                pluginBrowser.close()
+                                pluginBrowser.visible = false
                             }
                         }
                     }
@@ -235,6 +243,17 @@ Dialog {
                     hoverEnabled: true
                     acceptedButtons: Qt.NoButton
                 }
+            }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+
+            Item { Layout.fillWidth: true }
+
+            Button {
+                text: "Close"
+                onClicked: pluginBrowser.visible = false
             }
         }
     }

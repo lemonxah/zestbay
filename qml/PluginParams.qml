@@ -2,13 +2,14 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-Dialog {
+ApplicationWindow {
     id: pluginParams
     title: pluginName ? pluginName + " - Parameters" : "Plugin Parameters"
     width: 420
     height: 500
-    modal: false
-    standardButtons: Dialog.Close
+    minimumWidth: 320
+    minimumHeight: 300
+    visible: false
 
     required property var controller
 
@@ -30,7 +31,9 @@ Dialog {
     function openForNode(nodeId) {
         pluginNodeId = nodeId
         loadParams()
-        open()
+        visible = true
+        raise()
+        requestActivate()
     }
 
     function loadParams() {
@@ -48,7 +51,9 @@ Dialog {
         }
     }
 
-    contentItem: ColumnLayout {
+    ColumnLayout {
+        anchors.fill: parent
+        anchors.margins: 16
         spacing: 8
 
         RowLayout {
@@ -169,6 +174,23 @@ Dialog {
                         }
                     }
                 }
+            }
+        }
+
+        Rectangle {
+            Layout.fillWidth: true
+            height: 1
+            color: "#3c3c3c"
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+
+            Item { Layout.fillWidth: true }
+
+            Button {
+                text: "Close"
+                onClicked: pluginParams.visible = false
             }
         }
     }

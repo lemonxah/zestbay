@@ -304,25 +304,21 @@ ApplicationWindow {
     PluginBrowser {
         id: pluginBrowser
         controller: controller
-        anchors.centerIn: parent
     }
 
     PluginParams {
         id: pluginParamsDialog
         controller: controller
-        anchors.centerIn: parent
     }
 
     RuleEditor {
         id: ruleEditor
         controller: controller
-        anchors.centerIn: parent
     }
 
     PluginManager {
         id: pluginManagerDialog
         controller: controller
-        anchors.centerIn: parent
     }
 
     Preferences {
@@ -336,6 +332,5 @@ ApplicationWindow {
     CpuOverlay {
         id: cpuOverlayDialog
         controller: controller
-        anchors.centerIn: parent
     }
 }

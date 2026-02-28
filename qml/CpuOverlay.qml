@@ -2,19 +2,27 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-Dialog {
+ApplicationWindow {
     id: cpuOverlay
     title: "CPU Usage"
     width: 680
     height: 520
-    modal: true
-    standardButtons: Dialog.Close
+    minimumWidth: 500
+    minimumHeight: 400
+    visible: false
 
     required property var controller
 
     property var cpuData: []
     property var pluginData: []
     property real totalPluginDsp: 0.0
+
+    function open() {
+        refresh()
+        visible = true
+        raise()
+        requestActivate()
+    }
 
     function refresh() {
         try {
@@ -35,8 +43,6 @@ Dialog {
         bigGraph.requestPaint()
     }
 
-    onOpened: refresh()
-
     Timer {
         id: overlayRefreshTimer
         interval: 500
@@ -45,7 +51,9 @@ Dialog {
         onTriggered: refresh()
     }
 
-    contentItem: ColumnLayout {
+    ColumnLayout {
+        anchors.fill: parent
+        anchors.margins: 16
         spacing: 10
 
         // Header with current CPU value

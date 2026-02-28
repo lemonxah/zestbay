@@ -2,13 +2,14 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-Dialog {
+ApplicationWindow {
     id: ruleEditor
     title: "Patchbay Rules"
     width: 720
     height: 520
-    modal: true
-    standardButtons: Dialog.Close
+    minimumWidth: 500
+    minimumHeight: 400
+    visible: false
 
     required property var controller
 
@@ -29,7 +30,12 @@ Dialog {
         }
     }
 
-    onOpened: loadRules()
+    function open() {
+        loadRules()
+        visible = true
+        raise()
+        requestActivate()
+    }
 
     Connections {
         target: controller
@@ -40,7 +46,9 @@ Dialog {
         }
     }
 
-    contentItem: ColumnLayout {
+    ColumnLayout {
+        anchors.fill: parent
+        anchors.margins: 16
         spacing: 8
 
         RowLayout {
@@ -330,6 +338,11 @@ Dialog {
 
                     ToolTip.visible: hovered
                     ToolTip.text: "Replace all rules with current connections"
+                }
+
+                Button {
+                    text: "Close"
+                    onClicked: ruleEditor.visible = false
                 }
             }
 
