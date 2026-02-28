@@ -166,6 +166,13 @@ ApplicationWindow {
                 onTriggered: controller.snapshot_rules()
             }
         }
+        Menu {
+            title: "&Help"
+            Action {
+                text: "&About ZestBay..."
+                onTriggered: aboutDialog.open()
+            }
+        }
     }
 
     footer: ToolBar {
@@ -331,6 +338,11 @@ ApplicationWindow {
 
     CpuOverlay {
         id: cpuOverlayDialog
+        controller: controller
+    }
+
+    About {
+        id: aboutDialog
         controller: controller
     }
 }

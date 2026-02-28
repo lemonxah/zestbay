@@ -163,6 +163,12 @@ pub mod qobject {
 
         #[qinvokable]
         fn set_default_node(self: Pin<&mut Self>, layout_key: QString);
+
+        #[qinvokable]
+        fn get_app_version(self: Pin<&mut Self>) -> QString;
+
+        #[qinvokable]
+        fn get_qt_version(self: Pin<&mut Self>) -> QString;
     }
 
     unsafe extern "RustQt" {
@@ -2276,6 +2282,14 @@ impl qobject::AppController {
                 patchbay.set_default_target(Some(display_name));
             }
         }
+    }
+
+    pub fn get_app_version(self: Pin<&mut Self>) -> QString {
+        QString::from(env!("CARGO_PKG_VERSION"))
+    }
+
+    pub fn get_qt_version(self: Pin<&mut Self>) -> QString {
+        QString::from(env!("QT_VERSION"))
     }
 
     pub fn set_window_visible(self: Pin<&mut Self>, visible: bool) {
