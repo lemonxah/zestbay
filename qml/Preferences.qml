@@ -10,6 +10,7 @@ ApplicationWindow {
     minimumWidth: 400
     minimumHeight: 400
     visible: false
+    color: Theme.windowBg
 
     required property var controller
 
@@ -54,7 +55,7 @@ ApplicationWindow {
         Rectangle {
             Layout.fillWidth: true
             height: 1
-            color: "#3c3c3c"
+            color: Theme.separator
         }
 
         Item {
@@ -116,7 +117,7 @@ ApplicationWindow {
                 Rectangle {
                     Layout.fillWidth: true
                     height: 1
-                    color: "#2c2c2c"
+                    color: Theme.separatorLight
                 }
 
                 RowLayout {
@@ -149,7 +150,7 @@ ApplicationWindow {
                 Rectangle {
                     Layout.fillWidth: true
                     height: 1
-                    color: "#2c2c2c"
+                    color: Theme.separatorLight
                 }
 
                 RowLayout {
@@ -182,7 +183,7 @@ ApplicationWindow {
                 Rectangle {
                     Layout.fillWidth: true
                     height: 1
-                    color: "#3c3c3c"
+                    color: Theme.separator
                 }
 
                 Label {
@@ -261,7 +262,7 @@ ApplicationWindow {
                 Rectangle {
                     Layout.fillWidth: true
                     height: 1
-                    color: "#2c2c2c"
+                    color: Theme.separatorLight
                 }
 
                 ColumnLayout {
@@ -325,7 +326,7 @@ ApplicationWindow {
                 Rectangle {
                     Layout.fillWidth: true
                     height: 1
-                    color: "#2c2c2c"
+                    color: Theme.separatorLight
                 }
 
                 ColumnLayout {
@@ -389,7 +390,7 @@ ApplicationWindow {
                 Rectangle {
                     Layout.fillWidth: true
                     height: 1
-                    color: "#2c2c2c"
+                    color: Theme.separatorLight
                 }
 
                 ColumnLayout {
@@ -453,7 +454,7 @@ ApplicationWindow {
                 Rectangle {
                     Layout.fillWidth: true
                     height: 1
-                    color: "#2c2c2c"
+                    color: Theme.separatorLight
                 }
 
                 ColumnLayout {
@@ -517,7 +518,7 @@ ApplicationWindow {
                 Rectangle {
                     Layout.fillWidth: true
                     height: 1
-                    color: "#2c2c2c"
+                    color: Theme.separatorLight
                 }
 
                 ColumnLayout {
@@ -593,7 +594,7 @@ ApplicationWindow {
                 visible: !prefsFlickable.atYEnd
                 gradient: Gradient {
                     GradientStop { position: 0.0; color: "transparent" }
-                    GradientStop { position: 1.0; color: "#1e1e1e" }
+                    GradientStop { position: 1.0; color: Theme.fadeColor }
                 }
 
                 Label {
@@ -614,7 +615,7 @@ ApplicationWindow {
                 height: 24
                 visible: !prefsFlickable.atYBeginning
                 gradient: Gradient {
-                    GradientStop { position: 0.0; color: "#1e1e1e" }
+                    GradientStop { position: 0.0; color: Theme.fadeColor }
                     GradientStop { position: 1.0; color: "transparent" }
                 }
             }
@@ -623,7 +624,7 @@ ApplicationWindow {
         Rectangle {
             Layout.fillWidth: true
             height: 1
-            color: "#3c3c3c"
+            color: Theme.separator
         }
 
         RowLayout {

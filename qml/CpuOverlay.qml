@@ -10,6 +10,7 @@ ApplicationWindow {
     minimumWidth: 500
     minimumHeight: 400
     visible: false
+    color: Theme.windowBg
 
     required property var controller
 
@@ -92,7 +93,7 @@ ApplicationWindow {
                 var h = height
 
                 // Background
-                ctx.fillStyle = "#1a1a1a"
+                ctx.fillStyle = "" + Theme.chartBg
                 ctx.fillRect(0, 0, w, h)
 
                 // Grid lines with labels
@@ -101,11 +102,11 @@ ApplicationWindow {
                 ctx.textBaseline = "middle"
 
                 var gridLines = [
-                    { pct: 5,  color: "#334455" },
-                    { pct: 10, color: "#445566" },
-                    { pct: 25, color: "#4466AA" },
-                    { pct: 50, color: "#AA4444" },
-                    { pct: 75, color: "#4466AA" },
+                    { pct: 5,  color: "" + Theme.chartGridLight },
+                    { pct: 10, color: "" + Theme.chartGrid25 },
+                    { pct: 25, color: "" + Theme.chartGrid25 },
+                    { pct: 50, color: "" + Theme.chartGrid50 },
+                    { pct: 75, color: "" + Theme.chartGrid25 },
                 ]
 
                 for (var gi = 0; gi < gridLines.length; gi++) {
@@ -142,11 +143,11 @@ ApplicationWindow {
                     ctx.lineTo(graphX + (d.length - 1) * step, h)
                     ctx.lineTo(graphX, h)
                     ctx.closePath()
-                    ctx.fillStyle = "rgba(76, 175, 80, 0.15)"
+                    ctx.fillStyle = "" + Theme.chartFill
                     ctx.fill()
 
                     // Line
-                    ctx.strokeStyle = "#4CAF50"
+                    ctx.strokeStyle = "" + Theme.chartLine
                     ctx.lineWidth = 1.5
                     ctx.beginPath()
                     for (var k = 0; k < d.length; k++) {
@@ -159,7 +160,7 @@ ApplicationWindow {
                 }
 
                 // Border
-                ctx.strokeStyle = "#333333"
+                ctx.strokeStyle = "" + Theme.chartBorder
                 ctx.lineWidth = 1
                 ctx.strokeRect(0, 0, w, h)
             }
@@ -169,7 +170,7 @@ ApplicationWindow {
         Rectangle {
             Layout.fillWidth: true
             height: 1
-            color: "#3c3c3c"
+            color: Theme.separator
         }
 
         // Plugin CPU section header
@@ -251,7 +252,7 @@ ApplicationWindow {
                 required property int index
                 width: pluginCpuList.width - 12
                 height: 32
-                color: index % 2 === 0 ? "#2a2a2a" : "#252525"
+                color: index % 2 === 0 ? Theme.rowEven : Theme.rowOdd
                 radius: 3
 
                 property var plugin: pluginData[index] || {}
@@ -275,9 +276,9 @@ ApplicationWindow {
                         font.pointSize: 10
                         Layout.preferredWidth: 70
                         horizontalAlignment: Text.AlignRight
-                        color: (plugin.dspPercent || 0) > 50 ? "#FF4444"
-                             : (plugin.dspPercent || 0) > 20 ? "#FFAA44"
-                             : "#88CC88"
+                        color: (plugin.dspPercent || 0) > 50 ? Theme.dspHigh
+                             : (plugin.dspPercent || 0) > 20 ? Theme.dspMedium
+                             : Theme.dspLow
                     }
 
                     Label {
@@ -303,9 +304,9 @@ ApplicationWindow {
                         Layout.preferredWidth: 100
                         Layout.preferredHeight: 12
                         Layout.alignment: Qt.AlignVCenter
-                        color: "#1a1a1a"
+                        color: Theme.chartBg
                         radius: 2
-                        border.color: "#333333"
+                        border.color: Theme.chartBorder
                         border.width: 1
 
                         Rectangle {
@@ -315,9 +316,9 @@ ApplicationWindow {
                             anchors.margins: 1
                             width: Math.min(1.0, (plugin.dspPercent || 0) / 100.0) * (parent.width - 2)
                             radius: 1
-                            color: (plugin.dspPercent || 0) > 50 ? "#CC3333"
-                                 : (plugin.dspPercent || 0) > 20 ? "#CC8833"
-                                 : "#4CAF50"
+                            color: (plugin.dspPercent || 0) > 50 ? Theme.dspBarHigh
+                                 : (plugin.dspPercent || 0) > 20 ? Theme.dspBarMedium
+                                 : Theme.dspBarLow
                         }
                     }
                 }

@@ -69,27 +69,27 @@ Item {
     readonly property real nodePadding: 8
     readonly property real buttonRowHeight: 22
 
-    readonly property color colSink: "#4682B4"
-    readonly property color colSource: "#3CB371"
-    readonly property color colVirtualSink: "#2E5A88"
-    readonly property color colVirtualSource: "#2A7A52"
-    readonly property color colStreamOut: "#FFA500"
-    readonly property color colStreamIn: "#BA55D3"
-    readonly property color colDuplex: "#FFD700"
-    readonly property color colJack: "#E04040"
-    readonly property color colLv2: "#00BFFF"
-    readonly property color colDefault: "#808080"
-    readonly property color colNodeBg: "#282828"
-    readonly property color colNodeBorder: "#3c3c3c"
-    readonly property color colPortIn: "#6495ED"
-    readonly property color colPortOut: "#90EE90"
-    readonly property color colMidi: "#FF69B4"
-    readonly property color colMidiPort: "#FF69B4"
-    readonly property color colLinkActive: "#32CD32"
-    readonly property color colLinkInactive: "#555555"
-    readonly property color colLinkMidi: "#FF69B4"
-    readonly property color colLinkConnecting: "#FFFF00"
-    readonly property color colDefaultOutline: "#00FF88"
+    readonly property color colSink: Theme.colSink
+    readonly property color colSource: Theme.colSource
+    readonly property color colVirtualSink: Theme.colVirtualSink
+    readonly property color colVirtualSource: Theme.colVirtualSource
+    readonly property color colStreamOut: Theme.colStreamOut
+    readonly property color colStreamIn: Theme.colStreamIn
+    readonly property color colDuplex: Theme.colDuplex
+    readonly property color colJack: Theme.colJack
+    readonly property color colLv2: Theme.colLv2
+    readonly property color colDefault: Theme.colDefault
+    readonly property color colNodeBg: Theme.nodeBg
+    readonly property color colNodeBorder: Theme.nodeBorder
+    readonly property color colPortIn: Theme.colPortIn
+    readonly property color colPortOut: Theme.colPortOut
+    readonly property color colMidi: Theme.colMidi
+    readonly property color colMidiPort: Theme.colMidiPort
+    readonly property color colLinkActive: Theme.colLinkActive
+    readonly property color colLinkInactive: Theme.colLinkInactive
+    readonly property color colLinkMidi: Theme.colLinkMidi
+    readonly property color colLinkConnecting: Theme.colLinkConnecting
+    readonly property color colDefaultOutline: Theme.colDefaultOutline
 
     function refreshData() {
         if (!viewportLoaded) {
@@ -726,7 +726,7 @@ Item {
 
             calculateNodeWidths(ctx)
 
-            ctx.fillStyle = "#1e1e1e"
+            ctx.fillStyle = "" + Theme.windowBg
             ctx.fillRect(0, 0, width, height)
 
             ctx.save()
@@ -758,7 +758,7 @@ Item {
                 var isDefaultNode = defaultNodeKey !== "" && node.layoutKey === defaultNodeKey
                 ctx.fillStyle = "" + colNodeBg
                 if (isNodeSelected) {
-                    ctx.strokeStyle = "#FFFF00"
+                    ctx.strokeStyle = "" + Theme.selectionOutline
                     ctx.lineWidth = 2.5
                 } else if (isDefaultNode) {
                     ctx.strokeStyle = "" + colDefaultOutline
@@ -777,7 +777,7 @@ Item {
                     var defBadgeH = 12
                     var defBadgeX = x + 4
                     var defBadgeY = y + 3
-                    ctx.fillStyle = "#004422"
+                    ctx.fillStyle = "" + Theme.defaultBadgeBg
                     ctx.strokeStyle = "" + colDefaultOutline
                     ctx.lineWidth = 1
                     roundRect(ctx, defBadgeX, defBadgeY, defBadgeW, defBadgeH, 2)
@@ -790,7 +790,7 @@ Item {
                 ctx.fillStyle = "" + getNodeColor(node)
                 roundRectTop(ctx, x, y, nw, headerHeight, 5)
 
-                ctx.fillStyle = "#ffffff"
+                ctx.fillStyle = "" + Theme.textPrimary
                 ctx.font = "bold 11px sans-serif"
                 ctx.textAlign = "center"
                 ctx.textBaseline = "middle"
@@ -799,8 +799,8 @@ Item {
                 // Draw format badge (LV2/CLAP/VST3) for plugin nodes
                 if (node.type === "Plugin" && node.pluginFormat) {
                     var fmt = node.pluginFormat
-                    var badgeColor = fmt === "CLAP" ? "#1a3a2a" : fmt === "VST3" ? "#3a2a1a" : "#1a3a5a"
-                    var badgeTextCol = fmt === "CLAP" ? "#60e0a0" : fmt === "VST3" ? "#e0a060" : "#60a0e0"
+                    var badgeColor = fmt === "CLAP" ? ("" + Theme.badgeClapBg) : fmt === "VST3" ? ("" + Theme.badgeVst3Bg) : ("" + Theme.badgeLv2Bg)
+                    var badgeTextCol = fmt === "CLAP" ? ("" + Theme.badgeClapText) : fmt === "VST3" ? ("" + Theme.badgeVst3Text) : ("" + Theme.badgeLv2Text)
                     ctx.font = "bold 8px sans-serif"
                     var badgeW = ctx.measureText(fmt).width + 6
                     var badgeH = 12
@@ -840,7 +840,7 @@ Item {
                         }
                     }
 
-                    ctx.fillStyle = "#bbbbbb"
+                    ctx.fillStyle = "" + Theme.textSecondary
                     ctx.font = "10px sans-serif"
                     ctx.textAlign = "left"
                     ctx.textBaseline = "middle"
@@ -871,7 +871,7 @@ Item {
                         }
                     }
 
-                    ctx.fillStyle = "#bbbbbb"
+                    ctx.fillStyle = "" + Theme.textSecondary
                     ctx.font = "10px sans-serif"
                     ctx.textAlign = "right"
                     ctx.textBaseline = "middle"
@@ -887,24 +887,24 @@ Item {
                     var hasUi = node.pluginHasUi !== false
 
                     // UI button — disabled (dimmed) when plugin has no UI
-                    ctx.fillStyle = hasUi ? "#373737" : "#2a2a2a"
-                    ctx.strokeStyle = hasUi ? "#5a5a5a" : "#3a3a3a"
+                    ctx.fillStyle = hasUi ? ("" + Theme.buttonBg) : ("" + Theme.buttonDisabledBg)
+                    ctx.strokeStyle = hasUi ? ("" + Theme.buttonBorder) : ("" + Theme.buttonDisabledBorder)
                     ctx.lineWidth = 1
                     roundRect(ctx, x + nodePadding, btnY, btnW, btnH, 3)
 
-                    ctx.fillStyle = hasUi ? "#ffffff" : "#555555"
+                    ctx.fillStyle = hasUi ? ("" + Theme.textPrimary) : ("" + Theme.textDisabled)
                     ctx.font = "10px sans-serif"
                     ctx.textAlign = "center"
                     ctx.textBaseline = "middle"
                     ctx.fillText("UI", x + nodePadding + btnW / 2, btnY + btnH / 2)
 
                     // Params button — always active
-                    ctx.fillStyle = "#373737"
-                    ctx.strokeStyle = "#5a5a5a"
+                    ctx.fillStyle = "" + Theme.buttonBg
+                    ctx.strokeStyle = "" + Theme.buttonBorder
                     ctx.lineWidth = 1
                     roundRect(ctx, x + nodePadding * 2 + btnW, btnY, btnW, btnH, 3)
 
-                    ctx.fillStyle = "#ffffff"
+                    ctx.fillStyle = "" + Theme.textPrimary
                     ctx.font = "10px sans-serif"
                     ctx.textAlign = "center"
                     ctx.textBaseline = "middle"
@@ -921,7 +921,7 @@ Item {
                     var isSelected = selectedLinks[link.id] === true
                     var isMidiLink = portMediaTypes[link.outputPortId] === "Midi"
                                   || portMediaTypes[link.inputPortId] === "Midi"
-                    var linkColor = isSelected ? "#FF4444"
+                    var linkColor = isSelected ? ("" + Theme.colLinkSelected)
                                   : isMidiLink ? colLinkMidi
                                   : (link.active ? colLinkActive : colLinkInactive)
                     var linkWidth = isSelected ? 3 : 2
@@ -949,9 +949,9 @@ Item {
                 var selY = Math.min(sc1.y, sc2.y)
                 var selW = Math.abs(sc2.x - sc1.x)
                 var selH = Math.abs(sc2.y - sc1.y)
-                ctx.strokeStyle = "#FFFF00"
+                ctx.strokeStyle = "" + Theme.selectionOutline
                 ctx.lineWidth = 1 / zoom
-                ctx.fillStyle = "rgba(255, 255, 0, 0.08)"
+                ctx.fillStyle = "rgba(255, 255, 0, " + Theme.selectionFillAlpha + ")"
                 ctx.beginPath()
                 ctx.rect(selX, selY, selW, selH)
                 ctx.fill()
@@ -962,7 +962,7 @@ Item {
             if (activeSnapLines.length > 0) {
                 ctx.save()
                 ctx.setLineDash([4 / zoom, 4 / zoom])
-                ctx.strokeStyle = "#00AAFF"
+                ctx.strokeStyle = "" + Theme.snapGuide
                 ctx.lineWidth = 1 / zoom
                 // Compute visible canvas bounds
                 var visLeft = -panX / zoom

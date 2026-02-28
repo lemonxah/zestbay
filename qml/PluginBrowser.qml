@@ -5,6 +5,7 @@ import QtQuick.Layouts
 ApplicationWindow {
     id: pluginBrowser
     title: "Add Plugin"
+    color: Theme.windowBg
     width: 700
     height: 500
     minimumWidth: 450
@@ -146,7 +147,7 @@ ApplicationWindow {
                 required property int index
                 width: pluginList.width
                 height: 64
-                color: pluginMouseArea.containsMouse ? "#3a3a3a" : (index % 2 === 0 ? "#2a2a2a" : "#252525")
+                color: pluginMouseArea.containsMouse ? Theme.rowHover : (index % 2 === 0 ? Theme.rowEven : Theme.rowOdd)
                 opacity: plugin.compatible ? 1.0 : 0.5
 
                 property var plugin: filteredPlugins[index] || {}
@@ -173,10 +174,10 @@ ApplicationWindow {
                                 visible: plugin.format !== undefined
                                 text: plugin.format || ""
                                 font.pointSize: 7
-                                color: plugin.format === "CLAP" ? "#60e0a0" : plugin.format === "VST3" ? "#e0a060" : "#60a0e0"
+                                color: plugin.format === "CLAP" ? Theme.badgeClapText : plugin.format === "VST3" ? Theme.badgeVst3Text : Theme.badgeLv2Text
                                 padding: 2
                                 background: Rectangle {
-                                    color: plugin.format === "CLAP" ? "#1a3a2a" : plugin.format === "VST3" ? "#3a2a1a" : "#1a3a5a"
+                                    color: plugin.format === "CLAP" ? Theme.badgeClapBg : plugin.format === "VST3" ? Theme.badgeVst3Bg : Theme.badgeLv2Bg
                                     radius: 3
                                 }
                             }
@@ -184,15 +185,15 @@ ApplicationWindow {
                                 visible: plugin.hasUi === false
                                 text: "no UI"
                                 font.pointSize: 7
-                                color: "#a0a060"
+                                color: Theme.badgeNoUiText
                                 padding: 2
-                                background: Rectangle { color: "#3a3a1a"; radius: 3 }
+                                background: Rectangle { color: Theme.badgeNoUiBg; radius: 3 }
                             }
                             Label {
                                 visible: !plugin.compatible
                                 text: "incompatible"
                                 font.pointSize: 8
-                                color: "#e06060"
+                                color: Theme.statusError
                             }
                         }
 

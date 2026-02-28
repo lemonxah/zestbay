@@ -8,6 +8,7 @@ ApplicationWindow {
     visible: false
     width: 800
     height: 600
+    color: Theme.windowBg
     title: "ZestBay - Qt6"
 
     Component.onCompleted: {
@@ -229,12 +230,12 @@ ApplicationWindow {
                     var w = width
                     var h = height
 
-                    ctx.fillStyle = "#1a1a1a"
+                    ctx.fillStyle = "" + Theme.chartBg
                     ctx.fillRect(0, 0, w, h)
 
                     ctx.setLineDash([2, 2])
 
-                    ctx.strokeStyle = "#4466AA"
+                    ctx.strokeStyle = "" + Theme.chartGrid25
                     ctx.lineWidth = 0.5
                     ctx.beginPath()
                     ctx.moveTo(0, h * 0.75)
@@ -245,7 +246,7 @@ ApplicationWindow {
                     ctx.lineTo(w, h * 0.25)
                     ctx.stroke()
 
-                    ctx.strokeStyle = "#AA4444"
+                    ctx.strokeStyle = "" + Theme.chartGrid50
                     ctx.lineWidth = 0.5
                     ctx.beginPath()
                     ctx.moveTo(0, h * 0.5)
@@ -255,7 +256,7 @@ ApplicationWindow {
                     ctx.setLineDash([])
 
                     if (d.length >= 2) {
-                        ctx.strokeStyle = "#4CAF50"
+                        ctx.strokeStyle = "" + Theme.chartLine
                         ctx.lineWidth = 1
                         ctx.beginPath()
                         var step = w / (d.length - 1)
@@ -268,7 +269,7 @@ ApplicationWindow {
                         ctx.stroke()
                     }
 
-                    ctx.strokeStyle = "#333333"
+                    ctx.strokeStyle = "" + Theme.chartBorder
                     ctx.lineWidth = 1
                     ctx.strokeRect(0, 0, w, h)
                 }
@@ -289,7 +290,7 @@ ApplicationWindow {
             Rectangle {
                 width: 1
                 height: parent.height * 0.6
-                color: "#3c3c3c"
+                color: Theme.separator
                 Layout.alignment: Qt.AlignVCenter
             }
 

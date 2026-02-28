@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import ZestBay
 
 ApplicationWindow {
     id: pluginParams
@@ -10,6 +11,7 @@ ApplicationWindow {
     minimumWidth: 320
     minimumHeight: 300
     visible: false
+    color: Theme.windowBg
 
     required property var controller
 
@@ -91,7 +93,7 @@ ApplicationWindow {
         Rectangle {
             Layout.fillWidth: true
             height: 1
-            color: "#3c3c3c"
+            color: Theme.separator
         }
 
         Label {
@@ -122,7 +124,7 @@ ApplicationWindow {
                 required property int index
                 width: paramList.width - 12
                 height: 56
-                color: index % 2 === 0 ? "#2a2a2a" : "#252525"
+                color: index % 2 === 0 ? Theme.rowEven : Theme.rowOdd
                 radius: 3
 
                 property var param: parameters[index] || {}
@@ -180,7 +182,7 @@ ApplicationWindow {
         Rectangle {
             Layout.fillWidth: true
             height: 1
-            color: "#3c3c3c"
+            color: Theme.separator
         }
 
         RowLayout {

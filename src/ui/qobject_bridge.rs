@@ -169,6 +169,18 @@ pub mod qobject {
 
         #[qinvokable]
         fn get_qt_version(self: Pin<&mut Self>) -> QString;
+
+        #[qinvokable]
+        fn backup_rules(self: Pin<&mut Self>, name: QString) -> QString;
+
+        #[qinvokable]
+        fn list_rule_backups_json(self: Pin<&mut Self>) -> QString;
+
+        #[qinvokable]
+        fn restore_rule_backup(self: Pin<&mut Self>, filename: QString);
+
+        #[qinvokable]
+        fn delete_rule_backup(self: Pin<&mut Self>, filename: QString);
     }
 
     unsafe extern "RustQt" {
@@ -2292,6 +2304,177 @@ impl qobject::AppController {
         QString::from(env!("QT_VERSION"))
     }
 
+    pub fn backup_rules(self: Pin<&mut Self>, name: QString) -> QString {
+        let name_str: String = name.to_string();
+        let backup_dir = config_path("rule_backups");
+        if let Err(e) = std::fs::create_dir_all(&backup_dir) {
+            log::error!("Failed to create backup dir: {}", e);
+            return QString::from("");
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        // Format as YYYYMMDD_HHMMSS using simple arithmetic (UTC)
+        let secs = now as i64;
+        let days = secs / 86400;
+        let time_of_day = (secs % 86400) as u32;
+        let hours = time_of_day / 3600;
+        let minutes = (time_of_day % 3600) / 60;
+        let seconds = time_of_day % 60;
+        // Compute date from days since epoch (1970-01-01)
+        let (year, month, day) = days_to_ymd(days);
+        let timestamp = format!("{:04}{:02}{:02}_{:02}{:02}{:02}", year, month, day, hours, minutes, seconds);
+        let safe_name = if name_str.trim().is_empty() {
+            timestamp.clone()
+        } else {
+            let sanitized: String = name_str
+                .trim()
+                .chars()
+                .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == ' ' { c } else { '_' })
+                .collect();
+            format!("{}_{}", timestamp, sanitized)
+        };
+        let filename = format!("{}.json", safe_name);
+        let dest = backup_dir.join(&filename);
+
+        let src = config_path("rules.json");
+        match std::fs::read_to_string(&src) {
+            Ok(content) => {
+                if let Err(e) = std::fs::write(&dest, &content) {
+                    log::error!("Failed to write backup {:?}: {}", dest, e);
+                    return QString::from("");
+                }
+                log::info!("Rules backed up to {:?}", dest);
+                QString::from(&filename)
+            }
+            Err(e) => {
+                log::error!("Failed to read rules for backup: {}", e);
+                QString::from("")
+            }
+        }
+    }
+
+    pub fn list_rule_backups_json(self: Pin<&mut Self>) -> QString {
+        let backup_dir = config_path("rule_backups");
+        let mut backups: Vec<serde_json::Value> = Vec::new();
+
+        if let Ok(entries) = std::fs::read_dir(&backup_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                    let filename = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string();
+
+                    // Parse rule count from the file
+                    let rule_count = std::fs::read_to_string(&path)
+                        .ok()
+                        .and_then(|s| serde_json::from_str::<Vec<serde_json::Value>>(&s).ok())
+                        .map(|v| v.len())
+                        .unwrap_or(0);
+
+                    // Extract display name from filename: strip .json, split on first _
+                    // Format: YYYYMMDD_HHMMSS_OptionalName.json
+                    let stem = filename.trim_end_matches(".json");
+                    let display_name = if stem.len() > 16 && stem.chars().nth(15) == Some('_') {
+                        stem[16..].to_string()
+                    } else {
+                        String::new()
+                    };
+
+                    // Get timestamp from filename
+                    let date_str = if stem.len() >= 15 {
+                        let d = &stem[..8];
+                        let t = &stem[9..15];
+                        format!(
+                            "{}-{}-{} {}:{}:{}",
+                            &d[..4], &d[4..6], &d[6..8],
+                            &t[..2], &t[2..4], &t[4..6]
+                        )
+                    } else {
+                        // Fallback to file modification time
+                        entry
+                            .metadata()
+                            .ok()
+                            .and_then(|m| m.modified().ok())
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|dur| {
+                                let secs = dur.as_secs() as i64;
+                                let tod = (secs % 86400) as u32;
+                                let (y, mo, d) = days_to_ymd(secs / 86400);
+                                format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                                    y, mo, d, tod / 3600, (tod % 3600) / 60, tod % 60)
+                            })
+                            .unwrap_or_default()
+                    };
+
+                    backups.push(serde_json::json!({
+                        "filename": filename,
+                        "name": display_name,
+                        "date": date_str,
+                        "ruleCount": rule_count,
+                    }));
+                }
+            }
+        }
+
+        // Sort newest first
+        backups.sort_by(|a, b| {
+            let fa = a["filename"].as_str().unwrap_or("");
+            let fb = b["filename"].as_str().unwrap_or("");
+            fb.cmp(fa)
+        });
+
+        let json = serde_json::to_string(&backups).unwrap_or_else(|_| "[]".to_string());
+        QString::from(&json)
+    }
+
+    pub fn restore_rule_backup(mut self: Pin<&mut Self>, filename: QString) {
+        let filename_str: String = filename.to_string();
+        let backup_path = config_path("rule_backups").join(&filename_str);
+
+        match std::fs::read_to_string(&backup_path) {
+            Ok(content) => {
+                // Validate it parses as rules
+                match serde_json::from_str::<Vec<crate::patchbay::rules::AutoConnectRule>>(&content) {
+                    Ok(rules) => {
+                        // Write to rules.json
+                        let rules_path = config_path("rules.json");
+                        if let Err(e) = std::fs::write(&rules_path, &content) {
+                            log::error!("Failed to write restored rules: {}", e);
+                            return;
+                        }
+                        // Load into patchbay manager
+                        if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
+                            patchbay.set_rules(rules.clone());
+                        }
+                        log::info!("Restored {} rules from backup {:?}", rules.len(), filename_str);
+                    }
+                    Err(e) => {
+                        log::error!("Backup file {:?} contains invalid rules: {}", filename_str, e);
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!("Failed to read backup {:?}: {}", backup_path, e);
+            }
+        }
+    }
+
+    pub fn delete_rule_backup(self: Pin<&mut Self>, filename: QString) {
+        let filename_str: String = filename.to_string();
+        let backup_path = config_path("rule_backups").join(&filename_str);
+        if let Err(e) = std::fs::remove_file(&backup_path) {
+            log::error!("Failed to delete backup {:?}: {}", backup_path, e);
+        } else {
+            log::info!("Deleted rule backup: {}", filename_str);
+        }
+    }
+
     pub fn set_window_visible(self: Pin<&mut Self>, visible: bool) {
         if let Some(ref tray) = self.rust().tray_state {
             use std::sync::atomic::Ordering;
@@ -2333,6 +2516,22 @@ impl qobject::AppController {
         }
         unreachable!()
     }
+}
+
+/// Convert days since Unix epoch to (year, month, day).
+fn days_to_ymd(days: i64) -> (i64, u32, u32) {
+    // Algorithm from http://howardhinnant.github.io/date_algorithms.html
+    let z = days + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = (z - era * 146097) as u32; // day of era [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // year of era [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }
 
 fn config_path(filename: &str) -> PathBuf {

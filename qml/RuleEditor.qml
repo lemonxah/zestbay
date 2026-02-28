@@ -10,12 +10,121 @@ ApplicationWindow {
     minimumWidth: 500
     minimumHeight: 400
     visible: false
+    color: Theme.windowBg
 
     required property var controller
 
     property var rules: []
     property var nodeNames: []
     property var nodeTypes: ["Any", "Sink", "Source", "App Out", "App In", "Duplex", "Plugin"]
+    property var backups: []
+    property string pendingRestoreFilename: ""
+
+    Dialog {
+        id: snapshotConfirmDialog
+        title: "Confirm Snapshot"
+        anchors.centerIn: parent
+        modal: true
+        standardButtons: Dialog.Yes | Dialog.No
+        width: Math.min(ruleEditor.width * 0.8, 420)
+
+        ColumnLayout {
+            width: parent.width
+            spacing: 12
+
+            Label {
+                text: "Replace all rules?"
+                font.bold: true
+                font.pointSize: 11
+            }
+
+            Label {
+                text: "This will delete all existing rules (" + rules.length + ") and replace them with rules based on the connections currently active on the graph.\n\nThis cannot be undone."
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
+        }
+
+        onAccepted: {
+            controller.snapshot_rules()
+            loadRules()
+        }
+    }
+
+    Dialog {
+        id: restoreConfirmDialog
+        title: "Restore Backup"
+        anchors.centerIn: parent
+        modal: true
+        standardButtons: Dialog.Yes | Dialog.No
+        width: Math.min(ruleEditor.width * 0.8, 420)
+
+        ColumnLayout {
+            width: parent.width
+            spacing: 12
+
+            Label {
+                text: "Restore this backup?"
+                font.bold: true
+                font.pointSize: 11
+            }
+
+            Label {
+                text: "This will replace all current rules (" + rules.length + ") with the rules from the selected backup.\n\nThis cannot be undone."
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
+        }
+
+        onAccepted: {
+            if (pendingRestoreFilename !== "") {
+                controller.restore_rule_backup(pendingRestoreFilename)
+                pendingRestoreFilename = ""
+                loadRules()
+                loadBackups()
+            }
+        }
+
+        onRejected: {
+            pendingRestoreFilename = ""
+        }
+    }
+
+    Dialog {
+        id: backupNameDialog
+        title: "Save Backup"
+        anchors.centerIn: parent
+        modal: true
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        width: Math.min(ruleEditor.width * 0.8, 360)
+
+        ColumnLayout {
+            width: parent.width
+            spacing: 8
+
+            Label {
+                text: "Enter a name for this backup (optional):"
+            }
+
+            TextField {
+                id: backupNameField
+                placeholderText: "e.g. Before mixer changes"
+                Layout.fillWidth: true
+                selectByMouse: true
+                onAccepted: backupNameDialog.accept()
+            }
+        }
+
+        onAccepted: {
+            controller.backup_rules(backupNameField.text)
+            backupNameField.text = ""
+            loadBackups()
+        }
+
+        onRejected: {
+            backupNameField.text = ""
+        }
+    }
 
     function loadRules() {
         try {
@@ -30,8 +139,17 @@ ApplicationWindow {
         }
     }
 
+    function loadBackups() {
+        try {
+            backups = JSON.parse(controller.list_rule_backups_json());
+        } catch (e) {
+            backups = [];
+        }
+    }
+
     function open() {
         loadRules();
+        loadBackups();
         visible = true;
         raise();
         requestActivate();
@@ -91,7 +209,7 @@ ApplicationWindow {
         Rectangle {
             Layout.fillWidth: true
             height: 1
-            color: "#3c3c3c"
+            color: Theme.separator
         }
 
         ListView {
@@ -148,7 +266,7 @@ ApplicationWindow {
                 required property int index
                 width: ruleList.width - 12
                 height: 56
-                color: ruleMouseArea.containsMouse ? "#3a3a3a" : (index % 2 === 0 ? "#2a2a2a" : "#252525")
+                color: ruleMouseArea.containsMouse ? Theme.rowHover : (index % 2 === 0 ? Theme.rowEven : Theme.rowOdd)
                 radius: 4
 
                 property var rule: rules[index] || {}
@@ -227,19 +345,24 @@ ApplicationWindow {
                         Layout.preferredHeight: 30
                         Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
                         radius: 4
-                        color: delMouseArea.containsMouse ? "#5c2020" : "transparent"
-                        border.color: delMouseArea.containsMouse ? "#cc4444" : "#555555"
+                        color: delMouseArea.containsMouse ? Theme.deleteBg : "transparent"
+                        border.color: delMouseArea.containsMouse ? Theme.deleteBorder : Theme.borderMuted
                         border.width: 1
 
                         // Trash can icon drawn with Canvas
                         Canvas {
+                            id: ruleTrashCanvas
                             anchors.centerIn: parent
                             width: 16
                             height: 16
+
+                            property color iconColor: delMouseArea.containsMouse ? Theme.deleteIcon : Theme.deleteIconMuted
+                            onIconColorChanged: requestPaint()
+
                             onPaint: {
                                 var ctx = getContext("2d");
                                 ctx.reset();
-                                var c = delMouseArea.containsMouse ? "#ff6666" : "#999999";
+                                var c = iconColor;
                                 ctx.strokeStyle = c;
                                 ctx.fillStyle = c;
                                 ctx.lineWidth = 1.2;
@@ -317,7 +440,7 @@ ApplicationWindow {
         Rectangle {
             Layout.fillWidth: true
             height: 1
-            color: "#3c3c3c"
+            color: Theme.separator
         }
 
         ColumnLayout {
@@ -349,10 +472,7 @@ ApplicationWindow {
 
                 Button {
                     text: "Snapshot Connections"
-                    onClicked: {
-                        controller.snapshot_rules();
-                        loadRules();
-                    }
+                    onClicked: snapshotConfirmDialog.open()
 
                     ToolTip.visible: hovered
                     ToolTip.text: "Replace all rules with current connections"
@@ -464,6 +584,188 @@ ApplicationWindow {
                                         targetTypeCombo.currentIndex = tgtIdx;
                                 }
                             }
+                        }
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            Layout.fillWidth: true
+            height: 1
+            color: Theme.separator
+        }
+
+        ColumnLayout {
+            id: backupSection
+            Layout.fillWidth: true
+            spacing: 6
+
+            property bool expanded: false
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                Button {
+                    text: backupSection.expanded ? "Hide Backups" : "Backups..."
+                    onClicked: {
+                        if (!backupSection.expanded) loadBackups()
+                        backupSection.expanded = !backupSection.expanded
+                    }
+                }
+
+                Item { Layout.fillWidth: true }
+
+                Button {
+                    text: "Save Backup"
+                    onClicked: backupNameDialog.open()
+
+                    ToolTip.visible: hovered
+                    ToolTip.text: "Save current rules as a backup"
+                }
+            }
+
+            ColumnLayout {
+                visible: backupSection.expanded
+                Layout.fillWidth: true
+                spacing: 4
+
+                Label {
+                    text: backups.length + " backup" + (backups.length !== 1 ? "s" : "") + " saved"
+                    opacity: 0.6
+                    visible: backups.length > 0
+                }
+
+                Label {
+                    text: "No backups yet. Use 'Save Backup' to create one."
+                    opacity: 0.5
+                    visible: backups.length === 0
+                }
+
+                ListView {
+                    id: backupList
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: Math.min(backups.length * 42, 180)
+                    clip: true
+                    model: backups.length
+                    spacing: 2
+                    visible: backups.length > 0
+
+                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                    delegate: Rectangle {
+                        id: backupDelegate
+                        required property int index
+                        width: backupList.width - 12
+                        height: 38
+                        color: backupMouse.containsMouse ? Theme.rowHover : (index % 2 === 0 ? Theme.rowEven : Theme.rowOdd)
+                        radius: 3
+
+                        property var backup: backups[index] || {}
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 8
+                            anchors.rightMargin: 8
+                            spacing: 8
+
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 1
+
+                                Label {
+                                    text: backup.name || backup.date || ""
+                                    font.bold: backup.name ? true : false
+                                    font.pointSize: 9
+                                    elide: Text.ElideRight
+                                    Layout.fillWidth: true
+                                }
+
+                                RowLayout {
+                                    spacing: 8
+                                    Label {
+                                        text: backup.date || ""
+                                        font.pointSize: 8
+                                        opacity: 0.5
+                                        visible: backup.name ? true : false
+                                    }
+                                    Label {
+                                        text: (backup.ruleCount || 0) + " rules"
+                                        font.pointSize: 8
+                                        opacity: 0.5
+                                    }
+                                }
+                            }
+
+                            Button {
+                                text: "Restore"
+                                font.pointSize: 9
+                                implicitHeight: 28
+                                onClicked: {
+                                    pendingRestoreFilename = backup.filename || ""
+                                    restoreConfirmDialog.open()
+                                }
+
+                                ToolTip.visible: hovered
+                                ToolTip.text: "Replace current rules with this backup"
+                            }
+
+                            Rectangle {
+                                width: 26
+                                height: 26
+                                radius: 3
+                                color: backupDelMouse.containsMouse ? Theme.deleteBg : "transparent"
+                                border.color: backupDelMouse.containsMouse ? Theme.deleteBorder : Theme.borderMuted
+                                border.width: 1
+
+                                Canvas {
+                                    id: backupTrashCanvas
+                                    anchors.centerIn: parent
+                                    width: 14
+                                    height: 14
+
+                                    property color iconColor: backupDelMouse.containsMouse ? Theme.deleteIcon : Theme.deleteIconMuted
+                                    onIconColorChanged: requestPaint()
+
+                                    onPaint: {
+                                        var ctx = getContext("2d")
+                                        ctx.reset()
+                                        var c = iconColor
+                                        ctx.strokeStyle = c
+                                        ctx.lineWidth = 1.2
+                                        ctx.lineCap = "round"
+                                        ctx.beginPath(); ctx.moveTo(2, 3.5); ctx.lineTo(12, 3.5); ctx.stroke()
+                                        ctx.beginPath(); ctx.moveTo(5, 3.5); ctx.lineTo(5, 2); ctx.lineTo(9, 2); ctx.lineTo(9, 3.5); ctx.stroke()
+                                        ctx.beginPath(); ctx.moveTo(3, 3.5); ctx.lineTo(4, 12); ctx.lineTo(10, 12); ctx.lineTo(11, 3.5); ctx.stroke()
+                                        ctx.beginPath(); ctx.moveTo(5.5, 5.5); ctx.lineTo(5.5, 10); ctx.stroke()
+                                        ctx.beginPath(); ctx.moveTo(8.5, 5.5); ctx.lineTo(8.5, 10); ctx.stroke()
+                                    }
+                                }
+
+                                MouseArea {
+                                    id: backupDelMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        if (backup.filename) {
+                                            controller.delete_rule_backup(backup.filename)
+                                            loadBackups()
+                                        }
+                                    }
+                                }
+
+                                ToolTip.visible: backupDelMouse.containsMouse
+                                ToolTip.text: "Delete backup"
+                            }
+                        }
+
+                        MouseArea {
+                            id: backupMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            acceptedButtons: Qt.NoButton
                         }
                     }
                 }

@@ -1,4 +1,4 @@
-use cxx_qt_build::{CxxQtBuilder, QmlModule};
+use cxx_qt_build::{CxxQtBuilder, QmlFile, QmlModule};
 use std::process::Command;
 
 fn main() {
@@ -33,7 +33,8 @@ fn main() {
             .qml_file("qml/PluginManager.qml")
             .qml_file("qml/Preferences.qml")
             .qml_file("qml/CpuOverlay.qml")
-            .qml_file("qml/About.qml"),
+            .qml_file("qml/About.qml")
+            .qml_file(QmlFile::from("qml/Theme.qml").singleton(true)),
     )
     .qt_module("Network")
     .files(["src/ui/qobject_bridge.rs"])

@@ -10,6 +10,7 @@ ApplicationWindow {
     minimumWidth: 360
     minimumHeight: 280
     visible: false
+    color: Theme.windowBg
 
     required property var controller
 
@@ -41,7 +42,7 @@ ApplicationWindow {
         Rectangle {
             Layout.fillWidth: true
             height: 1
-            color: "#3c3c3c"
+            color: Theme.separator
         }
 
         GridLayout {

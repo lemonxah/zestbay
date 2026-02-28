@@ -5,6 +5,7 @@ import QtQuick.Layouts
 ApplicationWindow {
     id: pluginManager
     title: "Manage Plugins"
+    color: Theme.windowBg
     width: 750
     height: 600
     minimumWidth: 550
@@ -80,9 +81,9 @@ ApplicationWindow {
                         required property int index
                         width: pluginList.width
                         height: 48
-                        color: index === selectedIndex ? "#404060" :
-                               pluginMouse.containsMouse ? "#3a3a3a" :
-                               (index % 2 === 0 ? "#2a2a2a" : "#252525")
+                        color: index === selectedIndex ? Theme.rowSelected :
+                               pluginMouse.containsMouse ? Theme.rowHover :
+                               (index % 2 === 0 ? Theme.rowEven : Theme.rowOdd)
                         radius: 3
 
                         property var plugin: plugins[index] || {}
@@ -105,7 +106,7 @@ ApplicationWindow {
                                 Label {
                                     text: plugin.bypassed ? "Bypassed" : "Active"
                                     font.pointSize: 8
-                                    color: plugin.bypassed ? "#e0a040" : "#60c060"
+                                    color: plugin.bypassed ? Theme.statusBypassed : Theme.statusActive
                                     opacity: 0.8
                                 }
                                 Label {
@@ -129,7 +130,7 @@ ApplicationWindow {
             Rectangle {
                 Layout.fillHeight: true
                 width: 1
-                color: "#3c3c3c"
+                color: Theme.separator
             }
 
             ColumnLayout {
@@ -199,7 +200,7 @@ ApplicationWindow {
                     Rectangle {
                         Layout.fillWidth: true
                         height: 1
-                        color: "#3c3c3c"
+                        color: Theme.separator
                     }
 
                     Label {
@@ -234,7 +235,7 @@ ApplicationWindow {
                             required property int index
                             width: paramList.width - 12
                             height: 56
-                            color: index % 2 === 0 ? "#2a2a2a" : "#252525"
+                            color: index % 2 === 0 ? Theme.rowEven : Theme.rowOdd
                             radius: 3
 
                             property var param: selectedPlugin && selectedPlugin.parameters ? selectedPlugin.parameters[index] : {}
@@ -297,7 +298,7 @@ ApplicationWindow {
         Rectangle {
             Layout.fillWidth: true
             height: 1
-            color: "#3c3c3c"
+            color: Theme.separator
         }
 
         RowLayout {
