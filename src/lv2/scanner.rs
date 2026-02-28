@@ -2,7 +2,10 @@ use lilv::World;
 
 use super::types::*;
 
-const PROVIDED_FEATURES: &[&str] = &["http://lv2plug.in/ns/ext/urid#map"];
+const PROVIDED_FEATURES: &[&str] = &[
+    "http://lv2plug.in/ns/ext/urid#map",
+    "http://lv2plug.in/ns/ext/worker#schedule",
+];
 
 pub fn scan_plugins() -> Vec<Lv2PluginInfo> {
     let world = World::with_load_all();

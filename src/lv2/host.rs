@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -6,6 +7,7 @@ use lilv::World;
 
 use super::types::*;
 use super::urid::UridMapper;
+use super::worker::{LV2_Worker_Interface, Lv2Worker, Lv2WorkerSetup, LV2_WORKER_INTERFACE_URI};
 
 static NEXT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -54,6 +56,10 @@ pub struct Lv2PluginInstance {
     atom_sequence_urid: u32,
     pub bypassed: bool,
     pub sample_rate: f64,
+    /// Worker thread for plugins that require the worker#schedule feature
+    pub worker: Option<Lv2Worker>,
+    /// Accumulated worker thread CPU time (ns) drained after each process() call
+    pub last_worker_ns: u64,
 }
 
 pub struct AtomBuf {
@@ -86,12 +92,31 @@ impl Lv2PluginInstance {
         let mut urid_map = Box::new(urid_mapper.as_lv2_urid_map());
         let urid_feature = unsafe { UridMapper::make_feature(&mut *urid_map as *mut _) };
 
+        // Check if this plugin requires the worker#schedule feature
+        let needs_worker = plugin_info
+            .required_features
+            .iter()
+            .any(|f| f == "http://lv2plug.in/ns/ext/worker#schedule");
+
+        // Create worker setup BEFORE instantiation so the feature is available
+        let worker_setup = if needs_worker {
+            Some(Lv2WorkerSetup::new())
+        } else {
+            None
+        };
+
         // lilv 0.2.4 depends on lv2_raw 0.2's LV2Feature while we use lv2_raw 0.3.
         // Both versions have an identical #[repr(C)] layout:
         //   { uri: *const c_char, data: *mut c_void }
         // The only difference is libc types vs std::os::raw types (same ABI).
         // We transmute the Vec to bridge the type boundary.
-        let features_v3: Vec<&lv2_raw::core::LV2Feature> = vec![&urid_feature];
+        let worker_feature;
+        let features_v3: Vec<&lv2_raw::core::LV2Feature> = if let Some(ref ws) = worker_setup {
+            worker_feature = ws.make_feature();
+            vec![&urid_feature, &worker_feature]
+        } else {
+            vec![&urid_feature]
+        };
         let features = unsafe {
             // SAFETY: lv2_raw 0.2 and 0.3 LV2Feature are layout-identical #[repr(C)] structs.
             std::mem::transmute::<Vec<&lv2_raw::core::LV2Feature>, Vec<_>>(features_v3)
@@ -200,6 +225,36 @@ impl Lv2PluginInstance {
                 .collect(),
         });
 
+        // Activate the worker if needed: get the instance handle and worker
+        // interface BEFORE activation (extension_data is available on the
+        // un-activated instance).
+        let worker = if let Some(ws) = worker_setup {
+            let lv2_handle = instance.handle() as *mut c_void;
+            let worker_iface_ptr: Option<std::ptr::NonNull<LV2_Worker_Interface>> = unsafe {
+                // extension_data returns lv2_raw 0.2 types (via lilv), but
+                // LV2_Worker_Interface is our own #[repr(C)] definition which
+                // matches the C layout exactly.
+                instance.extension_data::<LV2_Worker_Interface>(LV2_WORKER_INTERFACE_URI)
+            };
+            match worker_iface_ptr {
+                Some(iface_ptr) => {
+                    log::info!("LV2 worker: activating for plugin '{}'", plugin_info.name);
+                    Some(unsafe { ws.activate(lv2_handle, iface_ptr.as_ptr()) })
+                }
+                None => {
+                    log::warn!(
+                        "LV2 worker: plugin '{}' requires worker but provides no interface",
+                        plugin_info.name
+                    );
+                    // Drop the setup (channels are cleaned up)
+                    drop(ws);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let active_instance = unsafe { instance.activate() };
 
         Some(Self {
@@ -219,6 +274,8 @@ impl Lv2PluginInstance {
             atom_sequence_urid,
             bypassed: false,
             sample_rate,
+            worker,
+            last_worker_ns: 0,
         })
     }
 
@@ -245,20 +302,7 @@ impl Lv2PluginInstance {
         outputs: &mut [&mut [f32]],
         sample_count: usize,
     ) {
-        if self.bypassed {
-            for (i, output) in outputs.iter_mut().enumerate() {
-                if i < inputs.len() {
-                    let copy_len = output.len().min(inputs[i].len()).min(sample_count);
-                    output[..copy_len].copy_from_slice(&inputs[i][..copy_len]);
-                } else {
-                    for sample in output.iter_mut().take(sample_count) {
-                        *sample = 0.0;
-                    }
-                }
-            }
-            return;
-        }
-
+        // Connect audio ports (buffer pointers change each cycle)
         for (i, &port_idx) in self.audio_input_indices.iter().enumerate() {
             if i < inputs.len() {
                 unsafe {
@@ -279,6 +323,7 @@ impl Lv2PluginInstance {
             }
         }
 
+        // Prepare atom input buffers (UI → plugin communication)
         for (ab, shared) in self
             .atom_in_bufs
             .iter_mut()
@@ -304,8 +349,35 @@ impl Lv2PluginInstance {
             init_atom_sequence(&mut ab.data, ATOM_BUF_SIZE, true, self.atom_sequence_urid);
         }
 
+        // Always call run() so the plugin keeps its internal state alive
+        // (visualizers, worker threads, etc.). When bypassed we just
+        // overwrite the audio output with a passthrough copy afterwards.
         unsafe {
             self.instance.run(sample_count);
+        }
+
+        // Deliver any pending worker responses after run()
+        // and drain accumulated worker thread CPU time for stats
+        self.last_worker_ns = 0;
+        if let Some(ref worker) = self.worker {
+            unsafe {
+                worker.deliver_responses();
+            }
+            self.last_worker_ns = worker.drain_worker_ns();
+        }
+
+        // When bypassed, overwrite plugin audio output with passthrough
+        if self.bypassed {
+            for (i, output) in outputs.iter_mut().enumerate() {
+                if i < inputs.len() {
+                    let copy_len = output.len().min(inputs[i].len()).min(sample_count);
+                    output[..copy_len].copy_from_slice(&inputs[i][..copy_len]);
+                } else {
+                    for sample in output.iter_mut().take(sample_count) {
+                        *sample = 0.0;
+                    }
+                }
+            }
         }
 
         for (cp, slot) in self

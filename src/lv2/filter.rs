@@ -394,6 +394,7 @@ unsafe extern "C" fn on_process(
         let t0 = std::time::Instant::now();
         inst.process(&input_bufs, &mut output_bufs, n_samples as usize);
         let elapsed = t0.elapsed().as_nanos() as u64;
-        fd.cpu_slot.record(elapsed, n_samples, rate);
+        fd.cpu_slot
+            .record(elapsed, inst.last_worker_ns, n_samples, rate);
     }
 }

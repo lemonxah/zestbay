@@ -761,7 +761,8 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
         let title = CString::new(format!("ZestBay — {}", plugin_name))
             .unwrap_or_else(|_| c"ZestBay — Plugin UI".to_owned());
         gtk_window_set_title(window, title.as_ptr());
-        gtk_window_set_default_size(window, 640, 480);
+        // Use -1, -1 so GTK sizes the window to fit the plugin's UI widget naturally.
+        gtk_window_set_default_size(window, -1, -1);
 
         let destroy_signal = c"destroy";
         let id_data = Box::into_raw(Box::new(instance_id));

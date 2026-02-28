@@ -36,6 +36,12 @@ QtObject {
     readonly property color buttonBorder:   dark ? "#5a5a5a" : "#b0b0b0"
     readonly property color buttonDisabledBg: dark ? "#2a2a2a" : "#f0f0f0"
     readonly property color buttonDisabledBorder: dark ? "#3a3a3a" : "#d0d0d0"
+    readonly property color buttonActiveBg:      dark ? "#1a4a2a" : "#c8f0d8"
+    readonly property color buttonActiveBorder:  dark ? "#40b060" : "#40a050"
+    readonly property color buttonActiveText:    dark ? "#60e080" : "#1a6030"
+    readonly property color buttonOffBg:         dark ? "#4a1a1a" : "#f0d0d0"
+    readonly property color buttonOffBorder:     dark ? "#cc4444" : "#cc4444"
+    readonly property color buttonOffText:       dark ? "#ff6666" : "#aa2222"
 
     // ─── Destructive / Delete ───
     readonly property color deleteBg:       dark ? "#5c2020" : "#ffe0e0"

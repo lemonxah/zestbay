@@ -382,21 +382,6 @@ impl ClapPluginInstance {
         outputs: &mut [&mut [f32]],
         sample_count: usize,
     ) { unsafe {
-        if self.bypassed {
-            // Pass-through
-            for (i, output) in outputs.iter_mut().enumerate() {
-                if i < inputs.len() {
-                    let n = output.len().min(inputs[i].len()).min(sample_count);
-                    output[..n].copy_from_slice(&inputs[i][..n]);
-                } else {
-                    for s in output.iter_mut().take(sample_count) {
-                        *s = 0.0;
-                    }
-                }
-            }
-            return;
-        }
-
         // Read parameter changes from the shared port_updates
         // and build CLAP input events
         let mut param_events: Vec<clap_sys::events::clap_event_param_value> = Vec::new();
@@ -521,6 +506,20 @@ impl ClapPluginInstance {
         let plugin_ref = &*self.plugin;
         if let Some(process_fn) = plugin_ref.process {
             process_fn(self.plugin, &process);
+        }
+
+        // When bypassed, overwrite plugin audio output with passthrough
+        if self.bypassed {
+            for (i, output) in outputs.iter_mut().enumerate() {
+                if i < inputs.len() {
+                    let n = output.len().min(inputs[i].len()).min(sample_count);
+                    output[..n].copy_from_slice(&inputs[i][..n]);
+                } else {
+                    for s in output.iter_mut().take(sample_count) {
+                        *s = 0.0;
+                    }
+                }
+            }
         }
 
         // Update port_updates with current param values

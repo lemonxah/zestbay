@@ -2248,6 +2248,8 @@ impl qobject::AppController {
                     "avgUs": snap.avg_ns / 1000,
                     "lastUs": snap.last_ns / 1000,
                     "calls": snap.calls,
+                    "workerPercent": (snap.worker_percent * 100.0).round() / 100.0,
+                    "workerAvgUs": snap.worker_avg_ns / 1000,
                 })
             })
             .collect();
@@ -2802,6 +2804,7 @@ fn node_to_json(
 
                 val["pluginFormat"] = serde_json::json!(format_str);
                 val["pluginHasUi"] = serde_json::json!(has_ui);
+                val["pluginBypassed"] = serde_json::json!(instance.bypassed);
             }
         }
     }

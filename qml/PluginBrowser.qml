@@ -77,9 +77,11 @@ ApplicationWindow {
 
     function open() {
         loadPlugins()
+        searchField.text = ""
         visible = true
         raise()
         requestActivate()
+        searchField.forceActiveFocus()
     }
 
     ColumnLayout {

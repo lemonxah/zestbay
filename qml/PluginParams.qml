@@ -142,12 +142,77 @@ ApplicationWindow {
                             elide: Text.ElideRight
                             Layout.fillWidth: true
                         }
+
+                        // Clickable value label / inline text editor
                         Label {
+                            id: valueLabel
+                            visible: !valueField.visible
                             text: param.value !== undefined ? param.value.toFixed(3) : ""
                             font.pointSize: 9
                             font.family: "monospace"
                             opacity: 0.8
+                            horizontalAlignment: Text.AlignRight
+                            verticalAlignment: Text.AlignVCenter
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.IBeamCursor
+                                onClicked: {
+                                    valueField.text = param.value !== undefined ? param.value.toFixed(3) : "0"
+                                    valueField.visible = true
+                                    valueField.forceActiveFocus()
+                                    valueField.selectAll()
+                                }
+                            }
                         }
+
+                        TextField {
+                            id: valueField
+                            visible: false
+                            implicitWidth: 90
+                            implicitHeight: 28
+                            font.pointSize: 9
+                            font.family: "monospace"
+                            horizontalAlignment: Text.AlignRight
+                            verticalAlignment: Text.AlignVCenter
+                            leftPadding: 6
+                            rightPadding: 6
+                            topPadding: 2
+                            bottomPadding: 2
+                            selectByMouse: true
+                            inputMethodHints: Qt.ImhFormattedNumbersOnly
+                            validator: DoubleValidator {
+                                bottom: param.min !== undefined ? param.min : -999999
+                                top: param.max !== undefined ? param.max : 999999
+                            }
+
+                            background: Rectangle {
+                                color: Theme.inputBg
+                                border.color: Theme.buttonBorder
+                                border.width: 1
+                                radius: 2
+                            }
+
+                            onAccepted: commitValue()
+                            onActiveFocusChanged: {
+                                if (!activeFocus && visible) commitValue()
+                            }
+                            Keys.onEscapePressed: {
+                                valueField.visible = false
+                            }
+
+                            function commitValue() {
+                                var num = parseFloat(text)
+                                if (!isNaN(num) && pluginNodeId >= 0 && param.portIndex !== undefined) {
+                                    var min = param.min !== undefined ? param.min : -999999
+                                    var max = param.max !== undefined ? param.max : 999999
+                                    num = Math.max(min, Math.min(max, num))
+                                    controller.set_plugin_parameter(pluginNodeId, param.portIndex, num)
+                                }
+                                valueField.visible = false
+                            }
+                        }
+
                         Button {
                             text: "R"
                             flat: true

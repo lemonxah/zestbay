@@ -1090,6 +1090,12 @@ fn build_plugin_info(
         });
     }
 
+    let required_features: Vec<String> = plugin
+        .required_features()
+        .iter()
+        .filter_map(|n| n.as_uri().map(String::from))
+        .collect();
+
     Some(crate::lv2::Lv2PluginInfo {
         uri,
         name,
@@ -1100,7 +1106,7 @@ fn build_plugin_info(
         audio_outputs,
         control_inputs,
         control_outputs,
-        required_features: Vec::new(),
+        required_features,
         compatible: true,
         has_ui: false,
         format: crate::lv2::PluginFormat::Lv2,

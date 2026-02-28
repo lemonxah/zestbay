@@ -55,6 +55,10 @@ Item {
     property var pendingPluginPosition: null
     property string defaultNodeKey: ""
 
+    // Local bypass overrides for instant visual feedback
+    // Maps nodeId -> bool (true = bypassed). Cleared on each refreshData().
+    property var localBypassState: ({})
+
     // Snap guides: drawn while dragging
     readonly property real snapThreshold: 5  // pixels in canvas space
     property var activeSnapLines: []  // [{axis:"x"|"y", pos: number}]
@@ -553,6 +557,11 @@ Item {
         controller.save_hidden(JSON.stringify(arr))
     }
 
+    function isNodeBypassed(node) {
+        if (node.id in localBypassState) return localBypassState[node.id]
+        return node.pluginBypassed === true
+    }
+
     function findNodeData(nodeId) {
         for (var i = 0; i < nodes.length; i++) {
             if (nodes[i].id === nodeId) return nodes[i]
@@ -703,12 +712,19 @@ Item {
             var nw = getNodeWidth(n.id)
             var btnY = pos.y + h - buttonRowHeight - nodePadding
             var btnH = buttonRowHeight
-            var btnW = (nw - nodePadding * 3) / 2
+            var btnW = (nw - nodePadding * 4) / 3
+            // On/Off button
             if (c.x >= pos.x + nodePadding && c.x <= pos.x + nodePadding + btnW &&
+                c.y >= btnY && c.y <= btnY + btnH) {
+                return { button: "onoff", nodeId: n.id, bypassed: isNodeBypassed(n) }
+            }
+            // UI button
+            if (c.x >= pos.x + nodePadding * 2 + btnW && c.x <= pos.x + nodePadding * 2 + btnW * 2 &&
                 c.y >= btnY && c.y <= btnY + btnH) {
                 return { button: "ui", nodeId: n.id, hasUi: n.pluginHasUi !== false }
             }
-            if (c.x >= pos.x + nodePadding * 2 + btnW && c.x <= pos.x + nodePadding * 2 + btnW * 2 &&
+            // Params button
+            if (c.x >= pos.x + nodePadding * 3 + btnW * 2 && c.x <= pos.x + nodePadding * 3 + btnW * 3 &&
                 c.y >= btnY && c.y <= btnY + btnH) {
                 return { button: "params", nodeId: n.id }
             }
@@ -735,8 +751,7 @@ Item {
 
             var newPortPositions = {}
 
-            // Draw nodes first so port positions are computed,
-            // then draw links on top using the fresh positions.
+            // Pass 1: compute port positions (no drawing yet)
             for (var ni = 0; ni < nodes.length; ni++) {
                 var node = nodes[ni]
                 if (node.layoutKey && hiddenNodes[node.layoutKey]) continue
@@ -750,169 +765,20 @@ Item {
                     .sort(function(a, b) { return a.name.localeCompare(b.name) })
                 var outputs = ports.filter(function(p) { return p.direction === "Output" })
                     .sort(function(a, b) { return a.name.localeCompare(b.name) })
-                var rows = Math.max(inputs.length, outputs.length, 1)
-                var h = calculateNodeHeight(node)
                 var nw = getNodeWidth(node.id)
-
-                var isNodeSelected = selectedNodes[node.id] === true
-                var isDefaultNode = defaultNodeKey !== "" && node.layoutKey === defaultNodeKey
-                ctx.fillStyle = "" + colNodeBg
-                if (isNodeSelected) {
-                    ctx.strokeStyle = "" + Theme.selectionOutline
-                    ctx.lineWidth = 2.5
-                } else if (isDefaultNode) {
-                    ctx.strokeStyle = "" + colDefaultOutline
-                    ctx.lineWidth = 2.5
-                } else {
-                    ctx.strokeStyle = "" + colNodeBorder
-                    ctx.lineWidth = 1.5
-                }
-                roundRect(ctx, x, y, nw, h, 5)
-
-                // Draw "DEFAULT" badge for the default node
-                if (isDefaultNode) {
-                    ctx.font = "bold 8px sans-serif"
-                    var defBadgeText = "DEFAULT"
-                    var defBadgeW = ctx.measureText(defBadgeText).width + 6
-                    var defBadgeH = 12
-                    var defBadgeX = x + 4
-                    var defBadgeY = y + 3
-                    ctx.fillStyle = "" + Theme.defaultBadgeBg
-                    ctx.strokeStyle = "" + colDefaultOutline
-                    ctx.lineWidth = 1
-                    roundRect(ctx, defBadgeX, defBadgeY, defBadgeW, defBadgeH, 2)
-                    ctx.fillStyle = "" + colDefaultOutline
-                    ctx.textAlign = "center"
-                    ctx.textBaseline = "middle"
-                    ctx.fillText(defBadgeText, defBadgeX + defBadgeW / 2, defBadgeY + defBadgeH / 2)
-                }
-
-                ctx.fillStyle = "" + getNodeColor(node)
-                roundRectTop(ctx, x, y, nw, headerHeight, 5)
-
-                ctx.fillStyle = "" + Theme.textPrimary
-                ctx.font = "bold 11px sans-serif"
-                ctx.textAlign = "center"
-                ctx.textBaseline = "middle"
-                ctx.fillText(truncate(node.name, 30), x + nw / 2, y + headerHeight / 2)
-
-                // Draw format badge (LV2/CLAP/VST3) for plugin nodes
-                if (node.type === "Plugin" && node.pluginFormat) {
-                    var fmt = node.pluginFormat
-                    var badgeColor = fmt === "CLAP" ? ("" + Theme.badgeClapBg) : fmt === "VST3" ? ("" + Theme.badgeVst3Bg) : ("" + Theme.badgeLv2Bg)
-                    var badgeTextCol = fmt === "CLAP" ? ("" + Theme.badgeClapText) : fmt === "VST3" ? ("" + Theme.badgeVst3Text) : ("" + Theme.badgeLv2Text)
-                    ctx.font = "bold 8px sans-serif"
-                    var badgeW = ctx.measureText(fmt).width + 6
-                    var badgeH = 12
-                    var badgeX = x + nw - badgeW - 4
-                    var badgeY = y + 3
-                    var br = 2
-                    ctx.fillStyle = badgeColor
-                    ctx.strokeStyle = badgeColor
-                    ctx.lineWidth = 1
-                    roundRect(ctx, badgeX, badgeY, badgeW, badgeH, br)
-                    ctx.fillStyle = badgeTextCol
-                    ctx.textAlign = "center"
-                    ctx.textBaseline = "middle"
-                    ctx.fillText(fmt, badgeX + badgeW / 2, badgeY + badgeH / 2)
-                }
 
                 var portBaseY = y + headerHeight + nodePadding
                 for (var pi = 0; pi < inputs.length; pi++) {
                     var py = portBaseY + pi * (portHeight + portSpacing) + portHeight / 2
-                    var px = x
-
-                    ctx.fillStyle = inputs[pi].mediaType === "Midi" ? ("" + colMidiPort) : ("" + colPortIn)
-                    ctx.beginPath()
-                    ctx.arc(px, py, portRadius, 0, Math.PI * 2)
-                    ctx.fill()
-
-                    if (connectFromPortId >= 0 && connectFromDir === "Output") {
-                        var sxIn = px * zoom + panX
-                        var syIn = py * zoom + panY
-                        var dIn = Math.sqrt(Math.pow(connectMouseX - sxIn, 2) + Math.pow(connectMouseY - syIn, 2))
-                        if (dIn < portRadius * zoom * 3) {
-                            ctx.strokeStyle = "" + colLinkConnecting
-                            ctx.lineWidth = 2
-                            ctx.beginPath()
-                            ctx.arc(px, py, portRadius + 2, 0, Math.PI * 2)
-                            ctx.stroke()
-                        }
-                    }
-
-                    ctx.fillStyle = "" + Theme.textSecondary
-                    ctx.font = "10px sans-serif"
-                    ctx.textAlign = "left"
-                    ctx.textBaseline = "middle"
-                    ctx.fillText(truncate(inputs[pi].name, 24), px + portRadius + 4, py)
-
-                    newPortPositions[inputs[pi].id] = { cx: px, cy: py }
+                    newPortPositions[inputs[pi].id] = { cx: x, cy: py }
                 }
-
                 for (var po = 0; po < outputs.length; po++) {
                     var pyo = portBaseY + po * (portHeight + portSpacing) + portHeight / 2
-                    var pxo = x + nw
-
-                    ctx.fillStyle = outputs[po].mediaType === "Midi" ? ("" + colMidiPort) : ("" + colPortOut)
-                    ctx.beginPath()
-                    ctx.arc(pxo, pyo, portRadius, 0, Math.PI * 2)
-                    ctx.fill()
-
-                    if (connectFromPortId >= 0 && connectFromDir === "Input") {
-                        var sxOut = pxo * zoom + panX
-                        var syOut = pyo * zoom + panY
-                        var dOut = Math.sqrt(Math.pow(connectMouseX - sxOut, 2) + Math.pow(connectMouseY - syOut, 2))
-                        if (dOut < portRadius * zoom * 3) {
-                            ctx.strokeStyle = "" + colLinkConnecting
-                            ctx.lineWidth = 2
-                            ctx.beginPath()
-                            ctx.arc(pxo, pyo, portRadius + 2, 0, Math.PI * 2)
-                            ctx.stroke()
-                        }
-                    }
-
-                    ctx.fillStyle = "" + Theme.textSecondary
-                    ctx.font = "10px sans-serif"
-                    ctx.textAlign = "right"
-                    ctx.textBaseline = "middle"
-                    ctx.fillText(truncate(outputs[po].name, 24), pxo - portRadius - 4, pyo)
-
-                    newPortPositions[outputs[po].id] = { cx: pxo, cy: pyo }
-                }
-
-                if (node.type === "Plugin") {
-                    var btnY = y + h - buttonRowHeight - nodePadding
-                    var btnW = (nw - nodePadding * 3) / 2
-                    var btnH = buttonRowHeight
-                    var hasUi = node.pluginHasUi !== false
-
-                    // UI button — disabled (dimmed) when plugin has no UI
-                    ctx.fillStyle = hasUi ? ("" + Theme.buttonBg) : ("" + Theme.buttonDisabledBg)
-                    ctx.strokeStyle = hasUi ? ("" + Theme.buttonBorder) : ("" + Theme.buttonDisabledBorder)
-                    ctx.lineWidth = 1
-                    roundRect(ctx, x + nodePadding, btnY, btnW, btnH, 3)
-
-                    ctx.fillStyle = hasUi ? ("" + Theme.textPrimary) : ("" + Theme.textDisabled)
-                    ctx.font = "10px sans-serif"
-                    ctx.textAlign = "center"
-                    ctx.textBaseline = "middle"
-                    ctx.fillText("UI", x + nodePadding + btnW / 2, btnY + btnH / 2)
-
-                    // Params button — always active
-                    ctx.fillStyle = "" + Theme.buttonBg
-                    ctx.strokeStyle = "" + Theme.buttonBorder
-                    ctx.lineWidth = 1
-                    roundRect(ctx, x + nodePadding * 2 + btnW, btnY, btnW, btnH, 3)
-
-                    ctx.fillStyle = "" + Theme.textPrimary
-                    ctx.font = "10px sans-serif"
-                    ctx.textAlign = "center"
-                    ctx.textBaseline = "middle"
-                    ctx.fillText("Params", x + nodePadding * 2 + btnW + btnW / 2, btnY + btnH / 2)
+                    newPortPositions[outputs[po].id] = { cx: x + nw, cy: pyo }
                 }
             }
 
-            // Draw links on top of nodes using freshly computed port positions
+            // Pass 2: draw links BEHIND nodes using freshly computed port positions
             for (var li = 0; li < links.length; li++) {
                 var link = links[li]
                 var fromPos = newPortPositions[link.outputPortId]
@@ -927,6 +793,190 @@ Item {
                     var linkWidth = isSelected ? 3 : 2
                     drawBezier(ctx, fromPos.cx, fromPos.cy, toPos.cx, toPos.cy,
                         linkColor, linkWidth)
+                }
+            }
+
+            // Pass 3: draw nodes ON TOP of links
+            for (var ni2 = 0; ni2 < nodes.length; ni2++) {
+                var node2 = nodes[ni2]
+                if (node2.layoutKey && hiddenNodes[node2.layoutKey]) continue
+                var pos2 = nodePositions[node2.id]
+                if (!pos2) continue
+
+                var nx = pos2.x
+                var ny = pos2.y
+                var nPorts = portsByNode[node2.id] || []
+                var nInputs = nPorts.filter(function(p) { return p.direction === "Input" })
+                    .sort(function(a, b) { return a.name.localeCompare(b.name) })
+                var nOutputs = nPorts.filter(function(p) { return p.direction === "Output" })
+                    .sort(function(a, b) { return a.name.localeCompare(b.name) })
+                var nh = calculateNodeHeight(node2)
+                var nnw = getNodeWidth(node2.id)
+
+                var isNodeSelected = selectedNodes[node2.id] === true
+                var isDefaultNode = defaultNodeKey !== "" && node2.layoutKey === defaultNodeKey
+                ctx.fillStyle = "" + colNodeBg
+                if (isNodeSelected) {
+                    ctx.strokeStyle = "" + Theme.selectionOutline
+                    ctx.lineWidth = 2.5
+                } else if (isDefaultNode) {
+                    ctx.strokeStyle = "" + colDefaultOutline
+                    ctx.lineWidth = 2.5
+                } else {
+                    ctx.strokeStyle = "" + colNodeBorder
+                    ctx.lineWidth = 1.5
+                }
+                roundRect(ctx, nx, ny, nnw, nh, 5)
+
+                // Draw "DEFAULT" badge for the default node
+                if (isDefaultNode) {
+                    ctx.font = "bold 8px sans-serif"
+                    var defBadgeText = "DEFAULT"
+                    var defBadgeW = ctx.measureText(defBadgeText).width + 6
+                    var defBadgeH = 12
+                    var defBadgeX = nx + 4
+                    var defBadgeY = ny + 3
+                    ctx.fillStyle = "" + Theme.defaultBadgeBg
+                    ctx.strokeStyle = "" + colDefaultOutline
+                    ctx.lineWidth = 1
+                    roundRect(ctx, defBadgeX, defBadgeY, defBadgeW, defBadgeH, 2)
+                    ctx.fillStyle = "" + colDefaultOutline
+                    ctx.textAlign = "center"
+                    ctx.textBaseline = "middle"
+                    ctx.fillText(defBadgeText, defBadgeX + defBadgeW / 2, defBadgeY + defBadgeH / 2)
+                }
+
+                ctx.fillStyle = "" + getNodeColor(node2)
+                roundRectTop(ctx, nx, ny, nnw, headerHeight, 5)
+
+                ctx.fillStyle = "" + Theme.textPrimary
+                ctx.font = "bold 11px sans-serif"
+                ctx.textAlign = "center"
+                ctx.textBaseline = "middle"
+                ctx.fillText(truncate(node2.name, 30), nx + nnw / 2, ny + headerHeight / 2)
+
+                // Draw format badge (LV2/CLAP/VST3) for plugin nodes
+                if (node2.type === "Plugin" && node2.pluginFormat) {
+                    var fmt = node2.pluginFormat
+                    var badgeColor = fmt === "CLAP" ? ("" + Theme.badgeClapBg) : fmt === "VST3" ? ("" + Theme.badgeVst3Bg) : ("" + Theme.badgeLv2Bg)
+                    var badgeTextCol = fmt === "CLAP" ? ("" + Theme.badgeClapText) : fmt === "VST3" ? ("" + Theme.badgeVst3Text) : ("" + Theme.badgeLv2Text)
+                    ctx.font = "bold 8px sans-serif"
+                    var badgeW = ctx.measureText(fmt).width + 6
+                    var badgeH = 12
+                    var badgeX = nx + nnw - badgeW - 4
+                    var badgeY = ny + 3
+                    var br = 2
+                    ctx.fillStyle = badgeColor
+                    ctx.strokeStyle = badgeColor
+                    ctx.lineWidth = 1
+                    roundRect(ctx, badgeX, badgeY, badgeW, badgeH, br)
+                    ctx.fillStyle = badgeTextCol
+                    ctx.textAlign = "center"
+                    ctx.textBaseline = "middle"
+                    ctx.fillText(fmt, badgeX + badgeW / 2, badgeY + badgeH / 2)
+                }
+
+                var nPortBaseY = ny + headerHeight + nodePadding
+                for (var npi = 0; npi < nInputs.length; npi++) {
+                    var npy = nPortBaseY + npi * (portHeight + portSpacing) + portHeight / 2
+                    var npx = nx
+
+                    ctx.fillStyle = nInputs[npi].mediaType === "Midi" ? ("" + colMidiPort) : ("" + colPortIn)
+                    ctx.beginPath()
+                    ctx.arc(npx, npy, portRadius, 0, Math.PI * 2)
+                    ctx.fill()
+
+                    if (connectFromPortId >= 0 && connectFromDir === "Output") {
+                        var sxIn = npx * zoom + panX
+                        var syIn = npy * zoom + panY
+                        var dIn = Math.sqrt(Math.pow(connectMouseX - sxIn, 2) + Math.pow(connectMouseY - syIn, 2))
+                        if (dIn < portRadius * zoom * 3) {
+                            ctx.strokeStyle = "" + colLinkConnecting
+                            ctx.lineWidth = 2
+                            ctx.beginPath()
+                            ctx.arc(npx, npy, portRadius + 2, 0, Math.PI * 2)
+                            ctx.stroke()
+                        }
+                    }
+
+                    ctx.fillStyle = "" + Theme.textSecondary
+                    ctx.font = "10px sans-serif"
+                    ctx.textAlign = "left"
+                    ctx.textBaseline = "middle"
+                    ctx.fillText(truncate(nInputs[npi].name, 24), npx + portRadius + 4, npy)
+                }
+
+                for (var npo = 0; npo < nOutputs.length; npo++) {
+                    var npyo = nPortBaseY + npo * (portHeight + portSpacing) + portHeight / 2
+                    var npxo = nx + nnw
+
+                    ctx.fillStyle = nOutputs[npo].mediaType === "Midi" ? ("" + colMidiPort) : ("" + colPortOut)
+                    ctx.beginPath()
+                    ctx.arc(npxo, npyo, portRadius, 0, Math.PI * 2)
+                    ctx.fill()
+
+                    if (connectFromPortId >= 0 && connectFromDir === "Input") {
+                        var sxOut = npxo * zoom + panX
+                        var syOut = npyo * zoom + panY
+                        var dOut = Math.sqrt(Math.pow(connectMouseX - sxOut, 2) + Math.pow(connectMouseY - syOut, 2))
+                        if (dOut < portRadius * zoom * 3) {
+                            ctx.strokeStyle = "" + colLinkConnecting
+                            ctx.lineWidth = 2
+                            ctx.beginPath()
+                            ctx.arc(npxo, npyo, portRadius + 2, 0, Math.PI * 2)
+                            ctx.stroke()
+                        }
+                    }
+
+                    ctx.fillStyle = "" + Theme.textSecondary
+                    ctx.font = "10px sans-serif"
+                    ctx.textAlign = "right"
+                    ctx.textBaseline = "middle"
+                    ctx.fillText(truncate(nOutputs[npo].name, 24), npxo - portRadius - 4, npyo)
+                }
+
+                if (node2.type === "Plugin") {
+                    var btnY2 = ny + nh - buttonRowHeight - nodePadding
+                    var btnW3 = (nnw - nodePadding * 4) / 3
+                    var btnH2 = buttonRowHeight
+                    var hasUi = node2.pluginHasUi !== false
+                    var isBypassed = isNodeBypassed(node2)
+
+                    // On/Off button
+                    ctx.fillStyle = isBypassed ? ("" + Theme.buttonOffBg) : ("" + Theme.buttonActiveBg)
+                    ctx.strokeStyle = isBypassed ? ("" + Theme.buttonOffBorder) : ("" + Theme.buttonActiveBorder)
+                    ctx.lineWidth = 1
+                    roundRect(ctx, nx + nodePadding, btnY2, btnW3, btnH2, 3)
+
+                    ctx.fillStyle = isBypassed ? ("" + Theme.buttonOffText) : ("" + Theme.buttonActiveText)
+                    ctx.font = "bold 10px sans-serif"
+                    ctx.textAlign = "center"
+                    ctx.textBaseline = "middle"
+                    ctx.fillText(isBypassed ? "OFF" : "ON", nx + nodePadding + btnW3 / 2, btnY2 + btnH2 / 2)
+
+                    // UI button — disabled (dimmed) when plugin has no UI
+                    ctx.fillStyle = hasUi ? ("" + Theme.buttonBg) : ("" + Theme.buttonDisabledBg)
+                    ctx.strokeStyle = hasUi ? ("" + Theme.buttonBorder) : ("" + Theme.buttonDisabledBorder)
+                    ctx.lineWidth = 1
+                    roundRect(ctx, nx + nodePadding * 2 + btnW3, btnY2, btnW3, btnH2, 3)
+
+                    ctx.fillStyle = hasUi ? ("" + Theme.textPrimary) : ("" + Theme.textDisabled)
+                    ctx.font = "10px sans-serif"
+                    ctx.textAlign = "center"
+                    ctx.textBaseline = "middle"
+                    ctx.fillText("UI", nx + nodePadding * 2 + btnW3 + btnW3 / 2, btnY2 + btnH2 / 2)
+
+                    // Params button — always active
+                    ctx.fillStyle = "" + Theme.buttonBg
+                    ctx.strokeStyle = "" + Theme.buttonBorder
+                    ctx.lineWidth = 1
+                    roundRect(ctx, nx + nodePadding * 3 + btnW3 * 2, btnY2, btnW3, btnH2, 3)
+
+                    ctx.fillStyle = "" + Theme.textPrimary
+                    ctx.font = "10px sans-serif"
+                    ctx.textAlign = "center"
+                    ctx.textBaseline = "middle"
+                    ctx.fillText("Params", nx + nodePadding * 3 + btnW3 * 2 + btnW3 / 2, btnY2 + btnH2 / 2)
                 }
             }
 
@@ -1039,7 +1089,14 @@ Item {
             if (mouse.button === Qt.LeftButton) {
                 var btnHit = findButtonAt(mouse.x, mouse.y)
                 if (btnHit) {
-                    if (btnHit.button === "ui" && btnHit.hasUi) {
+                    if (btnHit.button === "onoff") {
+                        var newBypassed = !btnHit.bypassed
+                        // Immediate local feedback
+                        localBypassState[btnHit.nodeId] = newBypassed
+                        localBypassState = localBypassState  // trigger change signal
+                        controller.set_plugin_bypass(btnHit.nodeId, newBypassed)
+                        canvas.requestPaint()
+                    } else if (btnHit.button === "ui" && btnHit.hasUi) {
                         controller.open_plugin_ui(btnHit.nodeId)
                     } else if (btnHit.button === "params") {
                         graphView.openPluginParams(btnHit.nodeId)

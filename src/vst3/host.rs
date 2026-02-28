@@ -668,21 +668,6 @@ impl Vst3PluginInstance {
         sample_count: usize,
     ) {
         unsafe {
-            if self.bypassed {
-                // Pass-through
-                for (i, output) in outputs.iter_mut().enumerate() {
-                    if i < inputs.len() {
-                        let n = output.len().min(inputs[i].len()).min(sample_count);
-                        output[..n].copy_from_slice(&inputs[i][..n]);
-                    } else {
-                        for s in output.iter_mut().take(sample_count) {
-                            *s = 0.0;
-                        }
-                    }
-                }
-                return;
-            }
-
             // Read parameter changes from shared port_updates and build
             // IParameterChanges for the process call.
             self.input_param_changes.reset();
@@ -782,6 +767,20 @@ impl Vst3PluginInstance {
             process_data.processContext = std::ptr::null_mut();
 
             self.processor.process(&mut process_data);
+
+            // When bypassed, overwrite plugin audio output with passthrough
+            if self.bypassed {
+                for (i, output) in outputs.iter_mut().enumerate() {
+                    if i < inputs.len() {
+                        let n = output.len().min(inputs[i].len()).min(sample_count);
+                        output[..n].copy_from_slice(&inputs[i][..n]);
+                    } else {
+                        for s in output.iter_mut().take(sample_count) {
+                            *s = 0.0;
+                        }
+                    }
+                }
+            }
 
             // Sync param values back to port_updates
             for (i, p) in self.params.iter().enumerate() {
