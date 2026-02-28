@@ -201,7 +201,7 @@ ApplicationWindow {
                     onClicked: cpuOverlayDialog.open()
                 }
 
-                ToolTip.visible: cpuSparklineHover.containsMouse
+                ToolTip.visible: cpuSparklineHover.hovered
                 ToolTip.text: "Click for detailed CPU view"
 
                 HoverHandler {
