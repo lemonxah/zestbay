@@ -1,6 +1,6 @@
 [package]
 name = "zestbay"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "A PipeWire patchbay application"
 license = "MIT"
@@ -17,7 +17,7 @@ libspa = "0.9"
 
 # LV2 Plugin Hosting
 lilv = "0.2"
-lv2_raw = "0.2"
+lv2_raw = "0.3"
 
 # CLAP Plugin Hosting
 clap-sys = "0.5"

@@ -57,15 +57,22 @@ ApplicationWindow {
             color: "#3c3c3c"
         }
 
-        Flickable {
+        Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            contentHeight: settingsColumn.implicitHeight
-            clip: true
 
-            ScrollBar.vertical: ScrollBar {
-                policy: ScrollBar.AsNeeded
-            }
+            Flickable {
+                id: prefsFlickable
+                anchors.fill: parent
+                contentHeight: settingsColumn.implicitHeight
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+
+                ScrollBar.vertical: ScrollBar {
+                    id: prefsScrollBar
+                    policy: ScrollBar.AlwaysOn
+                    minimumSize: 0.08
+                }
 
             ColumnLayout {
                 id: settingsColumn
@@ -573,6 +580,42 @@ ApplicationWindow {
 
                 Item {
                     Layout.fillHeight: true
+                }
+            }
+        }
+
+            // Bottom fade gradient to hint there's more content below
+            Rectangle {
+                anchors.left: parent.left
+                anchors.right: prefsScrollBar.left
+                anchors.bottom: parent.bottom
+                height: 32
+                visible: !prefsFlickable.atYEnd
+                gradient: Gradient {
+                    GradientStop { position: 0.0; color: "transparent" }
+                    GradientStop { position: 1.0; color: "#1e1e1e" }
+                }
+
+                Label {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: 4
+                    text: "\u25BC  scroll for more  \u25BC"
+                    font.pointSize: 8
+                    opacity: 0.5
+                }
+            }
+
+            // Top fade gradient when scrolled down
+            Rectangle {
+                anchors.left: parent.left
+                anchors.right: prefsScrollBar.left
+                anchors.top: parent.top
+                height: 24
+                visible: !prefsFlickable.atYBeginning
+                gradient: Gradient {
+                    GradientStop { position: 0.0; color: "#1e1e1e" }
+                    GradientStop { position: 1.0; color: "transparent" }
                 }
             }
         }

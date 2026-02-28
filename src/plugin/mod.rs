@@ -5,6 +5,7 @@
 //! top-level module (`src/lv2/`, `src/clap/`, `src/vst3/`) and feeds into
 //! the unified [`PluginManager`].
 
+pub mod cpu_stats;
 pub mod manager;
 pub mod types;
 

@@ -9,7 +9,8 @@ fn main() {
             .qml_file("qml/PluginParams.qml")
             .qml_file("qml/RuleEditor.qml")
             .qml_file("qml/PluginManager.qml")
-            .qml_file("qml/Preferences.qml"),
+            .qml_file("qml/Preferences.qml")
+            .qml_file("qml/CpuOverlay.qml"),
     )
     .qt_module("Network")
     .files(["src/ui/qobject_bridge.rs"])

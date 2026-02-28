@@ -85,7 +85,17 @@ impl Lv2PluginInstance {
 
         let mut urid_map = Box::new(urid_mapper.as_lv2_urid_map());
         let urid_feature = unsafe { UridMapper::make_feature(&mut *urid_map as *mut _) };
-        let features = vec![&urid_feature];
+
+        // lilv 0.2.4 depends on lv2_raw 0.2's LV2Feature while we use lv2_raw 0.3.
+        // Both versions have an identical #[repr(C)] layout:
+        //   { uri: *const c_char, data: *mut c_void }
+        // The only difference is libc types vs std::os::raw types (same ABI).
+        // We transmute the Vec to bridge the type boundary.
+        let features_v3: Vec<&lv2_raw::core::LV2Feature> = vec![&urid_feature];
+        let features = unsafe {
+            // SAFETY: lv2_raw 0.2 and 0.3 LV2Feature are layout-identical #[repr(C)] structs.
+            std::mem::transmute::<Vec<&lv2_raw::core::LV2Feature>, Vec<_>>(features_v3)
+        };
 
         let mut instance = unsafe { plugin.instantiate(sample_rate, features) }?;
 

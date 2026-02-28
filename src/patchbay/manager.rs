@@ -8,6 +8,9 @@ pub struct PatchbayManager {
     rules: Vec<AutoConnectRule>,
     pub enabled: bool,
     pub rules_dirty: bool,
+    /// Display name of the default target node. When a source node has no
+    /// matching rules, its output ports will be connected to this node instead.
+    default_target: Option<String>,
 }
 
 impl PatchbayManager {
@@ -17,6 +20,7 @@ impl PatchbayManager {
             rules: Vec::new(),
             enabled: true,
             rules_dirty: false,
+            default_target: None,
         }
     }
 
@@ -33,6 +37,10 @@ impl PatchbayManager {
     pub fn remove_rule(&mut self, id: &str) {
         self.rules.retain(|r| r.id != id);
         self.rules_dirty = true;
+    }
+
+    pub fn set_default_target(&mut self, name: Option<String>) {
+        self.default_target = name;
     }
 
     pub fn rules(&self) -> &[AutoConnectRule] {
@@ -266,9 +274,45 @@ impl PatchbayManager {
                 .filter(|r| r.enabled && r.matches_source(node.display_name(), node.node_type))
                 .collect();
 
-            for rule in &matching_rules {
-                if let Some(target) = self.find_matching_target(rule, &nodes, node.id) {
-                    commands.extend(self.generate_connections(rule, target, &output_ports));
+            if matching_rules.is_empty() {
+                // No rules match this source — use the default target if set,
+                // but only for application streams (StreamOutput), not hardware
+                // sources like microphones or other node types.
+                let is_app_stream = node.node_type == Some(NodeType::StreamOutput);
+                if is_app_stream {
+                if let Some(ref default_name) = self.default_target {
+                    if let Some(target) = nodes.iter().find(|n| {
+                        n.id != node.id
+                            && n.ready
+                            && n.node_type.map(|t| t.has_inputs()).unwrap_or(false)
+                            && n.display_name() == default_name
+                    }) {
+                        // Auto-connect by port matching (no explicit port mappings)
+                        let target_ports = self.graph.get_input_ports(target.id);
+                        for source_port in &output_ports {
+                            if let Some(target_port) =
+                                self.find_matching_port(source_port, &target_ports)
+                            {
+                                if self
+                                    .graph
+                                    .find_link(source_port.id, target_port.id)
+                                    .is_none()
+                                {
+                                    commands.push(PwCommand::Connect {
+                                        output_port_id: source_port.id,
+                                        input_port_id: target_port.id,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                } // is_app_stream
+            } else {
+                for rule in &matching_rules {
+                    if let Some(target) = self.find_matching_target(rule, &nodes, node.id) {
+                        commands.extend(self.generate_connections(rule, target, &output_ports));
+                    }
                 }
             }
         }
@@ -432,6 +476,16 @@ impl PatchbayManager {
             }
         }
 
+        // If the source has no rules, check if this link is to the default
+        // target — if so, it's authorized by the default routing.
+        if !has_any_rule_for_source {
+            if let Some(ref default_name) = self.default_target {
+                if target_node.display_name() == default_name {
+                    return false;
+                }
+            }
+        }
+
         let has_any_rule_for_target = self.rules.iter().any(|r| {
             r.enabled
                 && r.matches_target(
@@ -442,6 +496,15 @@ impl PatchbayManager {
         });
 
         if has_any_rule_for_target {
+            // If the source has no rules but is connected to this target
+            // via default routing, don't remove the link.
+            if !has_any_rule_for_source {
+                if let Some(ref default_name) = self.default_target {
+                    if target_node.display_name() == default_name {
+                        return false;
+                    }
+                }
+            }
             let authorized = self.rules.iter().any(|r| link_authorized_by(r));
             if !authorized {
                 return true;

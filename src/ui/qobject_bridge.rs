@@ -154,6 +154,15 @@ pub mod qobject {
 
         #[qinvokable]
         fn get_cpu_history(self: Pin<&mut Self>) -> QString;
+
+        #[qinvokable]
+        fn get_plugin_cpu_json(self: Pin<&mut Self>) -> QString;
+
+        #[qinvokable]
+        fn get_default_node(self: Pin<&mut Self>) -> QString;
+
+        #[qinvokable]
+        fn set_default_node(self: Pin<&mut Self>, layout_key: QString);
     }
 
     unsafe extern "RustQt" {
@@ -323,7 +332,7 @@ impl Default for AppControllerRust {
             prev_cpu_ticks: 0,
             prev_cpu_time: None,
             cpu_avg: 0.0,
-            cpu_history: vec![0.0; 60],
+            cpu_history: vec![0.0; 120],
             bridge_split: BridgeSplitState::new(),
         }
     }
@@ -496,6 +505,23 @@ impl qobject::AppController {
                 if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
                     patchbay.set_rules(rules);
                     patchbay.rules_dirty = false;
+                }
+            }
+
+            // Load default node setting
+            let default_node_path = config_path("default_node.txt");
+            if let Ok(key) = std::fs::read_to_string(&default_node_path) {
+                let key = key.trim().to_string();
+                if !key.is_empty() {
+                    let display_name = if let Some(pos) = key.find(':') {
+                        key[pos + 1..].to_string()
+                    } else {
+                        key.clone()
+                    };
+                    log::info!("Loaded default node: {}", display_name);
+                    if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
+                        patchbay.set_default_target(Some(display_name));
+                    }
                 }
             }
         }
@@ -918,7 +944,7 @@ impl qobject::AppController {
         self.as_mut().rust_mut().cpu_avg = avg;
         {
             let h = &mut self.as_mut().rust_mut().cpu_history;
-            if h.len() >= 60 {
+            if h.len() >= 120 {
                 h.remove(0);
             }
             h.push(avg);
@@ -2188,6 +2214,68 @@ impl qobject::AppController {
     pub fn get_cpu_history(self: Pin<&mut Self>) -> QString {
         let json = serde_json::to_string(&self.rust().cpu_history).unwrap_or_default();
         QString::from(&json)
+    }
+
+    pub fn get_plugin_cpu_json(self: Pin<&mut Self>) -> QString {
+        use crate::plugin::cpu_stats::global_cpu_tracker;
+
+        let snapshots = global_cpu_tracker().take_all_snapshots();
+        let items: Vec<serde_json::Value> = snapshots
+            .into_iter()
+            .map(|(id, name, snap)| {
+                serde_json::json!({
+                    "id": id,
+                    "name": name,
+                    "dspPercent": (snap.dsp_percent * 100.0).round() / 100.0,
+                    "avgUs": snap.avg_ns / 1000,
+                    "lastUs": snap.last_ns / 1000,
+                    "calls": snap.calls,
+                })
+            })
+            .collect();
+        let json = serde_json::to_string(&items).unwrap_or_default();
+        QString::from(&json)
+    }
+
+    pub fn get_default_node(self: Pin<&mut Self>) -> QString {
+        let path = config_path("default_node.txt");
+        match std::fs::read_to_string(&path) {
+            Ok(s) => QString::from(&s.trim().to_string()),
+            Err(_) => QString::from(""),
+        }
+    }
+
+    pub fn set_default_node(mut self: Pin<&mut Self>, layout_key: QString) {
+        let key: String = layout_key.to_string();
+        let path = config_path("default_node.txt");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if key.is_empty() {
+            let _ = std::fs::remove_file(&path);
+            log::info!("Cleared default node");
+        } else {
+            if let Err(e) = std::fs::write(&path, &key) {
+                log::error!("Failed to save default node to {:?}: {}", path, e);
+            } else {
+                log::info!("Set default node: {}", key);
+            }
+        }
+
+        // Update patchbay manager with the new default
+        if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
+            if key.is_empty() {
+                patchbay.set_default_target(None);
+            } else {
+                // Extract the display name from the layout key (format is "Type:DisplayName")
+                let display_name = if let Some(pos) = key.find(':') {
+                    key[pos + 1..].to_string()
+                } else {
+                    key.clone()
+                };
+                patchbay.set_default_target(Some(display_name));
+            }
+        }
     }
 
     pub fn set_window_visible(self: Pin<&mut Self>, visible: bool) {

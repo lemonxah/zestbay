@@ -188,6 +188,19 @@ ApplicationWindow {
                 height: 40
                 Layout.alignment: Qt.AlignVCenter
 
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: cpuOverlayDialog.open()
+                }
+
+                ToolTip.visible: cpuSparklineHover.containsMouse
+                ToolTip.text: "Click for detailed CPU view"
+
+                HoverHandler {
+                    id: cpuSparklineHover
+                }
+
                 property var cpuData: []
 
                 Connections {
@@ -258,6 +271,12 @@ ApplicationWindow {
                 text: "CPU: " + controller.cpu_usage
                 font.family: "monospace"
                 opacity: 0.7
+
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: cpuOverlayDialog.open()
+                }
             }
 
             Rectangle {
@@ -312,5 +331,11 @@ ApplicationWindow {
         onPollIntervalChanged: intervalMs => {
             pollTimer.interval = intervalMs;
         }
+    }
+
+    CpuOverlay {
+        id: cpuOverlayDialog
+        controller: controller
+        anchors.centerIn: parent
     }
 }

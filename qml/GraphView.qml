@@ -53,6 +53,7 @@ Item {
     property int contextNodeId: -1
     property var contextNode: null
     property var pendingPluginPosition: null
+    property string defaultNodeKey: ""
 
     readonly property real minNodeWidth: 180
     readonly property real maxNodeWidth: 400
@@ -84,6 +85,7 @@ Item {
     readonly property color colLinkInactive: "#555555"
     readonly property color colLinkMidi: "#FF69B4"
     readonly property color colLinkConnecting: "#FFFF00"
+    readonly property color colDefaultOutline: "#00FF88"
 
     function refreshData() {
         if (!viewportLoaded) {
@@ -103,6 +105,10 @@ Item {
                 savedLayout = {}
             }
             layoutLoaded = true
+            try {
+                var defNode = controller.get_default_node()
+                if (defNode) defaultNodeKey = defNode
+            } catch(e) {}
         }
         if (!hiddenLoaded) {
             try {
@@ -159,16 +165,84 @@ Item {
                     pendingPluginPosition = null
                     persistLayout()
                 } else {
-                    var col = getNodeColumn(n.type)
-                    var cursor = layoutCursors[col]
-                    nodePositions[n.id] = { x: cursor.x, y: cursor.y }
-                    cursor.y += calculateNodeHeight(n) + 20
+                    // Try to position near connected peers
+                    var peerPos = findConnectedPeerPosition(n.id)
+                    if (peerPos) {
+                        // Place to the left of a sink/target, or right of a source
+                        var offsetX = (n.type === "Sink" || n.type === "StreamInput") ? 250 : -250
+                        nodePositions[n.id] = { x: peerPos.x + offsetX, y: peerPos.y }
+                    } else {
+                        var col = getNodeColumn(n.type)
+                        var cursor = layoutCursors[col]
+                        nodePositions[n.id] = { x: cursor.x, y: cursor.y }
+                        cursor.y += calculateNodeHeight(n) + 20
+                    }
                 }
+                // Resolve overlaps: shift down until no collision
+                resolveNodeOverlap(n)
             }
         }
 
         canvas.requestPaint()
         repaintTimer.restart()
+    }
+
+    function findConnectedPeerPosition(nodeId) {
+        // Look through current links to find any node already positioned
+        // that is connected to this node
+        for (var li = 0; li < links.length; li++) {
+            var link = links[li]
+            var peerId = -1
+            if (link.outputNodeId === nodeId && link.inputNodeId in nodePositions) {
+                peerId = link.inputNodeId
+            } else if (link.inputNodeId === nodeId && link.outputNodeId in nodePositions) {
+                peerId = link.outputNodeId
+            }
+            if (peerId >= 0) {
+                return nodePositions[peerId]
+            }
+        }
+        return null
+    }
+
+    function resolveNodeOverlap(node, skipIds) {
+        var pos = nodePositions[node.id]
+        if (!pos) return
+        var h = calculateNodeHeight(node)
+        var w = getNodeWidth(node.id) || minNodeWidth
+        var maxAttempts = 50
+        var spacing = 10
+        for (var attempt = 0; attempt < maxAttempts; attempt++) {
+            var overlaps = false
+            for (var oi = 0; oi < nodes.length; oi++) {
+                var other = nodes[oi]
+                if (other.id === node.id) continue
+                if (skipIds && skipIds[other.id]) continue
+                var opos = nodePositions[other.id]
+                if (!opos) continue
+                var oh = calculateNodeHeight(other)
+                var ow = getNodeWidth(other.id) || minNodeWidth
+
+                // Check AABB overlap
+                if (pos.x < opos.x + ow && pos.x + w > opos.x &&
+                    pos.y < opos.y + oh && pos.y + h > opos.y) {
+                    // Calculate vertical overlap amounts
+                    var overlapTop = opos.y + oh - pos.y    // how far into the other from the top
+                    var overlapBot = pos.y + h - opos.y     // how far into the other from the bottom
+                    // Snap above unless the node is mostly past the other (>70% overlap from top)
+                    var minH = Math.min(h, oh)
+                    if (overlapTop < minH * 0.7) {
+                        pos = { x: pos.x, y: opos.y - h - spacing }
+                    } else {
+                        pos = { x: pos.x, y: opos.y + oh + spacing }
+                    }
+                    nodePositions[node.id] = pos
+                    overlaps = true
+                    break
+                }
+            }
+            if (!overlaps) break
+        }
     }
 
     function persistLayout() {
@@ -219,6 +293,28 @@ Item {
                     hiddenNodes[contextNode.layoutKey] = true
                     hiddenNodes = hiddenNodes
                     persistHidden()
+                    canvas.requestPaint()
+                }
+            }
+        }
+
+        MenuSeparator {}
+
+        MenuItem {
+            text: contextNode && contextNode.layoutKey === defaultNodeKey && defaultNodeKey !== ""
+                  ? "Clear Default" : "Set as Default"
+            visible: contextNode !== null && (contextNode.type === "Sink" || contextNode.type === "Duplex" || contextNode.type === "Plugin")
+            height: visible ? implicitHeight : 0
+            onTriggered: {
+                if (contextNode) {
+                    var key = contextNode.layoutKey || ""
+                    if (key === defaultNodeKey && defaultNodeKey !== "") {
+                        defaultNodeKey = ""
+                        controller.set_default_node("")
+                    } else if (key !== "") {
+                        defaultNodeKey = key
+                        controller.set_default_node(key)
+                    }
                     canvas.requestPaint()
                 }
             }
@@ -532,51 +628,8 @@ Item {
 
             var newPortPositions = {}
 
-            for (var li = 0; li < links.length; li++) {
-                var link = links[li]
-                var fromPos = portPositions[link.outputPortId]
-                var toPos = portPositions[link.inputPortId]
-                if (fromPos && toPos) {
-                    var isSelected = selectedLinks[link.id] === true
-                    var isMidiLink = portMediaTypes[link.outputPortId] === "Midi"
-                                  || portMediaTypes[link.inputPortId] === "Midi"
-                    var linkColor = isSelected ? "#FF4444"
-                                  : isMidiLink ? colLinkMidi
-                                  : (link.active ? colLinkActive : colLinkInactive)
-                    var linkWidth = isSelected ? 3 : 2
-                    drawBezier(ctx, fromPos.cx, fromPos.cy, toPos.cx, toPos.cy,
-                        linkColor, linkWidth)
-                }
-            }
-
-            if (connectFromPortId >= 0) {
-                var dragFrom = portPositions[connectFromPortId]
-                if (dragFrom) {
-                    var dragToC = graphView.toCanvas(connectMouseX, connectMouseY)
-                    if (connectFromDir === "Input") {
-                        drawBezier(ctx, dragToC.x, dragToC.y, dragFrom.cx, dragFrom.cy, colLinkConnecting, 2)
-                    } else {
-                        drawBezier(ctx, dragFrom.cx, dragFrom.cy, dragToC.x, dragToC.y, colLinkConnecting, 2)
-                    }
-                }
-            }
-
-            if (selectDragging) {
-                var sc1 = graphView.toCanvas(selectStartX, selectStartY)
-                var sc2 = graphView.toCanvas(selectEndX, selectEndY)
-                var selX = Math.min(sc1.x, sc2.x)
-                var selY = Math.min(sc1.y, sc2.y)
-                var selW = Math.abs(sc2.x - sc1.x)
-                var selH = Math.abs(sc2.y - sc1.y)
-                ctx.strokeStyle = "#FFFF00"
-                ctx.lineWidth = 1 / zoom
-                ctx.fillStyle = "rgba(255, 255, 0, 0.08)"
-                ctx.beginPath()
-                ctx.rect(selX, selY, selW, selH)
-                ctx.fill()
-                ctx.stroke()
-            }
-
+            // Draw nodes first so port positions are computed,
+            // then draw links on top using the fresh positions.
             for (var ni = 0; ni < nodes.length; ni++) {
                 var node = nodes[ni]
                 if (node.layoutKey && hiddenNodes[node.layoutKey]) continue
@@ -595,10 +648,37 @@ Item {
                 var nw = getNodeWidth(node.id)
 
                 var isNodeSelected = selectedNodes[node.id] === true
+                var isDefaultNode = defaultNodeKey !== "" && node.layoutKey === defaultNodeKey
                 ctx.fillStyle = "" + colNodeBg
-                ctx.strokeStyle = isNodeSelected ? "#FFFF00" : ("" + colNodeBorder)
-                ctx.lineWidth = isNodeSelected ? 2.5 : 1.5
+                if (isNodeSelected) {
+                    ctx.strokeStyle = "#FFFF00"
+                    ctx.lineWidth = 2.5
+                } else if (isDefaultNode) {
+                    ctx.strokeStyle = "" + colDefaultOutline
+                    ctx.lineWidth = 2.5
+                } else {
+                    ctx.strokeStyle = "" + colNodeBorder
+                    ctx.lineWidth = 1.5
+                }
                 roundRect(ctx, x, y, nw, h, 5)
+
+                // Draw "DEFAULT" badge for the default node
+                if (isDefaultNode) {
+                    ctx.font = "bold 8px sans-serif"
+                    var defBadgeText = "DEFAULT"
+                    var defBadgeW = ctx.measureText(defBadgeText).width + 6
+                    var defBadgeH = 12
+                    var defBadgeX = x + 4
+                    var defBadgeY = y + 3
+                    ctx.fillStyle = "#004422"
+                    ctx.strokeStyle = "" + colDefaultOutline
+                    ctx.lineWidth = 1
+                    roundRect(ctx, defBadgeX, defBadgeY, defBadgeW, defBadgeH, 2)
+                    ctx.fillStyle = "" + colDefaultOutline
+                    ctx.textAlign = "center"
+                    ctx.textBaseline = "middle"
+                    ctx.fillText(defBadgeText, defBadgeX + defBadgeW / 2, defBadgeY + defBadgeH / 2)
+                }
 
                 ctx.fillStyle = "" + getNodeColor(node)
                 roundRectTop(ctx, x, y, nw, headerHeight, 5)
@@ -723,6 +803,52 @@ Item {
                     ctx.textBaseline = "middle"
                     ctx.fillText("Params", x + nodePadding * 2 + btnW + btnW / 2, btnY + btnH / 2)
                 }
+            }
+
+            // Draw links on top of nodes using freshly computed port positions
+            for (var li = 0; li < links.length; li++) {
+                var link = links[li]
+                var fromPos = newPortPositions[link.outputPortId]
+                var toPos = newPortPositions[link.inputPortId]
+                if (fromPos && toPos) {
+                    var isSelected = selectedLinks[link.id] === true
+                    var isMidiLink = portMediaTypes[link.outputPortId] === "Midi"
+                                  || portMediaTypes[link.inputPortId] === "Midi"
+                    var linkColor = isSelected ? "#FF4444"
+                                  : isMidiLink ? colLinkMidi
+                                  : (link.active ? colLinkActive : colLinkInactive)
+                    var linkWidth = isSelected ? 3 : 2
+                    drawBezier(ctx, fromPos.cx, fromPos.cy, toPos.cx, toPos.cy,
+                        linkColor, linkWidth)
+                }
+            }
+
+            if (connectFromPortId >= 0) {
+                var dragFrom = newPortPositions[connectFromPortId] || portPositions[connectFromPortId]
+                if (dragFrom) {
+                    var dragToC = graphView.toCanvas(connectMouseX, connectMouseY)
+                    if (connectFromDir === "Input") {
+                        drawBezier(ctx, dragToC.x, dragToC.y, dragFrom.cx, dragFrom.cy, colLinkConnecting, 2)
+                    } else {
+                        drawBezier(ctx, dragFrom.cx, dragFrom.cy, dragToC.x, dragToC.y, colLinkConnecting, 2)
+                    }
+                }
+            }
+
+            if (selectDragging) {
+                var sc1 = graphView.toCanvas(selectStartX, selectStartY)
+                var sc2 = graphView.toCanvas(selectEndX, selectEndY)
+                var selX = Math.min(sc1.x, sc2.x)
+                var selY = Math.min(sc1.y, sc2.y)
+                var selW = Math.abs(sc2.x - sc1.x)
+                var selH = Math.abs(sc2.y - sc1.y)
+                ctx.strokeStyle = "#FFFF00"
+                ctx.lineWidth = 1 / zoom
+                ctx.fillStyle = "rgba(255, 255, 0, 0.08)"
+                ctx.beginPath()
+                ctx.rect(selX, selY, selW, selH)
+                ctx.fill()
+                ctx.stroke()
             }
 
             ctx.restore()
@@ -938,7 +1064,18 @@ Item {
 
                 if (groupDragging) {
                     groupDragging = false
+                    // Resolve overlaps for each node in the group against
+                    // nodes outside the group (skip fellow group members)
+                    for (var gid in selectedNodes) {
+                        if (selectedNodes[gid]) {
+                            var gNode = findNodeData(parseInt(gid))
+                            if (gNode) {
+                                resolveNodeOverlap(gNode, selectedNodes)
+                            }
+                        }
+                    }
                     persistLayout()
+                    canvas.requestPaint()
                 }
 
                 if (dragNodeId >= 0) {
@@ -949,7 +1086,13 @@ Item {
                             controller.insert_node_on_link(linkUnder, dragNodeId)
                         }
                     }
+                    // Resolve overlap after dropping a single node
+                    var droppedNode = findNodeData(dragNodeId)
+                    if (droppedNode) {
+                        resolveNodeOverlap(droppedNode)
+                    }
                     persistLayout()
+                    canvas.requestPaint()
                 }
                 dragNodeId = -1
 

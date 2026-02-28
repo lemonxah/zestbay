@@ -94,11 +94,44 @@ Dialog {
 
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
+            // Column header row
+            header: Item {
+                width: ruleList.width - 12
+                height: rules.length > 0 ? 28 : 0
+                visible: rules.length > 0
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 8
+                    anchors.rightMargin: 8
+                    spacing: 8
+
+                    Label {
+                        text: "Rule"
+                        font.bold: true
+                        font.pointSize: 9
+                        opacity: 0.5
+                        Layout.fillWidth: true
+                    }
+                    Label {
+                        text: "Enabled"
+                        font.bold: true
+                        font.pointSize: 9
+                        opacity: 0.5
+                        Layout.preferredWidth: 58
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    Label {
+                        text: ""
+                        Layout.preferredWidth: 36
+                    }
+                }
+            }
+
             delegate: Rectangle {
                 id: ruleDelegate
                 required property int index
                 width: ruleList.width - 12
-                height: 60
+                height: 56
                 color: ruleMouseArea.containsMouse ? "#3a3a3a" : (index % 2 === 0 ? "#2a2a2a" : "#252525")
                 radius: 4
 
@@ -106,15 +139,20 @@ Dialog {
 
                 RowLayout {
                     anchors.fill: parent
-                    anchors.margins: 8
+                    anchors.leftMargin: 10
+                    anchors.rightMargin: 6
+                    anchors.topMargin: 6
+                    anchors.bottomMargin: 6
                     spacing: 8
 
                     ColumnLayout {
                         Layout.fillWidth: true
+                        Layout.fillHeight: true
                         spacing: 2
 
                         RowLayout {
                             spacing: 6
+                            Layout.fillWidth: true
                             Label {
                                 text: rule.sourceLabel || ""
                                 font.bold: true
@@ -124,7 +162,7 @@ Dialog {
                             Label {
                                 text: "\u2192"
                                 font.pointSize: 12
-                                opacity: 0.6
+                                opacity: 0.5
                             }
                             Label {
                                 text: rule.targetLabel || ""
@@ -134,24 +172,20 @@ Dialog {
                             }
                         }
 
-                        RowLayout {
-                            spacing: 8
-                            Label {
-                                text: {
-                                    var parts = []
-                                    if (rule.portMappings && rule.portMappings.length > 0)
-                                        parts.push(rule.portMappings.length + " port mapping" + (rule.portMappings.length > 1 ? "s" : ""))
-                                    else
-                                        parts.push("heuristic matching")
-                                    return parts.join("  |  ")
-                                }
-                                font.pointSize: 8
-                                opacity: 0.5
+                        Label {
+                            text: {
+                                if (rule.portMappings && rule.portMappings.length > 0)
+                                    return rule.portMappings.length + " port mapping" + (rule.portMappings.length > 1 ? "s" : "")
+                                return "heuristic matching"
                             }
+                            font.pointSize: 8
+                            opacity: 0.4
                         }
                     }
 
                     Switch {
+                        Layout.preferredWidth: 58
+                        Layout.alignment: Qt.AlignVCenter
                         checked: rule.enabled || false
                         onToggled: {
                             if (rule.id) {
@@ -164,19 +198,77 @@ Dialog {
                         ToolTip.text: rule.enabled ? "Enabled" : "Disabled"
                     }
 
-                    Button {
-                        text: "X"
-                        flat: true
-                        implicitWidth: 32
-                        implicitHeight: 32
-                        onClicked: {
-                            if (rule.id) {
-                                controller.remove_rule(rule.id)
-                                loadRules()
+                    Rectangle {
+                        Layout.preferredWidth: 30
+                        Layout.preferredHeight: 30
+                        Layout.alignment: Qt.AlignVCenter
+                        radius: 4
+                        color: delMouseArea.containsMouse ? "#5c2020" : "transparent"
+                        border.color: delMouseArea.containsMouse ? "#cc4444" : "#555555"
+                        border.width: 1
+
+                        // Trash can icon drawn with Canvas
+                        Canvas {
+                            anchors.centerIn: parent
+                            width: 16
+                            height: 16
+                            onPaint: {
+                                var ctx = getContext("2d")
+                                ctx.reset()
+                                var c = delMouseArea.containsMouse ? "#ff6666" : "#999999"
+                                ctx.strokeStyle = c
+                                ctx.fillStyle = c
+                                ctx.lineWidth = 1.2
+                                ctx.lineCap = "round"
+
+                                // Lid
+                                ctx.beginPath()
+                                ctx.moveTo(2, 4)
+                                ctx.lineTo(14, 4)
+                                ctx.stroke()
+
+                                // Handle
+                                ctx.beginPath()
+                                ctx.moveTo(6, 4)
+                                ctx.lineTo(6, 2.5)
+                                ctx.lineTo(10, 2.5)
+                                ctx.lineTo(10, 4)
+                                ctx.stroke()
+
+                                // Can body
+                                ctx.beginPath()
+                                ctx.moveTo(3.5, 4)
+                                ctx.lineTo(4.5, 14)
+                                ctx.lineTo(11.5, 14)
+                                ctx.lineTo(12.5, 4)
+                                ctx.stroke()
+
+                                // Inner lines
+                                ctx.beginPath()
+                                ctx.moveTo(6.5, 6.5)
+                                ctx.lineTo(6.5, 11.5)
+                                ctx.stroke()
+                                ctx.beginPath()
+                                ctx.moveTo(9.5, 6.5)
+                                ctx.lineTo(9.5, 11.5)
+                                ctx.stroke()
                             }
                         }
 
-                        ToolTip.visible: hovered
+                        MouseArea {
+                            id: delMouseArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                if (rule.id) {
+                                    controller.remove_rule(rule.id)
+                                    loadRules()
+                                }
+                            }
+                        }
+
+                        ToolTip.visible: delMouseArea.containsMouse
                         ToolTip.text: "Delete rule"
                     }
                 }

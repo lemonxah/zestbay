@@ -2,11 +2,13 @@ use std::cell::RefCell;
 use std::ffi::CString;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use pipewire::core::CoreRc;
 
 use super::host::Lv2PluginInstance;
 use super::types::*;
+use crate::plugin::cpu_stats::{global_cpu_tracker, PluginTimingSlot};
 
 pub struct Lv2FilterNode {
     filter: *mut pipewire::sys::pw_filter,
@@ -43,6 +45,7 @@ struct FilterData {
     output_port_ptrs: Vec<*mut std::ffi::c_void>,
     n_audio_inputs: usize,
     n_audio_outputs: usize,
+    cpu_slot: Arc<PluginTimingSlot>,
 }
 
 unsafe impl Send for FilterData {}
@@ -91,6 +94,9 @@ impl Lv2FilterNode {
 
         let instance_ptr = plugin_instance.as_ptr();
 
+        let cpu_slot =
+            global_cpu_tracker().register(config.instance_id, config.display_name.clone());
+
         let user_data = Box::into_raw(Box::new(FilterData {
             instance_ptr,
             filter,
@@ -103,6 +109,7 @@ impl Lv2FilterNode {
             output_port_ptrs: Vec::with_capacity(config.audio_outputs),
             n_audio_inputs: config.audio_inputs,
             n_audio_outputs: config.audio_outputs,
+            cpu_slot,
         }));
 
         let events = Box::new(pipewire::sys::pw_filter_events {
@@ -249,6 +256,8 @@ impl Lv2FilterNode {
 
 impl Drop for Lv2FilterNode {
     fn drop(&mut self) {
+        global_cpu_tracker().unregister(self.instance_id);
+
         if !self._user_data.is_null() {
             unsafe {
                 (*self._user_data)
@@ -335,8 +344,11 @@ unsafe extern "C" fn on_process(
             return;
         }
 
-        let n_samples = if !position.is_null() {
-            (*position).clock.duration as u32
+        let (n_samples, rate) = if !position.is_null() {
+            (
+                (*position).clock.duration as u32,
+                (*position).clock.rate.denom as u32,
+            )
         } else {
             return;
         };
@@ -379,6 +391,9 @@ unsafe extern "C" fn on_process(
             return;
         }
 
+        let t0 = std::time::Instant::now();
         inst.process(&input_bufs, &mut output_bufs, n_samples as usize);
+        let elapsed = t0.elapsed().as_nanos() as u64;
+        fd.cpu_slot.record(elapsed, n_samples, rate);
     }
 }
