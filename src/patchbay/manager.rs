@@ -259,10 +259,6 @@ impl PatchbayManager {
                 continue;
             }
 
-            if !node.node_type.map(|t| t.has_outputs()).unwrap_or(false) {
-                continue;
-            }
-
             let output_ports = self.graph.get_output_ports(node.id);
             if output_ports.is_empty() {
                 continue;
