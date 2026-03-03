@@ -69,9 +69,9 @@ impl Lv2FilterNode {
                 c_str(b"Filter\0"),
                 c_str(b"media.role\0"),
                 c_str(b"DSP\0"),
-                c_str(b"media.class\0"),
-                c_str(b"Audio/Duplex\0"),
                 c_str(b"node.virtual\0"),
+                c_str(b"true\0"),
+                c_str(b"node.passive\0"),
                 c_str(b"true\0"),
                 std::ptr::null::<std::os::raw::c_char>(),
             );

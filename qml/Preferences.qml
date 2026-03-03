@@ -588,7 +588,8 @@ ApplicationWindow {
             // Bottom fade gradient to hint there's more content below
             Rectangle {
                 anchors.left: parent.left
-                anchors.right: prefsScrollBar.left
+                anchors.right: parent.right
+                anchors.rightMargin: prefsScrollBar.width
                 anchors.bottom: parent.bottom
                 height: 32
                 visible: !prefsFlickable.atYEnd
@@ -610,7 +611,8 @@ ApplicationWindow {
             // Top fade gradient when scrolled down
             Rectangle {
                 anchors.left: parent.left
-                anchors.right: prefsScrollBar.left
+                anchors.right: parent.right
+                anchors.rightMargin: prefsScrollBar.width
                 anchors.top: parent.top
                 height: 24
                 visible: !prefsFlickable.atYBeginning
