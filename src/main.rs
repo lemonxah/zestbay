@@ -1,4 +1,5 @@
 mod clap;
+mod layout;
 mod lv2;
 mod patchbay;
 mod pipewire;

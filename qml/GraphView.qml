@@ -39,6 +39,9 @@ Item {
     property var hiddenNodes: ({})
     property bool hiddenLoaded: false
 
+    property var pinnedNodes: ({})
+    property bool pinnedLoaded: false
+
     property bool selectDragging: false
     property real selectStartX: 0
     property real selectStartY: 0
@@ -131,6 +134,19 @@ Item {
             }
             hiddenLoaded = true
         }
+        if (!pinnedLoaded) {
+            try {
+                var pinnedArr = JSON.parse(controller.get_pinned_json())
+                var pSet = {}
+                for (var pi = 0; pi < pinnedArr.length; pi++) {
+                    pSet[pinnedArr[pi]] = true
+                }
+                pinnedNodes = pSet
+            } catch(e) {
+                pinnedNodes = {}
+            }
+            pinnedLoaded = true
+        }
 
         try {
             var nodesJson = controller.get_nodes_json()
@@ -173,20 +189,14 @@ Item {
                     pendingPluginPosition = null
                     persistLayout()
                 } else {
-                    // Try to position near connected peers
-                    var peerPos = findConnectedPeerPosition(n.id)
-                    if (peerPos) {
-                        // Place to the left of a sink/target, or right of a source
-                        var offsetX = (n.type === "Sink" || n.type === "StreamInput") ? 250 : -250
-                        nodePositions[n.id] = { x: peerPos.x + offsetX, y: peerPos.y }
-                    } else {
-                        var col = getNodeColumn(n.type)
-                        var cursor = layoutCursors[col]
-                        nodePositions[n.id] = { x: cursor.x, y: cursor.y }
-                        cursor.y += calculateNodeHeight(n) + 20
-                    }
+                    nodePositions[n.id] = { x: 0, y: 0 }
+                    autoPlaceNewNode(n.id)
                 }
-                // Resolve overlaps: shift down until no collision
+                if (n.type === "Plugin" && key && !pinnedNodes[key]) {
+                    pinnedNodes[key] = true
+                    pinnedNodes = pinnedNodes
+                    persistPinned()
+                }
                 resolveNodeOverlap(n)
             }
         }
@@ -409,7 +419,28 @@ Item {
             }
         }
 
-        MenuSeparator {}
+        MenuItem {
+            text: contextNode && contextNode.layoutKey && pinnedNodes[contextNode.layoutKey]
+                  ? "Unpin" : "Pin"
+            onTriggered: {
+                if (contextNode && contextNode.layoutKey) {
+                    var key = contextNode.layoutKey
+                    if (pinnedNodes[key]) {
+                        delete pinnedNodes[key]
+                    } else {
+                        pinnedNodes[key] = true
+                    }
+                    pinnedNodes = pinnedNodes
+                    persistPinned()
+                    canvas.requestPaint()
+                }
+            }
+        }
+
+        MenuSeparator {
+            visible: contextNode !== null && (contextNode.type === "Sink" || contextNode.type === "Duplex" || contextNode.type === "Plugin")
+            height: visible ? implicitHeight : 0
+        }
 
         MenuItem {
             text: contextNode && contextNode.layoutKey === defaultNodeKey && defaultNodeKey !== ""
@@ -433,6 +464,7 @@ Item {
 
         MenuSeparator {
             visible: contextNode && contextNode.type === "Plugin"
+            height: visible ? implicitHeight : 0
         }
 
         MenuItem {
@@ -457,6 +489,7 @@ Item {
 
         MenuSeparator {
             visible: contextNode !== null && contextNode.type === "Plugin"
+            height: visible ? implicitHeight : 0
         }
 
         MenuItem {
@@ -516,13 +549,7 @@ Item {
 
         MenuItem {
             text: "Auto Layout"
-            onTriggered: {
-                nodePositions = {}
-                savedLayout = {}
-                layoutCursors = { "source": {x: 50, y: 50}, "stream": {x: 350, y: 50}, "sink": {x: 650, y: 50} }
-                refreshData()
-                persistLayout()
-            }
+            onTriggered: runAutoLayout()
         }
     }
 
@@ -555,6 +582,99 @@ Item {
             if (hiddenNodes[k]) arr.push(k)
         }
         controller.save_hidden(JSON.stringify(arr))
+    }
+
+    function persistPinned() {
+        var arr = []
+        for (var k in pinnedNodes) {
+            if (pinnedNodes[k]) arr.push(k)
+        }
+        controller.save_pinned(JSON.stringify(arr))
+    }
+
+    function collectNodeSizes() {
+        var sizesObj = {}
+        for (var ni = 0; ni < nodes.length; ni++) {
+            var n = nodes[ni]
+            if (n.layoutKey && hiddenNodes[n.layoutKey]) continue
+            var key = n.layoutKey || ""
+            if (key) {
+                sizesObj[key] = [getNodeWidth(n.id) || minNodeWidth, calculateNodeHeight(n)]
+            }
+        }
+        return sizesObj
+    }
+
+    function collectPinnedPositions() {
+        var pinned = {}
+        for (var ni = 0; ni < nodes.length; ni++) {
+            var n = nodes[ni]
+            var key = n.layoutKey || ""
+            if (key && pinnedNodes[key] && nodePositions[n.id]) {
+                var pos = nodePositions[n.id]
+                pinned[key] = [pos.x, pos.y]
+            }
+        }
+        return pinned
+    }
+
+    function runAutoLayout(pinnedOverride) {
+        var sizes = collectNodeSizes()
+        var pinPositions = pinnedOverride || collectPinnedPositions()
+        console.log("Auto layout sizes:", JSON.stringify(sizes))
+        console.log("Auto layout pinned:", JSON.stringify(pinPositions))
+        var sizesJson = JSON.stringify(sizes)
+        var pinnedJson = JSON.stringify(pinPositions)
+        var resultJson = controller.auto_layout(sizesJson, pinnedJson)
+        console.log("Auto layout result:", resultJson)
+        try {
+            var positions = JSON.parse(resultJson)
+            nodePositions = {}
+            savedLayout = positions
+            for (var ni = 0; ni < nodes.length; ni++) {
+                var n = nodes[ni]
+                var key = n.layoutKey || ""
+                if (key && positions[key]) {
+                    var pos = positions[key]
+                    nodePositions[n.id] = { x: pos[0], y: pos[1] }
+                }
+            }
+            canvas.requestPaint()
+            persistLayout()
+        } catch(e) {
+            console.log("Auto layout failed:", e)
+        }
+    }
+
+    function autoPlaceNewNode(nodeId) {
+        var pinned = {}
+        for (var ni = 0; ni < nodes.length; ni++) {
+            var n = nodes[ni]
+            var key = n.layoutKey || ""
+            if (key && n.id !== nodeId && nodePositions[n.id]) {
+                var pos = nodePositions[n.id]
+                pinned[key] = [pos.x, pos.y]
+            }
+        }
+        var sizesJson = JSON.stringify(collectNodeSizes())
+        var pinnedJson = JSON.stringify(pinned)
+        var resultJson = controller.auto_layout(sizesJson, pinnedJson)
+        try {
+            var positions = JSON.parse(resultJson)
+            for (var ni2 = 0; ni2 < nodes.length; ni2++) {
+                var n2 = nodes[ni2]
+                var key2 = n2.layoutKey || ""
+                if (n2.id === nodeId && key2 && positions[key2]) {
+                    var pos2 = positions[key2]
+                    nodePositions[n2.id] = { x: pos2[0], y: pos2[1] }
+                    if (savedLayout) savedLayout[key2] = [pos2[0], pos2[1]]
+                }
+            }
+            canvas.requestPaint()
+            persistLayout()
+        } catch(e) {
+            console.log("Auto place new node failed:", e)
+        }
     }
 
     function isNodeBypassed(node) {
@@ -698,6 +818,25 @@ Item {
             }
         }
         return -1
+    }
+
+    function findPinButtonAt(sx, sy) {
+        var c = toCanvas(sx, sy)
+        for (var i = nodes.length - 1; i >= 0; i--) {
+            var n = nodes[i]
+            if (n.layoutKey && hiddenNodes[n.layoutKey]) continue
+            var pos = nodePositions[n.id]
+            if (!pos) continue
+            var nw = getNodeWidth(n.id)
+            var btnX = pos.x + nw - 18
+            var btnY = pos.y + 2
+            var btnSize = 16
+            if (c.x >= btnX && c.x <= btnX + btnSize &&
+                c.y >= btnY && c.y <= btnY + btnSize) {
+                return n
+            }
+        }
+        return null
     }
 
     function findButtonAt(sx, sy) {
@@ -854,6 +993,25 @@ Item {
                 ctx.textAlign = "center"
                 ctx.textBaseline = "middle"
                 ctx.fillText(truncate(node2.name, 30), nx + nnw / 2, ny + headerHeight / 2)
+
+                var isPinned = !!(node2.layoutKey && pinnedNodes[node2.layoutKey])
+                var pinX = nx + nnw - 16
+                var pinY = ny + 3
+                var pinS = 12
+                var pinAlpha = isPinned ? 1.0 : 0.25
+                ctx.save()
+                ctx.globalAlpha = pinAlpha
+                ctx.fillStyle = "" + Theme.textPrimary
+                ctx.beginPath()
+                ctx.arc(pinX + pinS / 2, pinY + pinS * 0.3, pinS * 0.25, 0, Math.PI * 2)
+                ctx.fill()
+                ctx.strokeStyle = "" + Theme.textPrimary
+                ctx.lineWidth = 1.5
+                ctx.beginPath()
+                ctx.moveTo(pinX + pinS / 2, pinY + pinS * 0.5)
+                ctx.lineTo(pinX + pinS / 2, pinY + pinS)
+                ctx.stroke()
+                ctx.restore()
 
                 // Draw format badge (LV2/CLAP/VST3) for plugin nodes
                 if (node2.type === "Plugin" && node2.pluginFormat) {
@@ -1087,6 +1245,20 @@ Item {
             }
 
             if (mouse.button === Qt.LeftButton) {
+                var pinHit = findPinButtonAt(mouse.x, mouse.y)
+                if (pinHit && pinHit.layoutKey) {
+                    var pk = pinHit.layoutKey
+                    if (pinnedNodes[pk]) {
+                        delete pinnedNodes[pk]
+                    } else {
+                        pinnedNodes[pk] = true
+                    }
+                    pinnedNodes = pinnedNodes
+                    persistPinned()
+                    canvas.requestPaint()
+                    return
+                }
+
                 var btnHit = findButtonAt(mouse.x, mouse.y)
                 if (btnHit) {
                     if (btnHit.button === "onoff") {

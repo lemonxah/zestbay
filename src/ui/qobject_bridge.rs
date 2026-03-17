@@ -55,6 +55,12 @@ pub mod qobject {
         fn save_hidden(self: Pin<&mut Self>, json: QString);
 
         #[qinvokable]
+        fn get_pinned_json(self: Pin<&mut Self>) -> QString;
+
+        #[qinvokable]
+        fn save_pinned(self: Pin<&mut Self>, json: QString);
+
+        #[qinvokable]
         fn get_available_plugins_json(self: Pin<&mut Self>) -> QString;
 
         #[qinvokable]
@@ -181,6 +187,13 @@ pub mod qobject {
 
         #[qinvokable]
         fn delete_rule_backup(self: Pin<&mut Self>, filename: QString);
+
+        #[qinvokable]
+        fn auto_layout(
+            self: Pin<&mut Self>,
+            node_sizes_json: QString,
+            pinned_positions_json: QString,
+        ) -> QString;
     }
 
     unsafe extern "RustQt" {
@@ -1528,6 +1541,139 @@ impl qobject::AppController {
         }
     }
 
+    /// `node_sizes_json`: layoutKey → [width, height]. `pinned_positions_json`: layoutKey → [x, y].
+    /// Returns layoutKey → [x, y]. Pinned nodes keep their positions; free nodes are laid out.
+    pub fn auto_layout(mut self: Pin<&mut Self>, node_sizes_json: QString, pinned_positions_json: QString) -> QString {
+        use crate::layout;
+
+        let sizes_str: String = node_sizes_json.to_string();
+        let node_sizes: std::collections::HashMap<String, Vec<f64>> =
+            serde_json::from_str(&sizes_str).unwrap_or_default();
+
+        let pinned_str: String = pinned_positions_json.to_string();
+        let pinned_by_key: std::collections::HashMap<String, Vec<f64>> =
+            serde_json::from_str(&pinned_str).unwrap_or_default();
+
+        let graph = match self.rust().graph.clone() {
+            Some(g) => g,
+            None => return QString::from("{}"),
+        };
+
+        let all_nodes = graph.get_all_nodes();
+        let all_links = graph.get_all_links();
+
+        let mut layout_nodes: Vec<(u32, String, &str, f64, f64)> = Vec::new();
+        let mut layout_ports: Vec<(u32, u32, usize, bool)> = Vec::new();
+        let mut layout_links: Vec<(u32, u32, u32, u32, u32)> = Vec::new();
+        let mut id_to_layout_key: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+
+        // Phase 1: resolve bridge virtual IDs (needs mutable self for bridge_split)
+        let mut bridge_vids: Vec<(u32, u32, String, String)> = Vec::new();
+        for n in all_nodes.iter().filter(|n| n.ready && n.is_bridge) {
+            let groups = graph.get_bridge_port_groups(n.id);
+            for (group, device_name) in &groups {
+                let vid = self.as_mut().rust_mut().bridge_split
+                    .get_or_create_virtual_id(n.id, group);
+                bridge_vids.push((n.id, vid, group.clone(), device_name.clone()));
+            }
+        }
+
+        // Phase 2: build layout data (immutable self access for plugin_manager)
+        let mgr = self.rust().plugin_manager.as_ref();
+
+        for n in all_nodes.iter().filter(|n| n.ready) {
+            if n.is_bridge {
+                let groups = graph.get_bridge_port_groups(n.id);
+                if groups.is_empty() {
+                    let key = layout_key(n, mgr);
+                    let (w, h) = get_node_size(&node_sizes, &key, n.id);
+                    let type_str = node_type_str(n);
+                    layout_nodes.push((n.id, n.display_name().to_string(), type_str, w, h));
+                    id_to_layout_key.insert(n.id, key);
+
+                    let ports = graph.get_ports_for_node(n.id);
+                    add_ports_to_layout(&ports, n.id, &mut layout_ports);
+                } else {
+                    for &(real_id, vid, ref _group, ref device_name) in &bridge_vids {
+                        if real_id != n.id { continue; }
+
+                        let key = format!("MidiBridge:{}", device_name);
+                        let (w, h) = get_node_size(&node_sizes, &key, vid);
+
+                        let group_ports = graph.get_ports_for_bridge_group(n.id, &_group);
+                        let has_inputs = group_ports.iter().any(|p| p.direction == PortDirection::Input);
+                        let has_outputs = group_ports.iter().any(|p| p.direction == PortDirection::Output);
+                        let type_str = if has_inputs && has_outputs { "Duplex" }
+                            else if has_outputs { "Source" }
+                            else if has_inputs { "Sink" }
+                            else { "Duplex" };
+
+                        layout_nodes.push((vid, device_name.clone(), type_str, w, h));
+                        id_to_layout_key.insert(vid, key);
+
+                        add_ports_to_layout(&group_ports, vid, &mut layout_ports);
+                    }
+                }
+            } else {
+                let key = layout_key(n, mgr);
+                let (w, h) = get_node_size(&node_sizes, &key, n.id);
+                let type_str = node_type_str(n);
+                layout_nodes.push((n.id, n.display_name().to_string(), type_str, w, h));
+                id_to_layout_key.insert(n.id, key);
+
+                let ports = graph.get_ports_for_node(n.id);
+                add_ports_to_layout(&ports, n.id, &mut layout_ports);
+            }
+        }
+
+        for l in &all_links {
+            let out_node = self.rust().bridge_split
+                .resolve_port_virtual_node(l.output_port_id)
+                .unwrap_or(l.output_node_id);
+            let in_node = self.rust().bridge_split
+                .resolve_port_virtual_node(l.input_port_id)
+                .unwrap_or(l.input_node_id);
+
+            if id_to_layout_key.contains_key(&out_node) && id_to_layout_key.contains_key(&in_node) {
+                layout_links.push((l.id, out_node, l.output_port_id, in_node, l.input_port_id));
+            }
+        }
+
+        let config = layout::graph::LayoutConfig::default();
+        let mut pinned_by_id: std::collections::HashMap<u32, (f64, f64)> = std::collections::HashMap::new();
+        for (key, pos) in &pinned_by_key {
+            if pos.len() >= 2 {
+                for (&node_id, node_key) in &id_to_layout_key {
+                    if node_key == key {
+                        pinned_by_id.insert(node_id, (pos[0], pos[1]));
+                    }
+                }
+            }
+        }
+
+        for &(id, ref name, type_str, w, h) in &layout_nodes {
+            let pin_tag = if pinned_by_id.contains_key(&id) { " [PINNED]" } else { "" };
+            log::info!("  node {}: {}({}) {}x{}{}", id, name, type_str, w as i32, h as i32, pin_tag);
+        }
+        log::info!("auto_layout: {} nodes ({} pinned), {} links",
+            layout_nodes.len(), pinned_by_id.len(), layout_links.len());
+
+        let positions = layout::sugiyama_layout(layout_nodes, layout_ports, layout_links, config, &pinned_by_id);
+
+        let mut result: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+        for (node_id, (x, y)) in &positions {
+            if let Some(key) = id_to_layout_key.get(node_id) {
+                let pin_tag = if pinned_by_id.contains_key(node_id) { " [P]" } else { "" };
+                log::info!("  result {}: ({:.0}, {:.0}){}", key, x, y, pin_tag);
+                result.insert(key.clone(), serde_json::json!([x, y]));
+            }
+        }
+
+        let json = serde_json::to_string(&serde_json::Value::Object(result)).unwrap_or_else(|_| "{}".to_string());
+        log::info!("auto_layout: computed {} positions", positions.len());
+        QString::from(&json)
+    }
+
     pub fn get_hidden_json(self: Pin<&mut Self>) -> QString {
         let path = config_path("hidden.json");
         let json = match std::fs::read_to_string(&path) {
@@ -1548,6 +1694,26 @@ impl qobject::AppController {
             log::error!("Failed to save hidden to {:?}: {}", path, e);
         } else {
             log::debug!("save_hidden: written to {:?}", path);
+        }
+    }
+
+    pub fn get_pinned_json(self: Pin<&mut Self>) -> QString {
+        let path = config_path("pinned.json");
+        let json = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => "[]".to_string(),
+        };
+        QString::from(&json)
+    }
+
+    pub fn save_pinned(self: Pin<&mut Self>, json: QString) {
+        let path = config_path("pinned.json");
+        let s: String = json.to_string();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::write(&path, &s) {
+            log::error!("Failed to save pinned to {:?}: {}", path, e);
         }
     }
 
@@ -2837,6 +3003,58 @@ fn layout_key(
         None => "Unknown".to_string(),
     };
     format!("{}:{}", prefix, node.display_name())
+}
+
+fn node_type_str(n: &Node) -> &'static str {
+    match n.node_type {
+        Some(NodeType::Sink) => "Sink",
+        Some(NodeType::Source) => "Source",
+        Some(NodeType::StreamOutput) => "StreamOutput",
+        Some(NodeType::StreamInput) => "StreamInput",
+        Some(NodeType::Duplex) => "Duplex",
+        Some(NodeType::Plugin) => "Plugin",
+        None => "Unknown",
+    }
+}
+
+fn get_node_size(
+    node_sizes: &std::collections::HashMap<String, Vec<f64>>,
+    layout_key: &str,
+    node_id: u32,
+) -> (f64, f64) {
+    if let Some(size) = node_sizes.get(layout_key) {
+        if size.len() >= 2 {
+            return (size[0], size[1]);
+        }
+    }
+    if let Some(size) = node_sizes.get(&node_id.to_string()) {
+        if size.len() >= 2 {
+            return (size[0], size[1]);
+        }
+    }
+    (180.0, 80.0)
+}
+
+fn add_ports_to_layout(
+    ports: &[crate::pipewire::Port],
+    node_id: u32,
+    layout_ports: &mut Vec<(u32, u32, usize, bool)>,
+) {
+    let mut input_idx = 0usize;
+    let mut output_idx = 0usize;
+    for p in ports {
+        let is_output = p.direction == crate::pipewire::PortDirection::Output;
+        let port_index = if is_output {
+            let idx = output_idx;
+            output_idx += 1;
+            idx
+        } else {
+            let idx = input_idx;
+            input_idx += 1;
+            idx
+        };
+        layout_ports.push((p.id, node_id, port_index, is_output));
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
