@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::midi::types::{MappingMode, MidiCcMapping, MidiCcSource};
+
 pub type ObjectId = u32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -153,6 +155,24 @@ pub enum PwCommand {
     ClosePluginUI {
         instance_id: u64,
     },
+    StartMidiLearn {
+        instance_id: u64,
+        port_index: usize,
+        label: String,
+        mode: MappingMode,
+    },
+    CancelMidiLearn,
+    AddMidiMapping(MidiCcMapping),
+    RemoveMidiMapping(MidiCcSource),
+    RemoveMidiMappingsForPlugin {
+        instance_id: u64,
+    },
+    CreateMidiInput {
+        device_name: String,
+    },
+    RemoveMidiInput {
+        device_name: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -180,6 +200,29 @@ pub enum PluginEvent {
         instance_id: Option<u64>,
         message: String,
         fatal: bool,
+    },
+    MidiLearnStarted {
+        instance_id: u64,
+        port_index: usize,
+    },
+    MidiLearnCancelled,
+    MidiMappingAdded(MidiCcMapping),
+    MidiMappingRemoved(MidiCcSource),
+    MidiMappingConflict {
+        source: MidiCcSource,
+        existing_label: String,
+    },
+    MidiCcReceived {
+        device_name: String,
+        channel: u8,
+        cc: u8,
+        message_type: crate::midi::MidiMessageType,
+    },
+    MidiInputCreated {
+        device_name: String,
+    },
+    MidiInputRemoved {
+        device_name: String,
     },
 }
 

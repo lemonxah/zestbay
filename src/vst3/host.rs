@@ -324,6 +324,7 @@ pub struct Vst3Param {
     pub default: f64,
     /// Is this the bypass parameter?
     pub is_bypass: bool,
+    pub is_toggle: bool,
 }
 
 /// A running VST3 plugin instance.
@@ -549,6 +550,7 @@ impl Vst3PluginInstance {
                         if !is_hidden && !is_readonly && !is_bypass_param {
                             let name = read_string128(&pinfo.title);
                             let value = ctrl.getParamNormalized(pinfo.id);
+                            let is_toggle = pinfo.stepCount == 1;
                             params.push(Vst3Param {
                                 id: pinfo.id,
                                 port_index: port_idx,
@@ -556,6 +558,7 @@ impl Vst3PluginInstance {
                                 value,
                                 default: pinfo.defaultNormalizedValue,
                                 is_bypass: false,
+                                is_toggle,
                             });
                             port_idx += 1;
                         }
@@ -833,6 +836,7 @@ impl Vst3PluginInstance {
                 min: 0.0,
                 max: 1.0,
                 default: p.default as f32,
+                is_toggle: p.is_toggle,
             })
             .collect()
     }

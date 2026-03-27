@@ -364,6 +364,7 @@ fn probe_plugin_ports(
                                     default_value: 0.0,
                                     min_value: 0.0,
                                     max_value: 0.0,
+                                    is_toggle: false,
                                 });
                             }
                         }
@@ -393,6 +394,7 @@ fn probe_plugin_ports(
                                     default_value: 0.0,
                                     min_value: 0.0,
                                     max_value: 0.0,
+                                    is_toggle: false,
                                 });
                             }
                         }
@@ -426,6 +428,12 @@ fn probe_plugin_ports(
                                     control_inputs += 1;
                                     PluginPortType::ControlInput
                                 };
+                                let is_toggle = !readonly
+                                    && info.flags
+                                        & clap_sys::ext::params::CLAP_PARAM_IS_STEPPED
+                                        != 0
+                                    && info.min_value == 0.0
+                                    && info.max_value == 1.0;
                                 ports.push(PluginPortInfo {
                                     index: ports.len(),
                                     symbol: format!("param_{}", info.id),
@@ -434,6 +442,7 @@ fn probe_plugin_ports(
                                     default_value: info.default_value as f32,
                                     min_value: info.min_value as f32,
                                     max_value: info.max_value as f32,
+                                    is_toggle,
                                 });
                             }
                         }

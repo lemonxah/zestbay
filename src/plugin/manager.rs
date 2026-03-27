@@ -97,6 +97,7 @@ impl PluginManager {
                     min: 0.0,
                     max: 1.0,
                     default: 0.0,
+                    is_toggle: false,
                 });
             }
         }

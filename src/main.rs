@@ -1,6 +1,7 @@
 mod clap;
 mod layout;
 mod lv2;
+mod midi;
 mod patchbay;
 mod pipewire;
 mod plugin;

@@ -22,6 +22,12 @@ ApplicationWindow {
     property var parameters: []
     property int instanceId: -1
 
+    property int midiLearnInstanceId: -1
+    property int midiLearnPortIndex: -1
+
+    property string conflictSourceJson: ""
+    property string conflictExistingLabel: ""
+
     Timer {
         id: refreshTimer
         interval: 200
@@ -50,6 +56,90 @@ ApplicationWindow {
             parameters = data.parameters || []
         } catch(e) {
             parameters = []
+        }
+    }
+
+    function clearMidiLearnState() {
+        midiLearnInstanceId = -1
+        midiLearnPortIndex = -1
+    }
+
+    function showConflictDialog(sourceJson, existingLabel) {
+        conflictSourceJson = sourceJson
+        conflictExistingLabel = existingLabel
+        midiConflictDialog.open()
+    }
+
+    function getMidiMappingText(portIndex) {
+        if (instanceId < 0 || portIndex === undefined) return ""
+        try {
+            var json = controller.get_midi_mapping_for_param_json(instanceId, portIndex)
+            if (!json || json === "") return ""
+            var m = JSON.parse(json)
+            if (!m || !m.source) return ""
+            var ch = m.source.channel !== null && m.source.channel !== undefined ? (m.source.channel + 1) : "*"
+            var prefix = m.source.message_type === "Note" ? "Note " : "CC "
+            return prefix + m.source.cc + " ch" + ch
+        } catch(e) {
+            return ""
+        }
+    }
+
+    Dialog {
+        id: midiConflictDialog
+        title: "MIDI Mapping Conflict"
+        anchors.centerIn: parent
+        modal: true
+        width: Math.min(pluginParams.width * 0.8, 400)
+
+        ColumnLayout {
+            width: parent.width
+            spacing: 12
+
+            Label {
+                text: {
+                    try {
+                        var src = JSON.parse(conflictSourceJson)
+                        var ch = src.channel !== null && src.channel !== undefined ? (src.channel + 1) : "*"
+                        var prefix = src.message_type === "Note" ? "Note " : "CC "
+                        return prefix + src.cc + " on channel " + ch + " from \"" + src.device_name + "\" is already assigned to:\n\n\"" + conflictExistingLabel + "\"\n\nReassign to the current parameter?"
+                    } catch(e) {
+                        return "This control is already assigned to \"" + conflictExistingLabel + "\". Reassign?"
+                    }
+                }
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+
+                Button {
+                    text: "Cancel"
+                    onClicked: {
+                        clearMidiLearnState()
+                        midiConflictDialog.close()
+                    }
+                }
+
+                Button {
+                    text: "Reassign"
+                    highlighted: true
+                    onClicked: {
+                        midiConflictDialog.close()
+                        if (midiLearnInstanceId >= 0 && midiLearnPortIndex >= 0) {
+                            var p = parameters[midiLearnPortIndex] || {}
+                            controller.start_midi_learn(
+                                midiLearnInstanceId,
+                                midiLearnPortIndex,
+                                pluginName + " > " + (p.name || ""),
+                                p.isToggle ? "toggle" : "continuous"
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -123,11 +213,14 @@ ApplicationWindow {
                 id: paramDelegate
                 required property int index
                 width: paramList.width - 12
-                height: 56
+                height: 72
                 color: index % 2 === 0 ? Theme.rowEven : Theme.rowOdd
                 radius: 3
 
                 property var param: parameters[index] || {}
+                property bool isLearning: pluginParams.midiLearnInstanceId === pluginParams.instanceId
+                                          && pluginParams.midiLearnPortIndex === param.portIndex
+                property string midiMapping: pluginParams.getMidiMappingText(param.portIndex)
 
                 ColumnLayout {
                     anchors.fill: parent
@@ -143,7 +236,46 @@ ApplicationWindow {
                             Layout.fillWidth: true
                         }
 
-                        // Clickable value label / inline text editor
+                        Label {
+                            visible: paramDelegate.midiMapping !== "" && !paramDelegate.isLearning
+                            text: paramDelegate.midiMapping
+                            font.pointSize: 7
+                            font.family: "monospace"
+                            color: Theme.colMidi
+                        }
+
+                        Button {
+                            visible: paramDelegate.midiMapping !== "" && !paramDelegate.isLearning
+                            text: "\u00d7"
+                            flat: true
+                            implicitWidth: 18
+                            implicitHeight: 18
+                            font.pointSize: 9
+                            ToolTip.visible: hovered
+                            ToolTip.text: "Remove MIDI mapping"
+                            onClicked: {
+                                if (pluginParams.instanceId >= 0 && param.portIndex !== undefined) {
+                                    controller.remove_midi_mapping_for_param(pluginParams.instanceId, param.portIndex)
+                                }
+                            }
+                        }
+
+                        Label {
+                            id: learnIndicator
+                            visible: paramDelegate.isLearning
+                            text: "Listening..."
+                            font.pointSize: 7
+                            font.italic: true
+                            color: Theme.colMidi
+
+                            SequentialAnimation on opacity {
+                                running: paramDelegate.isLearning
+                                loops: Animation.Infinite
+                                NumberAnimation { to: 0.3; duration: 600 }
+                                NumberAnimation { to: 1.0; duration: 600 }
+                            }
+                        }
+
                         Label {
                             id: valueLabel
                             visible: !valueField.visible
@@ -214,6 +346,54 @@ ApplicationWindow {
                         }
 
                         Button {
+                            id: midiLearnBtn
+                            text: "M"
+                            flat: true
+                            implicitWidth: 24
+                            implicitHeight: 20
+                            font.pointSize: 8
+                            font.bold: paramDelegate.isLearning
+                            ToolTip.visible: hovered
+                            ToolTip.text: paramDelegate.isLearning ? "Cancel MIDI learn" : "MIDI Learn"
+
+                            background: Rectangle {
+                                color: paramDelegate.isLearning ? Theme.colMidi : Theme.buttonBg
+                                border.color: paramDelegate.isLearning ? Theme.colMidi : Theme.buttonBorder
+                                border.width: 1
+                                radius: 2
+                                opacity: paramDelegate.isLearning ? 0.3 : 1.0
+
+                                SequentialAnimation on opacity {
+                                    running: paramDelegate.isLearning
+                                    loops: Animation.Infinite
+                                    NumberAnimation { to: 0.15; duration: 600 }
+                                    NumberAnimation { to: 0.4; duration: 600 }
+                                }
+                            }
+
+                            contentItem: Text {
+                                text: parent.text
+                                font: parent.font
+                                color: paramDelegate.isLearning ? Theme.colMidi : Theme.textPrimary
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+
+                            onClicked: {
+                                if (paramDelegate.isLearning) {
+                                    controller.cancel_midi_learn()
+                                } else if (pluginParams.instanceId >= 0 && param.portIndex !== undefined) {
+                                    controller.start_midi_learn(
+                                        pluginParams.instanceId,
+                                        param.portIndex,
+                                        pluginName + " > " + (param.name || ""),
+                                        param.isToggle ? "toggle" : "continuous"
+                                    )
+                                }
+                            }
+                        }
+
+                        Button {
                             text: "R"
                             flat: true
                             implicitWidth: 24
@@ -229,14 +409,34 @@ ApplicationWindow {
                         }
                     }
 
-                    Slider {
+                    Loader {
                         Layout.fillWidth: true
-                        from: param.min !== undefined ? param.min : 0
-                        to: param.max !== undefined ? param.max : 1
-                        value: param.value !== undefined ? param.value : 0
-                        onMoved: {
-                            if (pluginNodeId >= 0 && param.portIndex !== undefined) {
-                                controller.set_plugin_parameter(pluginNodeId, param.portIndex, value)
+                        sourceComponent: param.isToggle ? toggleComponent : sliderComponent
+
+                        Component {
+                            id: toggleComponent
+                            Switch {
+                                checked: param.value !== undefined ? param.value > 0.5 : false
+                                text: checked ? "On" : "Off"
+                                onToggled: {
+                                    if (pluginNodeId >= 0 && param.portIndex !== undefined) {
+                                        controller.set_plugin_parameter(pluginNodeId, param.portIndex, checked ? 1.0 : 0.0)
+                                    }
+                                }
+                            }
+                        }
+
+                        Component {
+                            id: sliderComponent
+                            Slider {
+                                from: param.min !== undefined ? param.min : 0
+                                to: param.max !== undefined ? param.max : 1
+                                value: param.value !== undefined ? param.value : 0
+                                onMoved: {
+                                    if (pluginNodeId >= 0 && param.portIndex !== undefined) {
+                                        controller.set_plugin_parameter(pluginNodeId, param.portIndex, value)
+                                    }
+                                }
                             }
                         }
                     }

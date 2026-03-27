@@ -88,6 +88,7 @@ pub struct ClapParam {
     pub min: f64,
     pub max: f64,
     pub default: f64,
+    pub is_toggle: bool,
 }
 
 unsafe impl Send for ClapPluginInstance {}
@@ -286,6 +287,11 @@ impl ClapPluginInstance {
                                     if let Some(get_val) = pe.get_value {
                                         get_val(plugin_ptr, info.id, &mut value);
                                     }
+                                    let is_toggle = info.flags
+                                        & clap_sys::ext::params::CLAP_PARAM_IS_STEPPED
+                                        != 0
+                                        && info.min_value == 0.0
+                                        && info.max_value == 1.0;
                                     params.push(ClapParam {
                                         id: info.id,
                                         port_index: params.len(),
@@ -294,6 +300,7 @@ impl ClapPluginInstance {
                                         min: info.min_value,
                                         max: info.max_value,
                                         default: info.default_value,
+                                        is_toggle,
                                     });
                                 }
                             }
@@ -557,6 +564,7 @@ impl ClapPluginInstance {
                 min: p.min as f32,
                 max: p.max as f32,
                 default: p.default as f32,
+                is_toggle: p.is_toggle,
             })
             .collect()
     }

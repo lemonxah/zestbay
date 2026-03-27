@@ -76,6 +76,7 @@ pub struct ControlPort {
     pub min: f32,
     pub max: f32,
     pub default: f32,
+    pub is_toggle: bool,
 }
 
 impl Lv2PluginInstance {
@@ -148,6 +149,7 @@ impl Lv2PluginInstance {
                         min: port_info.min_value,
                         max: port_info.max_value,
                         default: port_info.default_value,
+                        is_toggle: port_info.is_toggle,
                     });
                 }
                 Lv2PortType::ControlOutput => {
@@ -159,6 +161,7 @@ impl Lv2PluginInstance {
                         min: port_info.min_value,
                         max: port_info.max_value,
                         default: port_info.default_value,
+                        is_toggle: false,
                     });
                 }
                 Lv2PortType::AtomInput => {
@@ -323,6 +326,19 @@ impl Lv2PluginInstance {
             }
         }
 
+        // Read external parameter changes (e.g. from MIDI RT callback) into
+        // the plugin's control input ports.  The LV2 plugin reads `cp.value`
+        // directly via `connect_port_mut`, so updating it here ensures the
+        // plugin processes with the latest value.  After `run()` we write
+        // `cp.value` back to the atomic (which is now the same value).
+        for (cp, slot) in self
+            .control_inputs
+            .iter_mut()
+            .zip(self.port_updates.control_inputs.iter())
+        {
+            cp.value = slot.value.load();
+        }
+
         // Prepare atom input buffers (UI → plugin communication)
         for (ab, shared) in self
             .atom_in_bufs
@@ -465,6 +481,7 @@ impl Lv2PluginInstance {
                 min: cp.min,
                 max: cp.max,
                 default: cp.default,
+                is_toggle: cp.is_toggle,
             })
             .collect()
     }
@@ -562,6 +579,7 @@ impl Lv2Manager {
                     min: 0.0,
                     max: 1.0,
                     default: 0.0,
+                    is_toggle: false,
                 });
             }
         }

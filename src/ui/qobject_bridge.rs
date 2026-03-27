@@ -194,6 +194,35 @@ pub mod qobject {
             node_sizes_json: QString,
             pinned_positions_json: QString,
         ) -> QString;
+
+        #[qinvokable]
+        fn start_midi_learn(
+            self: Pin<&mut Self>,
+            instance_id: u64,
+            port_index: u32,
+            label: QString,
+            mode: QString,
+        );
+
+        #[qinvokable]
+        fn cancel_midi_learn(self: Pin<&mut Self>);
+
+        #[qinvokable]
+        fn remove_midi_mapping_for_param(
+            self: Pin<&mut Self>,
+            instance_id: u64,
+            port_index: u32,
+        );
+
+        #[qinvokable]
+        fn get_midi_mappings_json(self: Pin<&mut Self>) -> QString;
+
+        #[qinvokable]
+        fn get_midi_mapping_for_param_json(
+            self: Pin<&mut Self>,
+            instance_id: u64,
+            port_index: u32,
+        ) -> QString;
     }
 
     unsafe extern "RustQt" {
@@ -208,6 +237,21 @@ pub mod qobject {
 
         #[qsignal]
         fn hide_window_requested(self: Pin<&mut AppController>);
+
+        #[qsignal]
+        fn midi_mapping_added(self: Pin<&mut AppController>, mapping_json: QString);
+
+        #[qsignal]
+        fn midi_mapping_removed(self: Pin<&mut AppController>, instance_id: u64, port_index: u32);
+
+        #[qsignal]
+        fn midi_learn_started(self: Pin<&mut AppController>, instance_id: u64, port_index: u32);
+
+        #[qsignal]
+        fn midi_learn_cancelled(self: Pin<&mut AppController>);
+
+        #[qsignal]
+        fn midi_mapping_conflict(self: Pin<&mut AppController>, source_json: QString, existing_label: QString);
     }
 }
 
@@ -331,6 +375,9 @@ pub struct AppControllerRust {
     cpu_history: Vec<f64>,
 
     bridge_split: BridgeSplitState,
+
+    midi_mappings: Vec<crate::midi::MidiCcMapping>,
+    midi_learn_target: Option<(u64, usize, String, crate::midi::MappingMode)>,
 }
 
 impl Default for AppControllerRust {
@@ -365,6 +412,8 @@ impl Default for AppControllerRust {
             cpu_avg: 0.0,
             cpu_history: vec![0.0; 120],
             bridge_split: BridgeSplitState::new(),
+            midi_mappings: Vec::new(),
+            midi_learn_target: None,
         }
     }
 }
@@ -455,6 +504,7 @@ impl qobject::AppController {
                                     min: port.min_value,
                                     max: port.max_value,
                                     default: port.default_value,
+                                    is_toggle: port.is_toggle,
                                 }
                             })
                             .collect()
@@ -469,6 +519,7 @@ impl qobject::AppController {
                                 min: 0.0,
                                 max: 1.0,
                                 default: 0.0,
+                                is_toggle: false,
                             })
                             .collect()
                     }
@@ -512,6 +563,17 @@ impl qobject::AppController {
                         display_name: sp.display_name,
                         format: format_str,
                     });
+                }
+            }
+        }
+
+        let saved_midi = load_midi_mappings();
+        if !saved_midi.is_empty() {
+            log::info!("Restoring {} saved MIDI mappings", saved_midi.len());
+            self.as_mut().rust_mut().midi_mappings = saved_midi.clone();
+            if let Some(ref tx) = self.rust().cmd_tx {
+                for mapping in saved_midi {
+                    let _ = tx.send(PwCommand::AddMidiMapping(mapping));
                 }
             }
         }
@@ -721,6 +783,75 @@ impl qobject::AppController {
                     } else {
                         error_msg = Some(message);
                     }
+                }
+                PluginEvent::MidiLearnStarted { instance_id, port_index } => {
+                    log::info!("MIDI learn started: instance={} port={}", instance_id, port_index);
+                    self.as_mut().midi_learn_started(instance_id, port_index as u32);
+                }
+                PluginEvent::MidiLearnCancelled => {
+                    log::info!("MIDI learn cancelled");
+                    self.as_mut().midi_learn_cancelled();
+                }
+                PluginEvent::MidiMappingAdded(ref mapping) => {
+                    log::info!("MIDI mapping added: {:?} -> {:?}", mapping.source, mapping.target);
+                    self.as_mut().rust_mut().midi_mappings.push(mapping.clone());
+                    persist_midi_mappings(&self.rust().midi_mappings);
+                    let json = serde_json::to_string(mapping).unwrap_or_else(|_| "{}".to_string());
+                    self.as_mut().midi_mapping_added(QString::from(&json));
+                }
+                PluginEvent::MidiMappingRemoved(ref source) => {
+                    log::info!("MIDI mapping removed: {:?}", source);
+                    let removed = self.rust().midi_mappings
+                        .iter()
+                        .find(|m| m.source == *source)
+                        .map(|m| (m.target.instance_id, m.target.port_index as u32));
+                    self.as_mut().rust_mut().midi_mappings.retain(|m| m.source != *source);
+                    persist_midi_mappings(&self.rust().midi_mappings);
+                    if let Some((iid, pidx)) = removed {
+                        self.as_mut().midi_mapping_removed(iid, pidx);
+                    }
+                }
+                PluginEvent::MidiMappingConflict { ref source, ref existing_label } => {
+                    log::warn!(
+                        "MIDI mapping conflict: {:?} already assigned to '{}'",
+                        source,
+                        existing_label
+                    );
+                    let source_json = serde_json::to_string(source).unwrap_or_else(|_| "{}".to_string());
+                    self.as_mut().midi_mapping_conflict(
+                        QString::from(&source_json),
+                        QString::from(existing_label.as_str()),
+                    );
+                }
+                PluginEvent::MidiCcReceived { ref device_name, channel, cc, message_type } => {
+                    if let Some((instance_id, port_index, label, mode)) =
+                        self.as_mut().rust_mut().midi_learn_target.take()
+                    {
+                        let mapping = crate::midi::MidiCcMapping {
+                            source: crate::midi::MidiCcSource {
+                                device_name: device_name.clone(),
+                                channel: Some(channel),
+                                cc,
+                                message_type,
+                            },
+                            target: crate::midi::MidiCcTarget {
+                                instance_id,
+                                port_index,
+                            },
+                            mode,
+                            label,
+                        };
+                        if let Some(ref tx) = self.rust().cmd_tx {
+                            let _ = tx.send(PwCommand::CancelMidiLearn);
+                            let _ = tx.send(PwCommand::AddMidiMapping(mapping));
+                        }
+                    }
+                }
+                PluginEvent::MidiInputCreated { ref device_name } => {
+                    log::info!("MIDI input created: {}", device_name);
+                }
+                PluginEvent::MidiInputRemoved { ref device_name } => {
+                    log::info!("MIDI input removed: {}", device_name);
                 }
             }
         }
@@ -1781,6 +1912,7 @@ impl qobject::AppController {
                             min: port.min_value,
                             max: port.max_value,
                             default: port.default_value,
+                            is_toggle: port.is_toggle,
                         })
                         .collect()
                 })
@@ -1914,6 +2046,7 @@ impl qobject::AppController {
                         "min": p.min,
                         "max": p.max,
                         "default": p.default,
+                        "isToggle": p.is_toggle,
                     })
                 })
                 .collect();
@@ -1976,6 +2109,89 @@ impl qobject::AppController {
         }
     }
 
+    pub fn start_midi_learn(
+        mut self: Pin<&mut Self>,
+        instance_id: u64,
+        port_index: u32,
+        label: QString,
+        mode: QString,
+    ) {
+        let mode_str = mode.to_string();
+        let mapping_mode = match mode_str.as_str() {
+            "toggle" => crate::midi::MappingMode::Toggle,
+            "momentary" => crate::midi::MappingMode::Momentary,
+            _ => crate::midi::MappingMode::Continuous,
+        };
+        let label_str = label.to_string();
+        self.as_mut().rust_mut().midi_learn_target = Some((
+            instance_id,
+            port_index as usize,
+            label_str.clone(),
+            mapping_mode,
+        ));
+        if let Some(ref tx) = self.rust().cmd_tx {
+            let _ = tx.send(PwCommand::StartMidiLearn {
+                instance_id,
+                port_index: port_index as usize,
+                label: label_str,
+                mode: mapping_mode,
+            });
+        }
+    }
+
+    pub fn cancel_midi_learn(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().midi_learn_target = None;
+        if let Some(ref tx) = self.rust().cmd_tx {
+            let _ = tx.send(PwCommand::CancelMidiLearn);
+        }
+    }
+
+    pub fn remove_midi_mapping_for_param(
+        self: Pin<&mut Self>,
+        instance_id: u64,
+        port_index: u32,
+    ) {
+        let target = crate::midi::MidiCcTarget {
+            instance_id,
+            port_index: port_index as usize,
+        };
+        let source = self.rust().midi_mappings
+            .iter()
+            .find(|m| m.target == target)
+            .map(|m| m.source.clone());
+        if let Some(source) = source {
+            if let Some(ref tx) = self.rust().cmd_tx {
+                let _ = tx.send(PwCommand::RemoveMidiMapping(source));
+            }
+        }
+    }
+
+    pub fn get_midi_mappings_json(self: Pin<&mut Self>) -> QString {
+        let json = serde_json::to_string(&self.rust().midi_mappings).unwrap_or_else(|_| "[]".to_string());
+        QString::from(&json)
+    }
+
+    pub fn get_midi_mapping_for_param_json(
+        self: Pin<&mut Self>,
+        instance_id: u64,
+        port_index: u32,
+    ) -> QString {
+        let target = crate::midi::MidiCcTarget {
+            instance_id,
+            port_index: port_index as usize,
+        };
+        let mapping = self.rust().midi_mappings
+            .iter()
+            .find(|m| m.target == target);
+        match mapping {
+            Some(m) => {
+                let json = serde_json::to_string(m).unwrap_or_else(|_| "{}".to_string());
+                QString::from(&json)
+            }
+            None => QString::from(""),
+        }
+    }
+
     pub fn get_active_plugins_json(self: Pin<&mut Self>) -> QString {
         if let Some(ref mgr) = self.rust().plugin_manager {
             let mut entries: Vec<serde_json::Value> = mgr
@@ -1994,6 +2210,7 @@ impl qobject::AppController {
                                 "min": p.min,
                                 "max": p.max,
                                 "default": p.default,
+                                "isToggle": p.is_toggle,
                             })
                         })
                         .collect();
@@ -2837,6 +3054,27 @@ fn load_saved_links() -> Vec<SavedPluginLink> {
     match std::fs::read_to_string(&path) {
         Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
         Err(_) => Vec::new(),
+    }
+}
+
+fn load_midi_mappings() -> Vec<crate::midi::MidiCcMapping> {
+    let path = config_path("midi_mappings.json");
+    match std::fs::read_to_string(&path) {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn persist_midi_mappings(mappings: &[crate::midi::MidiCcMapping]) {
+    let path = config_path("midi_mappings.json");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let json = serde_json::to_string_pretty(mappings).unwrap_or_default();
+    if let Err(e) = std::fs::write(&path, &json) {
+        log::error!("Failed to save MIDI mappings to {:?}: {}", path, e);
+    } else {
+        log::debug!("persist_midi_mappings: {} mappings written", mappings.len());
     }
 }
 

@@ -89,6 +89,10 @@ pub struct PluginPortInfo {
     pub default_value: f32,
     pub min_value: f32,
     pub max_value: f32,
+    /// Whether this port is a boolean toggle (e.g. LV2 `lv2:toggled`,
+    /// CLAP stepped 0–1, VST3 `stepCount == 1`).
+    #[serde(default)]
+    pub is_toggle: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -246,6 +250,7 @@ pub struct ParameterValue {
     pub min: f32,
     pub max: f32,
     pub default: f32,
+    pub is_toggle: bool,
 }
 
 // ---------------------------------------------------------------------------

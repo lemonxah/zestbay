@@ -18,6 +18,7 @@ pub fn scan_plugins_with_world(world: &World) -> Vec<Lv2PluginInfo> {
     let audio_class = world.new_uri("http://lv2plug.in/ns/lv2core#AudioPort");
     let control_class = world.new_uri("http://lv2plug.in/ns/lv2core#ControlPort");
     let atom_class = world.new_uri("http://lv2plug.in/ns/ext/atom#AtomPort");
+    let toggled_prop = world.new_uri("http://lv2plug.in/ns/lv2core#toggled");
 
     // UI class URIs for detecting native UI availability
     let ui_gtk3 = world.new_uri("http://lv2plug.in/ns/extensions/ui#Gtk3UI");
@@ -105,6 +106,7 @@ pub fn scan_plugins_with_world(world: &World) -> Vec<Lv2PluginInfo> {
             let default_value = port_range.default;
             let min_value = port_range.min;
             let max_value = port_range.max;
+            let is_toggle = is_control && is_input && port.has_property(&toggled_prop);
 
             ports.push(Lv2PortInfo {
                 index: i,
@@ -114,6 +116,7 @@ pub fn scan_plugins_with_world(world: &World) -> Vec<Lv2PluginInfo> {
                 default_value,
                 min_value,
                 max_value,
+                is_toggle,
             });
         }
 

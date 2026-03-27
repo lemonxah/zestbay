@@ -93,6 +93,21 @@ ApplicationWindow {
             mainWindow.visible = false;
             controller.set_window_visible(false);
         }
+        function onMidi_learn_started(instance_id, port_index) {
+            pluginParamsDialog.midiLearnInstanceId = instance_id
+            pluginParamsDialog.midiLearnPortIndex = port_index
+        }
+        function onMidi_learn_cancelled() {
+            pluginParamsDialog.clearMidiLearnState()
+        }
+        function onMidi_mapping_added(mapping_json) {
+            pluginParamsDialog.clearMidiLearnState()
+        }
+        function onMidi_mapping_removed(instance_id, port_index) {
+        }
+        function onMidi_mapping_conflict(source_json, existing_label) {
+            pluginParamsDialog.showConflictDialog(source_json, existing_label)
+        }
     }
 
     Dialog {
@@ -132,6 +147,10 @@ ApplicationWindow {
             Action {
                 text: "&Manage Plugins..."
                 onTriggered: pluginManagerDialog.open()
+            }
+            Action {
+                text: "MIDI &Mappings..."
+                onTriggered: midiMappingsDialog.open()
             }
             MenuSeparator {}
             Action {
@@ -326,6 +345,11 @@ ApplicationWindow {
 
     PluginManager {
         id: pluginManagerDialog
+        controller: controller
+    }
+
+    MidiMappings {
+        id: midiMappingsDialog
         controller: controller
     }
 
