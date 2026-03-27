@@ -1,7 +1,14 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ksni::blocking::TrayMethods;
+
+#[derive(Clone)]
+pub struct PluginEntry {
+    pub name: String,
+    pub node_id: u32,
+    pub has_ui: bool,
+}
 
 #[derive(Clone)]
 pub struct TrayState {
@@ -9,6 +16,8 @@ pub struct TrayState {
     pub hide_requested: Arc<AtomicBool>,
     pub quit_requested: Arc<AtomicBool>,
     pub window_visible: Arc<AtomicBool>,
+    pub plugins: Arc<Mutex<Vec<PluginEntry>>>,
+    pub open_plugin_ui: Arc<Mutex<Option<u32>>>,
 }
 
 impl TrayState {
@@ -18,6 +27,8 @@ impl TrayState {
             hide_requested: Arc::new(AtomicBool::new(false)),
             quit_requested: Arc::new(AtomicBool::new(false)),
             window_visible: Arc::new(AtomicBool::new(true)),
+            plugins: Arc::new(Mutex::new(Vec::new())),
+            open_plugin_ui: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -62,19 +73,59 @@ impl ksni::Tray for ZestBayTray {
 
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::*;
-        vec![
-            StandardItem {
-                label: "Show".into(),
-                icon_name: "window-new".into(),
-                activate: Box::new(|tray: &mut Self| {
-                    log::info!("Tray: Show menu item clicked");
-                    tray.state.window_visible.store(true, Ordering::Release);
-                    tray.state.show_requested.store(true, Ordering::Release);
-                }),
-                ..Default::default()
+
+        let mut items: Vec<ksni::MenuItem<Self>> = vec![StandardItem {
+            label: "Show".into(),
+            icon_name: "window-new".into(),
+            activate: Box::new(|tray: &mut Self| {
+                log::info!("Tray: Show menu item clicked");
+                tray.state.window_visible.store(true, Ordering::Release);
+                tray.state.show_requested.store(true, Ordering::Release);
+            }),
+            ..Default::default()
+        }
+        .into()];
+
+        let plugins = self
+            .state
+            .plugins
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if !plugins.is_empty() {
+            let mut plugin_items: Vec<ksni::MenuItem<Self>> = Vec::new();
+            for plugin in &plugins {
+                let node_id = plugin.node_id;
+                let has_ui = plugin.has_ui;
+                plugin_items.push(
+                    StandardItem {
+                        label: plugin.name.clone(),
+                        enabled: has_ui,
+                        activate: Box::new(move |tray: &mut ZestBayTray| {
+                            log::info!("Tray: open plugin UI for node_id={}", node_id);
+                            if let Ok(mut req) = tray.state.open_plugin_ui.lock() {
+                                *req = Some(node_id);
+                            }
+                        }),
+                        ..Default::default()
+                    }
+                    .into(),
+                );
             }
-            .into(),
-            ksni::MenuItem::Separator,
+            items.push(ksni::MenuItem::Separator);
+            items.push(
+                SubMenu {
+                    label: "Plugin UIs".into(),
+                    icon_name: "preferences-system".into(),
+                    submenu: plugin_items,
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+
+        items.push(ksni::MenuItem::Separator);
+        items.push(
             StandardItem {
                 label: "Quit".into(),
                 icon_name: "application-exit".into(),
@@ -85,7 +136,9 @@ impl ksni::Tray for ZestBayTray {
                 ..Default::default()
             }
             .into(),
-        ]
+        );
+
+        items
     }
 }
 

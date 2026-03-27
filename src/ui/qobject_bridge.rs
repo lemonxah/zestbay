@@ -954,6 +954,13 @@ impl qobject::AppController {
                 tray.window_visible.store(false, Ordering::Release);
                 self.as_mut().hide_window_requested();
             }
+
+            if let Ok(mut req) = tray.open_plugin_ui.lock() {
+                if let Some(node_id) = req.take() {
+                    log::info!("Tray: open plugin UI requested for node_id={}", node_id);
+                    self.as_mut().open_plugin_ui(node_id);
+                }
+            }
         }
 
         if let Some(msg) = error_msg {
@@ -963,6 +970,7 @@ impl qobject::AppController {
 
         if changed {
             self.as_mut().refresh_cache();
+            self.as_mut().sync_tray_plugins();
             self.as_mut().graph_changed();
         }
 
@@ -2648,6 +2656,39 @@ impl qobject::AppController {
             use std::sync::atomic::Ordering;
             tray.window_visible.store(visible, Ordering::Release);
             log::info!("Window visible state updated to {}", visible);
+        }
+    }
+
+    fn sync_tray_plugins(self: Pin<&mut Self>) {
+        let tray = match self.rust().tray_state.as_ref() {
+            Some(t) => t,
+            None => return,
+        };
+        let mgr = match self.rust().plugin_manager.as_ref() {
+            Some(m) => m,
+            None => return,
+        };
+
+        let mut entries: Vec<crate::tray::PluginEntry> = mgr
+            .active_instances()
+            .values()
+            .filter(|info| info.pw_node_id.is_some())
+            .map(|info| {
+                let has_ui = mgr
+                    .find_plugin(&info.plugin_uri)
+                    .map(|p| p.has_ui)
+                    .unwrap_or(false);
+                crate::tray::PluginEntry {
+                    name: info.display_name.clone(),
+                    node_id: info.pw_node_id.unwrap_or(0),
+                    has_ui,
+                }
+            })
+            .collect();
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+
+        if let Ok(mut plugins) = tray.plugins.lock() {
+            *plugins = entries;
         }
     }
 

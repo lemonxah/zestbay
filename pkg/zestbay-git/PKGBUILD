@@ -12,6 +12,7 @@ depends=(
     'qt6-declarative'
     'lilv'
     'lv2'
+    'suil'
     'dbus'
 )
 makedepends=(
@@ -22,6 +23,10 @@ makedepends=(
     'pkg-config'
     'qt6-base'
     'qt6-declarative'
+    'pipewire'
+    'lilv'
+    'lv2'
+    'suil'
     'git'
 )
 provides=('zestbay')
