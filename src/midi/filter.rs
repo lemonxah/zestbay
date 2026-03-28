@@ -69,6 +69,27 @@ impl ResolvedMappings {
                 && e.source.message_type == message_type
         })
     }
+
+    /// Match by channel + cc only (ignoring device_name).
+    /// Used for per-plugin MIDI ports where routing determines the device.
+    pub fn find_any_device(
+        &self,
+        channel: u8,
+        cc: u8,
+        message_type: MidiMessageType,
+    ) -> Option<&ResolvedMappingEntry> {
+        let exact = self.entries.iter().find(|e| {
+            e.source.channel == Some(channel)
+                && e.source.cc == cc
+                && e.source.message_type == message_type
+        });
+        if exact.is_some() {
+            return exact;
+        }
+        self.entries.iter().find(|e| {
+            e.source.channel.is_none() && e.source.cc == cc && e.source.message_type == message_type
+        })
+    }
 }
 
 unsafe impl Send for ResolvedMappings {}

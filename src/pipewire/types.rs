@@ -167,12 +167,6 @@ pub enum PwCommand {
     RemoveMidiMappingsForPlugin {
         instance_id: u64,
     },
-    CreateMidiInput {
-        device_name: String,
-    },
-    RemoveMidiInput {
-        device_name: String,
-    },
 }
 
 #[derive(Debug, Clone)]
@@ -217,12 +211,6 @@ pub enum PluginEvent {
         channel: u8,
         cc: u8,
         message_type: crate::midi::MidiMessageType,
-    },
-    MidiInputCreated {
-        device_name: String,
-    },
-    MidiInputRemoved {
-        device_name: String,
     },
 }
 

@@ -244,22 +244,6 @@ ApplicationWindow {
                             color: Theme.colMidi
                         }
 
-                        Button {
-                            visible: paramDelegate.midiMapping !== "" && !paramDelegate.isLearning
-                            text: "\u00d7"
-                            flat: true
-                            implicitWidth: 18
-                            implicitHeight: 18
-                            font.pointSize: 9
-                            ToolTip.visible: hovered
-                            ToolTip.text: "Remove MIDI mapping"
-                            onClicked: {
-                                if (pluginParams.instanceId >= 0 && param.portIndex !== undefined) {
-                                    controller.remove_midi_mapping_for_param(pluginParams.instanceId, param.portIndex)
-                                }
-                            }
-                        }
-
                         Label {
                             id: learnIndicator
                             visible: paramDelegate.isLearning
@@ -389,6 +373,22 @@ ApplicationWindow {
                                         pluginName + " > " + (param.name || ""),
                                         param.isToggle ? "toggle" : "continuous"
                                     )
+                                }
+                            }
+                        }
+
+                        Button {
+                            visible: paramDelegate.midiMapping !== "" && !paramDelegate.isLearning
+                            text: "C"
+                            flat: true
+                            implicitWidth: 24
+                            implicitHeight: 20
+                            font.pointSize: 8
+                            ToolTip.visible: hovered
+                            ToolTip.text: "Clear MIDI mapping"
+                            onClicked: {
+                                if (pluginParams.instanceId >= 0 && param.portIndex !== undefined) {
+                                    controller.remove_midi_mapping_for_param(pluginParams.instanceId, param.portIndex)
                                 }
                             }
                         }

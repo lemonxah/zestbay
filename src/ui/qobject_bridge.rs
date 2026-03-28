@@ -570,7 +570,6 @@ impl qobject::AppController {
         let saved_midi = load_midi_mappings();
         if !saved_midi.is_empty() {
             log::info!("Restoring {} saved MIDI mappings", saved_midi.len());
-            self.as_mut().rust_mut().midi_mappings = saved_midi.clone();
             if let Some(ref tx) = self.rust().cmd_tx {
                 for mapping in saved_midi {
                     let _ = tx.send(PwCommand::AddMidiMapping(mapping));
@@ -846,12 +845,6 @@ impl qobject::AppController {
                             let _ = tx.send(PwCommand::AddMidiMapping(mapping));
                         }
                     }
-                }
-                PluginEvent::MidiInputCreated { ref device_name } => {
-                    log::info!("MIDI input created: {}", device_name);
-                }
-                PluginEvent::MidiInputRemoved { ref device_name } => {
-                    log::info!("MIDI input removed: {}", device_name);
                 }
             }
         }

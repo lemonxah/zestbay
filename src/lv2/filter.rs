@@ -8,6 +8,8 @@ use pipewire::core::CoreRc;
 
 use super::host::Lv2PluginInstance;
 use super::types::*;
+use crate::midi::filter::ResolvedMappings;
+use crate::midi::processing::MidiProcessingState;
 use crate::plugin::cpu_stats::{global_cpu_tracker, PluginTimingSlot};
 
 pub struct Lv2FilterNode {
@@ -43,9 +45,12 @@ struct FilterData {
     shutting_down: AtomicBool,
     input_port_ptrs: Vec<*mut std::ffi::c_void>,
     output_port_ptrs: Vec<*mut std::ffi::c_void>,
+    midi_in_port_ptr: *mut std::ffi::c_void,
+    midi_out_port_ptr: *mut std::ffi::c_void,
     n_audio_inputs: usize,
     n_audio_outputs: usize,
     cpu_slot: Arc<PluginTimingSlot>,
+    midi_state: MidiProcessingState,
 }
 
 unsafe impl Send for FilterData {}
@@ -107,9 +112,12 @@ impl Lv2FilterNode {
             shutting_down: AtomicBool::new(false),
             input_port_ptrs: Vec::with_capacity(config.audio_inputs),
             output_port_ptrs: Vec::with_capacity(config.audio_outputs),
+            midi_in_port_ptr: std::ptr::null_mut(),
+            midi_out_port_ptr: std::ptr::null_mut(),
             n_audio_inputs: config.audio_inputs,
             n_audio_outputs: config.audio_outputs,
             cpu_slot,
+            midi_state: MidiProcessingState::new(),
         }));
 
         let events = Box::new(pipewire::sys::pw_filter_events {
@@ -201,6 +209,70 @@ impl Lv2FilterNode {
             }
         }
 
+        // MIDI input port
+        {
+            let port_name = CString::new("midi_in").unwrap();
+            let port_props = unsafe {
+                pipewire::sys::pw_properties_new(
+                    c_str(b"port.name\0"),
+                    port_name.as_ptr(),
+                    c_str(b"format.dsp\0"),
+                    c_str(b"8 bit raw midi\0"),
+                    std::ptr::null::<std::os::raw::c_char>(),
+                )
+            };
+            let port_data = unsafe {
+                pipewire::sys::pw_filter_add_port(
+                    filter,
+                    libspa::sys::SPA_DIRECTION_INPUT,
+                    pipewire::sys::pw_filter_port_flags_PW_FILTER_PORT_FLAG_MAP_BUFFERS,
+                    std::mem::size_of::<PortData>(),
+                    port_props,
+                    std::ptr::null_mut(),
+                    0,
+                )
+            };
+            if port_data.is_null() {
+                log::error!("Failed to add MIDI input port for {}", config.display_name);
+            } else {
+                unsafe {
+                    (*user_data).midi_in_port_ptr = port_data;
+                }
+            }
+        }
+
+        // MIDI output port
+        {
+            let port_name = CString::new("midi_out").unwrap();
+            let port_props = unsafe {
+                pipewire::sys::pw_properties_new(
+                    c_str(b"port.name\0"),
+                    port_name.as_ptr(),
+                    c_str(b"format.dsp\0"),
+                    c_str(b"8 bit raw midi\0"),
+                    std::ptr::null::<std::os::raw::c_char>(),
+                )
+            };
+            let port_data = unsafe {
+                pipewire::sys::pw_filter_add_port(
+                    filter,
+                    libspa::sys::SPA_DIRECTION_OUTPUT,
+                    pipewire::sys::pw_filter_port_flags_PW_FILTER_PORT_FLAG_MAP_BUFFERS,
+                    std::mem::size_of::<PortData>(),
+                    port_props,
+                    std::ptr::null_mut(),
+                    0,
+                )
+            };
+            if port_data.is_null() {
+                log::error!("Failed to add MIDI output port for {}", config.display_name);
+            } else {
+                unsafe {
+                    (*user_data).midi_out_port_ptr = port_data;
+                }
+            }
+        }
+
         let flags = pipewire::sys::pw_filter_flags_PW_FILTER_FLAG_RT_PROCESS;
         let ret =
             unsafe { pipewire::sys::pw_filter_connect(filter, flags, std::ptr::null_mut(), 0) };
@@ -236,6 +308,29 @@ impl Lv2FilterNode {
             return 0;
         }
         unsafe { pipewire::sys::pw_filter_get_node_id(self.filter) }
+    }
+
+    pub fn update_mappings(&self, mappings: Arc<ResolvedMappings>) {
+        if !self._user_data.is_null() {
+            unsafe {
+                *(*self._user_data).midi_state.mappings.write() = mappings;
+            }
+        }
+    }
+
+    pub fn set_learn_mode(&self, enabled: bool) {
+        if !self._user_data.is_null() {
+            unsafe {
+                (*self._user_data)
+                    .midi_state
+                    .learn_captured
+                    .store(false, Ordering::SeqCst);
+                (*self._user_data)
+                    .midi_state
+                    .learn_mode
+                    .store(enabled, Ordering::SeqCst);
+            }
+        }
     }
 
     pub fn disconnect(&mut self) {
@@ -338,7 +433,7 @@ unsafe extern "C" fn on_process(
     position: *mut libspa::sys::spa_io_position,
 ) {
     unsafe {
-        let fd = &*(data as *const FilterData);
+        let fd = &mut *(data as *mut FilterData);
 
         if fd.shutting_down.load(Ordering::Acquire) {
             return;
@@ -355,6 +450,32 @@ unsafe extern "C" fn on_process(
 
         if n_samples == 0 || n_samples > 8192 {
             return;
+        }
+
+        if !fd.midi_in_port_ptr.is_null() {
+            let midi_in_buf = pipewire::sys::pw_filter_get_dsp_buffer(fd.midi_in_port_ptr, 0);
+            let midi_out_buf = if !fd.midi_out_port_ptr.is_null() {
+                pipewire::sys::pw_filter_get_dsp_buffer(fd.midi_out_port_ptr, n_samples)
+            } else {
+                std::ptr::null_mut()
+            };
+
+            if let Some(capture) = crate::midi::processing::process_midi_buffer(
+                midi_in_buf,
+                &mut fd.midi_state,
+                &fd.event_tx,
+                fd.instance_id,
+            ) {
+                let _ = fd.event_tx.send(crate::pipewire::PwEvent::Plugin(
+                    crate::pipewire::PluginEvent::MidiCcReceived {
+                        device_name: fd.display_name.clone(),
+                        channel: capture.channel,
+                        cc: capture.cc,
+                        message_type: capture.message_type,
+                    },
+                ));
+            }
+            crate::midi::processing::forward_midi_buffer(midi_in_buf, midi_out_buf);
         }
 
         let inst = &mut *fd.instance_ptr;

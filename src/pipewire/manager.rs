@@ -234,39 +234,18 @@ fn run_pipewire_thread(
         Rc::new(RefCell::new(crate::midi::MidiMappingTable::new()));
     let midi_learn_state: Rc<RefCell<Option<crate::midi::MidiLearnState>>> =
         Rc::new(RefCell::new(None));
-    let midi_filters: Rc<RefCell<HashMap<String, crate::midi::filter::MidiFilterNode>>> =
-        Rc::new(RefCell::new(HashMap::new()));
-
-    {
-        let default_name = "ZestBay MIDI In".to_string();
-        match crate::midi::filter::MidiFilterNode::new(
-            &core,
-            event_tx.clone(),
-            &default_name,
-        ) {
-            Ok(f) => {
-                log::info!("Default MIDI filter created: {}", default_name);
-                midi_filters.borrow_mut().insert(default_name.clone(), f);
-                let _ = event_tx.send(PwEvent::Plugin(
-                    PluginEvent::MidiInputCreated { device_name: default_name },
-                ));
-            }
-            Err(e) => {
-                log::error!("Failed to create default MIDI filter: {}", e);
-            }
-        }
-    }
 
     let _cmd_receiver = pw_cmd_rx.attach(mainloop.loop_(), {
         let pending_ops = pending_ops.clone();
         let lv2_instances = lv2_instances.clone();
+        let lv2_filters = lv2_filters.clone();
         let clap_instances = clap_instances.clone();
+        let clap_filters = clap_filters.clone();
         let vst3_instances = vst3_instances.clone();
+        let vst3_filters = vst3_filters.clone();
         let event_tx = event_tx.clone();
         let midi_mapping_table = midi_mapping_table.clone();
         let midi_learn_state = midi_learn_state.clone();
-        let midi_filters = midi_filters.clone();
-        let core_for_midi = core.clone();
 
         move |cmd| {
             match cmd {
@@ -324,7 +303,11 @@ fn run_pipewire_thread(
                         label,
                         mode,
                     });
-                    for filter in midi_filters.borrow().values() {
+                    if let Some(filter) = lv2_filters.borrow().get(&instance_id) {
+                        filter.set_learn_mode(true);
+                    } else if let Some(filter) = clap_filters.borrow().get(&instance_id) {
+                        filter.set_learn_mode(true);
+                    } else if let Some(filter) = vst3_filters.borrow().get(&instance_id) {
                         filter.set_learn_mode(true);
                     }
                     let _ = event_tx.send(PwEvent::Plugin(PluginEvent::MidiLearnStarted {
@@ -334,7 +317,13 @@ fn run_pipewire_thread(
                 }
                 PwCommand::CancelMidiLearn => {
                     *midi_learn_state.borrow_mut() = None;
-                    for filter in midi_filters.borrow().values() {
+                    for filter in lv2_filters.borrow().values() {
+                        filter.set_learn_mode(false);
+                    }
+                    for filter in clap_filters.borrow().values() {
+                        filter.set_learn_mode(false);
+                    }
+                    for filter in vst3_filters.borrow().values() {
                         filter.set_learn_mode(false);
                     }
                     let _ = event_tx.send(PwEvent::Plugin(PluginEvent::MidiLearnCancelled));
@@ -342,10 +331,12 @@ fn run_pipewire_thread(
                 PwCommand::AddMidiMapping(mapping) => {
                     handle_add_midi_mapping(
                         &midi_mapping_table,
-                        &midi_filters,
                         &lv2_instances,
+                        &lv2_filters,
                         &clap_instances,
+                        &clap_filters,
                         &vst3_instances,
+                        &vst3_filters,
                         &event_tx,
                         mapping,
                     );
@@ -355,10 +346,12 @@ fn run_pipewire_thread(
                     if removed.is_some() {
                         rebuild_resolved_mappings(
                             &midi_mapping_table,
-                            &midi_filters,
                             &lv2_instances,
+                            &lv2_filters,
                             &clap_instances,
+                            &clap_filters,
                             &vst3_instances,
+                            &vst3_filters,
                         );
                         let _ = event_tx.send(PwEvent::Plugin(
                             PluginEvent::MidiMappingRemoved(source),
@@ -369,56 +362,13 @@ fn run_pipewire_thread(
                     midi_mapping_table.borrow_mut().remove_by_instance(instance_id);
                     rebuild_resolved_mappings(
                         &midi_mapping_table,
-                        &midi_filters,
                         &lv2_instances,
+                        &lv2_filters,
                         &clap_instances,
+                        &clap_filters,
                         &vst3_instances,
+                        &vst3_filters,
                     );
-                }
-                PwCommand::CreateMidiInput { device_name } => {
-                    if midi_filters.borrow().contains_key(&device_name) {
-                        log::warn!("MIDI input '{}' already exists", device_name);
-                    } else {
-                        match crate::midi::filter::MidiFilterNode::new(
-                            &core_for_midi,
-                            event_tx.clone(),
-                            &device_name,
-                        ) {
-                            Ok(f) => {
-                                log::info!("MIDI input created: {}", device_name);
-                                midi_filters.borrow_mut().insert(device_name.clone(), f);
-                                rebuild_resolved_mappings(
-                                    &midi_mapping_table,
-                                    &midi_filters,
-                                    &lv2_instances,
-                                    &clap_instances,
-                                    &vst3_instances,
-                                );
-                                let _ = event_tx.send(PwEvent::Plugin(
-                                    PluginEvent::MidiInputCreated { device_name },
-                                ));
-                            }
-                            Err(e) => {
-                                log::error!("Failed to create MIDI input '{}': {}", device_name, e);
-                            }
-                        }
-                    }
-                }
-                PwCommand::RemoveMidiInput { device_name } => {
-                    if let Some(mut filter) = midi_filters.borrow_mut().remove(&device_name) {
-                        filter.disconnect();
-                        midi_mapping_table.borrow_mut().remove_by_device(&device_name);
-                        rebuild_resolved_mappings(
-                            &midi_mapping_table,
-                            &midi_filters,
-                            &lv2_instances,
-                            &clap_instances,
-                            &vst3_instances,
-                        );
-                        let _ = event_tx.send(PwEvent::Plugin(
-                            PluginEvent::MidiInputRemoved { device_name },
-                        ));
-                    }
                 }
                 cmd => {
                     let op = match cmd {
@@ -456,9 +406,7 @@ fn run_pipewire_thread(
                         | PwCommand::CancelMidiLearn
                         | PwCommand::AddMidiMapping(..)
                         | PwCommand::RemoveMidiMapping(..)
-                        | PwCommand::RemoveMidiMappingsForPlugin { .. }
-                        | PwCommand::CreateMidiInput { .. }
-                        | PwCommand::RemoveMidiInput { .. } => unreachable!(),
+                        | PwCommand::RemoveMidiMappingsForPlugin { .. } => unreachable!(),
                     };
                     pending_ops.borrow_mut().push(op);
                 }
@@ -795,7 +743,13 @@ fn parse_port(global: &GlobalObject<&DictRef>, graph: &Arc<GraphState>) -> Optio
         }
     };
 
-    let media_type = graph.get_node(node_id).and_then(|n| n.media_type);
+    let media_type = if props.get("format.dsp").map_or(false, |v| v.contains("midi")) {
+        Some(MediaType::Midi)
+    } else if name.starts_with("midi_") {
+        Some(MediaType::Midi)
+    } else {
+        graph.get_node(node_id).and_then(|n| n.media_type)
+    };
     let port_group = props.get("port.group").map(String::from);
     let port_alias = props.get("port.alias").map(String::from);
 
@@ -1339,56 +1293,74 @@ fn create_link(
 #[allow(clippy::too_many_arguments)]
 fn handle_add_midi_mapping(
     midi_mapping_table: &Rc<RefCell<crate::midi::MidiMappingTable>>,
-    midi_filters: &Rc<RefCell<HashMap<String, crate::midi::filter::MidiFilterNode>>>,
     lv2_instances: &GlobalSharedMutHashMap<u64, crate::lv2::host::Lv2PluginInstance>,
+    lv2_filters: &Rc<RefCell<HashMap<u64, crate::lv2::filter::Lv2FilterNode>>>,
     clap_instances: &GlobalSharedMutHashMap<u64, crate::clap::host::ClapPluginInstance>,
+    clap_filters: &Rc<RefCell<HashMap<u64, crate::clap::filter::ClapFilterNode>>>,
     vst3_instances: &GlobalSharedMutHashMap<u64, crate::vst3::host::Vst3PluginInstance>,
+    vst3_filters: &Rc<RefCell<HashMap<u64, crate::vst3::filter::Vst3FilterNode>>>,
     event_tx: &Sender<PwEvent>,
     mapping: crate::midi::MidiCcMapping,
 ) {
-    let existing_label = midi_mapping_table
+    let existing = midi_mapping_table
         .borrow()
-        .conflict_check(&mapping.source)
-        .map(String::from);
+        .get(&mapping.source)
+        .cloned();
 
-    if let Some(label) = existing_label {
+    if let Some(ref existing_mapping) = existing {
+        if existing_mapping.target == mapping.target {
+            return;
+        }
         let _ = event_tx.send(PwEvent::Plugin(PluginEvent::MidiMappingConflict {
             source: mapping.source.clone(),
-            existing_label: label,
+            existing_label: existing_mapping.label.clone(),
         }));
         return;
+    }
+
+    {
+        let old_source = midi_mapping_table
+            .borrow()
+            .find_by_target(&mapping.target)
+            .map(|m| m.source.clone());
+        if let Some(old_source) = old_source {
+            midi_mapping_table.borrow_mut().remove(&old_source);
+        }
     }
 
     midi_mapping_table.borrow_mut().insert(mapping.clone());
 
     rebuild_resolved_mappings(
         midi_mapping_table,
-        midi_filters,
         lv2_instances,
+        lv2_filters,
         clap_instances,
+        clap_filters,
         vst3_instances,
+        vst3_filters,
     );
 
     let _ = event_tx.send(PwEvent::Plugin(PluginEvent::MidiMappingAdded(mapping)));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rebuild_resolved_mappings(
     midi_mapping_table: &Rc<RefCell<crate::midi::MidiMappingTable>>,
-    midi_filters: &Rc<RefCell<HashMap<String, crate::midi::filter::MidiFilterNode>>>,
     lv2_instances: &GlobalSharedMutHashMap<u64, crate::lv2::host::Lv2PluginInstance>,
+    lv2_filters: &Rc<RefCell<HashMap<u64, crate::lv2::filter::Lv2FilterNode>>>,
     clap_instances: &GlobalSharedMutHashMap<u64, crate::clap::host::ClapPluginInstance>,
+    clap_filters: &Rc<RefCell<HashMap<u64, crate::clap::filter::ClapFilterNode>>>,
     vst3_instances: &GlobalSharedMutHashMap<u64, crate::vst3::host::Vst3PluginInstance>,
+    vst3_filters: &Rc<RefCell<HashMap<u64, crate::vst3::filter::Vst3FilterNode>>>,
 ) {
     let table = midi_mapping_table.borrow();
-    let filters = midi_filters.borrow();
 
-    let mut per_device: HashMap<&str, Vec<crate::midi::filter::ResolvedMappingEntry>> =
+    let mut per_instance: HashMap<u64, Vec<crate::midi::filter::ResolvedMappingEntry>> =
         HashMap::new();
 
     for mapping in table.all_mappings() {
         let instance_id = mapping.target.instance_id;
         let port_index = mapping.target.port_index;
-        let device = mapping.source.device_name.as_str();
 
         let entry = resolve_mapping_entry(
             mapping,
@@ -1400,14 +1372,27 @@ fn rebuild_resolved_mappings(
         );
 
         if let Some(entry) = entry {
-            per_device.entry(device).or_default().push(entry);
+            per_instance.entry(instance_id).or_default().push(entry);
         }
     }
 
-    for (device_name, filter) in filters.iter() {
-        let entries = per_device
-            .remove(device_name.as_str())
-            .unwrap_or_default();
+    let lv2_f = lv2_filters.borrow();
+    for (id, filter) in lv2_f.iter() {
+        let entries = per_instance.remove(id).unwrap_or_default();
+        let resolved = Arc::new(crate::midi::filter::ResolvedMappings::new(entries));
+        filter.update_mappings(resolved);
+    }
+
+    let clap_f = clap_filters.borrow();
+    for (id, filter) in clap_f.iter() {
+        let entries = per_instance.remove(id).unwrap_or_default();
+        let resolved = Arc::new(crate::midi::filter::ResolvedMappings::new(entries));
+        filter.update_mappings(resolved);
+    }
+
+    let vst3_f = vst3_filters.borrow();
+    for (id, filter) in vst3_f.iter() {
+        let entries = per_instance.remove(id).unwrap_or_default();
         let resolved = Arc::new(crate::midi::filter::ResolvedMappings::new(entries));
         filter.update_mappings(resolved);
     }

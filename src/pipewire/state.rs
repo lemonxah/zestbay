@@ -153,7 +153,14 @@ impl GraphState {
             .filter(|p| p.node_id == node_id)
             .cloned()
             .collect();
-        ports.sort_by(|a, b| a.direction.cmp(&b.direction).then_with(|| natural_cmp(&a.name, &b.name)));
+        ports.sort_by(|a, b| {
+            a.direction.cmp(&b.direction).then_with(|| {
+                // MIDI ports first within each direction group
+                let a_midi = a.media_type == Some(MediaType::Midi);
+                let b_midi = b.media_type == Some(MediaType::Midi);
+                b_midi.cmp(&a_midi).then_with(|| natural_cmp(&a.name, &b.name))
+            })
+        });
         ports
     }
 
@@ -165,7 +172,12 @@ impl GraphState {
             .filter(|p| p.node_id == node_id && p.direction == PortDirection::Input)
             .cloned()
             .collect();
-        ports.sort_by(|a, b| natural_cmp(&a.name, &b.name));
+        ports.sort_by(|a, b| {
+            // MIDI ports first
+            let a_midi = a.media_type == Some(MediaType::Midi);
+            let b_midi = b.media_type == Some(MediaType::Midi);
+            b_midi.cmp(&a_midi).then_with(|| natural_cmp(&a.name, &b.name))
+        });
         ports
     }
 
@@ -177,7 +189,12 @@ impl GraphState {
             .filter(|p| p.node_id == node_id && p.direction == PortDirection::Output)
             .cloned()
             .collect();
-        ports.sort_by(|a, b| natural_cmp(&a.name, &b.name));
+        ports.sort_by(|a, b| {
+            // MIDI ports first
+            let a_midi = a.media_type == Some(MediaType::Midi);
+            let b_midi = b.media_type == Some(MediaType::Midi);
+            b_midi.cmp(&a_midi).then_with(|| natural_cmp(&a.name, &b.name))
+        });
         ports
     }
 

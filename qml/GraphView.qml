@@ -901,9 +901,9 @@ Item {
                 var y = pos.y
                 var ports = portsByNode[node.id] || []
                 var inputs = ports.filter(function(p) { return p.direction === "Input" })
-                    .sort(function(a, b) { return a.name.localeCompare(b.name) })
+                    .sort(function(a, b) { var am = a.mediaType === "Midi" ? 0 : 1; var bm = b.mediaType === "Midi" ? 0 : 1; return am !== bm ? am - bm : a.name.localeCompare(b.name) })
                 var outputs = ports.filter(function(p) { return p.direction === "Output" })
-                    .sort(function(a, b) { return a.name.localeCompare(b.name) })
+                    .sort(function(a, b) { var am = a.mediaType === "Midi" ? 0 : 1; var bm = b.mediaType === "Midi" ? 0 : 1; return am !== bm ? am - bm : a.name.localeCompare(b.name) })
                 var nw = getNodeWidth(node.id)
 
                 var portBaseY = y + headerHeight + nodePadding
@@ -946,9 +946,9 @@ Item {
                 var ny = pos2.y
                 var nPorts = portsByNode[node2.id] || []
                 var nInputs = nPorts.filter(function(p) { return p.direction === "Input" })
-                    .sort(function(a, b) { return a.name.localeCompare(b.name) })
+                    .sort(function(a, b) { var am = a.mediaType === "Midi" ? 0 : 1; var bm = b.mediaType === "Midi" ? 0 : 1; return am !== bm ? am - bm : a.name.localeCompare(b.name) })
                 var nOutputs = nPorts.filter(function(p) { return p.direction === "Output" })
-                    .sort(function(a, b) { return a.name.localeCompare(b.name) })
+                    .sort(function(a, b) { var am = a.mediaType === "Midi" ? 0 : 1; var bm = b.mediaType === "Midi" ? 0 : 1; return am !== bm ? am - bm : a.name.localeCompare(b.name) })
                 var nh = calculateNodeHeight(node2)
                 var nnw = getNodeWidth(node2.id)
 
