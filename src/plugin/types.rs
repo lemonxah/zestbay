@@ -268,6 +268,8 @@ pub struct PluginInstanceInfo {
     pub parameters: Vec<ParameterValue>,
     pub active: bool,
     pub bypassed: bool,
+    /// Cached LV2 state entries (populated from PW thread on remove, used for persistence)
+    pub lv2_state: Vec<crate::lv2::state::StateEntry>,
 }
 
 // ---------------------------------------------------------------------------

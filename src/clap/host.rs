@@ -580,6 +580,7 @@ impl ClapPluginInstance {
             parameters: self.get_parameters(),
             active: true,
             bypassed: self.bypassed,
+            lv2_state: Vec::new(),
         }
     }
 }

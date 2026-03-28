@@ -1,10 +1,14 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::os::raw::c_char;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use lilv::World;
 
+use super::log::Lv2LogSetup;
+use super::options::Lv2OptionsSetup;
+use super::state::{LV2_State_Interface, StateEntry, LV2_STATE__INTERFACE};
 use super::types::*;
 use super::urid::UridMapper;
 use super::worker::{LV2_Worker_Interface, Lv2Worker, Lv2WorkerSetup, LV2_WORKER_INTERFACE_URI};
@@ -27,6 +31,52 @@ fn safe_clamp(value: f32, min: f32, max: f32) -> f32 {
 
 const ATOM_BUF_SIZE: usize = 65536;
 
+const LV2_RESIZE_PORT_URI: &std::ffi::CStr = c"http://lv2plug.in/ns/ext/resize-port#resize";
+const LV2_URI_MAP_URI: &std::ffi::CStr = c"http://lv2plug.in/ns/ext/uri-map";
+
+#[repr(C)]
+#[allow(non_camel_case_types)]
+struct LV2_Resize_Port_Resize {
+    data: *mut c_void,
+    resize: unsafe extern "C" fn(data: *mut c_void, index: u32, size: usize) -> i32,
+}
+
+const LV2_RESIZE_PORT_ERR_NO_SPACE: i32 = 2;
+
+unsafe extern "C" fn resize_port_stub(
+    _data: *mut c_void,
+    _index: u32,
+    _size: usize,
+) -> i32 {
+    LV2_RESIZE_PORT_ERR_NO_SPACE
+}
+
+#[repr(C)]
+#[allow(non_camel_case_types)]
+struct LV2_URI_Map_Feature {
+    callback_data: *mut c_void,
+    uri_to_id: unsafe extern "C" fn(
+        callback_data: *mut c_void,
+        map: *const c_char,
+        uri: *const c_char,
+    ) -> u32,
+}
+
+unsafe extern "C" fn uri_map_callback(
+    callback_data: *mut c_void,
+    _map: *const c_char,
+    uri: *const c_char,
+) -> u32 {
+    if callback_data.is_null() || uri.is_null() {
+        return 0;
+    }
+    unsafe {
+        let mapper = &*(callback_data as *const UridMapper);
+        let uri_str = std::ffi::CStr::from_ptr(uri);
+        mapper.map(uri_str.to_str().unwrap_or(""))
+    }
+}
+
 fn init_atom_sequence(buf: &mut [u8], capacity: usize, is_output: bool, sequence_type_urid: u32) {
     assert!(capacity >= 16, "atom buffer too small");
     buf[..capacity].fill(0);
@@ -44,6 +94,9 @@ pub struct Lv2PluginInstance {
     instance: lilv::instance::ActiveInstance,
     _world: lilv::World,
     _urid_map: Box<lv2_raw::urid::LV2UridMap>,
+    _urid_unmap: Box<super::urid::LV2UridUnmap>,
+    _log_setup: Lv2LogSetup,
+    _options_setup: Lv2OptionsSetup,
     pub plugin_uri: String,
     pub display_name: String,
     pub audio_input_indices: Vec<usize>,
@@ -60,6 +113,14 @@ pub struct Lv2PluginInstance {
     pub worker: Option<Lv2Worker>,
     /// Accumulated worker thread CPU time (ns) drained after each process() call
     pub last_worker_ns: u64,
+    /// LV2_State_Interface pointer (if the plugin provides it)
+    state_iface: Option<std::ptr::NonNull<LV2_State_Interface>>,
+    /// Raw LV2_Handle for calling state save/restore
+    lv2_handle: *mut c_void,
+    /// Plugin descriptor's extension_data function pointer (for data-access UI feature)
+    extension_data_fn: Option<unsafe extern "C" fn(*const c_char) -> *const c_void>,
+    /// Shared reference to the URID mapper for state operations
+    urid_mapper: Arc<UridMapper>,
 }
 
 pub struct AtomBuf {
@@ -85,21 +146,29 @@ impl Lv2PluginInstance {
         plugin: &lilv::plugin::Plugin,
         plugin_info: &Lv2PluginInfo,
         sample_rate: f64,
-        urid_mapper: &UridMapper,
+        urid_mapper: &Arc<UridMapper>,
     ) -> Option<Self> {
         let id = next_instance_id();
         let atom_sequence_urid = urid_mapper.map("http://lv2plug.in/ns/ext/atom#Sequence");
 
         let mut urid_map = Box::new(urid_mapper.as_lv2_urid_map());
         let urid_feature = unsafe { UridMapper::make_feature(&mut *urid_map as *mut _) };
+        let mut urid_unmap = Box::new(urid_mapper.as_lv2_urid_unmap());
+        let urid_unmap_feature =
+            unsafe { UridMapper::make_unmap_feature(&mut *urid_unmap as *mut _) };
 
-        // Check if this plugin requires the worker#schedule feature
+        let log_setup = Lv2LogSetup::new(urid_mapper);
+        let log_feature = log_setup.make_feature();
+
+        let options_setup = Lv2OptionsSetup::new(urid_mapper, sample_rate, 1024);
+        let options_feature = options_setup.make_feature();
+        let buf_size_features = options_setup.make_buf_size_features();
+
         let needs_worker = plugin_info
             .required_features
             .iter()
             .any(|f| f == "http://lv2plug.in/ns/ext/worker#schedule");
 
-        // Create worker setup BEFORE instantiation so the feature is available
         let worker_setup = if needs_worker {
             Some(Lv2WorkerSetup::new())
         } else {
@@ -112,12 +181,37 @@ impl Lv2PluginInstance {
         // The only difference is libc types vs std::os::raw types (same ABI).
         // We transmute the Vec to bridge the type boundary.
         let worker_feature;
-        let features_v3: Vec<&lv2_raw::core::LV2Feature> = if let Some(ref ws) = worker_setup {
-            worker_feature = ws.make_feature();
-            vec![&urid_feature, &worker_feature]
-        } else {
-            vec![&urid_feature]
+        let mut resize_port_data = LV2_Resize_Port_Resize {
+            data: std::ptr::null_mut(),
+            resize: resize_port_stub,
         };
+        let resize_port_feature = lv2_raw::core::LV2Feature {
+            uri: LV2_RESIZE_PORT_URI.as_ptr(),
+            data: &mut resize_port_data as *mut _ as *mut c_void,
+        };
+        let mut uri_map_data = LV2_URI_Map_Feature {
+            callback_data: Arc::as_ptr(urid_mapper) as *mut c_void,
+            uri_to_id: uri_map_callback,
+        };
+        let uri_map_feature = lv2_raw::core::LV2Feature {
+            uri: LV2_URI_MAP_URI.as_ptr(),
+            data: &mut uri_map_data as *mut _ as *mut c_void,
+        };
+        let mut features_v3: Vec<&lv2_raw::core::LV2Feature> = vec![
+            &urid_feature,
+            &urid_unmap_feature,
+            &log_feature,
+            &options_feature,
+            &resize_port_feature,
+            &uri_map_feature,
+        ];
+        for f in &buf_size_features {
+            features_v3.push(f);
+        }
+        if let Some(ref ws) = worker_setup {
+            worker_feature = ws.make_feature();
+            features_v3.push(&worker_feature);
+        }
         let features = unsafe {
             // SAFETY: lv2_raw 0.2 and 0.3 LV2Feature are layout-identical #[repr(C)] structs.
             std::mem::transmute::<Vec<&lv2_raw::core::LV2Feature>, Vec<_>>(features_v3)
@@ -231,8 +325,16 @@ impl Lv2PluginInstance {
         // Activate the worker if needed: get the instance handle and worker
         // interface BEFORE activation (extension_data is available on the
         // un-activated instance).
+        let lv2_handle = instance.handle() as *mut c_void;
+        // SAFETY: lv2_raw 0.2 uses `extern "C" fn(*const u8) -> *const libc::c_void`
+        // while the LV2 data-access spec uses `extern "C" fn(*const c_char) -> *const c_void`.
+        // These are ABI-identical (u8 vs i8 pointer, libc::c_void = core::ffi::c_void).
+        let extension_data_fn: Option<unsafe extern "C" fn(*const c_char) -> *const c_void> =
+            instance
+                .descriptor()
+                .map(|d| unsafe { std::mem::transmute(d.extension_data) });
+
         let worker = if let Some(ws) = worker_setup {
-            let lv2_handle = instance.handle() as *mut c_void;
             let worker_iface_ptr: Option<std::ptr::NonNull<LV2_Worker_Interface>> = unsafe {
                 // extension_data returns lv2_raw 0.2 types (via lilv), but
                 // LV2_Worker_Interface is our own #[repr(C)] definition which
@@ -249,7 +351,6 @@ impl Lv2PluginInstance {
                         "LV2 worker: plugin '{}' requires worker but provides no interface",
                         plugin_info.name
                     );
-                    // Drop the setup (channels are cleaned up)
                     drop(ws);
                     None
                 }
@@ -258,6 +359,15 @@ impl Lv2PluginInstance {
             None
         };
 
+        let state_iface: Option<std::ptr::NonNull<LV2_State_Interface>> =
+            unsafe { instance.extension_data::<LV2_State_Interface>(LV2_STATE__INTERFACE) };
+        if state_iface.is_some() {
+            log::info!(
+                "LV2 state: plugin '{}' provides state interface",
+                plugin_info.name
+            );
+        }
+
         let active_instance = unsafe { instance.activate() };
 
         Some(Self {
@@ -265,6 +375,9 @@ impl Lv2PluginInstance {
             instance: active_instance,
             _world: world,
             _urid_map: urid_map,
+            _urid_unmap: urid_unmap,
+            _log_setup: log_setup,
+            _options_setup: options_setup,
             plugin_uri: plugin_info.uri.clone(),
             display_name: plugin_info.name.clone(),
             audio_input_indices,
@@ -279,6 +392,10 @@ impl Lv2PluginInstance {
             sample_rate,
             worker,
             last_worker_ns: 0,
+            state_iface,
+            lv2_handle,
+            extension_data_fn,
+            urid_mapper: urid_mapper.clone(),
         })
     }
 
@@ -497,6 +614,42 @@ impl Lv2PluginInstance {
             parameters: self.get_parameters(),
             active: true,
             bypassed: self.bypassed,
+            lv2_state: Vec::new(),
+        }
+    }
+
+    pub fn lv2_handle_ptr(&self) -> *mut c_void {
+        self.lv2_handle
+    }
+
+    pub fn extension_data_fn(
+        &self,
+    ) -> Option<unsafe extern "C" fn(*const c_char) -> *const c_void> {
+        self.extension_data_fn
+    }
+
+    pub fn has_state_interface(&self) -> bool {
+        self.state_iface.is_some()
+    }
+
+    pub unsafe fn save_state(&self) -> Option<Vec<StateEntry>> {
+        let iface = self.state_iface?;
+        unsafe {
+            super::state::save_plugin_state(self.lv2_handle, iface.as_ptr(), &self.urid_mapper)
+        }
+    }
+
+    pub unsafe fn restore_state(&self, entries: &[StateEntry]) {
+        let Some(iface) = self.state_iface else {
+            return;
+        };
+        unsafe {
+            super::state::restore_plugin_state(
+                self.lv2_handle,
+                iface.as_ptr(),
+                &self.urid_mapper,
+                entries,
+            );
         }
     }
 }

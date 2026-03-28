@@ -1,8 +1,18 @@
 use std::collections::HashMap;
-use std::ffi::{CStr, c_char, c_void};
+use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::Mutex;
 
 use lv2_raw::urid::{LV2Urid, LV2UridMap, LV2UridMapHandle};
+
+#[allow(non_camel_case_types)]
+pub type LV2UridUnmapHandle = *mut c_void;
+
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct LV2UridUnmap {
+    pub handle: LV2UridUnmapHandle,
+    pub unmap: extern "C" fn(handle: LV2UridUnmapHandle, urid: LV2Urid) -> *const c_char,
+}
 
 pub struct UridMapper {
     inner: Mutex<UridMapperInner>,
@@ -11,6 +21,7 @@ pub struct UridMapper {
 struct UridMapperInner {
     uri_to_id: HashMap<String, LV2Urid>,
     id_to_uri: Vec<String>,
+    id_to_uri_c: Vec<CString>,
 }
 
 impl UridMapper {
@@ -19,6 +30,7 @@ impl UridMapper {
             inner: Mutex::new(UridMapperInner {
                 uri_to_id: HashMap::new(),
                 id_to_uri: vec![String::new()],
+                id_to_uri_c: vec![CString::default()],
             }),
         }
     }
@@ -31,10 +43,10 @@ impl UridMapper {
         let id = inner.id_to_uri.len() as LV2Urid;
         inner.uri_to_id.insert(uri.to_string(), id);
         inner.id_to_uri.push(uri.to_string());
+        inner.id_to_uri_c.push(CString::new(uri).unwrap_or_default());
         id
     }
 
-    #[allow(dead_code)]
     pub fn unmap(&self, urid: LV2Urid) -> Option<String> {
         let inner = self.inner.lock().unwrap();
         inner.id_to_uri.get(urid as usize).cloned()
@@ -54,6 +66,23 @@ impl UridMapper {
             data: map_struct as *mut c_void,
         }
     }
+
+    pub fn as_lv2_urid_unmap(&self) -> LV2UridUnmap {
+        LV2UridUnmap {
+            handle: self as *const UridMapper as LV2UridUnmapHandle,
+            unmap: urid_unmap_callback,
+        }
+    }
+
+    pub unsafe fn make_unmap_feature(
+        unmap_struct: *mut LV2UridUnmap,
+    ) -> lv2_raw::core::LV2Feature {
+        const URID_UNMAP_URI: &CStr = c"http://lv2plug.in/ns/ext/urid#unmap";
+        lv2_raw::core::LV2Feature {
+            uri: URID_UNMAP_URI.as_ptr(),
+            data: unmap_struct as *mut c_void,
+        }
+    }
 }
 
 extern "C" fn urid_map_callback(handle: LV2UridMapHandle, uri: *const c_char) -> LV2Urid {
@@ -65,5 +94,17 @@ extern "C" fn urid_map_callback(handle: LV2UridMapHandle, uri: *const c_char) ->
     match c_str.to_str() {
         Ok(s) => mapper.map(s),
         Err(_) => 0,
+    }
+}
+
+extern "C" fn urid_unmap_callback(handle: LV2UridUnmapHandle, urid: LV2Urid) -> *const c_char {
+    if handle.is_null() {
+        return std::ptr::null();
+    }
+    let mapper = unsafe { &*(handle as *const UridMapper) };
+    let inner = mapper.inner.lock().unwrap();
+    match inner.id_to_uri_c.get(urid as usize) {
+        Some(cstr) => cstr.as_ptr(),
+        None => std::ptr::null(),
     }
 }

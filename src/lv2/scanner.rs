@@ -4,7 +4,18 @@ use super::types::*;
 
 const PROVIDED_FEATURES: &[&str] = &[
     "http://lv2plug.in/ns/ext/urid#map",
+    "http://lv2plug.in/ns/ext/urid#unmap",
     "http://lv2plug.in/ns/ext/worker#schedule",
+    "http://lv2plug.in/ns/ext/log#log",
+    "http://lv2plug.in/ns/ext/options#options",
+    "http://lv2plug.in/ns/ext/buf-size#boundedBlockLength",
+    "http://lv2plug.in/ns/ext/buf-size#fixedBlockLength",
+    "http://lv2plug.in/ns/ext/state#interface",
+    "http://lv2plug.in/ns/ext/state#makePath",
+    "http://lv2plug.in/ns/ext/data-access",
+    "http://lv2plug.in/ns/ext/instance-access",
+    "http://lv2plug.in/ns/ext/resize-port#resize",
+    "http://lv2plug.in/ns/ext/uri-map",
 ];
 
 pub fn scan_plugins() -> Vec<Lv2PluginInfo> {

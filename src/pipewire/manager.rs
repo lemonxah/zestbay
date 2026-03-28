@@ -29,6 +29,7 @@ enum InternalOp {
         instance_id: u64,
         display_name: String,
         format: String,
+        lv2_state: Vec<crate::lv2::state::StateEntry>,
     },
     RemovePlugin {
         instance_id: u64,
@@ -385,11 +386,13 @@ fn run_pipewire_thread(
                             instance_id,
                             display_name,
                             format,
+                            lv2_state,
                         } => InternalOp::AddPlugin {
                             plugin_uri,
                             instance_id,
                             display_name,
                             format,
+                            lv2_state,
                         },
                         PwCommand::RemovePlugin { instance_id } => {
                             InternalOp::RemovePlugin { instance_id }
@@ -502,6 +505,7 @@ fn run_pipewire_thread(
                 instance_id,
                 display_name,
                 format,
+                lv2_state,
             } => {
                 let sample_rate = pw_sample_rate.load(Ordering::Relaxed) as f64;
                 handle_add_plugin(
@@ -519,11 +523,33 @@ fn run_pipewire_thread(
                     &display_name,
                     &format,
                     sample_rate,
+                    &lv2_state,
                 );
             }
             InternalOp::RemovePlugin { instance_id } => {
                 // Try LV2 first, then CLAP, then VST3
                 if lv2_instances.borrow().contains_key(&instance_id) {
+                    {
+                        let instances = lv2_instances.borrow();
+                        if let Some(inst_rc) = instances.get(&instance_id) {
+                            let inst = inst_rc.borrow();
+                            if inst.has_state_interface() {
+                                if let Some(state) = unsafe { inst.save_state() } {
+                                    log::info!(
+                                        "LV2 state: saved {} entries for instance {}",
+                                        state.len(),
+                                        instance_id
+                                    );
+                                    let _ = event_tx.send(PwEvent::Plugin(
+                                        PluginEvent::Lv2StateSaved {
+                                            instance_id,
+                                            state,
+                                        },
+                                    ));
+                                }
+                            }
+                        }
+                    }
                     crate::lv2::ui::close_plugin_ui(instance_id);
                     lv2_filters.borrow_mut().remove(&instance_id);
                     lv2_instances.borrow_mut().remove(&instance_id);
@@ -549,6 +575,8 @@ fn run_pipewire_thread(
                         .iter()
                         .map(|cp| (cp.index, cp.value))
                         .collect();
+                    let lv2_handle = inst.lv2_handle_ptr();
+                    let extension_data_fn = inst.extension_data_fn();
                     drop(inst);
                     handle_open_plugin_ui(
                         &event_tx,
@@ -558,6 +586,8 @@ fn run_pipewire_thread(
                         control_values,
                         port_updates,
                         urid_mapper.clone(),
+                        lv2_handle,
+                        extension_data_fn,
                     );
                 } else if let Some(instance) = clap_instances.borrow().get(&instance_id) {
                     let inst = instance.borrow();
@@ -804,6 +834,7 @@ fn handle_add_plugin(
     display_name: &str,
     format: &str,
     sample_rate: f64,
+    lv2_state: &[crate::lv2::state::StateEntry],
 ) {
     match format {
         "CLAP" => handle_add_clap_plugin(
@@ -836,6 +867,7 @@ fn handle_add_plugin(
             instance_id,
             display_name,
             sample_rate,
+            lv2_state,
         ),
     }
 }
@@ -850,6 +882,7 @@ fn handle_add_lv2_plugin(
     instance_id: u64,
     display_name: &str,
     sample_rate: f64,
+    lv2_state: &[crate::lv2::state::StateEntry],
 ) {
     let world = lilv::World::with_load_all();
     let uri_node = world.new_uri(plugin_uri);
@@ -904,6 +937,17 @@ fn handle_add_lv2_plugin(
             return;
         }
     };
+
+    if !lv2_state.is_empty() && lv2_instance.has_state_interface() {
+        log::info!(
+            "LV2 state: restoring {} entries for '{}'",
+            lv2_state.len(),
+            display_name
+        );
+        unsafe {
+            lv2_instance.restore_state(lv2_state);
+        }
+    }
 
     let instance_rc = std::rc::Rc::new(RefCell::new(lv2_instance));
 
@@ -1229,6 +1273,8 @@ fn handle_open_plugin_ui(
     control_values: Vec<(usize, f32)>,
     port_updates: crate::lv2::SharedPortUpdates,
     urid_mapper: Arc<crate::lv2::urid::UridMapper>,
+    lv2_handle: *mut std::ffi::c_void,
+    extension_data_fn: Option<unsafe extern "C" fn(*const std::os::raw::c_char) -> *const std::ffi::c_void>,
 ) {
     crate::lv2::ui::open_plugin_ui(
         plugin_uri,
@@ -1238,6 +1284,8 @@ fn handle_open_plugin_ui(
         control_values,
         port_updates,
         urid_mapper,
+        lv2_handle,
+        extension_data_fn,
     );
 }
 

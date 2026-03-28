@@ -852,6 +852,7 @@ impl Vst3PluginInstance {
             parameters: self.get_parameters(),
             active: true,
             bypassed: self.bypassed,
+            lv2_state: Vec::new(),
         }
     }
 

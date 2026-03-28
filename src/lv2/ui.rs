@@ -119,6 +119,14 @@ const GTK_WINDOW_TOPLEVEL: c_int = 0;
 
 const LV2_UI_IDLE_INTERFACE: &CStr = c"http://lv2plug.in/ns/extensions/ui#idleInterface";
 
+const LV2_DATA_ACCESS_URI: &CStr = c"http://lv2plug.in/ns/ext/data-access";
+const LV2_INSTANCE_ACCESS_URI: &CStr = c"http://lv2plug.in/ns/ext/instance-access";
+
+#[repr(C)]
+struct LV2ExtensionDataFeature {
+    data_access: unsafe extern "C" fn(*const c_char) -> *const c_void,
+}
+
 #[repr(C)]
 struct Lv2UiIdleInterface {
     idle: Option<unsafe extern "C" fn(ui_handle: *mut c_void) -> c_int>,
@@ -354,7 +362,14 @@ struct OpenUiRequest {
     control_values: Vec<(usize, f32)>,
     port_updates: super::types::SharedPortUpdates,
     urid_mapper: Arc<UridMapper>,
+    lv2_handle: *mut c_void,
+    extension_data_fn: Option<unsafe extern "C" fn(*const c_char) -> *const c_void>,
 }
+
+// SAFETY: lv2_handle is a raw LV2 plugin handle that must cross from the PW
+// thread to the GTK thread.  The GTK thread uses it read-only for data-access
+// and instance-access UI features.  The plugin instance outlives the UI.
+unsafe impl Send for OpenUiRequest {}
 type OnceArcMutex<A> = OnceLock<Arc<Mutex<A>>>;
 
 static GTK_CMD_TX: OnceLock<Mutex<Sender<GtkCommand>>> = OnceLock::new();
@@ -687,6 +702,33 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
     let mut urid_map_struct = req.urid_mapper.as_lv2_urid_map();
     let urid_feature = unsafe { UridMapper::make_feature(&mut urid_map_struct) };
 
+    let mut data_access_feature_data;
+    let data_access_feature;
+    let instance_access_feature;
+
+    let mut feature_list: Vec<*const lv2_raw::core::LV2Feature> = vec![&urid_feature as *const _];
+
+    if let Some(ext_data_fn) = req.extension_data_fn {
+        data_access_feature_data = LV2ExtensionDataFeature {
+            data_access: ext_data_fn,
+        };
+        data_access_feature = lv2_raw::core::LV2Feature {
+            uri: LV2_DATA_ACCESS_URI.as_ptr(),
+            data: &mut data_access_feature_data as *mut _ as *mut c_void,
+        };
+        feature_list.push(&data_access_feature as *const _);
+    }
+
+    if !req.lv2_handle.is_null() {
+        instance_access_feature = lv2_raw::core::LV2Feature {
+            uri: LV2_INSTANCE_ACCESS_URI.as_ptr(),
+            data: req.lv2_handle,
+        };
+        feature_list.push(&instance_access_feature as *const _);
+    }
+
+    feature_list.push(ptr::null());
+
     unsafe {
         let host = suil_host_new(
             Some(port_write_callback),
@@ -700,9 +742,6 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
             return;
         }
 
-        let features: [*const lv2_raw::core::LV2Feature; 2] =
-            [&urid_feature as *const _, ptr::null()];
-
         let instance = suil_instance_new(
             host,
             controller_ptr,
@@ -712,7 +751,7 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
             c_ui_type_uri.as_ptr(),
             c_bundle_path.as_ptr(),
             c_binary_path.as_ptr(),
-            features.as_ptr(),
+            feature_list.as_ptr(),
         );
         if instance.is_null() {
             suil_host_free(host);
@@ -898,6 +937,8 @@ pub fn open_plugin_ui(
     control_values: Vec<(usize, f32)>,
     port_updates: super::types::SharedPortUpdates,
     urid_mapper: Arc<UridMapper>,
+    lv2_handle: *mut c_void,
+    extension_data_fn: Option<unsafe extern "C" fn(*const c_char) -> *const c_void>,
 ) {
     let gtk_tx = ensure_gtk_thread();
     let tx = gtk_tx.lock().unwrap();
@@ -909,6 +950,8 @@ pub fn open_plugin_ui(
         control_values,
         port_updates,
         urid_mapper,
+        lv2_handle,
+        extension_data_fn,
     }));
 }
 

@@ -550,6 +550,7 @@ impl qobject::AppController {
                         parameters: restored_params,
                         active: true,
                         bypassed: sp.bypassed,
+                        lv2_state: sp.lv2_state.clone(),
                     };
                     mgr.register_instance(info);
                 }
@@ -562,6 +563,7 @@ impl qobject::AppController {
                         instance_id,
                         display_name: sp.display_name,
                         format: format_str,
+                        lv2_state: sp.lv2_state,
                     });
                 }
             }
@@ -821,6 +823,19 @@ impl qobject::AppController {
                         QString::from(&source_json),
                         QString::from(existing_label.as_str()),
                     );
+                }
+                PluginEvent::Lv2StateSaved { instance_id, state } => {
+                    log::info!(
+                        "LV2 state received: {} entries for instance {}",
+                        state.len(),
+                        instance_id
+                    );
+                    if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager {
+                        if let Some(info) = mgr.get_instance_mut(instance_id) {
+                            info.lv2_state = state;
+                        }
+                    }
+                    persist_active_plugins(self.rust().plugin_manager.as_ref());
                 }
                 PluginEvent::MidiCcReceived { ref device_name, channel, cc, message_type } => {
                     if let Some((instance_id, port_index, label, mode)) =
@@ -1931,6 +1946,7 @@ impl qobject::AppController {
                 parameters: initial_params,
                 active: true,
                 bypassed: false,
+                lv2_state: Vec::new(),
             };
             mgr.register_instance(info);
         }
@@ -1948,6 +1964,7 @@ impl qobject::AppController {
                 instance_id,
                 display_name: display_name.clone(),
                 format: format_str,
+                lv2_state: Vec::new(),
             });
         }
 
@@ -2973,6 +2990,8 @@ struct SavedPlugin {
     /// "LV2", "CLAP", or "VST3".  Defaults to "LV2" for backwards compat.
     #[serde(default = "default_lv2_format_str")]
     format: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    lv2_state: Vec<crate::lv2::state::StateEntry>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -3023,6 +3042,7 @@ fn persist_active_plugins(plugin_manager: Option<&PluginManager>) {
                     bypassed: info.bypassed,
                     parameters: params,
                     format: info.format.as_str().to_string(),
+                    lv2_state: info.lv2_state.clone(),
                 }
             })
             .collect()

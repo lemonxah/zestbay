@@ -136,6 +136,7 @@ pub enum PwCommand {
         display_name: String,
         /// "LV2", "CLAP", or "VST3"
         format: String,
+        lv2_state: Vec<crate::lv2::state::StateEntry>,
     },
     RemovePlugin {
         instance_id: u64,
@@ -211,6 +212,10 @@ pub enum PluginEvent {
         channel: u8,
         cc: u8,
         message_type: crate::midi::MidiMessageType,
+    },
+    Lv2StateSaved {
+        instance_id: u64,
+        state: Vec<crate::lv2::state::StateEntry>,
     },
 }
 
