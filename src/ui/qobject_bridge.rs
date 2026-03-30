@@ -1879,12 +1879,31 @@ impl qobject::AppController {
             }
         }
 
+        // Disambiguate duplicate layout keys by appending #N for the 2nd, 3rd, etc.
+        // Build a stable ordering: sort node IDs so the suffix assignment is deterministic.
+        let mut key_counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        let mut sorted_ids: Vec<u32> = id_to_layout_key.keys().copied().collect();
+        sorted_ids.sort();
+        let mut unique_keys: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+        for node_id in &sorted_ids {
+            if let Some(base_key) = id_to_layout_key.get(node_id) {
+                let count = key_counts.entry(base_key.clone()).or_insert(0);
+                let unique_key = if *count == 0 {
+                    base_key.clone()
+                } else {
+                    format!("{}#{}", base_key, count)
+                };
+                *count += 1;
+                unique_keys.insert(*node_id, unique_key);
+            }
+        }
+
         let config = layout::graph::LayoutConfig::default();
         let mut pinned_by_id: std::collections::HashMap<u32, (f64, f64)> = std::collections::HashMap::new();
         for (key, pos) in &pinned_by_key {
             if pos.len() >= 2 {
-                for (&node_id, node_key) in &id_to_layout_key {
-                    if node_key == key {
+                for (&node_id, ukey) in &unique_keys {
+                    if ukey == key {
                         pinned_by_id.insert(node_id, (pos[0], pos[1]));
                     }
                 }
@@ -1902,7 +1921,7 @@ impl qobject::AppController {
 
         let mut result: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
         for (node_id, (x, y)) in &positions {
-            if let Some(key) = id_to_layout_key.get(node_id) {
+            if let Some(key) = unique_keys.get(node_id) {
                 let pin_tag = if pinned_by_id.contains_key(node_id) { " [P]" } else { "" };
                 log::info!("  result {}: ({:.0}, {:.0}){}", key, x, y, pin_tag);
                 result.insert(key.clone(), serde_json::json!([x, y]));

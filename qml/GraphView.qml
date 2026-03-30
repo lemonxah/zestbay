@@ -98,6 +98,20 @@ Item {
     readonly property color colLinkConnecting: Theme.colLinkConnecting
     readonly property color colDefaultOutline: Theme.colDefaultOutline
 
+    function naturalCmp(a, b) {
+        var ax = a.split(/(\d+)/), bx = b.split(/(\d+)/)
+        for (var i = 0; i < Math.min(ax.length, bx.length); i++) {
+            var an = parseInt(ax[i]), bn = parseInt(bx[i])
+            if (!isNaN(an) && !isNaN(bn)) {
+                if (an !== bn) return an - bn
+            } else {
+                if (ax[i] < bx[i]) return -1
+                if (ax[i] > bx[i]) return 1
+            }
+        }
+        return ax.length - bx.length
+    }
+
     function refreshData() {
         if (!viewportLoaded) {
             try {
@@ -592,6 +606,28 @@ Item {
         controller.save_pinned(JSON.stringify(arr))
     }
 
+    // Build a mapping from node.id → unique layout key, disambiguating
+    // duplicates by appending #1, #2, etc. (sorted by node ID for stability).
+    function buildUniqueLayoutKeys() {
+        var sorted = []
+        for (var i = 0; i < nodes.length; i++) {
+            var n = nodes[i]
+            if (n.layoutKey && hiddenNodes[n.layoutKey]) continue
+            var key = n.layoutKey || ""
+            if (key) sorted.push({ id: n.id, key: key })
+        }
+        sorted.sort(function(a, b) { return a.id - b.id })
+        var counts = {}
+        var result = {}
+        for (var j = 0; j < sorted.length; j++) {
+            var base = sorted[j].key
+            var c = counts[base] || 0
+            result[sorted[j].id] = c === 0 ? base : base + "#" + c
+            counts[base] = c + 1
+        }
+        return result
+    }
+
     function collectNodeSizes() {
         var sizesObj = {}
         for (var ni = 0; ni < nodes.length; ni++) {
@@ -606,13 +642,15 @@ Item {
     }
 
     function collectPinnedPositions() {
+        var uniqueKeys = buildUniqueLayoutKeys()
         var pinned = {}
         for (var ni = 0; ni < nodes.length; ni++) {
             var n = nodes[ni]
-            var key = n.layoutKey || ""
-            if (key && pinnedNodes[key] && nodePositions[n.id]) {
+            var baseKey = n.layoutKey || ""
+            var uKey = uniqueKeys[n.id] || ""
+            if (uKey && baseKey && pinnedNodes[baseKey] && nodePositions[n.id]) {
                 var pos = nodePositions[n.id]
-                pinned[key] = [pos.x, pos.y]
+                pinned[uKey] = [pos.x, pos.y]
             }
         }
         return pinned
@@ -621,19 +659,17 @@ Item {
     function runAutoLayout(pinnedOverride) {
         var sizes = collectNodeSizes()
         var pinPositions = pinnedOverride || collectPinnedPositions()
-        console.log("Auto layout sizes:", JSON.stringify(sizes))
-        console.log("Auto layout pinned:", JSON.stringify(pinPositions))
         var sizesJson = JSON.stringify(sizes)
         var pinnedJson = JSON.stringify(pinPositions)
         var resultJson = controller.auto_layout(sizesJson, pinnedJson)
-        console.log("Auto layout result:", resultJson)
         try {
             var positions = JSON.parse(resultJson)
+            var uniqueKeys = buildUniqueLayoutKeys()
             nodePositions = {}
             savedLayout = positions
             for (var ni = 0; ni < nodes.length; ni++) {
                 var n = nodes[ni]
-                var key = n.layoutKey || ""
+                var key = uniqueKeys[n.id] || ""
                 if (key && positions[key]) {
                     var pos = positions[key]
                     nodePositions[n.id] = { x: pos[0], y: pos[1] }
@@ -647,10 +683,11 @@ Item {
     }
 
     function autoPlaceNewNode(nodeId) {
+        var uniqueKeys = buildUniqueLayoutKeys()
         var pinned = {}
         for (var ni = 0; ni < nodes.length; ni++) {
             var n = nodes[ni]
-            var key = n.layoutKey || ""
+            var key = uniqueKeys[n.id] || ""
             if (key && n.id !== nodeId && nodePositions[n.id]) {
                 var pos = nodePositions[n.id]
                 pinned[key] = [pos.x, pos.y]
@@ -661,9 +698,10 @@ Item {
         var resultJson = controller.auto_layout(sizesJson, pinnedJson)
         try {
             var positions = JSON.parse(resultJson)
+            var uniqueKeys2 = buildUniqueLayoutKeys()
             for (var ni2 = 0; ni2 < nodes.length; ni2++) {
                 var n2 = nodes[ni2]
-                var key2 = n2.layoutKey || ""
+                var key2 = uniqueKeys2[n2.id] || ""
                 if (n2.id === nodeId && key2 && positions[key2]) {
                     var pos2 = positions[key2]
                     nodePositions[n2.id] = { x: pos2[0], y: pos2[1] }
@@ -901,9 +939,9 @@ Item {
                 var y = pos.y
                 var ports = portsByNode[node.id] || []
                 var inputs = ports.filter(function(p) { return p.direction === "Input" })
-                    .sort(function(a, b) { var am = a.mediaType === "Midi" ? 0 : 1; var bm = b.mediaType === "Midi" ? 0 : 1; return am !== bm ? am - bm : a.name.localeCompare(b.name) })
+                    .sort(function(a, b) { var am = a.mediaType === "Midi" ? 0 : 1; var bm = b.mediaType === "Midi" ? 0 : 1; return am !== bm ? am - bm : naturalCmp(a.name, b.name) })
                 var outputs = ports.filter(function(p) { return p.direction === "Output" })
-                    .sort(function(a, b) { var am = a.mediaType === "Midi" ? 0 : 1; var bm = b.mediaType === "Midi" ? 0 : 1; return am !== bm ? am - bm : a.name.localeCompare(b.name) })
+                    .sort(function(a, b) { var am = a.mediaType === "Midi" ? 0 : 1; var bm = b.mediaType === "Midi" ? 0 : 1; return am !== bm ? am - bm : naturalCmp(a.name, b.name) })
                 var nw = getNodeWidth(node.id)
 
                 var portBaseY = y + headerHeight + nodePadding
@@ -946,9 +984,9 @@ Item {
                 var ny = pos2.y
                 var nPorts = portsByNode[node2.id] || []
                 var nInputs = nPorts.filter(function(p) { return p.direction === "Input" })
-                    .sort(function(a, b) { var am = a.mediaType === "Midi" ? 0 : 1; var bm = b.mediaType === "Midi" ? 0 : 1; return am !== bm ? am - bm : a.name.localeCompare(b.name) })
+                    .sort(function(a, b) { var am = a.mediaType === "Midi" ? 0 : 1; var bm = b.mediaType === "Midi" ? 0 : 1; return am !== bm ? am - bm : naturalCmp(a.name, b.name) })
                 var nOutputs = nPorts.filter(function(p) { return p.direction === "Output" })
-                    .sort(function(a, b) { var am = a.mediaType === "Midi" ? 0 : 1; var bm = b.mediaType === "Midi" ? 0 : 1; return am !== bm ? am - bm : a.name.localeCompare(b.name) })
+                    .sort(function(a, b) { var am = a.mediaType === "Midi" ? 0 : 1; var bm = b.mediaType === "Midi" ? 0 : 1; return am !== bm ? am - bm : naturalCmp(a.name, b.name) })
                 var nh = calculateNodeHeight(node2)
                 var nnw = getNodeWidth(node2.id)
 
