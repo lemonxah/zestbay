@@ -10,13 +10,110 @@ const PROVIDED_FEATURES: &[&str] = &[
     "http://lv2plug.in/ns/ext/options#options",
     "http://lv2plug.in/ns/ext/buf-size#boundedBlockLength",
     "http://lv2plug.in/ns/ext/buf-size#fixedBlockLength",
+    "http://lv2plug.in/ns/ext/buf-size#powerOf2BlockLength",
     "http://lv2plug.in/ns/ext/state#interface",
     "http://lv2plug.in/ns/ext/state#makePath",
+    "http://lv2plug.in/ns/ext/state#freePath",
+    "http://lv2plug.in/ns/ext/state#mapPath",
     "http://lv2plug.in/ns/ext/data-access",
     "http://lv2plug.in/ns/ext/instance-access",
     "http://lv2plug.in/ns/ext/resize-port#resize",
     "http://lv2plug.in/ns/ext/uri-map",
+    "http://lv2plug.in/ns/lv2core#hardRTCapable",
+    "http://lv2plug.in/ns/lv2core#isLive",
+    "http://lv2plug.in/ns/lv2core#inPlaceBroken",
 ];
+
+pub struct Lv2PortClassification {
+    pub ports: Vec<Lv2PortInfo>,
+    pub audio_inputs: usize,
+    pub audio_outputs: usize,
+    pub control_inputs: usize,
+    pub control_outputs: usize,
+}
+
+pub fn classify_lv2_ports(
+    world: &World,
+    plugin: &lilv::plugin::Plugin,
+) -> Option<Lv2PortClassification> {
+    let input_class = world.new_uri("http://lv2plug.in/ns/lv2core#InputPort");
+    let output_class = world.new_uri("http://lv2plug.in/ns/lv2core#OutputPort");
+    let audio_class = world.new_uri("http://lv2plug.in/ns/lv2core#AudioPort");
+    let control_class = world.new_uri("http://lv2plug.in/ns/lv2core#ControlPort");
+    let atom_class = world.new_uri("http://lv2plug.in/ns/ext/atom#AtomPort");
+    let cv_class = world.new_uri("http://lv2plug.in/ns/lv2core#CVPort");
+    let toggled_prop = world.new_uri("http://lv2plug.in/ns/lv2core#toggled");
+
+    let mut ports = Vec::new();
+    let mut audio_inputs = 0usize;
+    let mut audio_outputs = 0usize;
+    let mut control_inputs = 0usize;
+    let mut control_outputs = 0usize;
+
+    let port_ranges = plugin.port_ranges_float();
+
+    for (i, port_range) in port_ranges.iter().enumerate() {
+        let port = plugin.port_by_index(i)?;
+
+        let port_symbol = port
+            .symbol()
+            .and_then(|s| s.as_str().map(String::from))
+            .unwrap_or_else(|| format!("port_{}", i));
+
+        let port_name = port
+            .name()
+            .and_then(|n| n.as_str().map(String::from))
+            .unwrap_or_else(|| port_symbol.clone());
+
+        let is_input = port.is_a(&input_class);
+        let is_output = port.is_a(&output_class);
+        let is_audio = port.is_a(&audio_class);
+        let is_control = port.is_a(&control_class);
+        let is_atom = port.is_a(&atom_class);
+        let is_cv = port.is_a(&cv_class);
+
+        let port_type = if (is_audio || is_cv) && is_input {
+            audio_inputs += 1;
+            Lv2PortType::AudioInput
+        } else if (is_audio || is_cv) && is_output {
+            audio_outputs += 1;
+            Lv2PortType::AudioOutput
+        } else if is_control && is_input {
+            control_inputs += 1;
+            Lv2PortType::ControlInput
+        } else if is_control && is_output {
+            control_outputs += 1;
+            Lv2PortType::ControlOutput
+        } else if is_atom && is_input {
+            Lv2PortType::AtomInput
+        } else if is_atom && is_output {
+            Lv2PortType::AtomOutput
+        } else {
+            continue;
+        };
+
+        let is_toggle = is_control && is_input && port.has_property(&toggled_prop);
+
+        ports.push(Lv2PortInfo {
+            index: i,
+            symbol: port_symbol,
+            name: port_name,
+            port_type,
+            default_value: port_range.default,
+            min_value: port_range.min,
+            max_value: port_range.max,
+            is_toggle,
+        });
+    }
+
+    Some(Lv2PortClassification {
+        ports,
+        audio_inputs,
+        audio_outputs,
+        control_inputs,
+        control_outputs,
+    })
+}
 
 pub fn scan_plugins() -> Vec<Lv2PluginInfo> {
     let world = World::with_load_all();
@@ -24,14 +121,6 @@ pub fn scan_plugins() -> Vec<Lv2PluginInfo> {
 }
 
 pub fn scan_plugins_with_world(world: &World) -> Vec<Lv2PluginInfo> {
-    let input_class = world.new_uri("http://lv2plug.in/ns/lv2core#InputPort");
-    let output_class = world.new_uri("http://lv2plug.in/ns/lv2core#OutputPort");
-    let audio_class = world.new_uri("http://lv2plug.in/ns/lv2core#AudioPort");
-    let control_class = world.new_uri("http://lv2plug.in/ns/lv2core#ControlPort");
-    let atom_class = world.new_uri("http://lv2plug.in/ns/ext/atom#AtomPort");
-    let toggled_prop = world.new_uri("http://lv2plug.in/ns/lv2core#toggled");
-
-    // UI class URIs for detecting native UI availability
     let ui_gtk3 = world.new_uri("http://lv2plug.in/ns/extensions/ui#Gtk3UI");
     let ui_gtk2 = world.new_uri("http://lv2plug.in/ns/extensions/ui#GtkUI");
     let ui_gtk4 = world.new_uri("http://lv2plug.in/ns/extensions/ui#Gtk4UI");
@@ -64,72 +153,10 @@ pub fn scan_plugins_with_world(world: &World) -> Vec<Lv2PluginInfo> {
             .author_name()
             .and_then(|n| n.as_str().map(String::from));
 
-        let mut ports = Vec::new();
-        let mut audio_inputs = 0usize;
-        let mut audio_outputs = 0usize;
-        let mut control_inputs = 0usize;
-        let mut control_outputs = 0usize;
-
-        let port_ranges = plugin.port_ranges_float();
-
-        for (i, port_range) in port_ranges.iter().enumerate() {
-            let port = match plugin.port_by_index(i) {
-                Some(p) => p,
-                None => continue,
-            };
-
-            let port_symbol = match port.symbol() {
-                Some(s) => s.as_str().unwrap_or("").to_string(),
-                None => format!("port_{}", i),
-            };
-
-            let port_name = match port.name() {
-                Some(n) => n.as_str().unwrap_or("").to_string(),
-                None => port_symbol.clone(),
-            };
-
-            let is_input = port.is_a(&input_class);
-            let is_output = port.is_a(&output_class);
-            let is_audio = port.is_a(&audio_class);
-            let is_control = port.is_a(&control_class);
-            let is_atom = port.is_a(&atom_class);
-
-            let port_type = if is_audio && is_input {
-                audio_inputs += 1;
-                Lv2PortType::AudioInput
-            } else if is_audio && is_output {
-                audio_outputs += 1;
-                Lv2PortType::AudioOutput
-            } else if is_control && is_input {
-                control_inputs += 1;
-                Lv2PortType::ControlInput
-            } else if is_control && is_output {
-                control_outputs += 1;
-                Lv2PortType::ControlOutput
-            } else if is_atom && is_input {
-                Lv2PortType::AtomInput
-            } else if is_atom && is_output {
-                Lv2PortType::AtomOutput
-            } else {
-                continue;
-            };
-
-            let default_value = port_range.default;
-            let min_value = port_range.min;
-            let max_value = port_range.max;
-            let is_toggle = is_control && is_input && port.has_property(&toggled_prop);
-
-            ports.push(Lv2PortInfo {
-                index: i,
-                symbol: port_symbol,
-                name: port_name,
-                port_type,
-                default_value,
-                min_value,
-                max_value,
-                is_toggle,
-            });
-        }
+        let classification = match classify_lv2_ports(world, &plugin) {
+            Some(c) => c,
+            None => continue,
+        };
 
         let required_features: Vec<String> = plugin
             .required_features()
@@ -141,7 +168,6 @@ pub fn scan_plugins_with_world(world: &World) -> Vec<Lv2PluginInfo> {
             .iter()
             .all(|req| PROVIDED_FEATURES.iter().any(|provided| provided == req));
 
-        // Check if the plugin provides a supported native UI
         let has_ui = plugin
             .uis()
             .map(|uis| {
@@ -155,11 +181,11 @@ pub fn scan_plugins_with_world(world: &World) -> Vec<Lv2PluginInfo> {
             name,
             category,
             author,
-            ports,
-            audio_inputs,
-            audio_outputs,
-            control_inputs,
-            control_outputs,
+            ports: classification.ports,
+            audio_inputs: classification.audio_inputs,
+            audio_outputs: classification.audio_outputs,
+            control_inputs: classification.control_inputs,
+            control_outputs: classification.control_outputs,
             required_features,
             compatible,
             has_ui,

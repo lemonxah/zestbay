@@ -4,6 +4,7 @@
 //! channel labels, etc.) via the `LV2_State_Interface` extension.
 
 use std::ffi::c_void;
+use std::os::raw::c_char;
 use std::sync::Arc;
 
 use super::urid::UridMapper;
@@ -215,5 +216,211 @@ pub unsafe fn restore_plugin_state(
     };
     if status != LV2_STATE_SUCCESS {
         log::warn!("LV2 state restore failed with status {}", status);
+    }
+}
+
+// ── State path features (makePath, freePath, mapPath) ──
+
+const LV2_STATE_MAKE_PATH_URI: &std::ffi::CStr = c"http://lv2plug.in/ns/ext/state#makePath";
+const LV2_STATE_FREE_PATH_URI: &std::ffi::CStr = c"http://lv2plug.in/ns/ext/state#freePath";
+const LV2_STATE_MAP_PATH_URI: &std::ffi::CStr = c"http://lv2plug.in/ns/ext/state#mapPath";
+
+#[repr(C)]
+#[allow(non_camel_case_types)]
+struct LV2_State_Make_Path {
+    handle: *mut c_void,
+    path: unsafe extern "C" fn(handle: *mut c_void, path: *const c_char) -> *mut c_char,
+}
+
+#[repr(C)]
+#[allow(non_camel_case_types)]
+struct LV2_State_Free_Path {
+    handle: *mut c_void,
+    free_path: unsafe extern "C" fn(handle: *mut c_void, path: *mut c_char),
+}
+
+#[repr(C)]
+#[allow(non_camel_case_types)]
+struct LV2_State_Map_Path {
+    handle: *mut c_void,
+    abstract_path: unsafe extern "C" fn(handle: *mut c_void, absolute_path: *const c_char) -> *mut c_char,
+    absolute_path: unsafe extern "C" fn(handle: *mut c_void, abstract_path: *const c_char) -> *mut c_char,
+}
+
+struct StatePathContext {
+    state_dir: std::path::PathBuf,
+}
+
+fn sanitize_uri(uri: &str) -> String {
+    uri.chars()
+        .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect()
+}
+
+fn malloc_cstring(s: &str) -> *mut c_char {
+    unsafe {
+        let len = s.len() + 1;
+        let ptr = libc::malloc(len) as *mut c_char;
+        if ptr.is_null() {
+            return std::ptr::null_mut();
+        }
+        std::ptr::copy_nonoverlapping(s.as_ptr(), ptr as *mut u8, s.len());
+        *ptr.add(s.len()) = 0;
+        ptr
+    }
+}
+
+unsafe extern "C" fn make_path_callback(
+    handle: *mut c_void,
+    path: *const c_char,
+) -> *mut c_char {
+    if handle.is_null() || path.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        let ctx = &*(handle as *const StatePathContext);
+        let rel_path = match std::ffi::CStr::from_ptr(path).to_str() {
+            Ok(s) => s,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        if let Err(e) = std::fs::create_dir_all(&ctx.state_dir) {
+            log::warn!("LV2 state makePath: failed to create dir {:?}: {}", ctx.state_dir, e);
+            return std::ptr::null_mut();
+        }
+        let full = ctx.state_dir.join(rel_path);
+        let full_str = full.to_string_lossy();
+        malloc_cstring(&full_str)
+    }
+}
+
+unsafe extern "C" fn free_path_callback(
+    _handle: *mut c_void,
+    path: *mut c_char,
+) {
+    if !path.is_null() {
+        unsafe { libc::free(path as *mut c_void) };
+    }
+}
+
+unsafe extern "C" fn abstract_path_callback(
+    handle: *mut c_void,
+    absolute_path: *const c_char,
+) -> *mut c_char {
+    if handle.is_null() || absolute_path.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        let ctx = &*(handle as *const StatePathContext);
+        let abs = match std::ffi::CStr::from_ptr(absolute_path).to_str() {
+            Ok(s) => s,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        let abs_path = std::path::Path::new(abs);
+        let state_dir_str = ctx.state_dir.to_string_lossy();
+        if let Ok(rel) = abs_path.strip_prefix(&*state_dir_str) {
+            malloc_cstring(&rel.to_string_lossy())
+        } else {
+            malloc_cstring(abs)
+        }
+    }
+}
+
+unsafe extern "C" fn absolute_path_callback(
+    handle: *mut c_void,
+    abstract_path: *const c_char,
+) -> *mut c_char {
+    if handle.is_null() || abstract_path.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        let ctx = &*(handle as *const StatePathContext);
+        let rel = match std::ffi::CStr::from_ptr(abstract_path).to_str() {
+            Ok(s) => s,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        let rel_path = std::path::Path::new(rel);
+        let full = if rel_path.is_absolute() {
+            rel_path.to_path_buf()
+        } else {
+            ctx.state_dir.join(rel_path)
+        };
+        malloc_cstring(&full.to_string_lossy())
+    }
+}
+
+pub struct Lv2StatePathSetup {
+    make_path_struct: Box<LV2_State_Make_Path>,
+    free_path_struct: Box<LV2_State_Free_Path>,
+    map_path_struct: Box<LV2_State_Map_Path>,
+    ctx_ptr: *mut StatePathContext,
+}
+
+unsafe impl Send for Lv2StatePathSetup {}
+
+impl Lv2StatePathSetup {
+    pub fn new(plugin_uri: &str) -> Self {
+        let config_dir = dirs::config_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("~/.config"));
+        let state_dir = config_dir
+            .join("zestbay")
+            .join("plugin-state")
+            .join(sanitize_uri(plugin_uri));
+
+        let ctx = Box::new(StatePathContext { state_dir });
+        let ctx_ptr = Box::into_raw(ctx);
+        let handle = ctx_ptr as *mut c_void;
+
+        let make_path_struct = Box::new(LV2_State_Make_Path {
+            handle,
+            path: make_path_callback,
+        });
+
+        let free_path_struct = Box::new(LV2_State_Free_Path {
+            handle,
+            free_path: free_path_callback,
+        });
+
+        let map_path_struct = Box::new(LV2_State_Map_Path {
+            handle,
+            abstract_path: abstract_path_callback,
+            absolute_path: absolute_path_callback,
+        });
+
+        Lv2StatePathSetup {
+            make_path_struct,
+            free_path_struct,
+            map_path_struct,
+            ctx_ptr,
+        }
+    }
+
+    pub fn make_make_path_feature(&self) -> lv2_raw::core::LV2Feature {
+        lv2_raw::core::LV2Feature {
+            uri: LV2_STATE_MAKE_PATH_URI.as_ptr(),
+            data: &*self.make_path_struct as *const LV2_State_Make_Path as *mut c_void,
+        }
+    }
+
+    pub fn make_free_path_feature(&self) -> lv2_raw::core::LV2Feature {
+        lv2_raw::core::LV2Feature {
+            uri: LV2_STATE_FREE_PATH_URI.as_ptr(),
+            data: &*self.free_path_struct as *const LV2_State_Free_Path as *mut c_void,
+        }
+    }
+
+    pub fn make_map_path_feature(&self) -> lv2_raw::core::LV2Feature {
+        lv2_raw::core::LV2Feature {
+            uri: LV2_STATE_MAP_PATH_URI.as_ptr(),
+            data: &*self.map_path_struct as *const LV2_State_Map_Path as *mut c_void,
+        }
+    }
+}
+
+impl Drop for Lv2StatePathSetup {
+    fn drop(&mut self) {
+        if !self.ctx_ptr.is_null() {
+            unsafe { drop(Box::from_raw(self.ctx_ptr)) };
+            self.ctx_ptr = std::ptr::null_mut();
+        }
     }
 }

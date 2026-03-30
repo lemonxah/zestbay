@@ -223,6 +223,9 @@ pub mod qobject {
             instance_id: u64,
             port_index: u32,
         ) -> QString;
+
+        #[qinvokable]
+        fn restore_known_good(self: Pin<&mut Self>) -> bool;
     }
 
     unsafe extern "RustQt" {
@@ -252,6 +255,9 @@ pub mod qobject {
 
         #[qsignal]
         fn midi_mapping_conflict(self: Pin<&mut AppController>, source_json: QString, existing_label: QString);
+
+        #[qsignal]
+        fn crash_recovery_available(self: Pin<&mut AppController>, crashed_uris: QString);
     }
 }
 
@@ -360,6 +366,7 @@ pub struct AppControllerRust {
     params_dirty_since: Option<std::time::Instant>,
 
     pending_restore_count: usize,
+    restore_started_at: Option<std::time::Instant>,
     pending_links: Vec<SavedPluginLink>,
 
     links_dirty: bool,
@@ -378,6 +385,7 @@ pub struct AppControllerRust {
 
     midi_mappings: Vec<crate::midi::MidiCcMapping>,
     midi_learn_target: Option<(u64, usize, String, crate::midi::MappingMode)>,
+    plugins_frozen: bool,
 }
 
 impl Default for AppControllerRust {
@@ -401,6 +409,7 @@ impl Default for AppControllerRust {
             params_dirty: false,
             params_dirty_since: None,
             pending_restore_count: 0,
+            restore_started_at: None,
             pending_links: Vec::new(),
             links_dirty: false,
             links_dirty_since: None,
@@ -414,6 +423,7 @@ impl Default for AppControllerRust {
             bridge_split: BridgeSplitState::new(),
             midi_mappings: Vec::new(),
             midi_learn_target: None,
+            plugins_frozen: false,
         }
     }
 }
@@ -474,9 +484,39 @@ impl qobject::AppController {
         }
 
         let saved = load_saved_plugins();
-        if !saved.is_empty() {
+        let safe_mode = crate::SAFE_MODE.load(std::sync::atomic::Ordering::SeqCst);
+
+        let crashed_uris_str = if !safe_mode && has_crash_marker() {
+            let crashed_uris = read_crash_marker();
+            log::warn!(
+                "Crash marker detected! Previous plugin restore crashed. \
+                 Auto-entering safe mode. Crashed URIs: {:?}",
+                crashed_uris
+            );
+            remove_crash_marker();
+            Some(crashed_uris.join(", "))
+        } else {
+            None
+        };
+        let auto_safe = crashed_uris_str.is_some();
+
+        let skip_restore = safe_mode || auto_safe;
+
+        if skip_restore {
+            log::warn!(
+                "Safe mode active: skipping restoration of {} saved plugins. \
+                 Plugins remain in plugins.json but will not be loaded. \
+                 Restart without --safe-mode to try again.",
+                saved.len()
+            );
+            self.as_mut().rust_mut().plugins_frozen = true;
+            crate::PLUGINS_FROZEN.store(true, std::sync::atomic::Ordering::SeqCst);
+        } else if !saved.is_empty() {
             log::info!("Restoring {} saved plugins", saved.len());
+            let restore_uris: Vec<String> = saved.iter().map(|sp| sp.uri.clone()).collect();
+            write_crash_marker(&restore_uris);
             self.as_mut().rust_mut().pending_restore_count = saved.len();
+            self.as_mut().rust_mut().restore_started_at = Some(Instant::now());
             for sp in saved {
                 let instance_id = self.rust().next_instance_id;
                 self.as_mut().rust_mut().next_instance_id += 1;
@@ -586,6 +626,20 @@ impl qobject::AppController {
                 .store(false, std::sync::atomic::Ordering::Release);
         }
         self.as_mut().rust_mut().tray_state = Some(tray_state);
+
+        if let Some(ref uris) = crashed_uris_str {
+            if has_known_good_plugins() {
+                self.as_mut().crash_recovery_available(QString::from(uris.as_str()));
+            } else {
+                let msg = format!(
+                    "Crash detected during plugin restore. No known-good snapshot available.\n\
+                     Crashed plugins: {}\n\
+                     Restart without --safe-mode to try again, or manually edit plugins.json.",
+                    uris
+                );
+                self.as_mut().error_occurred(QString::from(msg.as_str()));
+            }
+        }
 
         log::info!("AppController initialized successfully");
     }
@@ -710,6 +764,8 @@ impl qobject::AppController {
                         self.as_mut().rust_mut().pending_restore_count = count;
                         if count == 0 {
                             log::info!("All plugins restored — will attempt link restoration");
+                            self.as_mut().rust_mut().restore_started_at = None;
+                            remove_crash_marker();
                         }
                     }
                 }
@@ -772,6 +828,10 @@ impl qobject::AppController {
                             if self.rust().pending_restore_count > 0 {
                                 let count = self.rust().pending_restore_count - 1;
                                 self.as_mut().rust_mut().pending_restore_count = count;
+                                if count == 0 {
+                                    self.as_mut().rust_mut().restore_started_at = None;
+                                    remove_crash_marker();
+                                }
                             }
                         }
 
@@ -1105,6 +1165,25 @@ impl qobject::AppController {
         if let Some(msg) = error_msg {
             let qmsg = QString::from(&msg);
             self.as_mut().error_occurred(qmsg);
+        }
+
+        const RESTORE_TIMEOUT_SECS: u64 = 30;
+        if self.rust().pending_restore_count > 0 {
+            if let Some(started) = self.rust().restore_started_at {
+                if started.elapsed() > std::time::Duration::from_secs(RESTORE_TIMEOUT_SECS) {
+                    let remaining = self.rust().pending_restore_count;
+                    log::error!(
+                        "Plugin restore timed out after {}s with {} plugin(s) still pending. \
+                         Clearing restore state.",
+                        RESTORE_TIMEOUT_SECS,
+                        remaining,
+                    );
+                    self.as_mut().rust_mut().pending_restore_count = 0;
+                    self.as_mut().rust_mut().restore_started_at = None;
+                    remove_crash_marker();
+                    persist_active_plugins(self.rust().plugin_manager.as_ref());
+                }
+            }
         }
 
         if changed {
@@ -1659,10 +1738,24 @@ impl qobject::AppController {
 
     pub fn request_quit(self: Pin<&mut Self>) {
         log::info!("Quit requested");
+        remove_crash_marker();
         persist_lv2_links(self.rust().graph.as_ref());
         persist_active_plugins(self.rust().plugin_manager.as_ref());
+        if !crate::PLUGINS_FROZEN.load(std::sync::atomic::Ordering::SeqCst) {
+            save_known_good_plugins();
+        }
         crate::lv2::ui::shutdown_gtk_thread();
         std::process::exit(0);
+    }
+
+    pub fn restore_known_good(self: Pin<&mut Self>) -> bool {
+        if restore_known_good_plugins() {
+            log::info!("Known-good plugins restored. Restart to load them.");
+            crate::PLUGINS_FROZEN.store(false, std::sync::atomic::Ordering::SeqCst);
+            true
+        } else {
+            false
+        }
     }
 
     pub fn get_layout_json(self: Pin<&mut Self>) -> QString {
@@ -2977,6 +3070,77 @@ fn config_path(filename: &str) -> PathBuf {
         .join(filename)
 }
 
+fn crash_marker_path() -> PathBuf {
+    config_path(".zestbay-restoring")
+}
+
+fn write_crash_marker(plugin_uris: &[String]) {
+    let path = crash_marker_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let content = plugin_uris.join("\n");
+    if let Err(e) = std::fs::write(&path, &content) {
+        log::error!("Failed to write crash marker: {}", e);
+    }
+}
+
+fn remove_crash_marker() {
+    let path = crash_marker_path();
+    let _ = std::fs::remove_file(&path);
+}
+
+fn has_crash_marker() -> bool {
+    crash_marker_path().exists()
+}
+
+fn read_crash_marker() -> Vec<String> {
+    let path = crash_marker_path();
+    match std::fs::read_to_string(&path) {
+        Ok(s) => s.lines().filter(|l| !l.is_empty()).map(String::from).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn known_good_plugins_path() -> PathBuf {
+    config_path("plugins.known_good.json")
+}
+
+fn save_known_good_plugins() {
+    let src = config_path("plugins.json");
+    let dst = known_good_plugins_path();
+    if src.exists() {
+        if let Err(e) = std::fs::copy(&src, &dst) {
+            log::error!("Failed to save known-good plugins snapshot: {}", e);
+        } else {
+            log::info!("Saved known-good plugins snapshot to {:?}", dst);
+        }
+    }
+}
+
+fn has_known_good_plugins() -> bool {
+    known_good_plugins_path().exists()
+}
+
+fn restore_known_good_plugins() -> bool {
+    let src = known_good_plugins_path();
+    let dst = config_path("plugins.json");
+    if !src.exists() {
+        log::warn!("No known-good plugins snapshot to restore");
+        return false;
+    }
+    match std::fs::copy(&src, &dst) {
+        Ok(_) => {
+            log::info!("Restored plugins.json from known-good snapshot");
+            true
+        }
+        Err(e) => {
+            log::error!("Failed to restore known-good plugins: {}", e);
+            false
+        }
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct SavedPlugin {
     #[serde(default)]
@@ -3022,6 +3186,10 @@ fn load_saved_plugins() -> Vec<SavedPlugin> {
 }
 
 fn persist_active_plugins(plugin_manager: Option<&PluginManager>) {
+    if crate::PLUGINS_FROZEN.load(std::sync::atomic::Ordering::SeqCst) {
+        log::info!("persist_active_plugins: skipped (plugins frozen in safe mode)");
+        return;
+    }
     let mut plugins: Vec<SavedPlugin> = if let Some(mgr) = plugin_manager {
         mgr.active_instances()
             .values()

@@ -8,7 +8,7 @@ use lilv::World;
 
 use super::log::Lv2LogSetup;
 use super::options::Lv2OptionsSetup;
-use super::state::{LV2_State_Interface, StateEntry, LV2_STATE__INTERFACE};
+use super::state::{LV2_State_Interface, Lv2StatePathSetup, StateEntry, LV2_STATE__INTERFACE};
 use super::types::*;
 use super::urid::UridMapper;
 use super::worker::{LV2_Worker_Interface, Lv2Worker, Lv2WorkerSetup, LV2_WORKER_INTERFACE_URI};
@@ -33,6 +33,11 @@ const ATOM_BUF_SIZE: usize = 65536;
 
 const LV2_RESIZE_PORT_URI: &std::ffi::CStr = c"http://lv2plug.in/ns/ext/resize-port#resize";
 const LV2_URI_MAP_URI: &std::ffi::CStr = c"http://lv2plug.in/ns/ext/uri-map";
+
+// Data-less LV2 host capability flags
+const LV2_HARD_RT_CAPABLE_URI: &std::ffi::CStr = c"http://lv2plug.in/ns/lv2core#hardRTCapable";
+const LV2_IS_LIVE_URI: &std::ffi::CStr = c"http://lv2plug.in/ns/lv2core#isLive";
+const LV2_IN_PLACE_BROKEN_URI: &std::ffi::CStr = c"http://lv2plug.in/ns/lv2core#inPlaceBroken";
 
 #[repr(C)]
 #[allow(non_camel_case_types)]
@@ -97,6 +102,7 @@ pub struct Lv2PluginInstance {
     _urid_unmap: Box<super::urid::LV2UridUnmap>,
     _log_setup: Lv2LogSetup,
     _options_setup: Lv2OptionsSetup,
+    _state_path_setup: Lv2StatePathSetup,
     pub plugin_uri: String,
     pub display_name: String,
     pub audio_input_indices: Vec<usize>,
@@ -146,6 +152,7 @@ impl Lv2PluginInstance {
         plugin: &lilv::plugin::Plugin,
         plugin_info: &Lv2PluginInfo,
         sample_rate: f64,
+        block_length: u32,
         urid_mapper: &Arc<UridMapper>,
     ) -> Option<Self> {
         let id = next_instance_id();
@@ -160,7 +167,7 @@ impl Lv2PluginInstance {
         let log_setup = Lv2LogSetup::new(urid_mapper);
         let log_feature = log_setup.make_feature();
 
-        let options_setup = Lv2OptionsSetup::new(urid_mapper, sample_rate, 1024);
+        let options_setup = Lv2OptionsSetup::new(urid_mapper, sample_rate, block_length);
         let options_feature = options_setup.make_feature();
         let buf_size_features = options_setup.make_buf_size_features();
 
@@ -174,6 +181,11 @@ impl Lv2PluginInstance {
         } else {
             None
         };
+
+        let state_path_setup = Lv2StatePathSetup::new(&plugin_info.uri);
+        let make_path_feature = state_path_setup.make_make_path_feature();
+        let free_path_feature = state_path_setup.make_free_path_feature();
+        let map_path_feature = state_path_setup.make_map_path_feature();
 
         // lilv 0.2.4 depends on lv2_raw 0.2's LV2Feature while we use lv2_raw 0.3.
         // Both versions have an identical #[repr(C)] layout:
@@ -197,6 +209,18 @@ impl Lv2PluginInstance {
             uri: LV2_URI_MAP_URI.as_ptr(),
             data: &mut uri_map_data as *mut _ as *mut c_void,
         };
+        let hard_rt_feature = lv2_raw::core::LV2Feature {
+            uri: LV2_HARD_RT_CAPABLE_URI.as_ptr(),
+            data: std::ptr::null_mut(),
+        };
+        let is_live_feature = lv2_raw::core::LV2Feature {
+            uri: LV2_IS_LIVE_URI.as_ptr(),
+            data: std::ptr::null_mut(),
+        };
+        let in_place_broken_feature = lv2_raw::core::LV2Feature {
+            uri: LV2_IN_PLACE_BROKEN_URI.as_ptr(),
+            data: std::ptr::null_mut(),
+        };
         let mut features_v3: Vec<&lv2_raw::core::LV2Feature> = vec![
             &urid_feature,
             &urid_unmap_feature,
@@ -204,6 +228,12 @@ impl Lv2PluginInstance {
             &options_feature,
             &resize_port_feature,
             &uri_map_feature,
+            &hard_rt_feature,
+            &is_live_feature,
+            &in_place_broken_feature,
+            &make_path_feature,
+            &free_path_feature,
+            &map_path_feature,
         ];
         for f in &buf_size_features {
             features_v3.push(f);
@@ -281,6 +311,16 @@ impl Lv2PluginInstance {
         for cp in &mut control_outputs {
             unsafe {
                 instance.connect_port_mut(cp.index, &mut cp.value as *mut f32);
+            }
+        }
+
+        // Connect audio ports to a dummy buffer so that ALL ports are
+        // connected before activate(), as required by the LV2 spec.
+        // process() will reconnect them to real buffers each cycle.
+        let mut dummy_audio_buf = vec![0.0f32; block_length as usize];
+        for &idx in audio_input_indices.iter().chain(audio_output_indices.iter()) {
+            unsafe {
+                instance.connect_port_mut(idx, dummy_audio_buf.as_mut_ptr());
             }
         }
 
@@ -378,6 +418,7 @@ impl Lv2PluginInstance {
             _urid_unmap: urid_unmap,
             _log_setup: log_setup,
             _options_setup: options_setup,
+            _state_path_setup: state_path_setup,
             plugin_uri: plugin_info.uri.clone(),
             display_name: plugin_info.name.clone(),
             audio_input_indices,

@@ -24,6 +24,8 @@ pub const LV2_BUF_SIZE__BOUNDED_BLOCK_LENGTH: &CStr =
     c"http://lv2plug.in/ns/ext/buf-size#boundedBlockLength";
 pub const LV2_BUF_SIZE__FIXED_BLOCK_LENGTH: &CStr =
     c"http://lv2plug.in/ns/ext/buf-size#fixedBlockLength";
+pub const LV2_BUF_SIZE__POWER_OF2_BLOCK_LENGTH: &CStr =
+    c"http://lv2plug.in/ns/ext/buf-size#powerOf2BlockLength";
 
 // ── Option context values ──
 
@@ -208,12 +210,20 @@ impl Lv2OptionsSetup {
         }
     }
 
+    pub fn make_power_of2_block_length_feature(&self) -> lv2_raw::core::LV2Feature {
+        lv2_raw::core::LV2Feature {
+            uri: LV2_BUF_SIZE__POWER_OF2_BLOCK_LENGTH.as_ptr(),
+            data: std::ptr::null_mut(),
+        }
+    }
+
     /// Convenience: return all buf-size features as a Vec.
     /// These are data-less features that plugins check for host capability.
     pub fn make_buf_size_features(&self) -> Vec<lv2_raw::core::LV2Feature> {
         vec![
             self.make_bounded_block_length_feature(),
             self.make_fixed_block_length_feature(),
+            self.make_power_of2_block_length_feature(),
         ]
     }
 }

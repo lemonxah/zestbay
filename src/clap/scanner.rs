@@ -37,13 +37,21 @@ pub fn scan_plugins() -> Vec<PluginInfo> {
 
 fn expand_search_dirs() -> Vec<PathBuf> {
     let home = std::env::var("HOME").unwrap_or_default();
+    let mut seen = std::collections::HashSet::new();
     CLAP_SEARCH_DIRS
         .iter()
-        .map(|d| {
-            if d.starts_with('~') {
+        .filter_map(|d| {
+            let path = if d.starts_with('~') {
                 PathBuf::from(d.replacen('~', &home, 1))
             } else {
                 PathBuf::from(d)
+            };
+            let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if seen.insert(canonical) {
+                Some(path)
+            } else {
+                log::debug!("CLAP: skipping duplicate directory {}", path.display());
+                None
             }
         })
         .collect()
@@ -62,12 +70,51 @@ fn scan_directory(dir: &Path, plugins: &mut Vec<PluginInfo>) {
         let path = entry.path();
         if path.is_dir() {
             if path.extension().is_some_and(|e| e == "clap") {
-                scan_clap_file(&path, plugins);
+                sandboxed_scan_clap_file(&path, plugins);
             } else {
                 scan_directory(&path, plugins);
             }
         } else if path.extension().is_some_and(|e| e == "clap") {
-            scan_clap_file(&path, plugins);
+            sandboxed_scan_clap_file(&path, plugins);
+        }
+    }
+}
+
+/// Run `scan_clap_file` inside a forked child process so that a segfault
+/// in the plugin's dlopen / init / factory code only kills the child.
+fn sandboxed_scan_clap_file(path: &Path, plugins: &mut Vec<PluginInfo>) {
+    use crate::plugin::sandbox::{SandboxResult, fork_scan};
+
+    let path_owned = path.to_path_buf();
+    let timeout = std::time::Duration::from_secs(10);
+
+    let result: SandboxResult<Vec<PluginInfo>> = fork_scan(
+        move || {
+            let mut found = Vec::new();
+            scan_clap_file(&path_owned, &mut found);
+            found
+        },
+        Some(timeout),
+    );
+
+    match result {
+        SandboxResult::Ok(found) => {
+            log::debug!("CLAP sandbox: {} scanned OK ({} plugins)", path.display(), found.len());
+            plugins.extend(found);
+        }
+        SandboxResult::Crashed { signal, description } => {
+            log::warn!(
+                "CLAP sandbox: {} crashed during scan (signal {:?}): {}",
+                path.display(), signal, description
+            );
+        }
+        SandboxResult::Timeout => {
+            log::warn!("CLAP sandbox: {} timed out during scan", path.display());
+        }
+        SandboxResult::ForkFailed(e) => {
+            log::error!("CLAP sandbox: fork failed for {}: {}", path.display(), e);
+            // Fallback: scan in-process (same as before sandboxing)
+            scan_clap_file(path, plugins);
         }
     }
 }
@@ -196,8 +243,18 @@ fn scan_clap_file(path: &Path, plugins: &mut Vec<PluginInfo>) {
             let features = parse_features(desc.features);
             let category = category_from_features(&features);
 
-            let (audio_inputs, audio_outputs, control_inputs, has_ui, ports) =
-                probe_plugin_ports(factory, &id);
+            // Infer audio layout from descriptor features (no instantiation).
+            // Accurate port info is discovered at instantiation time in host.rs.
+            let is_instrument = features.iter().any(|f| f == "instrument");
+            let (audio_inputs, audio_outputs) = if is_instrument {
+                (0, 2) // Instruments: no audio input, stereo output
+            } else {
+                (2, 2) // Effects: stereo in/out (default assumption)
+            };
+
+            // GUI support is checked at instantiation time via get_extension.
+            // Most CLAP plugins ship with a GUI, so default to true.
+            let has_ui = true;
 
             plugins.push(PluginInfo {
                 uri: id,
@@ -205,10 +262,10 @@ fn scan_clap_file(path: &Path, plugins: &mut Vec<PluginInfo>) {
                 format: PluginFormat::Clap,
                 category,
                 author: vendor,
-                ports,
+                ports: Vec::new(), // Populated at instantiation time
                 audio_inputs,
                 audio_outputs,
-                control_inputs,
+                control_inputs: 0,
                 control_outputs: 0,
                 required_features: Vec::new(),
                 compatible: true,
@@ -276,207 +333,4 @@ fn category_from_features(features: &[String]) -> PluginCategory {
     PluginCategory::Other("CLAP".to_string())
 }
 
-/// Briefly instantiate a plugin to query its audio ports and parameters.
-fn probe_plugin_ports(
-    factory: &clap_sys::factory::plugin_factory::clap_plugin_factory,
-    plugin_id: &str,
-) -> (usize, usize, usize, bool, Vec<PluginPortInfo>) { unsafe {
-    let c_id = match CString::new(plugin_id) {
-        Ok(s) => s,
-        Err(_) => return (0, 0, 0, false, Vec::new()),
-    };
 
-    let host = clap_sys::host::clap_host {
-        clap_version: clap_sys::version::clap_version {
-            major: 1,
-            minor: 2,
-            revision: 2,
-        },
-        host_data: std::ptr::null_mut(),
-        name: c"ZestBay".as_ptr(),
-        vendor: c"ZestBay".as_ptr(),
-        url: c"https://github.com/lemonxah/zestbay".as_ptr(),
-        version: c"0.1.0".as_ptr(),
-        get_extension: Some(host_get_extension_noop),
-        request_restart: Some(host_noop),
-        request_process: Some(host_noop),
-        request_callback: Some(host_noop),
-    };
-
-    let create = match factory.create_plugin {
-        Some(f) => f,
-        None => return (0, 0, 0, false, Vec::new()),
-    };
-
-    let plugin_ptr = create(factory, &host, c_id.as_ptr());
-    if plugin_ptr.is_null() {
-        return (0, 0, 0, false, Vec::new());
-    }
-
-    let plugin = &*plugin_ptr;
-
-    let init_ok = match plugin.init {
-        Some(f) => f(plugin_ptr),
-        None => false,
-    };
-    if !init_ok {
-        if let Some(destroy) = plugin.destroy {
-            destroy(plugin_ptr);
-        }
-        return (0, 0, 0, false, Vec::new());
-    }
-
-    let mut audio_inputs = 0usize;
-    let mut audio_outputs = 0usize;
-    let mut control_inputs = 0usize;
-    let mut has_ui = false;
-    let mut ports = Vec::new();
-
-    if let Some(get_ext) = plugin.get_extension {
-        // Audio ports
-        let ext = get_ext(
-            plugin_ptr,
-            clap_sys::ext::audio_ports::CLAP_EXT_AUDIO_PORTS.as_ptr(),
-        );
-        if !ext.is_null() {
-            let ap = &*(ext as *const clap_sys::ext::audio_ports::clap_plugin_audio_ports);
-            if let Some(count_fn) = ap.count {
-                let in_count = count_fn(plugin_ptr, true);
-                for idx in 0..in_count {
-                    let mut info: clap_sys::ext::audio_ports::clap_audio_port_info =
-                        std::mem::zeroed();
-                    if let Some(get_fn) = ap.get {
-                        if get_fn(plugin_ptr, idx, true, &mut info) {
-                            let ch = info.channel_count as usize;
-                            audio_inputs += ch;
-                            for c in 0..ch {
-                                let pname = read_clap_name(&info.name);
-                                let suffix = if ch > 1 {
-                                    format!(" ch{}", c + 1)
-                                } else {
-                                    String::new()
-                                };
-                                ports.push(PluginPortInfo {
-                                    index: ports.len(),
-                                    symbol: format!("audio_in_{}_{}", idx, c),
-                                    name: format!("{}{}", pname, suffix),
-                                    port_type: PluginPortType::AudioInput,
-                                    default_value: 0.0,
-                                    min_value: 0.0,
-                                    max_value: 0.0,
-                                    is_toggle: false,
-                                });
-                            }
-                        }
-                    }
-                }
-
-                let out_count = count_fn(plugin_ptr, false);
-                for idx in 0..out_count {
-                    let mut info: clap_sys::ext::audio_ports::clap_audio_port_info =
-                        std::mem::zeroed();
-                    if let Some(get_fn) = ap.get {
-                        if get_fn(plugin_ptr, idx, false, &mut info) {
-                            let ch = info.channel_count as usize;
-                            audio_outputs += ch;
-                            for c in 0..ch {
-                                let pname = read_clap_name(&info.name);
-                                let suffix = if ch > 1 {
-                                    format!(" ch{}", c + 1)
-                                } else {
-                                    String::new()
-                                };
-                                ports.push(PluginPortInfo {
-                                    index: ports.len(),
-                                    symbol: format!("audio_out_{}_{}", idx, c),
-                                    name: format!("{}{}", pname, suffix),
-                                    port_type: PluginPortType::AudioOutput,
-                                    default_value: 0.0,
-                                    min_value: 0.0,
-                                    max_value: 0.0,
-                                    is_toggle: false,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Params
-        let pext = get_ext(
-            plugin_ptr,
-            clap_sys::ext::params::CLAP_EXT_PARAMS.as_ptr(),
-        );
-        if !pext.is_null() {
-            let pe = &*(pext as *const clap_sys::ext::params::clap_plugin_params);
-            if let Some(count_fn) = pe.count {
-                let n = count_fn(plugin_ptr);
-                for idx in 0..n {
-                    let mut info: clap_sys::ext::params::clap_param_info = std::mem::zeroed();
-                    if let Some(get_info) = pe.get_info {
-                        if get_info(plugin_ptr, idx, &mut info) {
-                            let hidden =
-                                info.flags & clap_sys::ext::params::CLAP_PARAM_IS_HIDDEN != 0;
-                            let readonly =
-                                info.flags & clap_sys::ext::params::CLAP_PARAM_IS_READONLY != 0;
-                            if !hidden {
-                                let name = read_clap_name(&info.name);
-                                let pt = if readonly {
-                                    PluginPortType::ControlOutput
-                                } else {
-                                    control_inputs += 1;
-                                    PluginPortType::ControlInput
-                                };
-                                let is_toggle = !readonly
-                                    && info.flags
-                                        & clap_sys::ext::params::CLAP_PARAM_IS_STEPPED
-                                        != 0
-                                    && info.min_value == 0.0
-                                    && info.max_value == 1.0;
-                                ports.push(PluginPortInfo {
-                                    index: ports.len(),
-                                    symbol: format!("param_{}", info.id),
-                                    name,
-                                    port_type: pt,
-                                    default_value: info.default_value as f32,
-                                    min_value: info.min_value as f32,
-                                    max_value: info.max_value as f32,
-                                    is_toggle,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // GUI
-        let gui_ext = get_ext(plugin_ptr, clap_sys::ext::gui::CLAP_EXT_GUI.as_ptr());
-        has_ui = !gui_ext.is_null();
-    }
-
-    if let Some(destroy) = plugin.destroy {
-        destroy(plugin_ptr);
-    }
-
-    (audio_inputs, audio_outputs, control_inputs, has_ui, ports)
-}}
-
-fn read_clap_name(name: &[std::ffi::c_char]) -> String {
-    let bytes: Vec<u8> = name
-        .iter()
-        .take_while(|&&c| c != 0)
-        .map(|&c| c as u8)
-        .collect();
-    String::from_utf8(bytes).unwrap_or_else(|_| "?".to_string())
-}
-
-unsafe extern "C" fn host_get_extension_noop(
-    _host: *const clap_sys::host::clap_host,
-    _extension_id: *const std::ffi::c_char,
-) -> *const std::ffi::c_void {
-    std::ptr::null()
-}
-
-unsafe extern "C" fn host_noop(_host: *const clap_sys::host::clap_host) {}

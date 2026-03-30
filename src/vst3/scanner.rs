@@ -39,13 +39,21 @@ pub fn scan_plugins() -> Vec<PluginInfo> {
 
 fn expand_search_dirs() -> Vec<PathBuf> {
     let home = std::env::var("HOME").unwrap_or_default();
+    let mut seen = std::collections::HashSet::new();
     VST3_SEARCH_DIRS
         .iter()
-        .map(|d| {
-            if d.starts_with('~') {
+        .filter_map(|d| {
+            let path = if d.starts_with('~') {
                 PathBuf::from(d.replacen('~', &home, 1))
             } else {
                 PathBuf::from(d)
+            };
+            let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if seen.insert(canonical) {
+                Some(path)
+            } else {
+                log::debug!("VST3: skipping duplicate directory {}", path.display());
+                None
             }
         })
         .collect()
@@ -64,11 +72,46 @@ fn scan_directory(dir: &Path, plugins: &mut Vec<PluginInfo>) {
         let path = entry.path();
         if path.is_dir() {
             if path.extension().is_some_and(|e| e == "vst3") {
-                scan_vst3_bundle(&path, plugins);
+                sandboxed_scan_vst3_bundle(&path, plugins);
             } else {
-                // Recurse into subdirectories (some installs nest bundles)
                 scan_directory(&path, plugins);
             }
+        }
+    }
+}
+
+fn sandboxed_scan_vst3_bundle(bundle_path: &Path, plugins: &mut Vec<PluginInfo>) {
+    use crate::plugin::sandbox::{SandboxResult, fork_scan};
+
+    let path_owned = bundle_path.to_path_buf();
+    let timeout = std::time::Duration::from_secs(10);
+
+    let result: SandboxResult<Vec<PluginInfo>> = fork_scan(
+        move || {
+            let mut found = Vec::new();
+            scan_vst3_bundle(&path_owned, &mut found);
+            found
+        },
+        Some(timeout),
+    );
+
+    match result {
+        SandboxResult::Ok(found) => {
+            log::debug!("VST3 sandbox: {} scanned OK ({} plugins)", bundle_path.display(), found.len());
+            plugins.extend(found);
+        }
+        SandboxResult::Crashed { signal, description } => {
+            log::warn!(
+                "VST3 sandbox: {} crashed during scan (signal {:?}): {}",
+                bundle_path.display(), signal, description
+            );
+        }
+        SandboxResult::Timeout => {
+            log::warn!("VST3 sandbox: {} timed out during scan", bundle_path.display());
+        }
+        SandboxResult::ForkFailed(e) => {
+            log::error!("VST3 sandbox: fork failed for {}: {}", bundle_path.display(), e);
+            scan_vst3_bundle(bundle_path, plugins);
         }
     }
 }

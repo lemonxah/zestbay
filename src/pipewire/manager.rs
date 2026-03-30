@@ -82,12 +82,14 @@ fn run_pipewire_thread(
     let core = context.connect_rc(None)?;
     let registry = core.get_registry_rc()?;
 
-    // Detect the PipeWire graph sample rate from core properties.
-    // Default to 48000; updated when the core info callback fires.
+    // Detect the PipeWire graph sample rate and quantum from core properties.
+    // Default to 48000 Hz / 1024 frames; updated when the core info callback fires.
     let pw_sample_rate = Rc::new(AtomicU32::new(48000));
+    let pw_quantum = Rc::new(AtomicU32::new(1024));
 
     let _core_listener = {
         let pw_sample_rate = pw_sample_rate.clone();
+        let pw_quantum = pw_quantum.clone();
         core.add_listener_local()
             .info(move |info| {
                 if let Some(props) = info.props() {
@@ -96,6 +98,14 @@ fn run_pipewire_thread(
                             let prev = pw_sample_rate.swap(rate, Ordering::Relaxed);
                             if prev != rate {
                                 log::info!("PipeWire sample rate detected: {} Hz", rate);
+                            }
+                        }
+                    }
+                    if let Some(quantum_str) = props.get("default.clock.quantum") {
+                        if let Ok(q) = quantum_str.parse::<u32>() {
+                            let prev = pw_quantum.swap(q, Ordering::Relaxed);
+                            if prev != q {
+                                log::info!("PipeWire quantum detected: {} frames", q);
                             }
                         }
                     }
@@ -489,6 +499,7 @@ fn run_pipewire_thread(
         let vst3_filters = vst3_filters.clone();
         let urid_mapper = urid_mapper.clone();
         let pw_sample_rate = pw_sample_rate.clone();
+        let pw_quantum = pw_quantum.clone();
 
         move |op| match op {
             InternalOp::Connect {
@@ -508,6 +519,7 @@ fn run_pipewire_thread(
                 lv2_state,
             } => {
                 let sample_rate = pw_sample_rate.load(Ordering::Relaxed) as f64;
+                let block_length = pw_quantum.load(Ordering::Relaxed);
                 handle_add_plugin(
                     &core,
                     &event_tx,
@@ -523,6 +535,7 @@ fn run_pipewire_thread(
                     &display_name,
                     &format,
                     sample_rate,
+                    block_length,
                     &lv2_state,
                 );
             }
@@ -834,6 +847,7 @@ fn handle_add_plugin(
     display_name: &str,
     format: &str,
     sample_rate: f64,
+    block_length: u32,
     lv2_state: &[crate::lv2::state::StateEntry],
 ) {
     match format {
@@ -867,6 +881,7 @@ fn handle_add_plugin(
             instance_id,
             display_name,
             sample_rate,
+            block_length,
             lv2_state,
         ),
     }
@@ -882,56 +897,101 @@ fn handle_add_lv2_plugin(
     instance_id: u64,
     display_name: &str,
     sample_rate: f64,
+    block_length: u32,
     lv2_state: &[crate::lv2::state::StateEntry],
 ) {
-    let world = lilv::World::with_load_all();
-    let uri_node = world.new_uri(plugin_uri);
+    let urid_clone = urid_mapper.clone();
+    let uri_owned = plugin_uri.to_string();
+    let sr = sample_rate;
+    let bl = block_length;
 
-    let lilv_plugin = world
-        .plugins()
-        .iter()
-        .find(|p| p.uri().as_uri() == uri_node.as_uri());
-
-    let lilv_plugin = match lilv_plugin {
-        Some(p) => p,
-        None => {
+    // Exec-probe: test-instantiate in a clean child process to catch segfaults
+    {
+        let safe = crate::plugin::sandbox::exec_probe(
+            "lv2",
+            &uri_owned,
+            sr,
+            bl,
+            Some(std::time::Duration::from_secs(10)),
+        );
+        if !safe {
+            log::error!(
+                "LV2 plugin '{}' ({}) crashed during sandbox probe — skipping",
+                display_name, plugin_uri
+            );
             let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
                 instance_id: Some(instance_id),
-                message: format!("Plugin not found: {}", plugin_uri),
+                message: format!(
+                    "Plugin '{}' crashed during safety probe (segfault). It has been blocked to protect ZestBay.",
+                    display_name
+                ),
                 fatal: true,
             }));
             return;
         }
-    };
+    }
 
-    let plugin_info = match build_plugin_info(&world, &lilv_plugin) {
-        Some(info) => info,
-        None => {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let world = lilv::World::with_load_all();
+        let uri_node = world.new_uri(&uri_owned);
+
+        let lilv_plugin = world
+            .plugins()
+            .iter()
+            .find(|p| p.uri().as_uri() == uri_node.as_uri());
+
+        let lilv_plugin = match lilv_plugin {
+            Some(p) => p,
+            None => return Err(format!("Plugin not found: {}", uri_owned)),
+        };
+
+        let plugin_info = match build_plugin_info(&world, &lilv_plugin) {
+            Some(info) => info,
+            None => return Err(format!("Failed to parse plugin info: {}", uri_owned)),
+        };
+
+        let lv2_instance = unsafe {
+            crate::lv2::host::Lv2PluginInstance::new(
+                world,
+                &lilv_plugin,
+                &plugin_info,
+                sr,
+                bl,
+                &urid_clone,
+            )
+        };
+
+        match lv2_instance {
+            Some(inst) => Ok((inst, plugin_info)),
+            None => Err(format!("Failed to instantiate plugin: {}", uri_owned)),
+        }
+    }));
+
+    let (lv2_instance, plugin_info) = match result {
+        Ok(Ok((inst, info))) => (inst, info),
+        Ok(Err(msg)) => {
             let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
                 instance_id: Some(instance_id),
-                message: format!("Failed to parse plugin info: {}", plugin_uri),
+                message: msg,
                 fatal: true,
             }));
             return;
         }
-    };
-
-    let lv2_instance = unsafe {
-        crate::lv2::host::Lv2PluginInstance::new(
-            world,
-            &lilv_plugin,
-            &plugin_info,
-            sample_rate,
-            urid_mapper,
-        )
-    };
-
-    let lv2_instance = match lv2_instance {
-        Some(inst) => inst,
-        None => {
+        Err(panic_info) => {
+            let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic".to_string()
+            };
+            log::error!(
+                "Plugin '{}' ({}) panicked during instantiation: {}",
+                display_name, plugin_uri, panic_msg
+            );
             let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
                 instance_id: Some(instance_id),
-                message: format!("Failed to instantiate plugin: {}", plugin_uri),
+                message: format!("Plugin panicked during instantiation: {}", panic_msg),
                 fatal: true,
             }));
             return;
@@ -994,43 +1054,83 @@ fn handle_add_clap_plugin(
     display_name: &str,
     sample_rate: f64,
 ) {
-    // For CLAP, the plugin_uri is the CLAP plugin-id string.
-    // We need to find the library_path from the plugin catalog.
-    // The PluginManager lives on the UI thread, so we pass the library_path
-    // via an alternative mechanism.  For now, we scan CLAP directories
-    // to find the plugin.
-    let all_clap = crate::clap::scanner::scan_plugins();
-    let clap_info = all_clap.iter().find(|p| p.uri == plugin_uri);
+    let uri_owned = plugin_uri.to_string();
+    let sr = sample_rate;
 
-    let clap_info = match clap_info {
-        Some(info) => info,
-        None => {
+    // Exec-probe: test-instantiate in a clean child process to catch segfaults
+    {
+        let safe = crate::plugin::sandbox::exec_probe(
+            "clap",
+            &uri_owned,
+            sr,
+            0,
+            Some(std::time::Duration::from_secs(10)),
+        );
+        if !safe {
+            log::error!(
+                "CLAP plugin '{}' ({}) crashed during sandbox probe — skipping",
+                display_name, plugin_uri
+            );
             let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
                 instance_id: Some(instance_id),
-                message: format!("CLAP plugin not found: {}", plugin_uri),
+                message: format!(
+                    "CLAP plugin '{}' crashed during safety probe (segfault). It has been blocked to protect ZestBay.",
+                    display_name
+                ),
                 fatal: true,
             }));
             return;
         }
-    };
+    }
 
-    let library_path = &clap_info.library_path;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let all_clap = crate::clap::scanner::scan_plugins();
+        let clap_info = match all_clap.iter().find(|p| p.uri == uri_owned) {
+            Some(info) => info.clone(),
+            None => return Err(format!("CLAP plugin not found: {}", uri_owned)),
+        };
 
-    let clap_instance = unsafe {
-        crate::clap::host::ClapPluginInstance::new(
-            library_path,
-            plugin_uri,
-            clap_info,
-            sample_rate,
-        )
-    };
+        let library_path = &clap_info.library_path;
+        let clap_instance = unsafe {
+            crate::clap::host::ClapPluginInstance::new(
+                library_path,
+                &uri_owned,
+                &clap_info,
+                sr,
+            )
+        };
 
-    let clap_instance = match clap_instance {
-        Some(inst) => inst,
-        None => {
+        match clap_instance {
+            Some(inst) => Ok(inst),
+            None => Err(format!("Failed to instantiate CLAP plugin: {}", uri_owned)),
+        }
+    }));
+
+    let clap_instance = match result {
+        Ok(Ok(inst)) => inst,
+        Ok(Err(msg)) => {
             let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
                 instance_id: Some(instance_id),
-                message: format!("Failed to instantiate CLAP plugin: {}", plugin_uri),
+                message: msg,
+                fatal: true,
+            }));
+            return;
+        }
+        Err(panic_info) => {
+            let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic".to_string()
+            };
+            log::error!(
+                "CLAP plugin '{}' ({}) panicked during instantiation: {}",
+                display_name, plugin_uri, panic_msg
+            );
+            let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
+                instance_id: Some(instance_id),
+                message: format!("CLAP plugin panicked during instantiation: {}", panic_msg),
                 fatal: true,
             }));
             return;
@@ -1083,41 +1183,83 @@ fn handle_add_vst3_plugin(
     display_name: &str,
     sample_rate: f64,
 ) {
-    // For VST3, the plugin_uri is the hex-encoded TUID.
-    // We need to find the library_path (bundle path) from the plugin catalog.
-    // Re-scan to find the plugin info (same approach as CLAP).
-    let all_vst3 = crate::vst3::scanner::scan_plugins();
-    let vst3_info = all_vst3.iter().find(|p| p.uri == plugin_uri);
+    let uri_owned = plugin_uri.to_string();
+    let sr = sample_rate;
 
-    let vst3_info = match vst3_info {
-        Some(info) => info,
-        None => {
+    // Exec-probe: test-instantiate in a clean child process to catch segfaults
+    {
+        let safe = crate::plugin::sandbox::exec_probe(
+            "vst3",
+            &uri_owned,
+            sr,
+            0,
+            Some(std::time::Duration::from_secs(10)),
+        );
+        if !safe {
+            log::error!(
+                "VST3 plugin '{}' ({}) crashed during sandbox probe — skipping",
+                display_name, plugin_uri
+            );
             let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
                 instance_id: Some(instance_id),
-                message: format!("VST3 plugin not found: {}", plugin_uri),
+                message: format!(
+                    "VST3 plugin '{}' crashed during safety probe (segfault). It has been blocked to protect ZestBay.",
+                    display_name
+                ),
                 fatal: true,
             }));
             return;
         }
-    };
+    }
 
-    let library_path = &vst3_info.library_path;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let all_vst3 = crate::vst3::scanner::scan_plugins();
+        let vst3_info = match all_vst3.iter().find(|p| p.uri == uri_owned) {
+            Some(info) => info.clone(),
+            None => return Err(format!("VST3 plugin not found: {}", uri_owned)),
+        };
 
-    let vst3_instance = unsafe {
-        crate::vst3::host::Vst3PluginInstance::new(
-            library_path,
-            plugin_uri,
-            vst3_info,
-            sample_rate,
-        )
-    };
+        let library_path = &vst3_info.library_path;
+        let vst3_instance = unsafe {
+            crate::vst3::host::Vst3PluginInstance::new(
+                library_path,
+                &uri_owned,
+                &vst3_info,
+                sr,
+            )
+        };
 
-    let vst3_instance = match vst3_instance {
-        Some(inst) => inst,
-        None => {
+        match vst3_instance {
+            Some(inst) => Ok(inst),
+            None => Err(format!("Failed to instantiate VST3 plugin: {}", uri_owned)),
+        }
+    }));
+
+    let vst3_instance = match result {
+        Ok(Ok(inst)) => inst,
+        Ok(Err(msg)) => {
             let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
                 instance_id: Some(instance_id),
-                message: format!("Failed to instantiate VST3 plugin: {}", plugin_uri),
+                message: msg,
+                fatal: true,
+            }));
+            return;
+        }
+        Err(panic_info) => {
+            let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic".to_string()
+            };
+            log::error!(
+                "VST3 plugin '{}' ({}) panicked during instantiation: {}",
+                display_name, plugin_uri, panic_msg
+            );
+            let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
+                instance_id: Some(instance_id),
+                message: format!("VST3 plugin panicked during instantiation: {}", panic_msg),
                 fatal: true,
             }));
             return;
@@ -1164,13 +1306,6 @@ fn build_plugin_info(
     world: &lilv::World,
     plugin: &lilv::plugin::Plugin,
 ) -> Option<crate::lv2::Lv2PluginInfo> {
-    let input_class = world.new_uri("http://lv2plug.in/ns/lv2core#InputPort");
-    let output_class = world.new_uri("http://lv2plug.in/ns/lv2core#OutputPort");
-    let audio_class = world.new_uri("http://lv2plug.in/ns/lv2core#AudioPort");
-    let control_class = world.new_uri("http://lv2plug.in/ns/lv2core#ControlPort");
-    let atom_class = world.new_uri("http://lv2plug.in/ns/ext/atom#AtomPort");
-    let toggled_prop = world.new_uri("http://lv2plug.in/ns/lv2core#toggled");
-
     let uri = plugin.uri().as_uri()?.to_string();
     let name = plugin.name().as_str()?.to_string();
     let category = crate::lv2::Lv2PluginCategory::from_class_label(
@@ -1180,66 +1315,7 @@ fn build_plugin_info(
         .author_name()
         .and_then(|n| n.as_str().map(String::from));
 
-    let mut ports = Vec::new();
-    let mut audio_inputs = 0usize;
-    let mut audio_outputs = 0usize;
-    let mut control_inputs = 0usize;
-    let mut control_outputs = 0usize;
-
-    let port_ranges = plugin.port_ranges_float();
-
-    for (i, port_range) in port_ranges.iter().enumerate() {
-        let port = plugin.port_by_index(i)?;
-
-        let port_symbol = port
-            .symbol()
-            .and_then(|s| s.as_str().map(String::from))
-            .unwrap_or_else(|| format!("port_{}", i));
-
-        let port_name = port
-            .name()
-            .and_then(|n| n.as_str().map(String::from))
-            .unwrap_or_else(|| port_symbol.clone());
-
-        let is_input = port.is_a(&input_class);
-        let is_output = port.is_a(&output_class);
-        let is_audio = port.is_a(&audio_class);
-        let is_control = port.is_a(&control_class);
-        let is_atom = port.is_a(&atom_class);
-
-        let port_type = if is_audio && is_input {
-            audio_inputs += 1;
-            crate::lv2::Lv2PortType::AudioInput
-        } else if is_audio && is_output {
-            audio_outputs += 1;
-            crate::lv2::Lv2PortType::AudioOutput
-        } else if is_control && is_input {
-            control_inputs += 1;
-            crate::lv2::Lv2PortType::ControlInput
-        } else if is_control && is_output {
-            control_outputs += 1;
-            crate::lv2::Lv2PortType::ControlOutput
-        } else if is_atom && is_input {
-            crate::lv2::Lv2PortType::AtomInput
-        } else if is_atom && is_output {
-            crate::lv2::Lv2PortType::AtomOutput
-        } else {
-            continue;
-        };
-
-        let is_toggle = is_control && is_input && port.has_property(&toggled_prop);
-
-        ports.push(crate::lv2::Lv2PortInfo {
-            index: i,
-            symbol: port_symbol,
-            name: port_name,
-            port_type,
-            default_value: port_range.default,
-            min_value: port_range.min,
-            max_value: port_range.max,
-            is_toggle,
-        });
-    }
+    let classification = crate::lv2::scanner::classify_lv2_ports(world, plugin)?;
 
     let required_features: Vec<String> = plugin
         .required_features()
@@ -1252,11 +1328,11 @@ fn build_plugin_info(
         name,
         category,
         author,
-        ports,
-        audio_inputs,
-        audio_outputs,
-        control_inputs,
-        control_outputs,
+        ports: classification.ports,
+        audio_inputs: classification.audio_inputs,
+        audio_outputs: classification.audio_outputs,
+        control_inputs: classification.control_inputs,
+        control_outputs: classification.control_outputs,
         required_features,
         compatible: true,
         has_ui: false,

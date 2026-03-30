@@ -7,6 +7,7 @@
 
 pub mod cpu_stats;
 pub mod manager;
+pub mod sandbox;
 pub mod types;
 
 pub use manager::PluginManager;

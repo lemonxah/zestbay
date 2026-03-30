@@ -108,6 +108,16 @@ ApplicationWindow {
         function onMidi_mapping_conflict(source_json, existing_label) {
             pluginParamsDialog.showConflictDialog(source_json, existing_label)
         }
+        function onCrash_recovery_available(crashed_uris) {
+            crashRecoveryDialogText.text =
+                "A crash was detected during plugin restore.\n\n" +
+                "Crashed plugins: " + crashed_uris + "\n\n" +
+                "A known-good plugin snapshot is available. " +
+                "Would you like to restore it?\n\n" +
+                "• Restore: reverts plugins.json to the last working state. Restart to load.\n" +
+                "• Ignore: keeps the current plugins.json. Restart to try again."
+            crashRecoveryDialog.open()
+        }
     }
 
     Dialog {
@@ -120,6 +130,31 @@ ApplicationWindow {
 
         Label {
             id: errorDialogText
+            width: parent.width
+            wrapMode: Text.WordWrap
+        }
+    }
+
+    Dialog {
+        id: crashRecoveryDialog
+        title: "Crash Recovery"
+        anchors.centerIn: parent
+        modal: true
+        standardButtons: Dialog.Yes | Dialog.No
+        width: Math.min(mainWindow.width * 0.7, 550)
+
+        onAccepted: {
+            if (controller.restore_known_good()) {
+                errorDialogText.text = "Plugins restored to last known-good state.\nRestart ZestBay to load them."
+                errorDialog.open()
+            } else {
+                errorDialogText.text = "Failed to restore known-good plugins. Check logs for details."
+                errorDialog.open()
+            }
+        }
+
+        Label {
+            id: crashRecoveryDialogText
             width: parent.width
             wrapMode: Text.WordWrap
         }
