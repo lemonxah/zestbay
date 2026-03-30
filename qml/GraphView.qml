@@ -98,6 +98,12 @@ Item {
     readonly property color colLinkConnecting: Theme.colLinkConnecting
     readonly property color colDefaultOutline: Theme.colDefaultOutline
 
+    // Redraw graph when system theme changes
+    Connections {
+        target: Theme
+        function onDarkChanged() { canvas.requestPaint() }
+    }
+
     function naturalCmp(a, b) {
         var ax = a.split(/(\d+)/), bx = b.split(/(\d+)/)
         for (var i = 0; i < Math.min(ax.length, bx.length); i++) {
