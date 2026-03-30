@@ -22,6 +22,10 @@ pub static SAFE_MODE: AtomicBool = AtomicBool::new(false);
 /// user's saved plugins.json.
 pub static PLUGINS_FROZEN: AtomicBool = AtomicBool::new(false);
 
+/// Global flag: when true, skip the sandbox probe before plugin instantiation.
+/// Dangerous — a crashing plugin will take down the entire process.
+pub static NO_PROBE: AtomicBool = AtomicBool::new(false);
+
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
@@ -37,6 +41,11 @@ fn main() {
     if args.iter().any(|a| a == "--safe-mode") {
         log::warn!("Safe mode enabled via --safe-mode flag: skipping plugin restoration");
         SAFE_MODE.store(true, Ordering::SeqCst);
+    }
+
+    if args.iter().any(|a| a == "--no-probe") {
+        log::warn!("Plugin probing disabled via --no-probe flag: crashing plugins will take down ZestBay");
+        NO_PROBE.store(true, Ordering::SeqCst);
     }
 
     log::info!("Starting ZestBay");

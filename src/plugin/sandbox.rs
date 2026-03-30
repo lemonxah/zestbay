@@ -287,6 +287,7 @@ pub fn exec_probe(
         .arg(uri)
         .arg(sample_rate.to_string())
         .arg(block_length.to_string())
+        .env("RUST_LOG", "debug")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -326,10 +327,25 @@ pub fn exec_probe(
         child.wait().ok()
     };
 
+    // Capture stderr for diagnostics
+    let stderr_output = child
+        .stderr
+        .take()
+        .and_then(|mut e| {
+            let mut buf = String::new();
+            e.read_to_string(&mut buf).ok().map(|_| buf)
+        })
+        .unwrap_or_default();
+
     match result {
         Some(status) if status.success() => true,
         Some(status) => {
             log::warn!("sandbox: probe process exited with {:?}", status);
+            if !stderr_output.is_empty() {
+                for line in stderr_output.lines().take(50) {
+                    log::warn!("sandbox: probe stderr: {}", line);
+                }
+            }
             false
         }
         None => {
@@ -358,33 +374,73 @@ pub fn run_probe_main(args: &[String]) -> ! {
     match format.as_str() {
         "lv2" => {
             let world = lilv::World::with_load_all();
-            let all_lv2 = crate::lv2::scanner::scan_plugins_with_world(&world);
-            let info = match all_lv2.iter().find(|p| p.uri == *uri) {
-                Some(i) => i,
-                None => {
-                    eprintln!("probe: LV2 plugin not found: {}", uri);
-                    std::process::exit(1);
-                }
-            };
             let uri_node = world.new_uri(uri);
             let lilv_plugin = world
                 .plugins()
                 .iter()
                 .find(|p| p.uri().as_uri() == uri_node.as_uri());
-            if let Some(lp) = lilv_plugin {
-                let urid_mapper =
-                    std::sync::Arc::new(crate::lv2::urid::UridMapper::new());
-                let _inst = unsafe {
-                    crate::lv2::host::Lv2PluginInstance::new(
-                        world,
-                        &lp,
-                        info,
-                        sample_rate,
-                        block_length,
-                        &urid_mapper,
-                    )
-                };
-            }
+            let lp = match lilv_plugin {
+                Some(p) => p,
+                None => {
+                    eprintln!("probe: LV2 plugin not found: {}", uri);
+                    std::process::exit(1);
+                }
+            };
+            // Only classify ports for the target plugin — avoid scanning every
+            // LV2 plugin on the system, which can corrupt memory if any other
+            // plugin's .so is buggy.
+            let classification = match crate::lv2::scanner::classify_lv2_ports(&world, &lp) {
+                Some(c) => c,
+                None => {
+                    eprintln!("probe: failed to classify ports for {}", uri);
+                    std::process::exit(1);
+                }
+            };
+            let required_features: Vec<String> = lp
+                .required_features()
+                .iter()
+                .filter_map(|n| n.as_uri().map(String::from))
+                .collect();
+            let info = crate::lv2::Lv2PluginInfo {
+                uri: uri.to_string(),
+                name: lp.name().as_str().unwrap_or("").to_string(),
+                category: crate::lv2::Lv2PluginCategory::from_class_label(
+                    lp.class().label().as_str().unwrap_or("Plugin"),
+                ),
+                author: lp.author_name().and_then(|n| n.as_str().map(String::from)),
+                ports: classification.ports,
+                audio_inputs: classification.audio_inputs,
+                audio_outputs: classification.audio_outputs,
+                control_inputs: classification.control_inputs,
+                control_outputs: classification.control_outputs,
+                required_features,
+                compatible: true,
+                has_ui: false,
+                format: crate::lv2::PluginFormat::Lv2,
+                library_path: String::new(),
+            };
+            eprintln!(
+                "probe: LV2 plugin found: {} (ports: {} audio_in, {} audio_out, {} ctrl_in)",
+                info.name, info.audio_inputs, info.audio_outputs, info.control_inputs
+            );
+            eprintln!("probe: required features: {:?}", info.required_features);
+            eprintln!(
+                "probe: instantiating with sr={} bl={}",
+                sample_rate, block_length
+            );
+            let urid_mapper =
+                std::sync::Arc::new(crate::lv2::urid::UridMapper::new());
+            let _inst = unsafe {
+                crate::lv2::host::Lv2PluginInstance::new(
+                    world,
+                    &lp,
+                    &info,
+                    sample_rate,
+                    block_length,
+                    &urid_mapper,
+                )
+            };
+            eprintln!("probe: instantiation completed successfully");
         }
         "clap" => {
             let all_clap = crate::clap::scanner::scan_plugins();

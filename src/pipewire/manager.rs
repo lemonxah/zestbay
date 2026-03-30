@@ -906,7 +906,7 @@ fn handle_add_lv2_plugin(
     let bl = block_length;
 
     // Exec-probe: test-instantiate in a clean child process to catch segfaults
-    {
+    if !crate::NO_PROBE.load(std::sync::atomic::Ordering::SeqCst) {
         let safe = crate::plugin::sandbox::exec_probe(
             "lv2",
             &uri_owned,
@@ -1058,7 +1058,7 @@ fn handle_add_clap_plugin(
     let sr = sample_rate;
 
     // Exec-probe: test-instantiate in a clean child process to catch segfaults
-    {
+    if !crate::NO_PROBE.load(std::sync::atomic::Ordering::SeqCst) {
         let safe = crate::plugin::sandbox::exec_probe(
             "clap",
             &uri_owned,
@@ -1187,7 +1187,7 @@ fn handle_add_vst3_plugin(
     let sr = sample_rate;
 
     // Exec-probe: test-instantiate in a clean child process to catch segfaults
-    {
+    if !crate::NO_PROBE.load(std::sync::atomic::Ordering::SeqCst) {
         let safe = crate::plugin::sandbox::exec_probe(
             "vst3",
             &uri_owned,

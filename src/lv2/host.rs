@@ -247,7 +247,9 @@ impl Lv2PluginInstance {
             std::mem::transmute::<Vec<&lv2_raw::core::LV2Feature>, Vec<_>>(features_v3)
         };
 
+        log::debug!("LV2 new: calling plugin.instantiate()");
         let mut instance = unsafe { plugin.instantiate(sample_rate, features) }?;
+        log::debug!("LV2 new: instantiate() returned OK");
 
         let mut audio_input_indices = Vec::new();
         let mut audio_output_indices = Vec::new();
@@ -303,6 +305,7 @@ impl Lv2PluginInstance {
             }
         }
 
+        log::debug!("LV2 new: connecting control ports ({} in, {} out)", control_inputs.len(), control_outputs.len());
         for cp in &mut control_inputs {
             unsafe {
                 instance.connect_port_mut(cp.index, &mut cp.value as *mut f32);
@@ -313,17 +316,21 @@ impl Lv2PluginInstance {
                 instance.connect_port_mut(cp.index, &mut cp.value as *mut f32);
             }
         }
+        log::debug!("LV2 new: control ports connected");
 
         // Connect audio ports to a dummy buffer so that ALL ports are
         // connected before activate(), as required by the LV2 spec.
         // process() will reconnect them to real buffers each cycle.
+        log::debug!("LV2 new: connecting audio ports ({} in, {} out)", audio_input_indices.len(), audio_output_indices.len());
         let mut dummy_audio_buf = vec![0.0f32; block_length as usize];
         for &idx in audio_input_indices.iter().chain(audio_output_indices.iter()) {
             unsafe {
                 instance.connect_port_mut(idx, dummy_audio_buf.as_mut_ptr());
             }
         }
+        log::debug!("LV2 new: audio ports connected");
 
+        log::debug!("LV2 new: connecting atom ports ({} in, {} out)", atom_in_bufs.len(), atom_out_bufs.len());
         for ab in atom_in_bufs.iter_mut() {
             init_atom_sequence(&mut ab.data, ATOM_BUF_SIZE, false, atom_sequence_urid);
             unsafe {
@@ -336,6 +343,7 @@ impl Lv2PluginInstance {
                 instance.connect_port_mut(ab.port_index, ab.data.as_mut_ptr());
             }
         }
+        log::debug!("LV2 new: atom ports connected");
 
         let port_updates = Arc::new(PortUpdates {
             control_inputs: control_inputs
@@ -366,21 +374,37 @@ impl Lv2PluginInstance {
         // interface BEFORE activation (extension_data is available on the
         // un-activated instance).
         let lv2_handle = instance.handle() as *mut c_void;
-        // SAFETY: lv2_raw 0.2 uses `extern "C" fn(*const u8) -> *const libc::c_void`
-        // while the LV2 data-access spec uses `extern "C" fn(*const c_char) -> *const c_void`.
-        // These are ABI-identical (u8 vs i8 pointer, libc::c_void = core::ffi::c_void).
+
+        // lv2_raw 0.2 declares `extension_data` as non-nullable
+        // `extern "C" fn(...)`, but the LV2 C spec allows it to be NULL
+        // ("If a plugin does not support any extension data, this field
+        // may be NULL").  Reading a null through a non-nullable fn type
+        // is UB, so we read the raw pointer value first.
+        let has_extension_data = instance.descriptor().map_or(false, |d| {
+            let raw: *const () =
+                unsafe { *(std::ptr::addr_of!(d.extension_data) as *const *const ()) };
+            !raw.is_null()
+        });
+
         let extension_data_fn: Option<unsafe extern "C" fn(*const c_char) -> *const c_void> =
-            instance
-                .descriptor()
-                .map(|d| unsafe { std::mem::transmute(d.extension_data) });
+            if has_extension_data {
+                instance
+                    .descriptor()
+                    .map(|d| unsafe { std::mem::transmute(d.extension_data) })
+            } else {
+                None
+            };
 
         let worker = if let Some(ws) = worker_setup {
-            let worker_iface_ptr: Option<std::ptr::NonNull<LV2_Worker_Interface>> = unsafe {
-                // extension_data returns lv2_raw 0.2 types (via lilv), but
-                // LV2_Worker_Interface is our own #[repr(C)] definition which
-                // matches the C layout exactly.
-                instance.extension_data::<LV2_Worker_Interface>(LV2_WORKER_INTERFACE_URI)
-            };
+            let worker_iface_ptr: Option<std::ptr::NonNull<LV2_Worker_Interface>> =
+                if has_extension_data {
+                    unsafe {
+                        instance
+                            .extension_data::<LV2_Worker_Interface>(LV2_WORKER_INTERFACE_URI)
+                    }
+                } else {
+                    None
+                };
             match worker_iface_ptr {
                 Some(iface_ptr) => {
                     log::info!("LV2 worker: activating for plugin '{}'", plugin_info.name);
@@ -399,8 +423,11 @@ impl Lv2PluginInstance {
             None
         };
 
-        let state_iface: Option<std::ptr::NonNull<LV2_State_Interface>> =
-            unsafe { instance.extension_data::<LV2_State_Interface>(LV2_STATE__INTERFACE) };
+        let state_iface: Option<std::ptr::NonNull<LV2_State_Interface>> = if has_extension_data {
+            unsafe { instance.extension_data::<LV2_State_Interface>(LV2_STATE__INTERFACE) }
+        } else {
+            None
+        };
         if state_iface.is_some() {
             log::info!(
                 "LV2 state: plugin '{}' provides state interface",
@@ -408,7 +435,9 @@ impl Lv2PluginInstance {
             );
         }
 
+        log::debug!("LV2 new: calling activate()");
         let active_instance = unsafe { instance.activate() };
+        log::debug!("LV2 new: activate() completed");
 
         Some(Self {
             id,
