@@ -2108,7 +2108,7 @@ dependencies = [
 
 [[package]]
 name = "zestbay"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "clap-sys",
  "cxx",
@@ -2129,6 +2129,17 @@ dependencies = [
  "serde_json",
  "uuid",
  "vst3",
+]
+
+[[package]]
+name = "zestbay-ui-bridge"
+version = "0.7.0"
+dependencies = [
+ "env_logger",
+ "libc",
+ "log",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

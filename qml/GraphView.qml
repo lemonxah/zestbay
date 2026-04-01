@@ -596,6 +596,39 @@ Item {
         }
     }
 
+    // Confirmation dialog for inserting a plugin node onto a link
+    property int pendingInsertLinkId: -1
+    property int pendingInsertNodeId: -1
+
+    Dialog {
+        id: insertConfirmDialog
+        title: "Insert Plugin on Link"
+        standardButtons: Dialog.Yes | Dialog.No
+        anchors.centerIn: parent
+        modal: true
+        width: 360
+
+        contentItem: Text {
+            text: "Insert this plugin between the connected nodes?"
+            wrapMode: Text.WordWrap
+            color: Theme.textPrimary
+            padding: 12
+        }
+
+        onAccepted: {
+            if (pendingInsertLinkId >= 0 && pendingInsertNodeId >= 0) {
+                controller.insert_node_on_link(pendingInsertLinkId, pendingInsertNodeId)
+            }
+            pendingInsertLinkId = -1
+            pendingInsertNodeId = -1
+        }
+
+        onRejected: {
+            pendingInsertLinkId = -1
+            pendingInsertNodeId = -1
+        }
+    }
+
     function persistHidden() {
         var arr = []
         for (var k in hiddenNodes) {
@@ -1529,7 +1562,9 @@ Item {
                     if (linkUnder >= 0) {
                         var draggedNode = findNodeData(dragNodeId)
                         if (draggedNode && draggedNode.type === "Plugin") {
-                            controller.insert_node_on_link(linkUnder, dragNodeId)
+                            pendingInsertLinkId = linkUnder
+                            pendingInsertNodeId = dragNodeId
+                            insertConfirmDialog.open()
                         }
                     }
                     // Resolve overlap after dropping a single node

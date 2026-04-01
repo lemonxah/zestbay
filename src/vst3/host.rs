@@ -685,6 +685,7 @@ impl Vst3PluginInstance {
 
             let controller: Option<vst3::ComPtr<IEditController>> =
                 if let Some(ec) = component.cast::<IEditController>() {
+                    log::info!("VST3: {} — controller is same object as component", plugin_info.name);
                     Some(ec)
                 } else if has_separate_controller {
                     let mut ctrl_obj: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -698,7 +699,11 @@ impl Vst3PluginInstance {
                             ctrl_obj as *mut IEditController,
                         );
                         if let Some(ref ec) = ec {
-                            ec.initialize(host_app as *mut FUnknown);
+                            let init_r = ec.initialize(host_app as *mut FUnknown);
+                            log::info!(
+                                "VST3: {} — separate controller created and initialized (result={})",
+                                plugin_info.name, init_r,
+                            );
                         }
                         ec
                     } else {
@@ -707,6 +712,35 @@ impl Vst3PluginInstance {
                 } else {
                     None
                 };
+
+            // Connect component ↔ controller via IConnectionPoint.
+            // This is required by the VST3 spec for component/controller
+            // communication. Without it, some plugins (e.g. Vital) won't
+            // expose parameters or create views.
+            if let Some(ref ctrl) = controller {
+                // Connect via IConnectionPoint
+                if let Some(comp_cp) = component.cast::<IConnectionPoint>() {
+                    if let Some(ctrl_cp) = ctrl.cast::<IConnectionPoint>() {
+                        comp_cp.connect(ctrl_cp.as_ptr() as *mut IConnectionPoint);
+                        ctrl_cp.connect(comp_cp.as_ptr() as *mut IConnectionPoint);
+                        log::info!("VST3: {} — connected component ↔ controller via IConnectionPoint", plugin_info.name);
+                    }
+                }
+
+                // Pass component state to controller
+                let comp_stream = super::com_host::new_memory_stream();
+                let comp_result = component.getState(comp_stream as *mut IBStream);
+                if comp_result == kResultOk && !(*comp_stream).data.is_empty() {
+                    (*comp_stream).pos = 0;
+                    let _ = ctrl.setComponentState(comp_stream as *mut IBStream);
+                }
+                super::com_host::release_memory_stream(comp_stream);
+
+                log::info!(
+                    "VST3: {} — controller has {} params after init",
+                    plugin_info.name, ctrl.getParameterCount(),
+                );
+            }
 
             // Query audio bus info
             let mut input_bus_descs = Vec::new();

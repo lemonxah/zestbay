@@ -52,6 +52,16 @@ impl UridMapper {
         inner.id_to_uri.get(urid as usize).cloned()
     }
 
+    /// Snapshot all URI→URID mappings for IPC transfer to bridge process.
+    pub fn snapshot(&self) -> Vec<(String, u32)> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .uri_to_id
+            .iter()
+            .map(|(uri, &id)| (uri.clone(), id))
+            .collect()
+    }
+
     pub fn as_lv2_urid_map(&self) -> LV2UridMap {
         LV2UridMap {
             handle: self as *const UridMapper as LV2UridMapHandle,

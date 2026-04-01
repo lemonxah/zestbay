@@ -263,12 +263,44 @@ pub unsafe fn open_vst3_gui(
     }
 
     unsafe {
-        // Call createView via vtable (raw pointer, no SmartPtr wrapper)
-        let view = ((*(*controller_ptr).vtbl).createView)(controller_ptr, ViewType::kEditor);
+        // Verify controller is valid by checking parameter count
+        let param_count = ((*(*controller_ptr).vtbl).getParameterCount)(controller_ptr);
+        log::info!(
+            "VST3: controller has {} params, calling createView for '{}' (instance {})",
+            param_count, display_name, instance_id,
+        );
+
+        // Try createView — some plugins need this on the "main thread".
+        // Try from current thread first, then from a dedicated UI thread if null.
+        let mut view = ((*(*controller_ptr).vtbl).createView)(controller_ptr, ViewType::kEditor);
+
+        if view.is_null() {
+            // Retry from a fresh thread — some VST3 plugins check thread identity
+            log::info!("VST3: createView returned null on PW thread, retrying from UI thread");
+
+            let ctrl_addr = controller_ptr as usize;
+            let (tx, rx) = std::sync::mpsc::channel::<usize>();
+            std::thread::Builder::new()
+                .name("vst3-ui-create".into())
+                .spawn(move || {
+                    unsafe {
+                        let ctrl = ctrl_addr as *mut IEditController;
+                        let v = ((*(*ctrl).vtbl).createView)(ctrl, ViewType::kEditor);
+                        let _ = tx.send(v as usize);
+                    }
+                })
+                .ok();
+
+            if let Ok(v) = rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                view = v as *mut IPlugView;
+            }
+        }
+
         if view.is_null() {
             log::warn!(
-                "VST3: createView returned null for instance {}",
-                instance_id
+                "VST3: createView returned null for '{}' (instance {}). \
+                 This plugin may not support embedded UI.",
+                display_name, instance_id,
             );
             return;
         }
@@ -457,6 +489,10 @@ fn x11_event_loop(
                 if event_type == 33 {
                     // ClientMessage
                     let atom = *((event.as_ptr() as *const u8).add(56) as *const c_ulong);
+                    log::debug!(
+                        "VST3 GUI: ClientMessage atom={} wm_delete={} match={}",
+                        atom, wm_delete_atom, atom == wm_delete_atom,
+                    );
                     if atom == wm_delete_atom {
                         log::info!(
                             "VST3 GUI window close requested (instance {})",
