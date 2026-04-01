@@ -1,8 +1,9 @@
 [package]
 name = "zestbay"
-version = "0.6.4"
+version = "0.7.0"
 edition = "2024"
 description = "A PipeWire patchbay application"
+authors = ["Ryno Kotze <lemon.xah@gmail.com>"]
 license = "MIT"
 
 [dependencies]
