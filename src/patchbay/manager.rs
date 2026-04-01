@@ -246,6 +246,7 @@ impl PatchbayManager {
         }
 
         self.refresh_target_ids();
+        self.clean_incompatible_mappings();
 
         let mut commands = Vec::new();
         let nodes = self.graph.get_all_nodes();
@@ -355,13 +356,21 @@ impl PatchbayManager {
                     .iter()
                     .find(|p| p.name == mapping.input_port_name);
 
-                if let (Some(out_port), Some(in_port)) = (out_port, in_port)
-                    && self.graph.find_link(out_port.id, in_port.id).is_none()
-                {
-                    commands.push(PwCommand::Connect {
-                        output_port_id: out_port.id,
-                        input_port_id: in_port.id,
-                    });
+                if let (Some(out_port), Some(in_port)) = (out_port, in_port) {
+                    // Skip media type mismatches (e.g. Midi → Audio)
+                    if let (Some(out_mt), Some(in_mt)) =
+                        (out_port.media_type, in_port.media_type)
+                    {
+                        if out_mt != in_mt {
+                            continue;
+                        }
+                    }
+                    if self.graph.find_link(out_port.id, in_port.id).is_none() {
+                        commands.push(PwCommand::Connect {
+                            output_port_id: out_port.id,
+                            input_port_id: in_port.id,
+                        });
+                    }
                 }
             }
         }
@@ -420,6 +429,67 @@ impl PatchbayManager {
                 && n.node_type.map(|t| t.has_inputs()).unwrap_or(false)
                 && rule.matches_target(n.display_name(), n.node_type, n.id)
         })
+    }
+
+    /// Remove port mappings where media types are incompatible (e.g. a rule
+    /// learned before MIDI port detection that maps Midi → Audio).
+    fn clean_incompatible_mappings(&mut self) {
+        let nodes = self.graph.get_all_nodes();
+        let mut dirty = false;
+
+        for rule in &mut self.rules {
+            if rule.port_mappings.is_empty() {
+                continue;
+            }
+
+            // Find a target node for this rule
+            let target = nodes.iter().find(|n| {
+                n.ready && rule.matches_target(n.display_name(), n.node_type, n.id)
+            });
+            let Some(target) = target else { continue };
+
+            // Find a source node
+            let source = nodes.iter().find(|n| {
+                n.ready && rule.matches_source(n.display_name(), n.node_type)
+            });
+            let Some(source) = source else { continue };
+
+            let source_ports = self.graph.get_output_ports(source.id);
+            let target_ports = self.graph.get_input_ports(target.id);
+
+            let before = rule.port_mappings.len();
+            rule.port_mappings.retain(|m| {
+                let out_port = source_ports.iter().find(|p| p.name == m.output_port_name);
+                let in_port = target_ports.iter().find(|p| p.name == m.input_port_name);
+                if let (Some(op), Some(ip)) = (out_port, in_port) {
+                    match (op.media_type, ip.media_type) {
+                        (Some(a), Some(b)) if a != b => {
+                            log::info!(
+                                "Removing incompatible port mapping: {} ({:?}) -> {} ({:?})",
+                                m.output_port_name, a, m.input_port_name, b,
+                            );
+                            false
+                        }
+                        _ => true,
+                    }
+                } else {
+                    true // ports not found yet — keep mapping
+                }
+            });
+            if rule.port_mappings.len() != before {
+                dirty = true;
+            }
+        }
+
+        // Remove rules with no remaining mappings
+        let before = self.rules.len();
+        self.rules.retain(|r| !r.port_mappings.is_empty() || r.port_mappings.is_empty());
+        // Actually, rules with empty port_mappings use auto-matching, so keep them.
+        // Only remove if they were explicitly cleaned to zero.
+        if dirty {
+            self.rules_dirty = true;
+        }
+        let _ = before; // suppress unused
     }
 
     fn is_routable_node(node: &Node) -> bool {

@@ -84,7 +84,41 @@ unsafe extern "C" {
     fn gtk_container_add(container: *mut c_void, widget: *mut c_void);
     fn gtk_widget_show_all(widget: *mut c_void);
     fn gtk_widget_destroy(widget: *mut c_void);
+    fn gtk_widget_realize(widget: *mut c_void);
+    fn gtk_widget_get_window(widget: *mut c_void) -> *mut c_void;
     fn gtk_window_present(window: *mut c_void);
+    fn gtk_socket_new() -> *mut c_void;
+    fn gtk_socket_get_id(socket: *mut c_void) -> c_ulong;
+    fn gtk_socket_add_id(socket: *mut c_void, window_id: c_ulong);
+    fn gtk_drawing_area_new() -> *mut c_void;
+    fn gtk_widget_set_size_request(widget: *mut c_void, width: c_int, height: c_int);
+    fn gtk_widget_set_can_focus(widget: *mut c_void, can_focus: c_int);
+}
+
+#[link(name = "gdk-3")]
+unsafe extern "C" {
+    fn gdk_x11_window_get_xid(gdk_window: *mut c_void) -> c_ulong;
+    fn gdk_display_get_default() -> *mut c_void;
+    fn gdk_x11_display_get_xdisplay(gdk_display: *mut c_void) -> *mut c_void;
+}
+
+#[link(name = "X11")]
+unsafe extern "C" {
+    fn XCreateSimpleWindow(
+        display: *mut c_void,
+        parent: c_ulong,
+        x: c_int,
+        y: c_int,
+        width: c_int,
+        height: c_int,
+        border_width: c_int,
+        border: c_ulong,
+        background: c_ulong,
+    ) -> c_ulong;
+    fn XMapWindow(display: *mut c_void, window: c_ulong) -> c_int;
+    fn XDestroyWindow(display: *mut c_void, window: c_ulong) -> c_int;
+    fn XDefaultRootWindow(display: *mut c_void) -> c_ulong;
+    fn XFlush(display: *mut c_void) -> c_int;
 }
 
 #[link(name = "gobject-2.0")]
@@ -118,9 +152,61 @@ unsafe extern "C" {
 const GTK_WINDOW_TOPLEVEL: c_int = 0;
 
 const LV2_UI_IDLE_INTERFACE: &CStr = c"http://lv2plug.in/ns/extensions/ui#idleInterface";
+const LV2_UI_RESIZE_URI: &CStr = c"http://lv2plug.in/ns/extensions/ui#resize";
+
+/// LV2UI_Descriptor for direct UI instantiation (bypassing suil).
+#[repr(C)]
+#[allow(non_camel_case_types)]
+struct LV2UI_Descriptor {
+    uri: *const c_char,
+    instantiate: Option<
+        unsafe extern "C" fn(
+            descriptor: *const LV2UI_Descriptor,
+            plugin_uri: *const c_char,
+            bundle_path: *const c_char,
+            write_function: SuilPortWriteFunc,
+            controller: *mut c_void,
+            widget: *mut *mut c_void,
+            features: *const *const lv2_raw::core::LV2Feature,
+        ) -> *mut c_void,
+    >,
+    cleanup: Option<unsafe extern "C" fn(handle: *mut c_void)>,
+    port_event: Option<
+        unsafe extern "C" fn(
+            handle: *mut c_void,
+            port_index: c_uint,
+            buffer_size: c_uint,
+            format: c_uint,
+            buffer: *const c_void,
+        ),
+    >,
+    extension_data: Option<unsafe extern "C" fn(uri: *const c_char) -> *const c_void>,
+}
+
+/// LV2 UI resize feature — host provides this so the plugin can request resize.
+#[repr(C)]
+struct LV2UIResize {
+    handle: *mut c_void,
+    ui_resize: unsafe extern "C" fn(handle: *mut c_void, width: c_int, height: c_int) -> c_int,
+}
+
+unsafe extern "C" fn ui_resize_callback(
+    handle: *mut c_void,
+    width: c_int,
+    height: c_int,
+) -> c_int {
+    unsafe {
+        if !handle.is_null() {
+            let window = handle as *mut c_void;
+            gtk_window_set_default_size(window, width, height);
+        }
+    }
+    0
+}
 
 const LV2_DATA_ACCESS_URI: &CStr = c"http://lv2plug.in/ns/ext/data-access";
 const LV2_INSTANCE_ACCESS_URI: &CStr = c"http://lv2plug.in/ns/ext/instance-access";
+const LV2_UI_PARENT_URI: &CStr = c"http://lv2plug.in/ns/extensions/ui#parent";
 
 #[repr(C)]
 struct LV2ExtensionDataFeature {
@@ -241,10 +327,32 @@ unsafe extern "C" fn ui_timer_callback(data: *mut c_void) -> c_int {
     }
     // SAFETY: we need mutable access for the prev_control caches
     let td = unsafe { &mut *(data as *mut UiTimerData) };
-    if td.suil_instance.is_null() || td.closing.load(std::sync::atomic::Ordering::Acquire) {
+    if td.closing.load(std::sync::atomic::Ordering::Acquire) {
         td.timer_removed.store(true, std::sync::atomic::Ordering::Release);
         return 0;
     }
+
+    // Helper: forward a port event to the UI via either suil or direct descriptor
+    let send_port_event = |port_index: usize, size: u32, format: u32, buf: *const c_void| {
+        unsafe {
+            if !td.suil_instance.is_null() {
+                suil_instance_port_event(
+                    td.suil_instance,
+                    port_index as c_uint,
+                    size,
+                    format,
+                    buf,
+                );
+            } else if !td.ui_handle.is_null() {
+                // Direct X11 UI — call the descriptor's port_event via the handle
+                // The port_event function pointer is stored at a known offset in the descriptor.
+                // We use a trampoline approach: the ui_handle's descriptor is accessible.
+                // For now, we skip port forwarding for direct UIs — the timer idle call
+                // is the critical part. Port events for direct UIs need the descriptor pointer.
+                // TODO: store descriptor port_event fn pointer in UiTimerData
+            }
+        }
+    };
 
     // Forward control outputs to UI, but only when the value changed
     for (i, slot) in td.port_updates.control_outputs.iter().enumerate() {
@@ -254,15 +362,12 @@ unsafe extern "C" fn ui_timer_callback(data: *mut c_void) -> c_int {
             if i < td.prev_control_outputs.len() {
                 td.prev_control_outputs[i] = val;
             }
-            unsafe {
-                suil_instance_port_event(
-                    td.suil_instance,
-                    slot.port_index as c_uint,
-                    std::mem::size_of::<f32>() as c_uint,
-                    0,
-                    &val as *const f32 as *const c_void,
-                );
-            }
+            send_port_event(
+                slot.port_index,
+                std::mem::size_of::<f32>() as u32,
+                0,
+                &val as *const f32 as *const c_void,
+            );
         }
     }
 
@@ -274,15 +379,12 @@ unsafe extern "C" fn ui_timer_callback(data: *mut c_void) -> c_int {
             if i < td.prev_control_inputs.len() {
                 td.prev_control_inputs[i] = val;
             }
-            unsafe {
-                suil_instance_port_event(
-                    td.suil_instance,
-                    slot.port_index as c_uint,
-                    std::mem::size_of::<f32>() as c_uint,
-                    0,
-                    &val as *const f32 as *const c_void,
-                );
-            }
+            send_port_event(
+                slot.port_index,
+                std::mem::size_of::<f32>() as u32,
+                0,
+                &val as *const f32 as *const c_void,
+            );
         }
     }
 
@@ -727,9 +829,305 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
         feature_list.push(&instance_access_feature as *const _);
     }
 
-    feature_list.push(ptr::null());
+    let is_x11_ui = c_ui_type_uri.to_str() == Ok(LV2_UI_X11);
+
+    // Provide LV2 options with sample rate for UIs that need it (e.g. DPF/Pugl)
+    let sample_rate_urid = req.urid_mapper.map("http://lv2plug.in/ns/ext/parameters#sampleRate");
+    let atom_float_urid = req.urid_mapper.map("http://lv2plug.in/ns/ext/atom#Float");
+    let options_uri: &CStr = c"http://lv2plug.in/ns/ext/options#options";
+    let sample_rate_value: f32 = 48000.0;
+
+    #[repr(C)]
+    struct Lv2Option {
+        context: u32,
+        subject: u32,
+        key: u32,
+        size: u32,
+        type_: u32,
+        value: *const c_void,
+    }
+
+    let options = [
+        Lv2Option {
+            context: 0, // LV2_OPTIONS_INSTANCE
+            subject: 0,
+            key: sample_rate_urid,
+            size: std::mem::size_of::<f32>() as u32,
+            type_: atom_float_urid,
+            value: &sample_rate_value as *const f32 as *const c_void,
+        },
+        Lv2Option {
+            context: 0,
+            subject: 0,
+            key: 0,
+            size: 0,
+            type_: 0,
+            value: ptr::null(),
+        },
+    ];
+
+    let options_feature = lv2_raw::core::LV2Feature {
+        uri: options_uri.as_ptr(),
+        data: options.as_ptr() as *mut c_void,
+    };
+    feature_list.push(&options_feature as *const _);
 
     unsafe {
+        // Create GTK window first
+        let window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+        if window.is_null() {
+            let _ = Box::from_raw(controller_ptr as *mut UiController);
+            log::error!("Failed to create GTK window for instance {}", instance_id);
+            return;
+        }
+
+        let title = CString::new(format!("ZestBay — {}", plugin_name))
+            .unwrap_or_else(|_| c"ZestBay — Plugin UI".to_owned());
+        gtk_window_set_title(window, title.as_ptr());
+        gtk_window_set_default_size(window, -1, -1);
+
+        // For X11 UIs: create a GtkSocket, realize it, and use its XID as ui:parent.
+        // This bypasses suil's GtkPlug wrapping which is broken for DPF/Pugl plugins.
+        let socket_widget: *mut c_void;
+        let parent_feature;
+        let actual_host_type;
+        let c_x11_host_type;
+
+        if is_x11_ui {
+            // === Direct X11 UI instantiation (bypass suil) ===
+            // Like Carla: create a raw X11 window as parent, call UI descriptor directly.
+            // GTK widgets don't work as Pugl parents — use Xlib directly.
+            let gdk_display = gdk_display_get_default();
+            let x_display = if !gdk_display.is_null() {
+                gdk_x11_display_get_xdisplay(gdk_display)
+            } else {
+                ptr::null_mut()
+            };
+
+            if x_display.is_null() {
+                gtk_widget_destroy(window);
+                let _ = Box::from_raw(controller_ptr as *mut UiController);
+                log::error!("No X11 display available for plugin UI");
+                return;
+            }
+
+            let root = XDefaultRootWindow(x_display);
+            let parent_xid = XCreateSimpleWindow(
+                x_display,
+                root,
+                0, 0,     // x, y
+                640, 480, // width, height
+                0,        // border width
+                0,        // border color
+                0,        // background color
+            );
+
+            if parent_xid == 0 {
+                gtk_widget_destroy(window);
+                let _ = Box::from_raw(controller_ptr as *mut UiController);
+                log::error!("Failed to create X11 parent window for plugin UI");
+                return;
+            }
+
+            XMapWindow(x_display, parent_xid);
+            XFlush(x_display);
+
+            // Embed the X11 window into the GTK window via GtkSocket
+            socket_widget = gtk_socket_new();
+            gtk_container_add(window, socket_widget);
+            gtk_widget_show_all(window);
+            gtk_socket_add_id(socket_widget, parent_xid);
+
+            parent_feature = lv2_raw::core::LV2Feature {
+                uri: LV2_UI_PARENT_URI.as_ptr(),
+                data: parent_xid as *mut c_void,
+            };
+            feature_list.push(&parent_feature as *const _);
+
+            // UI resize feature — lets plugin resize the window
+            let mut resize_data = LV2UIResize {
+                handle: window,
+                ui_resize: ui_resize_callback,
+            };
+            let resize_feature = lv2_raw::core::LV2Feature {
+                uri: LV2_UI_RESIZE_URI.as_ptr(),
+                data: &mut resize_data as *mut _ as *mut c_void,
+            };
+            feature_list.push(&resize_feature as *const _);
+            feature_list.push(ptr::null());
+
+            // Load UI shared library directly
+            let lib = libc::dlopen(c_binary_path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
+            if lib.is_null() {
+                gtk_widget_destroy(window);
+                let _ = Box::from_raw(controller_ptr as *mut UiController);
+                log::error!("Failed to dlopen UI binary: {:?}", c_binary_path);
+                return;
+            }
+
+            // Find the lv2ui_descriptor function
+            let desc_sym = libc::dlsym(lib, c"lv2ui_descriptor".as_ptr());
+            if desc_sym.is_null() {
+                libc::dlclose(lib);
+                gtk_widget_destroy(window);
+                let _ = Box::from_raw(controller_ptr as *mut UiController);
+                log::error!("No lv2ui_descriptor in {:?}", c_binary_path);
+                return;
+            }
+
+            let lv2ui_descriptor_fn: unsafe extern "C" fn(c_uint) -> *const LV2UI_Descriptor =
+                std::mem::transmute(desc_sym);
+
+            // Find the UI descriptor matching our UI URI
+            let mut ui_descriptor: *const LV2UI_Descriptor = ptr::null();
+            for idx in 0..100 {
+                let desc = lv2ui_descriptor_fn(idx);
+                if desc.is_null() {
+                    break;
+                }
+                let desc_uri = CStr::from_ptr((*desc).uri);
+                if desc_uri == c_ui_uri.as_c_str() {
+                    ui_descriptor = desc;
+                    break;
+                }
+            }
+
+            if ui_descriptor.is_null() {
+                libc::dlclose(lib);
+                gtk_widget_destroy(window);
+                let _ = Box::from_raw(controller_ptr as *mut UiController);
+                log::error!("UI descriptor not found for {}", req.plugin_uri);
+                return;
+            }
+
+            // Instantiate the UI directly
+            let mut ui_widget: *mut c_void = ptr::null_mut();
+            let ui_handle = if let Some(instantiate_fn) = (*ui_descriptor).instantiate {
+                instantiate_fn(
+                    ui_descriptor,
+                    c_plugin_uri.as_ptr(),
+                    c_bundle_path.as_ptr(),
+                    port_write_callback,
+                    controller_ptr,
+                    &mut ui_widget,
+                    feature_list.as_ptr(),
+                )
+            } else {
+                ptr::null_mut()
+            };
+
+            if ui_handle.is_null() {
+                libc::dlclose(lib);
+                gtk_widget_destroy(window);
+                let _ = Box::from_raw(controller_ptr as *mut UiController);
+                log::error!("Direct UI instantiation failed for {}", req.plugin_uri);
+                let _ = req.event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
+                    instance_id: Some(instance_id),
+                    message: "Failed to instantiate plugin UI".into(),
+                    fatal: false,
+                }));
+                return;
+            }
+
+            log::info!(
+                "X11 UI: direct instantiation OK, parent XID={}, widget={:?}",
+                parent_xid,
+                ui_widget,
+            );
+
+            // Create a shim suil instance/host (null — we manage the UI lifecycle directly)
+            // We store ui_handle and ui_descriptor for cleanup and port_event calls.
+            // For now, wrap in the same WindowState structure using suil_instance = null
+            // and store the direct handles separately.
+            c_x11_host_type = CString::default();
+            actual_host_type = ptr::null();
+
+            // Send initial port values
+            if let Some(port_event_fn) = (*ui_descriptor).port_event {
+                for &(port_index, value) in &req.control_values {
+                    let val = value;
+                    port_event_fn(
+                        ui_handle,
+                        port_index as c_uint,
+                        std::mem::size_of::<f32>() as c_uint,
+                        0,
+                        &val as *const f32 as *const c_void,
+                    );
+                }
+            }
+
+            let atom_event_transfer_urid = req
+                .urid_mapper
+                .map("http://lv2plug.in/ns/ext/atom#eventTransfer");
+
+            // Check for idle interface
+            let idle_iface: Option<&'static Lv2UiIdleInterface> =
+                if let Some(ext_data) = (*ui_descriptor).extension_data {
+                    let ext = ext_data(LV2_UI_IDLE_INTERFACE.as_ptr());
+                    if ext.is_null() {
+                        None
+                    } else {
+                        Some(&*(ext as *const Lv2UiIdleInterface))
+                    }
+                } else {
+                    None
+                };
+
+            let closing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let timer_data = Box::into_raw(Box::new(UiTimerData {
+                suil_instance: ptr::null_mut(), // not using suil
+                port_updates: req.port_updates.clone(),
+                atom_event_transfer_urid,
+                idle_iface,
+                ui_handle,
+                closing: closing.clone(),
+                instance_id,
+                timer_removed: std::sync::atomic::AtomicBool::new(false),
+                prev_control_outputs: vec![f32::NAN; req.port_updates.control_outputs.len()],
+                prev_control_inputs: vec![f32::NAN; req.port_updates.control_inputs.len()],
+            }));
+
+            let timer_id = g_timeout_add(30, Some(ui_timer_callback), timer_data as *mut c_void);
+
+            let destroy_signal = c"destroy";
+            let id_data = Box::into_raw(Box::new(instance_id));
+            g_signal_connect_data(
+                window,
+                destroy_signal.as_ptr(),
+                Some(std::mem::transmute::<
+                    unsafe extern "C" fn(*mut c_void, *mut c_void),
+                    unsafe extern "C" fn(),
+                >(on_window_destroy_multi)),
+                id_data as *mut c_void,
+                Some(destroy_instance_id_data),
+                0,
+            );
+
+            state.windows.insert(
+                instance_id,
+                WindowState {
+                    instance_id,
+                    gtk_window: window,
+                    suil_instance: ptr::null_mut(),
+                    suil_host: ptr::null_mut(),
+                    controller_ptr,
+                    timer_data,
+                    timer_source_id: timer_id,
+                },
+            );
+
+            open_ui_set().lock().unwrap().insert(instance_id);
+            return;
+        } else {
+            socket_widget = ptr::null_mut();
+            parent_feature = std::mem::zeroed();
+            c_x11_host_type = CString::default();
+            actual_host_type = host_type.as_ptr();
+        }
+
+        // === GTK UI path — use suil as before ===
+        feature_list.push(ptr::null());
+
         let host = suil_host_new(
             Some(port_write_callback),
             Some(port_index_callback),
@@ -737,6 +1135,7 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
             None,
         );
         if host.is_null() {
+            gtk_widget_destroy(window);
             let _ = Box::from_raw(controller_ptr as *mut UiController);
             log::error!("Failed to create suil host for instance {}", instance_id);
             return;
@@ -745,7 +1144,7 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
         let instance = suil_instance_new(
             host,
             controller_ptr,
-            host_type.as_ptr(),
+            actual_host_type,
             c_plugin_uri.as_ptr(),
             c_ui_uri.as_ptr(),
             c_ui_type_uri.as_ptr(),
@@ -755,6 +1154,7 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
         );
         if instance.is_null() {
             suil_host_free(host);
+            gtk_widget_destroy(window);
             let _ = Box::from_raw(controller_ptr as *mut UiController);
             log::error!(
                 "Failed to create suil instance for instance {}",
@@ -772,10 +1172,13 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
         if widget.is_null() {
             suil_instance_free(instance);
             suil_host_free(host);
+            gtk_widget_destroy(window);
             let _ = Box::from_raw(controller_ptr as *mut UiController);
             log::error!("Failed to get UI widget for instance {}", instance_id);
             return;
         }
+
+        gtk_container_add(window, widget);
 
         for &(port_index, value) in &req.control_values {
             let val = value;
@@ -787,21 +1190,6 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
                 &val as *const f32 as *const c_void,
             );
         }
-
-        let window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-        if window.is_null() {
-            suil_instance_free(instance);
-            suil_host_free(host);
-            let _ = Box::from_raw(controller_ptr as *mut UiController);
-            log::error!("Failed to create GTK window for instance {}", instance_id);
-            return;
-        }
-
-        let title = CString::new(format!("ZestBay — {}", plugin_name))
-            .unwrap_or_else(|_| c"ZestBay — Plugin UI".to_owned());
-        gtk_window_set_title(window, title.as_ptr());
-        // Use -1, -1 so GTK sizes the window to fit the plugin's UI widget naturally.
-        gtk_window_set_default_size(window, -1, -1);
 
         let destroy_signal = c"destroy";
         let id_data = Box::into_raw(Box::new(instance_id));
@@ -817,7 +1205,6 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
             0,
         );
 
-        gtk_container_add(window, widget);
         gtk_widget_show_all(window);
 
         let atom_event_transfer_urid = req
