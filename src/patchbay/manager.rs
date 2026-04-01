@@ -370,21 +370,35 @@ impl PatchbayManager {
     }
 
     fn find_matching_port<'a>(&self, source: &Port, targets: &'a [Port]) -> Option<&'a Port> {
+        // Filter targets to compatible media types (don't connect Midi→Audio or Audio→Midi)
+        let compatible: Vec<&Port> = targets
+            .iter()
+            .filter(|p| match (source.media_type, p.media_type) {
+                (Some(a), Some(b)) => a == b,
+                _ => true, // If either is unknown, allow
+            })
+            .collect();
+
+        if compatible.is_empty() {
+            return None;
+        }
+
         if let Some(ref channel) = source.channel
-            && let Some(target) = targets.iter().find(|p| p.channel.as_ref() == Some(channel))
+            && let Some(target) = compatible.iter().find(|p| p.channel.as_ref() == Some(channel))
         {
             return Some(target);
         }
 
-        if let Some(target) = targets.iter().find(|p| p.name == source.name) {
+        if let Some(target) = compatible.iter().find(|p| p.name == source.name) {
             return Some(target);
         }
 
         let source_index = source.physical_index.unwrap_or(0);
-        targets
+        compatible
             .iter()
             .find(|p| p.physical_index.unwrap_or(0) == source_index)
-            .or_else(|| targets.first())
+            .copied()
+            .or_else(|| compatible.first().copied())
     }
 
     fn find_matching_target<'a>(

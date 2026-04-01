@@ -786,7 +786,8 @@ fn parse_port(global: &GlobalObject<&DictRef>, graph: &Arc<GraphState>) -> Optio
         }
     };
 
-    let media_type = if props.get("format.dsp").map_or(false, |v| v.contains("midi")) {
+    let format_dsp = props.get("format.dsp").map(String::from);
+    let media_type = if format_dsp.as_deref().map_or(false, |v| v.contains("midi")) {
         Some(MediaType::Midi)
     } else if name.starts_with("midi_") {
         Some(MediaType::Midi)
@@ -1011,12 +1012,21 @@ fn handle_add_lv2_plugin(
 
     let instance_rc = std::rc::Rc::new(RefCell::new(lv2_instance));
 
+    let has_midi_in = plugin_info.ports.iter().any(|p| {
+        p.port_type == crate::plugin::types::PluginPortType::AtomInput
+    });
+    let has_midi_out = plugin_info.ports.iter().any(|p| {
+        p.port_type == crate::plugin::types::PluginPortType::AtomOutput
+    });
+
     let filter_config = crate::lv2::filter::FilterConfig {
         instance_id,
         display_name: display_name.to_string(),
         audio_inputs: plugin_info.audio_inputs,
         audio_outputs: plugin_info.audio_outputs,
         sample_rate: sample_rate as u32,
+        has_midi_in,
+        has_midi_out,
     };
 
     match crate::lv2::filter::Lv2FilterNode::new(
@@ -1139,6 +1149,8 @@ fn handle_add_clap_plugin(
 
     let audio_inputs = clap_instance.audio_input_channels;
     let audio_outputs = clap_instance.audio_output_channels;
+    let has_midi_in = clap_instance.has_midi_in;
+    let has_midi_out = clap_instance.has_midi_out;
     let instance_rc = std::rc::Rc::new(RefCell::new(clap_instance));
 
     let filter_config = crate::clap::filter::FilterConfig {
@@ -1146,6 +1158,8 @@ fn handle_add_clap_plugin(
         display_name: display_name.to_string(),
         audio_inputs,
         audio_outputs,
+        has_midi_in,
+        has_midi_out,
     };
 
     match crate::clap::filter::ClapFilterNode::new(
@@ -1268,6 +1282,8 @@ fn handle_add_vst3_plugin(
 
     let audio_inputs = vst3_instance.audio_input_channels;
     let audio_outputs = vst3_instance.audio_output_channels;
+    let has_midi_in = vst3_instance.has_midi_in;
+    let has_midi_out = vst3_instance.has_midi_out;
     let instance_rc = std::rc::Rc::new(RefCell::new(vst3_instance));
 
     let filter_config = crate::vst3::filter::FilterConfig {
@@ -1275,6 +1291,8 @@ fn handle_add_vst3_plugin(
         display_name: display_name.to_string(),
         audio_inputs,
         audio_outputs,
+        has_midi_in,
+        has_midi_out,
     };
 
     match crate::vst3::filter::Vst3FilterNode::new(
@@ -1395,7 +1413,25 @@ fn create_link(
         return;
     }
 
-    log::debug!("Creating link {} -> {}", output_port_id, input_port_id);
+    // Reject cross-media-type links (e.g. Midi → Audio or Audio → Midi)
+    // PipeWire will reject these anyway, but catching them here avoids
+    // infinite retry loops from patchbay auto-rules.
+    if let (Some(out_mt), Some(in_mt)) = (output_port.media_type, input_port.media_type) {
+        if out_mt != in_mt {
+            log::warn!(
+                "Rejected media type mismatch: port {} ({:?}, {:?}) -> port {} ({:?}, {:?})",
+                output_port_id, output_port.name, out_mt,
+                input_port_id, input_port.name, in_mt,
+            );
+            return;
+        }
+    }
+
+    log::debug!(
+        "Creating link: port {} ({:?}, {:?}) -> port {} ({:?}, {:?})",
+        output_port_id, output_port.name, output_port.media_type,
+        input_port_id, input_port.name, input_port.media_type,
+    );
 
     let props = pipewire::properties::properties! {
         *pipewire::keys::LINK_OUTPUT_NODE => output_port.node_id.to_string(),

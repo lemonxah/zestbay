@@ -279,6 +279,212 @@ unsafe extern "system" fn empty_pc_add_parameter_data(
     std::ptr::null_mut()
 }
 
+// ---------------------------------------------------------------------------
+// RT-safe IEventList inline COM object for MIDI events
+// ---------------------------------------------------------------------------
+
+/// Max number of MIDI events per process call.
+const MAX_MIDI_EVENTS: usize = 256;
+
+/// Pre-allocated IEventList that holds note on/off and other MIDI events.
+#[repr(C)]
+struct InlineEventList {
+    vtbl: *const IEventListVtbl,
+    events: Vec<Event>,
+    used_count: i32,
+}
+
+static INLINE_EL_VTBL: IEventListVtbl = IEventListVtbl {
+    base: FUnknownVtbl {
+        queryInterface: iel_query_interface,
+        addRef: iel_add_ref,
+        release: iel_release,
+    },
+    getEventCount: iel_get_event_count,
+    getEvent: iel_get_event,
+    addEvent: iel_add_event,
+};
+
+unsafe extern "system" fn iel_query_interface(
+    this: *mut FUnknown,
+    iid: *const TUID,
+    obj: *mut *mut std::ffi::c_void,
+) -> tresult {
+    unsafe {
+        if iid.is_null() || obj.is_null() {
+            return kInvalidArgument;
+        }
+        let iid_ref = &*iid;
+        if *iid_ref == FUnknown_iid || *iid_ref == IEventList_iid {
+            *obj = this as *mut std::ffi::c_void;
+            return kResultOk;
+        }
+        *obj = std::ptr::null_mut();
+        kNoInterface
+    }
+}
+
+unsafe extern "system" fn iel_add_ref(_this: *mut FUnknown) -> uint32 {
+    1
+}
+
+unsafe extern "system" fn iel_release(_this: *mut FUnknown) -> uint32 {
+    1
+}
+
+unsafe extern "system" fn iel_get_event_count(this: *mut IEventList) -> int32 {
+    unsafe {
+        let el = this as *mut InlineEventList;
+        (*el).used_count
+    }
+}
+
+unsafe extern "system" fn iel_get_event(
+    this: *mut IEventList,
+    index: int32,
+    e: *mut Event,
+) -> tresult {
+    unsafe {
+        let el = this as *mut InlineEventList;
+        if index < 0 || index >= (*el).used_count || e.is_null() {
+            return kInvalidArgument;
+        }
+        *e = (&(*el).events)[index as usize];
+        kResultOk
+    }
+}
+
+unsafe extern "system" fn iel_add_event(
+    _this: *mut IEventList,
+    _e: *mut Event,
+) -> tresult {
+    // Output events from plugin — ignore for now
+    kResultOk
+}
+
+impl InlineEventList {
+    fn new() -> Self {
+        Self {
+            vtbl: &INLINE_EL_VTBL,
+            events: Vec::with_capacity(MAX_MIDI_EVENTS),
+            used_count: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.used_count = 0;
+    }
+
+    /// Add a note-on event. Returns false if full.
+    fn add_note_on(
+        &mut self,
+        sample_offset: i32,
+        channel: i16,
+        pitch: i16,
+        velocity: f32,
+    ) -> bool {
+        if (self.used_count as usize) >= self.events.len() {
+            if self.events.len() >= MAX_MIDI_EVENTS {
+                return false;
+            }
+            self.events.push(unsafe { std::mem::zeroed() });
+        }
+        let idx = self.used_count as usize;
+        let evt = &mut self.events[idx];
+        evt.busIndex = 0;
+        evt.sampleOffset = sample_offset;
+        evt.ppqPosition = 0.0;
+        evt.flags = 0;
+        evt.r#type = Event_::EventTypes_::kNoteOnEvent as u16;
+        evt.__field0.noteOn = NoteOnEvent {
+            channel,
+            pitch,
+            tuning: 0.0,
+            velocity,
+            length: 0,
+            noteId: -1,
+        };
+        self.used_count += 1;
+        true
+    }
+
+    /// Add a note-off event. Returns false if full.
+    fn add_note_off(
+        &mut self,
+        sample_offset: i32,
+        channel: i16,
+        pitch: i16,
+        velocity: f32,
+    ) -> bool {
+        if (self.used_count as usize) >= self.events.len() {
+            if self.events.len() >= MAX_MIDI_EVENTS {
+                return false;
+            }
+            self.events.push(unsafe { std::mem::zeroed() });
+        }
+        let idx = self.used_count as usize;
+        let evt = &mut self.events[idx];
+        evt.busIndex = 0;
+        evt.sampleOffset = sample_offset;
+        evt.ppqPosition = 0.0;
+        evt.flags = 0;
+        evt.r#type = Event_::EventTypes_::kNoteOffEvent as u16;
+        evt.__field0.noteOff = NoteOffEvent {
+            channel,
+            pitch,
+            velocity,
+            noteId: -1,
+            tuning: 0.0,
+        };
+        self.used_count += 1;
+        true
+    }
+
+    /// Populate from raw PipeWire MIDI events.
+    fn fill_from_raw(&mut self, midi_events: &[crate::midi::processing::RawMidiEvent]) {
+        self.reset();
+        for evt in midi_events {
+            if evt.size < 3 {
+                continue;
+            }
+            let status = evt.data[0];
+            let msg_type = status & 0xF0;
+            let channel = (status & 0x0F) as i16;
+            let pitch = evt.data[1] as i16;
+            let velocity_raw = evt.data[2];
+            let offset = evt.offset as i32;
+
+            match msg_type {
+                0x90 => {
+                    if velocity_raw == 0 {
+                        // Note-on with velocity 0 = note-off
+                        self.add_note_off(offset, channel, pitch, 0.0);
+                    } else {
+                        self.add_note_on(
+                            offset,
+                            channel,
+                            pitch,
+                            velocity_raw as f32 / 127.0,
+                        );
+                    }
+                }
+                0x80 => {
+                    self.add_note_off(
+                        offset,
+                        channel,
+                        pitch,
+                        velocity_raw as f32 / 127.0,
+                    );
+                }
+                _ => {
+                    // Other MIDI messages (CC, etc.) — not handled as VST3 events
+                    // CC mapping is handled by the filter's process_midi_buffer
+                }
+            }
+        }
+    }
+}
+
 static NEXT_INSTANCE_ID: AtomicU64 = AtomicU64::new(2_000_000);
 
 fn next_instance_id() -> PluginInstanceId {
@@ -341,6 +547,11 @@ pub struct Vst3PluginInstance {
     pub audio_input_channels: usize,
     pub audio_output_channels: usize,
 
+    /// Whether this plugin accepts MIDI input (has event input bus)
+    pub has_midi_in: bool,
+    /// Whether this plugin produces MIDI output (has event output bus)
+    pub has_midi_out: bool,
+
     input_bus_descs: Vec<Vst3AudioBusDesc>,
     output_bus_descs: Vec<Vst3AudioBusDesc>,
 
@@ -363,6 +574,10 @@ pub struct Vst3PluginInstance {
     input_param_changes: InlineParameterChanges,
     /// Pre-allocated output parameter changes for process().
     output_param_changes: EmptyParameterChanges,
+    /// Pre-allocated input event list for MIDI events.
+    input_event_list: InlineEventList,
+    /// Pre-allocated output event list (empty, for plugin output).
+    output_event_list: InlineEventList,
 }
 
 unsafe impl Send for Vst3PluginInstance {}
@@ -526,6 +741,31 @@ impl Vst3PluginInstance {
                 }
             }
 
+            // Query event (MIDI) buses
+            let k_event: i32 = vst3::Steinberg::Vst::MediaTypes_::kEvent as i32;
+            let has_midi_in = component.getBusCount(k_event, K_INPUT) > 0;
+            let has_midi_out = component.getBusCount(k_event, K_OUTPUT) > 0;
+
+            // Activate event buses so the plugin receives MIDI
+            if has_midi_in {
+                let n = component.getBusCount(k_event, K_INPUT);
+                for idx in 0..n {
+                    component.activateBus(k_event, K_INPUT, idx, 1);
+                }
+            }
+            if has_midi_out {
+                let n = component.getBusCount(k_event, K_OUTPUT);
+                for idx in 0..n {
+                    component.activateBus(k_event, K_OUTPUT, idx, 1);
+                }
+            }
+
+            log::info!(
+                "VST3: {} — audio {}/{}, midi_in={}, midi_out={}",
+                plugin_info.name, audio_input_channels, audio_output_channels,
+                has_midi_in, has_midi_out,
+            );
+
             // Query parameters
             let mut params = Vec::new();
             let mut bypass_param_id: Option<u32> = None;
@@ -642,6 +882,8 @@ impl Vst3PluginInstance {
                 display_name: plugin_info.name.clone(),
                 audio_input_channels,
                 audio_output_channels,
+                has_midi_in,
+                has_midi_out,
                 input_bus_descs,
                 output_bus_descs,
                 params,
@@ -653,6 +895,8 @@ impl Vst3PluginInstance {
                 component_handler,
                 input_param_changes: InlineParameterChanges::new(),
                 output_param_changes: EmptyParameterChanges { vtbl: &EMPTY_PC_VTBL },
+                input_event_list: InlineEventList::new(),
+                output_event_list: InlineEventList::new(),
                 active: true,
                 processing,
             })
@@ -669,6 +913,7 @@ impl Vst3PluginInstance {
         inputs: &[&[f32]],
         outputs: &mut [&mut [f32]],
         sample_count: usize,
+        midi_events: &[crate::midi::processing::RawMidiEvent],
     ) {
         unsafe {
             // Read parameter changes from shared port_updates and build
@@ -765,8 +1010,17 @@ impl Vst3PluginInstance {
             process_data.outputParameterChanges =
                 &mut self.output_param_changes as *mut EmptyParameterChanges
                     as *mut IParameterChanges;
-            process_data.inputEvents = std::ptr::null_mut();
-            process_data.outputEvents = std::ptr::null_mut();
+            // Populate MIDI events
+            self.input_event_list.fill_from_raw(midi_events);
+            self.output_event_list.reset();
+
+            process_data.inputEvents = if self.input_event_list.used_count > 0 {
+                &mut self.input_event_list as *mut InlineEventList as *mut IEventList
+            } else {
+                std::ptr::null_mut()
+            };
+            process_data.outputEvents =
+                &mut self.output_event_list as *mut InlineEventList as *mut IEventList;
             process_data.processContext = std::ptr::null_mut();
 
             self.processor.process(&mut process_data);

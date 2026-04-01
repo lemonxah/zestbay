@@ -28,6 +28,8 @@ pub struct FilterConfig {
     pub audio_inputs: usize,
     pub audio_outputs: usize,
     pub sample_rate: u32,
+    pub has_midi_in: bool,
+    pub has_midi_out: bool,
 }
 
 #[repr(C)]
@@ -49,6 +51,8 @@ struct FilterData {
     midi_out_port_ptr: *mut std::ffi::c_void,
     n_audio_inputs: usize,
     n_audio_outputs: usize,
+    /// Plugin accepts MIDI input (feed PipeWire MIDI to LV2 atom input buffers)
+    has_midi_in: bool,
     cpu_slot: Arc<PluginTimingSlot>,
     midi_state: MidiProcessingState,
 }
@@ -116,6 +120,7 @@ impl Lv2FilterNode {
             midi_out_port_ptr: std::ptr::null_mut(),
             n_audio_inputs: config.audio_inputs,
             n_audio_outputs: config.audio_outputs,
+            has_midi_in: config.has_midi_in,
             cpu_slot,
             midi_state: MidiProcessingState::new(),
         }));
@@ -452,6 +457,12 @@ unsafe extern "C" fn on_process(
             return;
         }
 
+        // Extract MIDI events from PipeWire buffer for plugin feeding
+        let mut midi_events_buf =
+            [crate::midi::processing::RawMidiEvent { offset: 0, data: [0; 3], size: 0 };
+                crate::midi::processing::MAX_MIDI_EVENTS];
+        let mut n_midi_events = 0usize;
+
         if !fd.midi_in_port_ptr.is_null() {
             let midi_in_buf = pipewire::sys::pw_filter_get_dsp_buffer(fd.midi_in_port_ptr, 0);
             let midi_out_buf = if !fd.midi_out_port_ptr.is_null() {
@@ -459,6 +470,14 @@ unsafe extern "C" fn on_process(
             } else {
                 std::ptr::null_mut()
             };
+
+            // Extract raw MIDI events before CC processing (for plugin feeding)
+            if fd.has_midi_in {
+                n_midi_events = crate::midi::processing::extract_midi_events(
+                    midi_in_buf,
+                    &mut midi_events_buf,
+                );
+            }
 
             if let Some(capture) = crate::midi::processing::process_midi_buffer(
                 midi_in_buf,
@@ -497,6 +516,12 @@ unsafe extern "C" fn on_process(
             }
         }
 
+        // Scratch buffer for unconnected output ports — the plugin still
+        // needs somewhere to write even if no one is listening.
+        // Using a single large buffer split into non-overlapping slices.
+        static mut SCRATCH: [f32; 8192 * 16] = [0.0; 8192 * 16];
+        let scratch_base = &raw mut SCRATCH;
+        let mut scratch_offset = 0usize;
         let mut output_bufs: Vec<&mut [f32]> = Vec::with_capacity(n_out);
         for port_ptr in &fd.output_port_ptrs {
             let buf = pipewire::sys::pw_filter_get_dsp_buffer(*port_ptr, n_samples);
@@ -505,15 +530,24 @@ unsafe extern "C" fn on_process(
                     buf as *mut f32,
                     n_samples as usize,
                 ));
+            } else {
+                let ns = n_samples as usize;
+                let slice = std::slice::from_raw_parts_mut(
+                    (*scratch_base).as_mut_ptr().add(scratch_offset),
+                    ns,
+                );
+                scratch_offset += ns;
+                output_bufs.push(slice);
             }
         }
 
-        if output_bufs.len() < n_out {
-            return;
-        }
-
         let t0 = std::time::Instant::now();
-        inst.process(&input_bufs, &mut output_bufs, n_samples as usize);
+        inst.process(
+            &input_bufs,
+            &mut output_bufs,
+            n_samples as usize,
+            &midi_events_buf[..n_midi_events],
+        );
         let elapsed = t0.elapsed().as_nanos() as u64;
         fd.cpu_slot
             .record(elapsed, inst.last_worker_ns, n_samples, rate);

@@ -205,6 +205,60 @@ pub unsafe fn forward_midi_buffer(in_buf: *mut std::ffi::c_void, out_buf: *mut s
     }
 }
 
+/// A single raw MIDI event extracted from a PipeWire DSP buffer.
+#[derive(Clone, Copy)]
+pub struct RawMidiEvent {
+    pub offset: u32,
+    pub data: [u8; 3],
+    pub size: u8,
+}
+
+/// Maximum number of MIDI events we collect per process cycle (RT-safe, no heap).
+pub const MAX_MIDI_EVENTS: usize = 256;
+
+/// Extract raw MIDI events from a PipeWire DSP buffer into a fixed-size array.
+///
+/// # Safety
+/// - `dsp_buf` must be a valid pointer from `pw_filter_get_dsp_buffer` for a MIDI port
+/// - Must be called from the PipeWire RT process callback
+pub unsafe fn extract_midi_events(
+    dsp_buf: *mut std::ffi::c_void,
+    out: &mut [RawMidiEvent; MAX_MIDI_EVENTS],
+) -> usize {
+    if dsp_buf.is_null() {
+        return 0;
+    }
+
+    unsafe {
+        let seq = dsp_buf as *const libspa::sys::spa_pod_sequence;
+        let body = &(*seq).body;
+        let body_size = (*seq).pod.size as u32;
+
+        let mut count = 0usize;
+        let mut ctrl = libspa::sys::spa_pod_control_first(body);
+        while libspa::sys::spa_pod_control_is_inside(body, body_size, ctrl) {
+            if (*ctrl).type_ == libspa::sys::SPA_CONTROL_Midi {
+                let midi_size = (*ctrl).value.size as usize;
+                let midi_data = (&(*ctrl).value as *const libspa::sys::spa_pod as *const u8)
+                    .add(std::mem::size_of::<libspa::sys::spa_pod>());
+
+                if midi_size >= 1 && midi_size <= 3 && count < MAX_MIDI_EVENTS {
+                    let mut evt = RawMidiEvent {
+                        offset: (*ctrl).offset,
+                        data: [0; 3],
+                        size: midi_size as u8,
+                    };
+                    std::ptr::copy_nonoverlapping(midi_data, evt.data.as_mut_ptr(), midi_size);
+                    out[count] = evt;
+                    count += 1;
+                }
+            }
+            ctrl = libspa::sys::spa_pod_control_next(ctrl);
+        }
+        count
+    }
+}
+
 /// Returns `None` if the value should not be applied (e.g. toggle not triggered).
 #[inline]
 fn compute_mapped_value(

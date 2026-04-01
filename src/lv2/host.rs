@@ -491,6 +491,7 @@ impl Lv2PluginInstance {
         inputs: &[&[f32]],
         outputs: &mut [&mut [f32]],
         sample_count: usize,
+        midi_events: &[crate::midi::processing::RawMidiEvent],
     ) {
         // Connect audio ports (buffer pointers change each cycle)
         for (i, &port_idx) in self.audio_input_indices.iter().enumerate() {
@@ -526,26 +527,70 @@ impl Lv2PluginInstance {
             cp.value = slot.value.load();
         }
 
-        // Prepare atom input buffers (UI → plugin communication)
+        // Prepare atom input buffers (UI → plugin communication + MIDI events)
+        let midi_event_urid = self.urid_mapper.map("http://lv2plug.in/ns/ext/midi#MidiEvent");
         for (ab, shared) in self
             .atom_in_bufs
             .iter_mut()
             .zip(self.port_updates.atom_inputs.iter())
         {
             init_atom_sequence(&mut ab.data, ATOM_BUF_SIZE, false, self.atom_sequence_urid);
-            let Some(ui_atom) = shared.read() else {
-                continue;
-            };
-            if !ui_atom.is_empty() && ui_atom.len() >= 8 {
-                let event_size = 8 + ui_atom.len();
-                let padded_event_size = (event_size + 7) & !7;
-                if 16 + padded_event_size <= ab.data.len() {
-                    ab.data[16..24].copy_from_slice(&0i64.to_ne_bytes());
-                    ab.data[24..24 + ui_atom.len()].copy_from_slice(&ui_atom);
-                    let body_size = 8u32 + padded_event_size as u32;
-                    ab.data[0..4].copy_from_slice(&body_size.to_ne_bytes());
+
+            // Track write position after the sequence header (16 bytes)
+            let mut write_pos = 16usize;
+
+            // Write UI atom data if available
+            if let Some(ui_atom) = shared.read() {
+                if !ui_atom.is_empty() && ui_atom.len() >= 8 {
+                    let event_size = 8 + ui_atom.len();
+                    let padded_event_size = (event_size + 7) & !7;
+                    if write_pos + padded_event_size <= ab.data.len() {
+                        // Time stamp (8 bytes)
+                        ab.data[write_pos..write_pos + 8]
+                            .copy_from_slice(&0i64.to_ne_bytes());
+                        // Atom data
+                        ab.data[write_pos + 8..write_pos + 8 + ui_atom.len()]
+                            .copy_from_slice(&ui_atom);
+                        write_pos += padded_event_size;
+                    }
                 }
             }
+
+            // Write MIDI events into the atom sequence
+            for evt in midi_events {
+                let midi_size = evt.size as usize;
+                if midi_size == 0 {
+                    continue;
+                }
+                // Each atom event: time_frames(8) + atom_size(4) + atom_type(4) + data(padded)
+                let event_data_size = 8 + 4 + 4 + midi_size;
+                let padded_event_size = (event_data_size + 7) & !7;
+                if write_pos + padded_event_size > ab.data.len() {
+                    break;
+                }
+                // Time stamp in frames (8 bytes, i64)
+                ab.data[write_pos..write_pos + 8]
+                    .copy_from_slice(&(evt.offset as i64).to_ne_bytes());
+                // Atom size (4 bytes) — size of MIDI data
+                ab.data[write_pos + 8..write_pos + 12]
+                    .copy_from_slice(&(midi_size as u32).to_ne_bytes());
+                // Atom type (4 bytes) — MIDI event URID
+                ab.data[write_pos + 12..write_pos + 16]
+                    .copy_from_slice(&midi_event_urid.to_ne_bytes());
+                // MIDI data
+                ab.data[write_pos + 16..write_pos + 16 + midi_size]
+                    .copy_from_slice(&evt.data[..midi_size]);
+                // Zero padding
+                for i in (write_pos + 16 + midi_size)..(write_pos + padded_event_size) {
+                    ab.data[i] = 0;
+                }
+                write_pos += padded_event_size;
+            }
+
+            // Update the sequence body size (first 4 bytes of atom)
+            let body_size = (write_pos - 8) as u32; // body size = total - atom header(8)
+            ab.data[0..4].copy_from_slice(&body_size.to_ne_bytes());
+
         }
 
         for ab in &mut self.atom_out_bufs {

@@ -57,6 +57,11 @@ pub struct ClapPluginInstance {
     pub audio_input_channels: usize,
     pub audio_output_channels: usize,
 
+    /// Whether this plugin accepts MIDI input (has note input ports)
+    pub has_midi_in: bool,
+    /// Whether this plugin produces MIDI output (has note output ports)
+    pub has_midi_out: bool,
+
     /// CLAP audio port info for process()
     input_port_infos: Vec<ClapAudioPortDesc>,
     output_port_infos: Vec<ClapAudioPortDesc>,
@@ -258,6 +263,43 @@ impl ClapPluginInstance {
             }
         }
 
+        // Query note ports (MIDI capability)
+        let mut has_midi_in = false;
+        let mut has_midi_out = false;
+
+        if let Some(get_ext) = plugin_ref.get_extension {
+            let ext = get_ext(
+                plugin_ptr,
+                clap_sys::ext::note_ports::CLAP_EXT_NOTE_PORTS.as_ptr(),
+            );
+            if !ext.is_null() {
+                let note_ports =
+                    &*(ext as *const clap_sys::ext::note_ports::clap_plugin_note_ports);
+                if let Some(count_fn) = note_ports.count {
+                    let in_count = count_fn(plugin_ptr, true);
+                    if in_count > 0 {
+                        has_midi_in = true;
+                    }
+                    let out_count = count_fn(plugin_ptr, false);
+                    if out_count > 0 {
+                        has_midi_out = true;
+                    }
+                }
+            }
+        }
+
+        // If the plugin is categorised as an instrument, assume it accepts MIDI
+        // even if it doesn't expose note ports (some plugins omit the extension).
+        if !has_midi_in && plugin_info.category == PluginCategory::Instrument {
+            has_midi_in = true;
+        }
+
+        log::info!(
+            "CLAP: {} — audio {}/{}, midi_in={}, midi_out={}",
+            plugin_info.name, audio_input_channels, audio_output_channels,
+            has_midi_in, has_midi_out,
+        );
+
         // Query params
         let mut params = Vec::new();
         let mut params_ext: *const clap_sys::ext::params::clap_plugin_params = std::ptr::null();
@@ -357,6 +399,8 @@ impl ClapPluginInstance {
             display_name: plugin_info.name.clone(),
             audio_input_channels,
             audio_output_channels,
+            has_midi_in,
+            has_midi_out,
             input_port_infos,
             output_port_infos,
             params,
@@ -388,6 +432,7 @@ impl ClapPluginInstance {
         inputs: &[&[f32]],
         outputs: &mut [&mut [f32]],
         sample_count: usize,
+        midi_events: &[crate::midi::processing::RawMidiEvent],
     ) { unsafe {
         // Read parameter changes from the shared port_updates
         // and build CLAP input events
@@ -418,14 +463,31 @@ impl ClapPluginInstance {
             }
         }
 
+        // Build CLAP MIDI events from raw PipeWire MIDI data
+        let mut midi_clap_events: Vec<clap_sys::events::clap_event_midi> = Vec::new();
+        for evt in midi_events {
+            midi_clap_events.push(clap_sys::events::clap_event_midi {
+                header: clap_sys::events::clap_event_header {
+                    size: std::mem::size_of::<clap_sys::events::clap_event_midi>() as u32,
+                    time: evt.offset,
+                    space_id: clap_sys::events::CLAP_CORE_EVENT_SPACE_ID,
+                    type_: clap_sys::events::CLAP_EVENT_MIDI,
+                    flags: 0,
+                },
+                port_index: 0,
+                data: evt.data,
+            });
+        }
+
         // Build input events list
-        let in_events_data = InputEventsData {
-            events: &param_events,
+        let in_events_data = MixedInputEventsData {
+            param_events: &param_events,
+            midi_events: &midi_clap_events,
         };
         let in_events = clap_sys::events::clap_input_events {
-            ctx: &in_events_data as *const InputEventsData as *mut c_void,
-            size: Some(input_events_size),
-            get: Some(input_events_get),
+            ctx: &in_events_data as *const MixedInputEventsData as *mut c_void,
+            size: Some(mixed_input_events_size),
+            get: Some(mixed_input_events_get),
         };
 
         // Build output events list (we'll collect param output changes)
@@ -606,29 +668,39 @@ impl Drop for ClapPluginInstance {
     }
 }
 
-// ---- Input events vtable ----
+// ---- Input events vtable (mixed param + MIDI) ----
 
-struct InputEventsData<'a> {
-    events: &'a [clap_sys::events::clap_event_param_value],
+struct MixedInputEventsData<'a> {
+    param_events: &'a [clap_sys::events::clap_event_param_value],
+    midi_events: &'a [clap_sys::events::clap_event_midi],
 }
 
-unsafe extern "C" fn input_events_size(list: *const clap_sys::events::clap_input_events) -> u32 {
+unsafe extern "C" fn mixed_input_events_size(
+    list: *const clap_sys::events::clap_input_events,
+) -> u32 {
     unsafe {
-        let data = &*((*list).ctx as *const InputEventsData);
-        data.events.len() as u32
+        let data = &*((*list).ctx as *const MixedInputEventsData);
+        (data.param_events.len() + data.midi_events.len()) as u32
     }
 }
 
-unsafe extern "C" fn input_events_get(
+unsafe extern "C" fn mixed_input_events_get(
     list: *const clap_sys::events::clap_input_events,
     index: u32,
 ) -> *const clap_sys::events::clap_event_header {
     unsafe {
-        let data = &*((*list).ctx as *const InputEventsData);
-        if (index as usize) < data.events.len() {
-            &data.events[index as usize].header as *const clap_sys::events::clap_event_header
+        let data = &*((*list).ctx as *const MixedInputEventsData);
+        let idx = index as usize;
+        let n_param = data.param_events.len();
+        if idx < n_param {
+            &data.param_events[idx].header as *const clap_sys::events::clap_event_header
         } else {
-            std::ptr::null()
+            let midi_idx = idx - n_param;
+            if midi_idx < data.midi_events.len() {
+                &data.midi_events[midi_idx].header as *const clap_sys::events::clap_event_header
+            } else {
+                std::ptr::null()
+            }
         }
     }
 }
