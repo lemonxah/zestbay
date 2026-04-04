@@ -6,6 +6,7 @@ use crate::pipewire::{GraphState, Link, MediaType, Node, NodeType, ObjectId, Por
 pub struct PatchbayManager {
     graph: Arc<GraphState>,
     rules: Vec<AutoConnectRule>,
+    pub OS_managed: bool,
     pub enabled: bool,
     pub rules_dirty: bool,
     /// Display name of the default target node. When a source node has no
@@ -18,6 +19,7 @@ impl PatchbayManager {
         Self {
             graph,
             rules: Vec::new(),
+            OS_managed: true,
             enabled: true,
             rules_dirty: false,
             default_target: None,
@@ -46,6 +48,7 @@ impl PatchbayManager {
     pub fn rules(&self) -> &[AutoConnectRule] {
         &self.rules
     }
+
 
     pub fn toggle_rule(&mut self, id: &str) -> Option<bool> {
         if let Some(rule) = self.rules.iter_mut().find(|r| r.id == id) {
@@ -425,6 +428,11 @@ impl PatchbayManager {
             Some(n) => n,
             None => return false,
         };
+
+        if self.OS_managed == true {
+            return false
+        }
+
 
         if !Self::is_routable_node(&source_node) || !Self::is_routable_node(&target_node) {
             return false;

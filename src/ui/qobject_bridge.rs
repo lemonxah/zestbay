@@ -9,6 +9,7 @@ pub mod qobject {
         #[qobject]
         #[qml_element]
         #[qproperty(bool, patchbay_enabled)]
+        #[qproperty(bool, OS_control_enabled)]
         #[qproperty(i32, active_plugin_count)]
         #[qproperty(i32, node_count)]
         #[qproperty(i32, link_count)]
@@ -115,6 +116,9 @@ pub mod qobject {
 
         #[qinvokable]
         fn snapshot_rules(self: Pin<&mut Self>);
+
+        #[qinvokable]
+        fn toggle_OS_control(self: Pin<&mut Self>, enabled: bool);
 
         #[qinvokable]
         fn toggle_patchbay(self: Pin<&mut Self>, enabled: bool);
@@ -341,6 +345,7 @@ impl BridgeSplitState {
 }
 
 pub struct AppControllerRust {
+    OS_control_enabled: bool,
     patchbay_enabled: bool,
     active_plugin_count: i32,
     node_count: i32,
@@ -391,6 +396,7 @@ pub struct AppControllerRust {
 impl Default for AppControllerRust {
     fn default() -> Self {
         Self {
+            OS_control_enabled: true,
             patchbay_enabled: true,
             active_plugin_count: 0,
             node_count: 0,
@@ -2575,6 +2581,12 @@ impl qobject::AppController {
         log::info!("Snapshot: replaced rules with current connections");
     }
 
+    pub fn toggle_OS_control(mut self: Pin<&mut Self>, enabled: bool) {
+        if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
+            patchbay.OS_managed = enabled;
+        }
+        self.as_mut().set_OS_control_enabled(enabled);
+    }
     pub fn toggle_patchbay(mut self: Pin<&mut Self>, enabled: bool) {
         if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
             patchbay.enabled = enabled;
@@ -2710,6 +2722,11 @@ impl qobject::AppController {
             "close_to_tray" => {
                 if let Ok(v) = val_str.parse::<bool>() {
                     self.as_mut().rust_mut().prefs.close_to_tray = v;
+                }
+            }
+            "OS_controlled" => {
+                if let Ok(v) = val_str.parse::<bool>() {
+                    self.as_mut().rust_mut().prefs.OS_controlled = v;
                 }
             }
             "pw_tick_interval_ms" => {
@@ -3553,6 +3570,9 @@ struct Preferences {
     #[serde(default = "Preferences::default_auto_learn_rules")]
     pub auto_learn_rules: bool,
 
+    #[serde(default = "Preferences::default_OS_controlled")]
+    pub OS_controlled: bool,
+
     #[serde(default = "Preferences::default_start_minimized")]
     pub start_minimized: bool,
 
@@ -3582,6 +3602,9 @@ impl Preferences {
     fn default_auto_learn_rules() -> bool {
         true
     }
+    fn default_OS_controlled() -> bool {
+        true
+    }
     fn default_start_minimized() -> bool {
         false
     }
@@ -3606,6 +3629,7 @@ impl Default for Preferences {
             auto_learn_rules: Self::default_auto_learn_rules(),
             start_minimized: Self::default_start_minimized(),
             close_to_tray: Self::default_close_to_tray(),
+            OS_controlled: Self::default_OS_controlled(),
             pw_tick_interval_ms: Self::default_pw_tick_interval_ms(),
             pw_operation_cooldown_ms: Self::default_pw_operation_cooldown_ms(),
         }

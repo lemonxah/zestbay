@@ -39,6 +39,9 @@ ApplicationWindow {
         if (key === "poll_interval_ms") {
             pollIntervalChanged(value);
         }
+        if (key === "OS_controlled") {
+            controller.toggle_OS_control(value)
+        }
     }
 
     ColumnLayout {
@@ -85,6 +88,39 @@ ApplicationWindow {
                     font.bold: true
                     font.pointSize: 11
                     opacity: 0.8
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 12
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 2
+
+                        Label {
+                            text: "OS Controlled Mode"
+                            font.bold: true
+                        }
+                        Label {
+                            text: "Allow the graph to be partially controlled by the OS, even when the patchbay rules are enabled.\n\n (Sets the default, the checkmark in the Patchbay menu does not affect this value, and it will always return to this upon restart.)"
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                            font.pointSize: 9
+                            opacity: 0.5
+                        }
+                    }
+
+                    Switch {
+                        checked: prefs.OS_controlled !== undefined ? prefs.OS_controlled : false
+                        onToggled: setPref("OS_controlled", checked)
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: 1
+                    color: Theme.separatorLight
                 }
 
                 RowLayout {

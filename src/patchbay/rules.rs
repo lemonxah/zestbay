@@ -18,6 +18,7 @@ pub struct AutoConnectRule {
     pub target_node_id: Option<ObjectId>,
     #[serde(default)]
     pub port_mappings: Vec<PortMapping>,
+    pub OS_managed: bool,
     pub enabled: bool,
 }
 
@@ -37,6 +38,7 @@ impl AutoConnectRule {
             target_node_type,
             target_node_id,
             port_mappings: Vec::new(),
+            OS_managed: true,
             enabled: true,
         }
     }

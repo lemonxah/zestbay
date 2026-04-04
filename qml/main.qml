@@ -206,6 +206,12 @@ ApplicationWindow {
                 checked: controller.patchbay_enabled
                 onToggled: controller.toggle_patchbay(checked)
             }
+             Action {
+                text: "OS Controlled Mode"
+                checkable: true
+                checked: controller.OS_control_enabled
+                onToggled: controller.toggle_OS_control(checked)
+            }
             MenuSeparator {}
             Action {
                 text: "Edit Rules..."
