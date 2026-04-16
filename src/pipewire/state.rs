@@ -141,6 +141,27 @@ impl GraphState {
         port
     }
 
+    /// Remove all links that reference the given port and return their IDs.
+    /// Call this after `remove_port` so that stale links don't linger in the
+    /// graph when PipeWire removes ports before their parent node.
+    pub fn cleanup_port(&self, port_id: ObjectId) -> Vec<ObjectId> {
+        let mut links = self.links.write();
+        let mut removed = Vec::new();
+        links.retain(|&id, l| {
+            if l.output_port_id == port_id || l.input_port_id == port_id {
+                removed.push(id);
+                false
+            } else {
+                true
+            }
+        });
+        if !removed.is_empty() {
+            drop(links);
+            self.mark_changed();
+        }
+        removed
+    }
+
     pub fn get_port(&self, id: ObjectId) -> Option<Port> {
         self.ports.read().get(&id).cloned()
     }
@@ -277,7 +298,9 @@ impl GraphState {
         ports
     }
 
-    pub fn cleanup_node(&self, node_id: ObjectId) {
+    /// Remove all ports and links belonging to a node.  Returns the IDs of
+    /// links that were removed so the caller can emit proper events.
+    pub fn cleanup_node(&self, node_id: ObjectId) -> Vec<ObjectId> {
         let port_ids: Vec<ObjectId> = self
             .ports
             .read()
@@ -286,10 +309,18 @@ impl GraphState {
             .map(|p| p.id)
             .collect();
 
+        let mut removed_links = Vec::new();
         {
             let mut links = self.links.write();
-            links.retain(|_, l| {
-                !port_ids.contains(&l.output_port_id) && !port_ids.contains(&l.input_port_id)
+            links.retain(|&id, l| {
+                if port_ids.contains(&l.output_port_id)
+                    || port_ids.contains(&l.input_port_id)
+                {
+                    removed_links.push(id);
+                    false
+                } else {
+                    true
+                }
             });
         }
 
@@ -301,5 +332,6 @@ impl GraphState {
         }
 
         self.mark_changed();
+        removed_links
     }
 }

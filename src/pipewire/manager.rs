@@ -119,6 +119,20 @@ fn run_pipewire_thread(
         Rc::new(RefCell::new(Instant::now() - Duration::from_secs(1)));
     let changes_pending: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
 
+    // Create PipeWire command channel before the registry listener so that
+    // global_remove can send cleanup commands for MIDI device removal.
+    let (pw_cmd_tx, pw_cmd_rx) = pipewire::channel::channel();
+    std::thread::spawn({
+        let pw_cmd_tx = pw_cmd_tx.clone();
+        move || {
+            while let Ok(cmd) = cmd_rx.recv() {
+                if pw_cmd_tx.send(cmd).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
     let _registry_listener = {
         let graph = graph.clone();
         let event_tx = event_tx.clone();
@@ -186,13 +200,42 @@ fn run_pipewire_thread(
                 let graph = graph.clone();
                 let event_tx = event_tx.clone();
                 let changes_pending = changes_pending.clone();
+                let pw_cmd_tx = pw_cmd_tx.clone();
 
                 move |id| {
-                    if graph.remove_node(id).is_some() {
-                        graph.cleanup_node(id);
+                    if let Some(node) = graph.remove_node(id) {
+                        // If a MIDI bridge node was removed (e.g. USB MIDI device
+                        // unplugged), clean up any MIDI mappings that referenced it
+                        // so stale mappings don't linger in the table.
+                        if node.is_bridge && node.media_type == Some(MediaType::Midi) {
+                            let device_name = node.display_name().to_string();
+                            log::info!(
+                                "MIDI device removed: {} (node {}), cleaning up mappings",
+                                device_name, id,
+                            );
+                            let _ = pw_cmd_tx.send(PwCommand::RemoveMidiMappingsForDevice {
+                                device_name,
+                            });
+                        }
+                        let removed_link_ids = graph.cleanup_node(id);
+                        // Destroy lingering PipeWire link objects and emit
+                        // LinkRemoved so the UI and persistence layer know.
+                        for link_id in removed_link_ids {
+                            let _ = pw_cmd_tx.send(PwCommand::Disconnect { link_id });
+                            let _ = event_tx.send(PwEvent::LinkRemoved(link_id));
+                        }
                         let _ = event_tx.send(PwEvent::NodeRemoved(id));
                         *changes_pending.borrow_mut() = true;
                     } else if let Some(port) = graph.remove_port(id) {
+                        // Also remove any links that referenced this port.
+                        // PipeWire may remove ports before their parent node,
+                        // so stale links must be cleaned up here too.
+                        let removed_link_ids = graph.cleanup_port(id);
+                        // Destroy lingering PipeWire link objects.
+                        for link_id in removed_link_ids {
+                            let _ = pw_cmd_tx.send(PwCommand::Disconnect { link_id });
+                            let _ = event_tx.send(PwEvent::LinkRemoved(link_id));
+                        }
                         let _ = event_tx.send(PwEvent::PortRemoved {
                             port_id: id,
                             node_id: port.node_id,
@@ -206,18 +249,6 @@ fn run_pipewire_thread(
             })
             .register()
     };
-
-    let (pw_cmd_tx, pw_cmd_rx) = pipewire::channel::channel();
-    std::thread::spawn({
-        let pw_cmd_tx = pw_cmd_tx.clone();
-        move || {
-            while let Ok(cmd) = cmd_rx.recv() {
-                if pw_cmd_tx.send(cmd).is_err() {
-                    break;
-                }
-            }
-        }
-    });
 
     let (internal_tx, internal_rx) = pipewire::channel::channel::<InternalOp>();
 
@@ -381,6 +412,22 @@ fn run_pipewire_thread(
                         &vst3_filters,
                     );
                 }
+                PwCommand::RemoveMidiMappingsForDevice { device_name } => {
+                    midi_mapping_table.borrow_mut().remove_by_device(&device_name);
+                    rebuild_resolved_mappings(
+                        &midi_mapping_table,
+                        &lv2_instances,
+                        &lv2_filters,
+                        &clap_instances,
+                        &clap_filters,
+                        &vst3_instances,
+                        &vst3_filters,
+                    );
+                    log::info!(
+                        "Cleaned up MIDI mappings for removed device: {}",
+                        device_name,
+                    );
+                }
                 cmd => {
                     let op = match cmd {
                         PwCommand::Connect {
@@ -419,7 +466,8 @@ fn run_pipewire_thread(
                         | PwCommand::CancelMidiLearn
                         | PwCommand::AddMidiMapping(..)
                         | PwCommand::RemoveMidiMapping(..)
-                        | PwCommand::RemoveMidiMappingsForPlugin { .. } => unreachable!(),
+                        | PwCommand::RemoveMidiMappingsForPlugin { .. }
+                        | PwCommand::RemoveMidiMappingsForDevice { .. } => unreachable!(),
                     };
                     pending_ops.borrow_mut().push(op);
                 }

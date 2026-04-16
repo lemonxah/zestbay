@@ -517,6 +517,14 @@ impl PatchbayManager {
         let out_port = self.graph.get_port(link.output_port_id);
         let in_port = self.graph.get_port(link.input_port_id);
 
+        // If either port has already been removed from the graph (e.g. during
+        // device disconnection), the link is stale and will be cleaned up by
+        // PipeWire.  Don't actively try to remove it — doing so can race with
+        // PipeWire's own cleanup and disrupt the audio graph.
+        if out_port.is_none() || in_port.is_none() {
+            return false;
+        }
+
         let link_authorized_by = |rule: &AutoConnectRule| -> bool {
             if !rule.enabled {
                 return false;
@@ -536,13 +544,12 @@ impl PatchbayManager {
                 return true;
             }
 
-            if let (Some(out_p), Some(in_p)) = (&out_port, &in_port) {
-                rule.port_mappings
-                    .iter()
-                    .any(|m| m.output_port_name == out_p.name && m.input_port_name == in_p.name)
-            } else {
-                false
-            }
+            // Safe to unwrap: we checked both are Some above
+            let out_p = out_port.as_ref().unwrap();
+            let in_p = in_port.as_ref().unwrap();
+            rule.port_mappings
+                .iter()
+                .any(|m| m.output_port_name == out_p.name && m.input_port_name == in_p.name)
         };
 
         let has_any_rule_for_source = self.rules.iter().any(|r| {

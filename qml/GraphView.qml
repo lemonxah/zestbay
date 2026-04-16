@@ -201,9 +201,11 @@ Item {
             var n = nodes[ni]
             if (!(n.id in nodePositions)) {
                 var key = n.layoutKey || ""
+                var restoredFromLayout = false
                 if (key && savedLayout[key]) {
                     var saved = savedLayout[key]
                     nodePositions[n.id] = { x: saved[0], y: saved[1] }
+                    restoredFromLayout = true
                 } else if (n.type === "Plugin" && pendingPluginPosition) {
                     nodePositions[n.id] = { x: pendingPluginPosition.x, y: pendingPluginPosition.y }
                     pendingPluginPosition = null
@@ -217,7 +219,12 @@ Item {
                     pinnedNodes = pinnedNodes
                     persistPinned()
                 }
-                resolveNodeOverlap(n)
+                // Don't resolve overlap for pinned nodes restored from saved layout —
+                // the user placed them there intentionally.
+                var isPinned = key && pinnedNodes[key]
+                if (!(isPinned && restoredFromLayout)) {
+                    resolveNodeOverlap(n)
+                }
             }
         }
 

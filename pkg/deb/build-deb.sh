@@ -52,8 +52,7 @@ Version: ${VERSION}
 Section: sound
 Priority: optional
 Architecture: ${ARCH}
-Depends: pipewire (>= 0.3), libqt6core6t64 | libqt6core6, libqt6gui6t64 | libqt6gui6, libqt6qml6, libqt6quick6, liblilv-0-0, libx11-6, libdbus-1-3
-Recommends: libsuil-0-0
+Depends: pipewire (>= 0.3), libqt6core6t64 | libqt6core6, libqt6gui6t64 | libqt6gui6, libqt6qml6, libqt6quick6, liblilv-0-0, libx11-6, libdbus-1-3, libsuil-0-0
 Installed-Size: ${INSTALLED_SIZE}
 Maintainer: Ryno Kotze <lemon.xah@gmail.com>
 Homepage: https://github.com/lemonxah/zestbay

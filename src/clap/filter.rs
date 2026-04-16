@@ -74,6 +74,12 @@ impl ClapFilterNode {
             .unwrap_or_else(|_| CString::new("CLAP Plugin").unwrap());
         let instance_id_str = config.instance_id.to_string();
 
+        // Instrument plugins (audio_inputs == 0) must NOT be passive:
+        // their only input is MIDI, and when the MIDI device disconnects
+        // PipeWire would stop scheduling a passive node with no connected
+        // inputs, killing the audio output chain.
+        let is_passive = config.audio_inputs > 0;
+
         let props = unsafe {
             let p = pipewire::sys::pw_properties_new(
                 c_str(b"media.type\0"),
@@ -84,10 +90,13 @@ impl ClapFilterNode {
                 c_str(b"DSP\0"),
                 c_str(b"node.virtual\0"),
                 c_str(b"true\0"),
-                c_str(b"node.passive\0"),
-                c_str(b"true\0"),
                 std::ptr::null::<std::os::raw::c_char>(),
             );
+            if is_passive {
+                let key = CString::new("node.passive").unwrap();
+                let val = CString::new("true").unwrap();
+                pipewire::sys::pw_properties_set(p, key.as_ptr(), val.as_ptr());
+            }
             let key = CString::new("node.name").unwrap();
             let val = CString::new(config.display_name.as_str()).unwrap();
             pipewire::sys::pw_properties_set(p, key.as_ptr(), val.as_ptr());

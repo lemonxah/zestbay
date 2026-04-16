@@ -19,6 +19,7 @@ BuildRequires:  lilv-devel
 BuildRequires:  lv2-devel
 BuildRequires:  libX11-devel
 BuildRequires:  dbus-devel
+BuildRequires:  suil-devel
 
 Requires:       pipewire
 Requires:       qt6-qtbase
@@ -26,6 +27,7 @@ Requires:       qt6-qtdeclarative
 Requires:       lilv
 Requires:       libX11
 Requires:       dbus
+Requires:       suil
 
 %description
 ZestBay is a PipeWire patchbay application with LV2, CLAP, and VST3

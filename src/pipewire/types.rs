@@ -168,6 +168,9 @@ pub enum PwCommand {
     RemoveMidiMappingsForPlugin {
         instance_id: u64,
     },
+    RemoveMidiMappingsForDevice {
+        device_name: String,
+    },
 }
 
 #[derive(Debug, Clone)]

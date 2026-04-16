@@ -15,6 +15,7 @@ depends=(
   'lv2'
   'libx11'
   'dbus'
+  'suil'
 )
 makedepends=(
   'rust'
@@ -29,9 +30,6 @@ makedepends=(
   'lv2'
   'libx11'
   'git'
-)
-optdepends=(
-  'suil: LV2 UI toolkit wrapping for GTK-based plugin UIs'
 )
 provides=('zestbay')
 conflicts=('zestbay')
