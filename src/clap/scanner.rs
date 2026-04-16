@@ -333,4 +333,136 @@ fn category_from_features(features: &[String]) -> PluginCategory {
     PluginCategory::Other("CLAP".to_string())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
 
+    // ---- category_from_features ----
+
+    #[test]
+    fn category_reverb() {
+        assert_eq!(category_from_features(&[s("reverb")]), PluginCategory::Reverb);
+    }
+
+    #[test]
+    fn category_delay() {
+        assert_eq!(category_from_features(&[s("delay")]), PluginCategory::Delay);
+    }
+
+    #[test]
+    fn category_distortion() {
+        assert_eq!(category_from_features(&[s("distortion")]), PluginCategory::Distortion);
+    }
+
+    #[test]
+    fn category_compressor() {
+        assert_eq!(category_from_features(&[s("compressor")]), PluginCategory::Compressor);
+    }
+
+    #[test]
+    fn category_limiter() {
+        assert_eq!(category_from_features(&[s("limiter")]), PluginCategory::Limiter);
+    }
+
+    #[test]
+    fn category_eq_variants() {
+        assert_eq!(category_from_features(&[s("equalizer")]), PluginCategory::Equaliser);
+        assert_eq!(category_from_features(&[s("eq")]), PluginCategory::Equaliser);
+    }
+
+    #[test]
+    fn category_filter() {
+        assert_eq!(category_from_features(&[s("filter")]), PluginCategory::Filter);
+    }
+
+    #[test]
+    fn category_chorus_variants() {
+        assert_eq!(category_from_features(&[s("chorus")]), PluginCategory::Chorus);
+        assert_eq!(category_from_features(&[s("flanger")]), PluginCategory::Chorus);
+        assert_eq!(category_from_features(&[s("phaser")]), PluginCategory::Chorus);
+    }
+
+    #[test]
+    fn category_amplifier() {
+        assert_eq!(category_from_features(&[s("amplifier")]), PluginCategory::Amplifier);
+    }
+
+    #[test]
+    fn category_mixer() {
+        assert_eq!(category_from_features(&[s("mixer")]), PluginCategory::Mixer);
+    }
+
+    #[test]
+    fn category_instrument_variants() {
+        assert_eq!(category_from_features(&[s("instrument")]), PluginCategory::Instrument);
+        assert_eq!(category_from_features(&[s("synthesizer")]), PluginCategory::Instrument);
+        assert_eq!(category_from_features(&[s("sampler")]), PluginCategory::Instrument);
+    }
+
+    #[test]
+    fn category_analyzer() {
+        assert_eq!(category_from_features(&[s("analyzer")]), PluginCategory::Analyser);
+    }
+
+    #[test]
+    fn category_utility() {
+        assert_eq!(category_from_features(&[s("utility")]), PluginCategory::Utility);
+    }
+
+    #[test]
+    fn category_spatial_variants() {
+        assert_eq!(category_from_features(&[s("spatial")]), PluginCategory::Spatial);
+        assert_eq!(category_from_features(&[s("surround")]), PluginCategory::Spatial);
+    }
+
+    #[test]
+    fn category_generator() {
+        assert_eq!(category_from_features(&[s("generator")]), PluginCategory::Generator);
+    }
+
+    #[test]
+    fn category_audio_effect_fallback() {
+        // "audio-effect" without specific category → Filter
+        assert_eq!(category_from_features(&[s("audio-effect")]), PluginCategory::Filter);
+    }
+
+    #[test]
+    fn category_instrument_broad_fallback() {
+        // "instrument" as a broad category feature (case-sensitive match)
+        assert_eq!(category_from_features(&[s("instrument")]), PluginCategory::Instrument);
+    }
+
+    #[test]
+    fn category_unknown_fallback() {
+        assert_eq!(
+            category_from_features(&[s("something-unknown")]),
+            PluginCategory::Other("CLAP".to_string()),
+        );
+    }
+
+    #[test]
+    fn category_empty_features() {
+        assert_eq!(
+            category_from_features(&[]),
+            PluginCategory::Other("CLAP".to_string()),
+        );
+    }
+
+    #[test]
+    fn category_first_recognized_wins() {
+        assert_eq!(
+            category_from_features(&[s("audio-effect"), s("reverb"), s("delay")]),
+            PluginCategory::Reverb,
+        );
+    }
+
+    #[test]
+    fn category_case_insensitive() {
+        assert_eq!(category_from_features(&[s("REVERB")]), PluginCategory::Reverb);
+        assert_eq!(category_from_features(&[s("Delay")]), PluginCategory::Delay);
+    }
+
+    fn s(v: &str) -> String {
+        v.to_string()
+    }
+}

@@ -65,11 +65,39 @@ unsafe extern "C" {
         protocols: *mut c_ulong,
         count: c_int,
     ) -> c_int;
+    fn XSync(display: *mut c_void, discard: c_int) -> c_int;
+    fn XQueryTree(
+        display: *mut c_void,
+        window: c_ulong,
+        root_return: *mut c_ulong,
+        parent_return: *mut c_ulong,
+        children_return: *mut *mut c_ulong,
+        nchildren_return: *mut std::os::raw::c_uint,
+    ) -> c_int;
+    fn XSetInputFocus(
+        display: *mut c_void,
+        focus: c_ulong,
+        revert_to: c_int,
+        time: c_ulong,
+    ) -> c_int;
+    fn XFree(data: *mut c_void) -> c_int;
 }
 
 const STRUCTURE_NOTIFY_MASK: c_long = 1 << 17;
 const SUBSTRUCTURE_NOTIFY_MASK: c_long = 1 << 19;
 const EXPOSURE_MASK: c_long = 1 << 15;
+const FOCUS_CHANGE_MASK: c_long = 1 << 21;
+
+// X11 event types
+const FOCUS_IN: i32 = 9;
+const MAP_NOTIFY: i32 = 19;
+const REPARENT_NOTIFY: i32 = 21;
+const CONFIGURE_NOTIFY: i32 = 22;
+const CLIENT_MESSAGE: i32 = 33;
+
+// XSetInputFocus revert_to constants
+const REVERT_TO_PARENT: c_int = 2;
+const CURRENT_TIME: c_ulong = 0;
 
 // ---------------------------------------------------------------------------
 // IPlugFrame implementation (COM object the plugin calls for resize)
@@ -385,7 +413,7 @@ pub unsafe fn open_vst3_gui(
         XSelectInput(
             display,
             window,
-            STRUCTURE_NOTIFY_MASK | SUBSTRUCTURE_NOTIFY_MASK | EXPOSURE_MASK,
+            STRUCTURE_NOTIFY_MASK | SUBSTRUCTURE_NOTIFY_MASK | EXPOSURE_MASK | FOCUS_CHANGE_MASK,
         );
 
         let wm_delete = XInternAtom(display, c"WM_DELETE_WINDOW".as_ptr(), 0);
@@ -394,6 +422,10 @@ pub unsafe fn open_vst3_gui(
 
         XMapWindow(display, window);
         XFlush(display);
+        // Ensure the window is fully realized before attaching the plugin view.
+        // Yabridge needs the parent window to exist on the X server before it
+        // can reparent its Wine window into it.
+        XSync(display, 0);
 
         // Attach the plugin view to our X11 window
         let attached = ((*(*view).vtbl).attached)(
@@ -464,10 +496,42 @@ pub unsafe fn open_vst3_gui(
     }
 }
 
+/// Query the first child window of `parent` via XQueryTree.
+/// Returns 0 if no children found.
+unsafe fn find_child_window(display: *mut c_void, parent: c_ulong) -> c_ulong {
+    unsafe {
+        let mut root_ret: c_ulong = 0;
+        let mut parent_ret: c_ulong = 0;
+        let mut children: *mut c_ulong = std::ptr::null_mut();
+        let mut nchildren: std::os::raw::c_uint = 0;
+
+        let status = XQueryTree(
+            display,
+            parent,
+            &mut root_ret,
+            &mut parent_ret,
+            &mut children,
+            &mut nchildren,
+        );
+
+        let child = if status != 0 && nchildren > 0 && !children.is_null() {
+            *children
+        } else {
+            0
+        };
+
+        if !children.is_null() {
+            XFree(children as *mut c_void);
+        }
+
+        child
+    }
+}
+
 /// X11 event loop for a VST3 GUI window.
 fn x11_event_loop(
     display: *mut c_void,
-    _window: c_ulong,
+    window: c_ulong,
     wm_delete_atom: c_ulong,
     instance_id: PluginInstanceId,
     running: std::sync::Arc<AtomicBool>,
@@ -475,6 +539,10 @@ fn x11_event_loop(
     run_loop: *mut HostRunLoop,
 ) {
     let tick = std::time::Duration::from_millis(8);
+
+    // Track the plugin's embedded child window (e.g. yabridge's Wine window).
+    // Initially 0 — discovered via ReparentNotify/MapNotify from XQueryTree.
+    let mut child_window: c_ulong = 0;
 
     while running.load(Ordering::Acquire) {
         unsafe {
@@ -486,24 +554,48 @@ fn x11_event_loop(
                 XNextEvent(display, &mut event);
 
                 let event_type = *(event.as_ptr() as *const i32);
-                if event_type == 33 {
-                    // ClientMessage
-                    let atom = *((event.as_ptr() as *const u8).add(56) as *const c_ulong);
-                    log::debug!(
-                        "VST3 GUI: ClientMessage atom={} wm_delete={} match={}",
-                        atom, wm_delete_atom, atom == wm_delete_atom,
-                    );
-                    if atom == wm_delete_atom {
-                        log::info!(
-                            "VST3 GUI window close requested (instance {})",
-                            instance_id
-                        );
-                        running.store(false, Ordering::Release);
-                        let _ = cmd_tx.send(crate::pipewire::PwCommand::ClosePluginUI {
-                            instance_id,
-                        });
-                        break;
+                match event_type {
+                    CLIENT_MESSAGE => {
+                        let atom = *((event.as_ptr() as *const u8).add(56) as *const c_ulong);
+                        if atom == wm_delete_atom {
+                            log::info!(
+                                "VST3 GUI window close requested (instance {})",
+                                instance_id
+                            );
+                            running.store(false, Ordering::Release);
+                            let _ = cmd_tx.send(crate::pipewire::PwCommand::ClosePluginUI {
+                                instance_id,
+                            });
+                            break;
+                        }
                     }
+                    REPARENT_NOTIFY | MAP_NOTIFY => {
+                        // A child window was reparented into or mapped within
+                        // our host window. This happens when yabridge embeds
+                        // its Wine window. Detect it so we can forward focus.
+                        let detected = find_child_window(display, window);
+                        if detected != 0 && detected != child_window {
+                            child_window = detected;
+                            log::info!(
+                                "VST3 GUI: child window 0x{:x} detected (instance {})",
+                                child_window, instance_id,
+                            );
+                        }
+                    }
+                    FOCUS_IN => {
+                        // Our host window received focus. Forward it to the
+                        // plugin's child window so keyboard input reaches the
+                        // embedded UI (critical for yabridge/Wine windows).
+                        if child_window != 0 {
+                            XSetInputFocus(display, child_window, REVERT_TO_PARENT, CURRENT_TIME);
+                            XFlush(display);
+                        }
+                    }
+                    CONFIGURE_NOTIFY => {
+                        // Child window resized — logged for debugging.
+                        // Actual resize coordination is handled by IPlugFrame::resizeView.
+                    }
+                    _ => {}
                 }
             }
         }

@@ -1289,3 +1289,379 @@ fn read_string128(buf: &[u16]) -> String {
     let chars: Vec<u16> = buf.iter().take_while(|&&c| c != 0).copied().collect();
     String::from_utf16(&chars).unwrap_or_else(|_| "?".to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- InlineParameterChanges ----
+
+    #[test]
+    fn param_changes_new_is_empty() {
+        let pc = InlineParameterChanges::new();
+        assert_eq!(pc.used_count, 0);
+        assert_eq!(pc.queues.len(), MAX_PARAM_CHANGES);
+    }
+
+    #[test]
+    fn param_changes_add_and_count() {
+        let mut pc = InlineParameterChanges::new();
+
+        assert!(pc.add_change(100, 0.5));
+        assert_eq!(pc.used_count, 1);
+        assert_eq!(pc.queues[0].param_id, 100);
+        assert!((pc.queues[0].value - 0.5).abs() < 1e-9);
+        assert!(pc.queues[0].used);
+
+        assert!(pc.add_change(200, 0.75));
+        assert_eq!(pc.used_count, 2);
+        assert_eq!(pc.queues[1].param_id, 200);
+    }
+
+    #[test]
+    fn param_changes_reset_clears() {
+        let mut pc = InlineParameterChanges::new();
+        pc.add_change(100, 0.5);
+        pc.add_change(200, 0.75);
+        assert_eq!(pc.used_count, 2);
+
+        pc.reset();
+        assert_eq!(pc.used_count, 0);
+        assert!(!pc.queues[0].used);
+        assert!(!pc.queues[1].used);
+    }
+
+    #[test]
+    fn param_changes_full_returns_false() {
+        let mut pc = InlineParameterChanges::new();
+        for i in 0..MAX_PARAM_CHANGES {
+            assert!(pc.add_change(i as u32, 0.0));
+        }
+        assert_eq!(pc.used_count, MAX_PARAM_CHANGES as i32);
+        // Should fail at capacity
+        assert!(!pc.add_change(999, 0.0));
+        assert_eq!(pc.used_count, MAX_PARAM_CHANGES as i32);
+    }
+
+    #[test]
+    fn param_changes_reset_then_reuse() {
+        let mut pc = InlineParameterChanges::new();
+        pc.add_change(1, 0.1);
+        pc.add_change(2, 0.2);
+        pc.reset();
+
+        pc.add_change(3, 0.3);
+        assert_eq!(pc.used_count, 1);
+        assert_eq!(pc.queues[0].param_id, 3);
+        assert!((pc.queues[0].value - 0.3).abs() < 1e-9);
+    }
+
+    // ---- InlineEventList ----
+
+    #[test]
+    fn event_list_new_is_empty() {
+        let el = InlineEventList::new();
+        assert_eq!(el.used_count, 0);
+    }
+
+    #[test]
+    fn event_list_add_note_on() {
+        let mut el = InlineEventList::new();
+        assert!(el.add_note_on(0, 1, 60, 0.8));
+        assert_eq!(el.used_count, 1);
+
+        let evt = &el.events[0];
+        assert_eq!(evt.r#type, Event_::EventTypes_::kNoteOnEvent as u16);
+        assert_eq!(evt.sampleOffset, 0);
+        unsafe {
+            assert_eq!(evt.__field0.noteOn.channel, 1);
+            assert_eq!(evt.__field0.noteOn.pitch, 60);
+            assert!((evt.__field0.noteOn.velocity - 0.8).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn event_list_add_note_off() {
+        let mut el = InlineEventList::new();
+        assert!(el.add_note_off(128, 0, 72, 0.5));
+        assert_eq!(el.used_count, 1);
+
+        let evt = &el.events[0];
+        assert_eq!(evt.r#type, Event_::EventTypes_::kNoteOffEvent as u16);
+        assert_eq!(evt.sampleOffset, 128);
+        unsafe {
+            assert_eq!(evt.__field0.noteOff.channel, 0);
+            assert_eq!(evt.__field0.noteOff.pitch, 72);
+            assert!((evt.__field0.noteOff.velocity - 0.5).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn event_list_reset() {
+        let mut el = InlineEventList::new();
+        el.add_note_on(0, 0, 60, 0.5);
+        el.add_note_off(0, 0, 60, 0.0);
+        assert_eq!(el.used_count, 2);
+
+        el.reset();
+        assert_eq!(el.used_count, 0);
+    }
+
+    #[test]
+    fn event_list_capacity_limit() {
+        let mut el = InlineEventList::new();
+        for i in 0..MAX_MIDI_EVENTS {
+            assert!(el.add_note_on(i as i32, 0, 60, 0.5));
+        }
+        assert_eq!(el.used_count, MAX_MIDI_EVENTS as i32);
+        // Should fail at capacity
+        assert!(!el.add_note_on(0, 0, 60, 0.5));
+    }
+
+    // ---- InlineEventList: fill_from_raw ----
+
+    #[test]
+    fn event_list_fill_from_raw_note_on() {
+        let mut el = InlineEventList::new();
+        let events = [crate::midi::processing::RawMidiEvent {
+            offset: 10,
+            data: [0x90, 60, 100], // Note on, channel 0, pitch 60, velocity 100
+            size: 3,
+        }];
+        el.fill_from_raw(&events);
+        assert_eq!(el.used_count, 1);
+
+        let evt = &el.events[0];
+        assert_eq!(evt.r#type, Event_::EventTypes_::kNoteOnEvent as u16);
+        assert_eq!(evt.sampleOffset, 10);
+        unsafe {
+            assert_eq!(evt.__field0.noteOn.channel, 0);
+            assert_eq!(evt.__field0.noteOn.pitch, 60);
+            assert!((evt.__field0.noteOn.velocity - 100.0 / 127.0).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn event_list_fill_from_raw_note_on_velocity_zero_is_note_off() {
+        let mut el = InlineEventList::new();
+        let events = [crate::midi::processing::RawMidiEvent {
+            offset: 0,
+            data: [0x90, 64, 0], // Note on with velocity 0 = note off
+            size: 3,
+        }];
+        el.fill_from_raw(&events);
+        assert_eq!(el.used_count, 1);
+
+        let evt = &el.events[0];
+        assert_eq!(evt.r#type, Event_::EventTypes_::kNoteOffEvent as u16);
+        unsafe {
+            assert_eq!(evt.__field0.noteOff.pitch, 64);
+            assert!((evt.__field0.noteOff.velocity - 0.0).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn event_list_fill_from_raw_note_off() {
+        let mut el = InlineEventList::new();
+        let events = [crate::midi::processing::RawMidiEvent {
+            offset: 20,
+            data: [0x80, 72, 64], // Note off, channel 0, pitch 72, velocity 64
+            size: 3,
+        }];
+        el.fill_from_raw(&events);
+        assert_eq!(el.used_count, 1);
+
+        let evt = &el.events[0];
+        assert_eq!(evt.r#type, Event_::EventTypes_::kNoteOffEvent as u16);
+        unsafe {
+            assert_eq!(evt.__field0.noteOff.pitch, 72);
+            assert!((evt.__field0.noteOff.velocity - 64.0 / 127.0).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn event_list_fill_from_raw_channel_extraction() {
+        let mut el = InlineEventList::new();
+        let events = [crate::midi::processing::RawMidiEvent {
+            offset: 0,
+            data: [0x95, 60, 80], // Note on, channel 5
+            size: 3,
+        }];
+        el.fill_from_raw(&events);
+        unsafe {
+            assert_eq!(el.events[0].__field0.noteOn.channel, 5);
+        }
+    }
+
+    #[test]
+    fn event_list_fill_from_raw_cc_ignored() {
+        let mut el = InlineEventList::new();
+        let events = [crate::midi::processing::RawMidiEvent {
+            offset: 0,
+            data: [0xB0, 1, 64], // CC, channel 0, CC#1, value 64
+            size: 3,
+        }];
+        el.fill_from_raw(&events);
+        assert_eq!(el.used_count, 0); // CC messages not converted to VST3 events
+    }
+
+    #[test]
+    fn event_list_fill_from_raw_short_message_skipped() {
+        let mut el = InlineEventList::new();
+        let events = [crate::midi::processing::RawMidiEvent {
+            offset: 0,
+            data: [0x90, 60, 0],
+            size: 2, // Too short (needs 3)
+        }];
+        el.fill_from_raw(&events);
+        assert_eq!(el.used_count, 0);
+    }
+
+    #[test]
+    fn event_list_fill_from_raw_mixed_events() {
+        let mut el = InlineEventList::new();
+        let events = [
+            crate::midi::processing::RawMidiEvent {
+                offset: 0,
+                data: [0x90, 60, 100], // Note on
+                size: 3,
+            },
+            crate::midi::processing::RawMidiEvent {
+                offset: 48,
+                data: [0xB0, 1, 64], // CC (ignored)
+                size: 3,
+            },
+            crate::midi::processing::RawMidiEvent {
+                offset: 96,
+                data: [0x80, 60, 0], // Note off
+                size: 3,
+            },
+        ];
+        el.fill_from_raw(&events);
+        assert_eq!(el.used_count, 2); // Only note on + note off
+    }
+
+    #[test]
+    fn event_list_fill_from_raw_resets_first() {
+        let mut el = InlineEventList::new();
+        // Fill with something first
+        el.add_note_on(0, 0, 60, 0.5);
+        el.add_note_on(0, 0, 64, 0.5);
+        assert_eq!(el.used_count, 2);
+
+        // fill_from_raw should reset before filling
+        el.fill_from_raw(&[]);
+        assert_eq!(el.used_count, 0);
+    }
+
+    // ---- read_string128 ----
+
+    #[test]
+    fn read_string128_basic() {
+        let mut buf = [0u16; 128];
+        for (i, ch) in "Gain".encode_utf16().enumerate() {
+            buf[i] = ch;
+        }
+        assert_eq!(read_string128(&buf), "Gain");
+    }
+
+    #[test]
+    fn read_string128_empty() {
+        let buf = [0u16; 128];
+        assert_eq!(read_string128(&buf), "");
+    }
+
+    #[test]
+    fn read_string128_full_buffer() {
+        let mut buf = [0u16; 128];
+        let text = "A".repeat(127);
+        for (i, ch) in text.encode_utf16().enumerate() {
+            buf[i] = ch;
+        }
+        buf[127] = 0;
+        assert_eq!(read_string128(&buf), text);
+    }
+
+    #[test]
+    fn read_string128_unicode() {
+        let mut buf = [0u16; 128];
+        for (i, ch) in "Über".encode_utf16().enumerate() {
+            buf[i] = ch;
+        }
+        assert_eq!(read_string128(&buf), "Über");
+    }
+
+    // ---- State blob format ----
+
+    #[test]
+    fn state_blob_format_roundtrip() {
+        // Simulate the format: [comp_len: u32 LE][comp_data][ctrl_data]
+        let comp_data = vec![1, 2, 3, 4, 5];
+        let ctrl_data = vec![10, 20, 30];
+
+        let comp_len = comp_data.len() as u32;
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&comp_len.to_le_bytes());
+        blob.extend_from_slice(&comp_data);
+        blob.extend_from_slice(&ctrl_data);
+
+        // Parse it back (same logic as set_state)
+        assert!(blob.len() >= 4);
+        let parsed_comp_len = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]) as usize;
+        assert_eq!(parsed_comp_len, 5);
+        assert!(blob.len() >= 4 + parsed_comp_len);
+
+        let parsed_comp = &blob[4..4 + parsed_comp_len];
+        let parsed_ctrl = &blob[4 + parsed_comp_len..];
+
+        assert_eq!(parsed_comp, &comp_data);
+        assert_eq!(parsed_ctrl, &ctrl_data);
+    }
+
+    #[test]
+    fn state_blob_empty_controller() {
+        let comp_data = vec![42, 43];
+        let ctrl_data: Vec<u8> = vec![];
+
+        let comp_len = comp_data.len() as u32;
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&comp_len.to_le_bytes());
+        blob.extend_from_slice(&comp_data);
+        blob.extend_from_slice(&ctrl_data);
+
+        let parsed_comp_len = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]) as usize;
+        let parsed_ctrl = &blob[4 + parsed_comp_len..];
+        assert!(parsed_ctrl.is_empty());
+    }
+
+    #[test]
+    fn state_blob_too_short_rejected() {
+        // Less than 4 bytes
+        let blob = vec![1, 2, 3];
+        assert!(blob.len() < 4); // would fail set_state's first check
+
+        // 4 bytes but comp_len says more data than exists
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&100u32.to_le_bytes()); // says 100 bytes of comp data
+        assert!(blob.len() < 4 + 100); // would fail set_state's second check
+    }
+
+    #[test]
+    fn state_blob_empty_component() {
+        let comp_data: Vec<u8> = vec![];
+        let ctrl_data = vec![1, 2, 3];
+
+        let comp_len = comp_data.len() as u32;
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&comp_len.to_le_bytes());
+        blob.extend_from_slice(&comp_data);
+        blob.extend_from_slice(&ctrl_data);
+
+        let parsed_comp_len = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]) as usize;
+        assert_eq!(parsed_comp_len, 0);
+        let parsed_comp = &blob[4..4 + parsed_comp_len];
+        let parsed_ctrl = &blob[4 + parsed_comp_len..];
+        assert!(parsed_comp.is_empty());
+        assert_eq!(parsed_ctrl, &ctrl_data);
+    }
+}

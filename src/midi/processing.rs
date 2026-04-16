@@ -261,7 +261,7 @@ pub unsafe fn extract_midi_events(
 
 /// Returns `None` if the value should not be applied (e.g. toggle not triggered).
 #[inline]
-fn compute_mapped_value(
+pub(crate) fn compute_mapped_value(
     entry: &ResolvedMappingEntry,
     state: &mut MidiProcessingState,
     cc: u8,
@@ -305,5 +305,216 @@ fn compute_mapped_value(
                 Some(entry.min)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::midi::types::MidiCcSource;
+    use crate::plugin::types::*;
+    use std::sync::Arc;
+
+    fn make_entry(min: f32, max: f32, mode: MappingMode, is_log: bool) -> (ResolvedMappingEntry, SharedPortUpdates) {
+        let port_updates = Arc::new(PortUpdates {
+            control_inputs: vec![PortSlot {
+                port_index: 0,
+                value: AtomicF32::new(min),
+            }],
+            control_outputs: Vec::new(),
+            atom_outputs: Vec::new(),
+            atom_inputs: Vec::new(),
+        });
+        let entry = ResolvedMappingEntry {
+            port_updates: port_updates.clone(),
+            port_index: 0,
+            instance_id: 1,
+            min,
+            max,
+            mode,
+            source: MidiCcSource {
+                device_name: "test".to_string(),
+                channel: Some(0),
+                cc: 1,
+                message_type: MidiMessageType::Cc,
+            },
+            is_logarithmic: is_log,
+            is_toggle: mode == MappingMode::Toggle,
+        };
+        (entry, port_updates)
+    }
+
+    // ---- Continuous mode ----
+
+    #[test]
+    fn continuous_min_value() {
+        let (entry, _pu) = make_entry(0.0, 1.0, MappingMode::Continuous, false);
+        let mut state = MidiProcessingState::new();
+        let result = compute_mapped_value(&entry, &mut state, 1, 0);
+        assert!(result.is_some());
+        assert!((result.unwrap() - 0.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn continuous_max_value() {
+        let (entry, _pu) = make_entry(0.0, 1.0, MappingMode::Continuous, false);
+        let mut state = MidiProcessingState::new();
+        let result = compute_mapped_value(&entry, &mut state, 1, 127);
+        assert!(result.is_some());
+        assert!((result.unwrap() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn continuous_mid_value() {
+        let (entry, _pu) = make_entry(0.0, 1.0, MappingMode::Continuous, false);
+        let mut state = MidiProcessingState::new();
+        let result = compute_mapped_value(&entry, &mut state, 1, 64);
+        let expected = 64.0 / 127.0;
+        assert!((result.unwrap() - expected).abs() < 1e-5);
+    }
+
+    #[test]
+    fn continuous_custom_range() {
+        let (entry, _pu) = make_entry(20.0, 20000.0, MappingMode::Continuous, false);
+        let mut state = MidiProcessingState::new();
+
+        let at_zero = compute_mapped_value(&entry, &mut state, 1, 0).unwrap();
+        assert!((at_zero - 20.0).abs() < 1e-3);
+
+        let at_max = compute_mapped_value(&entry, &mut state, 1, 127).unwrap();
+        assert!((at_max - 20000.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn continuous_logarithmic() {
+        let (entry, _pu) = make_entry(20.0, 20000.0, MappingMode::Continuous, true);
+        let mut state = MidiProcessingState::new();
+
+        let at_zero = compute_mapped_value(&entry, &mut state, 1, 0).unwrap();
+        assert!((at_zero - 20.0).abs() < 1e-3);
+
+        let at_max = compute_mapped_value(&entry, &mut state, 1, 127).unwrap();
+        assert!((at_max - 20000.0).abs() < 1.0);
+
+        // Logarithmic midpoint should be geometric mean, not arithmetic
+        let at_mid = compute_mapped_value(&entry, &mut state, 1, 64).unwrap();
+        let linear_mid = (20.0 + 20000.0) / 2.0;
+        assert!(at_mid < linear_mid); // log curve is below linear at midpoint
+    }
+
+    // ---- Momentary mode ----
+
+    #[test]
+    fn momentary_above_threshold() {
+        let (entry, _pu) = make_entry(0.0, 1.0, MappingMode::Momentary, false);
+        let mut state = MidiProcessingState::new();
+        let result = compute_mapped_value(&entry, &mut state, 1, 64);
+        assert_eq!(result, Some(1.0));
+    }
+
+    #[test]
+    fn momentary_at_threshold() {
+        let (entry, _pu) = make_entry(0.0, 1.0, MappingMode::Momentary, false);
+        let mut state = MidiProcessingState::new();
+        let result = compute_mapped_value(&entry, &mut state, 1, 63);
+        assert_eq!(result, Some(0.0));
+    }
+
+    #[test]
+    fn momentary_zero() {
+        let (entry, _pu) = make_entry(0.0, 1.0, MappingMode::Momentary, false);
+        let mut state = MidiProcessingState::new();
+        let result = compute_mapped_value(&entry, &mut state, 1, 0);
+        assert_eq!(result, Some(0.0));
+    }
+
+    #[test]
+    fn momentary_max() {
+        let (entry, _pu) = make_entry(0.0, 1.0, MappingMode::Momentary, false);
+        let mut state = MidiProcessingState::new();
+        let result = compute_mapped_value(&entry, &mut state, 1, 127);
+        assert_eq!(result, Some(1.0));
+    }
+
+    // ---- Toggle mode ----
+
+    #[test]
+    fn toggle_first_press_turns_on() {
+        let (entry, pu) = make_entry(0.0, 1.0, MappingMode::Toggle, false);
+        // Start at min
+        pu.control_inputs[0].value.store(0.0);
+        let mut state = MidiProcessingState::new();
+
+        // Press (value > 63, previous was false)
+        let result = compute_mapped_value(&entry, &mut state, 1, 127);
+        assert_eq!(result, Some(1.0)); // should toggle to max
+    }
+
+    #[test]
+    fn toggle_second_press_turns_off() {
+        let (entry, pu) = make_entry(0.0, 1.0, MappingMode::Toggle, false);
+        pu.control_inputs[0].value.store(1.0);
+        let mut state = MidiProcessingState::new();
+
+        // Press
+        let result = compute_mapped_value(&entry, &mut state, 1, 127);
+        assert_eq!(result, Some(0.0)); // current > mid, toggle to min
+    }
+
+    #[test]
+    fn toggle_hold_returns_none() {
+        let (entry, _pu) = make_entry(0.0, 1.0, MappingMode::Toggle, false);
+        let mut state = MidiProcessingState::new();
+
+        // First press
+        compute_mapped_value(&entry, &mut state, 1, 127);
+        // Continued hold (value > 63, prev was already true)
+        let result = compute_mapped_value(&entry, &mut state, 1, 127);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn toggle_release_returns_none() {
+        let (entry, _pu) = make_entry(0.0, 1.0, MappingMode::Toggle, false);
+        let mut state = MidiProcessingState::new();
+
+        // Release (value <= 63, no transition)
+        let result = compute_mapped_value(&entry, &mut state, 1, 0);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn toggle_press_release_press_toggles_twice() {
+        let (entry, pu) = make_entry(0.0, 1.0, MappingMode::Toggle, false);
+        pu.control_inputs[0].value.store(0.0);
+        let mut state = MidiProcessingState::new();
+
+        // First press → turns on
+        let r1 = compute_mapped_value(&entry, &mut state, 1, 127);
+        assert_eq!(r1, Some(1.0));
+        pu.control_inputs[0].value.store(1.0);
+
+        // Release
+        let r2 = compute_mapped_value(&entry, &mut state, 1, 0);
+        assert_eq!(r2, None);
+
+        // Second press → turns off
+        let r3 = compute_mapped_value(&entry, &mut state, 1, 127);
+        assert_eq!(r3, Some(0.0));
+    }
+
+    // ---- RawMidiEvent ----
+
+    #[test]
+    fn raw_midi_event_copy() {
+        let evt = RawMidiEvent {
+            offset: 42,
+            data: [0x90, 60, 100],
+            size: 3,
+        };
+        let copy = evt;
+        assert_eq!(copy.offset, 42);
+        assert_eq!(copy.data, [0x90, 60, 100]);
+        assert_eq!(copy.size, 3);
     }
 }

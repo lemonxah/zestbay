@@ -389,3 +389,275 @@ fn category_from_subcategories(sub: &str) -> PluginCategory {
 
     PluginCategory::Other("VST3".to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- hex_to_tuid / tuid_to_hex round-trip ----
+
+    #[test]
+    fn hex_to_tuid_valid() {
+        let hex = "0123456789ABCDEF0123456789ABCDEF";
+        let tuid = hex_to_tuid(hex).expect("valid 32-char hex should parse");
+        assert_eq!(tuid.len(), 16);
+        assert_eq!(tuid[0], 0x01_u8 as i8);
+        assert_eq!(tuid[1], 0x23_u8 as i8);
+        assert_eq!(tuid[15], 0xEF_u8 as i8);
+    }
+
+    #[test]
+    fn hex_to_tuid_roundtrip() {
+        let hex = "DEADBEEF01234567CAFEBABE89ABCDEF";
+        let tuid = hex_to_tuid(hex).unwrap();
+        let back = tuid_to_hex(&tuid);
+        assert_eq!(back, hex);
+    }
+
+    #[test]
+    fn hex_to_tuid_lowercase() {
+        let hex = "deadbeef01234567cafebabe89abcdef";
+        let tuid = hex_to_tuid(hex).unwrap();
+        let back = tuid_to_hex(&tuid);
+        // tuid_to_hex produces uppercase
+        assert_eq!(back, hex.to_uppercase());
+    }
+
+    #[test]
+    fn hex_to_tuid_wrong_length() {
+        assert!(hex_to_tuid("").is_none());
+        assert!(hex_to_tuid("0123456789ABCDEF").is_none()); // 16 chars (too short)
+        assert!(hex_to_tuid("0123456789ABCDEF0123456789ABCDEF00").is_none()); // 34 chars (too long)
+    }
+
+    #[test]
+    fn hex_to_tuid_invalid_hex_chars() {
+        assert!(hex_to_tuid("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ").is_none());
+        assert!(hex_to_tuid("0123456789ABCDEF0123456789ABCDEG").is_none());
+    }
+
+    #[test]
+    fn tuid_to_hex_all_zeros() {
+        let tuid = [0i8; 16];
+        assert_eq!(tuid_to_hex(&tuid), "00000000000000000000000000000000");
+    }
+
+    #[test]
+    fn tuid_to_hex_all_ff() {
+        let tuid = [-1i8; 16]; // 0xFF as i8 = -1
+        assert_eq!(tuid_to_hex(&tuid), "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF");
+    }
+
+    // ---- read_cstr ----
+
+    #[test]
+    fn read_cstr_basic() {
+        let buf: Vec<std::ffi::c_char> = b"Hello\0World"
+            .iter()
+            .map(|&b| b as std::ffi::c_char)
+            .collect();
+        assert_eq!(read_cstr(&buf), "Hello");
+    }
+
+    #[test]
+    fn read_cstr_empty() {
+        let buf: Vec<std::ffi::c_char> = vec![0];
+        assert_eq!(read_cstr(&buf), "");
+    }
+
+    #[test]
+    fn read_cstr_no_null_terminator() {
+        let buf: Vec<std::ffi::c_char> = b"NoNull"
+            .iter()
+            .map(|&b| b as std::ffi::c_char)
+            .collect();
+        assert_eq!(read_cstr(&buf), "NoNull");
+    }
+
+    // ---- category_from_subcategories ----
+
+    #[test]
+    fn category_reverb() {
+        assert_eq!(category_from_subcategories("Fx|Reverb"), PluginCategory::Reverb);
+    }
+
+    #[test]
+    fn category_delay() {
+        assert_eq!(category_from_subcategories("Fx|Delay"), PluginCategory::Delay);
+    }
+
+    #[test]
+    fn category_distortion() {
+        assert_eq!(category_from_subcategories("Fx|Distortion"), PluginCategory::Distortion);
+    }
+
+    #[test]
+    fn category_dynamics() {
+        assert_eq!(category_from_subcategories("Fx|Dynamics"), PluginCategory::Dynamics);
+    }
+
+    #[test]
+    fn category_eq() {
+        assert_eq!(category_from_subcategories("Fx|EQ"), PluginCategory::Equaliser);
+    }
+
+    #[test]
+    fn category_filter() {
+        assert_eq!(category_from_subcategories("Fx|Filter"), PluginCategory::Filter);
+    }
+
+    #[test]
+    fn category_chorus_variants() {
+        assert_eq!(category_from_subcategories("Fx|Chorus"), PluginCategory::Chorus);
+        assert_eq!(category_from_subcategories("Fx|Flanger"), PluginCategory::Chorus);
+        assert_eq!(category_from_subcategories("Fx|Phaser"), PluginCategory::Chorus);
+        assert_eq!(category_from_subcategories("Fx|Modulation"), PluginCategory::Chorus);
+    }
+
+    #[test]
+    fn category_compressor() {
+        assert_eq!(category_from_subcategories("Fx|Compressor"), PluginCategory::Compressor);
+    }
+
+    #[test]
+    fn category_limiter() {
+        assert_eq!(category_from_subcategories("Fx|Limiter"), PluginCategory::Limiter);
+    }
+
+    #[test]
+    fn category_amplifier() {
+        assert_eq!(category_from_subcategories("Fx|Amplifier"), PluginCategory::Amplifier);
+        assert_eq!(category_from_subcategories("Fx|Amp"), PluginCategory::Amplifier);
+    }
+
+    #[test]
+    fn category_mixer() {
+        assert_eq!(category_from_subcategories("Fx|Mixer"), PluginCategory::Mixer);
+    }
+
+    #[test]
+    fn category_instrument_variants() {
+        assert_eq!(category_from_subcategories("Instrument|Synth"), PluginCategory::Instrument);
+        assert_eq!(category_from_subcategories("Instrument|Sampler"), PluginCategory::Instrument);
+        assert_eq!(category_from_subcategories("Instrument|Drum"), PluginCategory::Instrument);
+        assert_eq!(category_from_subcategories("Instrument"), PluginCategory::Instrument);
+    }
+
+    #[test]
+    fn category_analyzer() {
+        assert_eq!(category_from_subcategories("Fx|Analyzer"), PluginCategory::Analyser);
+    }
+
+    #[test]
+    fn category_spatial() {
+        assert_eq!(category_from_subcategories("Fx|Spatial"), PluginCategory::Spatial);
+        assert_eq!(category_from_subcategories("Fx|Surround"), PluginCategory::Spatial);
+    }
+
+    #[test]
+    fn category_generator() {
+        assert_eq!(category_from_subcategories("Generator"), PluginCategory::Generator);
+    }
+
+    #[test]
+    fn category_utility() {
+        assert_eq!(category_from_subcategories("Fx|Tools"), PluginCategory::Utility);
+        assert_eq!(category_from_subcategories("Utility"), PluginCategory::Utility);
+    }
+
+    #[test]
+    fn category_fx_fallback() {
+        // "Fx" with no recognized subcategory → Filter
+        assert_eq!(category_from_subcategories("Fx"), PluginCategory::Filter);
+    }
+
+    #[test]
+    fn category_unknown_fallback() {
+        assert_eq!(
+            category_from_subcategories("SomethingUnknown"),
+            PluginCategory::Other("VST3".to_string()),
+        );
+    }
+
+    #[test]
+    fn category_empty_string() {
+        assert_eq!(
+            category_from_subcategories(""),
+            PluginCategory::Other("VST3".to_string()),
+        );
+    }
+
+    #[test]
+    fn category_first_match_wins() {
+        // "Reverb" appears first → Reverb, not Delay
+        assert_eq!(category_from_subcategories("Reverb|Delay"), PluginCategory::Reverb);
+        // "Delay" appears first → Delay
+        assert_eq!(category_from_subcategories("Delay|Reverb"), PluginCategory::Delay);
+    }
+
+    #[test]
+    fn category_case_insensitive() {
+        assert_eq!(category_from_subcategories("REVERB"), PluginCategory::Reverb);
+        assert_eq!(category_from_subcategories("reverb"), PluginCategory::Reverb);
+        assert_eq!(category_from_subcategories("Reverb"), PluginCategory::Reverb);
+    }
+
+    #[test]
+    fn category_whitespace_trimming() {
+        assert_eq!(category_from_subcategories("Fx | Reverb "), PluginCategory::Reverb);
+        assert_eq!(category_from_subcategories(" Delay | Fx "), PluginCategory::Delay);
+    }
+
+    // ---- find_bundle_binary ----
+
+    #[test]
+    fn find_bundle_binary_nonexistent_path() {
+        let result = find_bundle_binary(std::path::Path::new("/nonexistent/plugin.vst3"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_bundle_binary_standard_layout() {
+        // Create a temp directory mimicking a .vst3 bundle
+        let tmp = std::env::temp_dir().join("test_plugin.vst3");
+        let arch_dir = tmp.join("Contents").join("x86_64-linux");
+        std::fs::create_dir_all(&arch_dir).unwrap();
+        let so_path = arch_dir.join("test_plugin.so");
+        std::fs::write(&so_path, b"fake").unwrap();
+
+        let result = find_bundle_binary(&tmp);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), so_path);
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn find_bundle_binary_fallback_root() {
+        // .so directly in bundle root (no Contents/<arch>/)
+        let tmp = std::env::temp_dir().join("test_fallback.vst3");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let so_path = tmp.join("fallback.so");
+        std::fs::write(&so_path, b"fake").unwrap();
+
+        let result = find_bundle_binary(&tmp);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), so_path);
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn find_bundle_binary_no_so_file() {
+        let tmp = std::env::temp_dir().join("test_no_so.vst3");
+        let arch_dir = tmp.join("Contents").join("x86_64-linux");
+        std::fs::create_dir_all(&arch_dir).unwrap();
+        // Write a non-.so file
+        std::fs::write(arch_dir.join("readme.txt"), b"not a plugin").unwrap();
+
+        let result = find_bundle_binary(&tmp);
+        assert!(result.is_none());
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+}

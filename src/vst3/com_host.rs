@@ -494,29 +494,28 @@ pub unsafe fn run_loop_tick(run_loop: *mut HostRunLoop) {
             return;
         }
 
-        // Fire due timers
+        // Collect due timers, then fire them outside the lock.
+        // Plugins (esp. JUCE) may re-register timers from within onTimer(),
+        // which would deadlock if we held the lock during the callback.
+        let mut timers_to_fire: Vec<*mut ITimerHandler> = Vec::new();
         if let Ok(mut timers) = (*run_loop).timers.lock() {
             let now = std::time::Instant::now();
             for entry in timers.iter_mut() {
                 let elapsed = now.duration_since(entry.last_fired);
                 if elapsed.as_millis() >= entry.interval_ms as u128 {
                     entry.last_fired = now;
-                    let handler = entry.handler;
-                    // We need to call onTimer outside the lock to avoid
-                    // deadlocks if the plugin re-registers timers from the
-                    // callback. Collect handlers to fire instead.
-                    // ... but for simplicity and because this is the common
-                    // case, we'll call directly. If deadlocks occur, we can
-                    // collect and call outside the lock.
-                    ((*(*handler).vtbl).onTimer)(handler);
+                    timers_to_fire.push(entry.handler);
                 }
             }
         }
+        for handler in timers_to_fire {
+            ((*(*handler).vtbl).onTimer)(handler);
+        }
 
-        // Poll registered file descriptors
+        // Same pattern for fd handlers: collect, release lock, then fire.
+        let mut fds_to_fire: Vec<(*mut IEventHandler, std::os::raw::c_int)> = Vec::new();
         if let Ok(fds) = (*run_loop).fd_handlers.lock() {
             for entry in fds.iter() {
-                // Use poll(2) with zero timeout to check readability
                 let mut pfd = libc::pollfd {
                     fd: entry.fd,
                     events: libc::POLLIN,
@@ -524,9 +523,12 @@ pub unsafe fn run_loop_tick(run_loop: *mut HostRunLoop) {
                 };
                 let ret = libc::poll(&mut pfd, 1, 0);
                 if ret > 0 && (pfd.revents & libc::POLLIN) != 0 {
-                    ((*(*entry.handler).vtbl).onFDIsSet)(entry.handler, entry.fd);
+                    fds_to_fire.push((entry.handler, entry.fd));
                 }
             }
+        }
+        for (handler, fd) in fds_to_fire {
+            ((*(*handler).vtbl).onFDIsSet)(handler, fd);
         }
     }
 }
@@ -725,6 +727,532 @@ pub unsafe fn release_memory_stream(ms: *mut MemoryStream) {
     if !ms.is_null() {
         unsafe {
             ms_release(ms as *mut FUnknown);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- MemoryStream: write then read ----
+
+    #[test]
+    fn memory_stream_write_then_read() {
+        unsafe {
+            let ms = new_memory_stream();
+            let data = b"Hello, VST3!";
+            let mut written: int32 = 0;
+            let result = ms_write(
+                ms as *mut IBStream,
+                data.as_ptr() as *mut c_void,
+                data.len() as int32,
+                &mut written,
+            );
+            assert_eq!(result, kResultOk);
+            assert_eq!(written, data.len() as int32);
+            assert_eq!((*ms).data, data);
+            assert_eq!((*ms).pos, data.len());
+
+            // Seek back to start
+            let mut new_pos: int64 = 0;
+            let result = ms_seek(
+                ms as *mut IBStream,
+                0,
+                kIBSeekSet as int32,
+                &mut new_pos,
+            );
+            assert_eq!(result, kResultOk);
+            assert_eq!(new_pos, 0);
+
+            // Read it back
+            let mut buf = [0u8; 32];
+            let mut bytes_read: int32 = 0;
+            let result = ms_read(
+                ms as *mut IBStream,
+                buf.as_mut_ptr() as *mut c_void,
+                buf.len() as int32,
+                &mut bytes_read,
+            );
+            assert_eq!(result, kResultOk);
+            assert_eq!(bytes_read, data.len() as int32);
+            assert_eq!(&buf[..data.len()], data);
+
+            release_memory_stream(ms);
+        }
+    }
+
+    #[test]
+    fn memory_stream_from_data() {
+        unsafe {
+            let data = vec![1, 2, 3, 4, 5];
+            let ms = new_memory_stream_from_data(data.clone());
+            assert_eq!((*ms).pos, 0);
+            assert_eq!((*ms).data, data);
+
+            // Read all
+            let mut buf = [0u8; 8];
+            let mut bytes_read: int32 = 0;
+            let result = ms_read(
+                ms as *mut IBStream,
+                buf.as_mut_ptr() as *mut c_void,
+                buf.len() as int32,
+                &mut bytes_read,
+            );
+            assert_eq!(result, kResultOk);
+            assert_eq!(bytes_read, 5);
+            assert_eq!(&buf[..5], &[1, 2, 3, 4, 5]);
+            assert_eq!((*ms).pos, 5);
+
+            release_memory_stream(ms);
+        }
+    }
+
+    #[test]
+    fn memory_stream_read_past_end() {
+        unsafe {
+            let ms = new_memory_stream_from_data(vec![10, 20]);
+            // Skip past the data
+            (*ms).pos = 2;
+
+            let mut buf = [0u8; 4];
+            let mut bytes_read: int32 = 0;
+            let result = ms_read(
+                ms as *mut IBStream,
+                buf.as_mut_ptr() as *mut c_void,
+                4,
+                &mut bytes_read,
+            );
+            assert_eq!(result, kResultOk);
+            assert_eq!(bytes_read, 0); // nothing left to read
+
+            release_memory_stream(ms);
+        }
+    }
+
+    #[test]
+    fn memory_stream_partial_read() {
+        unsafe {
+            let ms = new_memory_stream_from_data(vec![1, 2, 3, 4, 5]);
+            // Read only 3 bytes
+            let mut buf = [0u8; 3];
+            let mut bytes_read: int32 = 0;
+            ms_read(
+                ms as *mut IBStream,
+                buf.as_mut_ptr() as *mut c_void,
+                3,
+                &mut bytes_read,
+            );
+            assert_eq!(bytes_read, 3);
+            assert_eq!(&buf, &[1, 2, 3]);
+            assert_eq!((*ms).pos, 3);
+
+            // Read remaining
+            ms_read(
+                ms as *mut IBStream,
+                buf.as_mut_ptr() as *mut c_void,
+                3,
+                &mut bytes_read,
+            );
+            assert_eq!(bytes_read, 2); // only 2 left
+            assert_eq!(&buf[..2], &[4, 5]);
+
+            release_memory_stream(ms);
+        }
+    }
+
+    // ---- MemoryStream: seek modes ----
+
+    #[test]
+    fn memory_stream_seek_set() {
+        unsafe {
+            let ms = new_memory_stream_from_data(vec![0; 100]);
+            let mut result_pos: int64 = 0;
+
+            let r = ms_seek(ms as *mut IBStream, 50, kIBSeekSet as int32, &mut result_pos);
+            assert_eq!(r, kResultOk);
+            assert_eq!(result_pos, 50);
+            assert_eq!((*ms).pos, 50);
+
+            release_memory_stream(ms);
+        }
+    }
+
+    #[test]
+    fn memory_stream_seek_cur() {
+        unsafe {
+            let ms = new_memory_stream_from_data(vec![0; 100]);
+            (*ms).pos = 30;
+            let mut result_pos: int64 = 0;
+
+            let r = ms_seek(ms as *mut IBStream, 20, kIBSeekCur as int32, &mut result_pos);
+            assert_eq!(r, kResultOk);
+            assert_eq!(result_pos, 50);
+            assert_eq!((*ms).pos, 50);
+
+            // Seek backwards
+            let r = ms_seek(ms as *mut IBStream, -10, kIBSeekCur as int32, &mut result_pos);
+            assert_eq!(r, kResultOk);
+            assert_eq!(result_pos, 40);
+
+            release_memory_stream(ms);
+        }
+    }
+
+    #[test]
+    fn memory_stream_seek_end() {
+        unsafe {
+            let ms = new_memory_stream_from_data(vec![0; 100]);
+            let mut result_pos: int64 = 0;
+
+            // Seek to end
+            let r = ms_seek(ms as *mut IBStream, 0, kIBSeekEnd as int32, &mut result_pos);
+            assert_eq!(r, kResultOk);
+            assert_eq!(result_pos, 100);
+
+            // Seek 10 before end
+            let r = ms_seek(ms as *mut IBStream, -10, kIBSeekEnd as int32, &mut result_pos);
+            assert_eq!(r, kResultOk);
+            assert_eq!(result_pos, 90);
+
+            release_memory_stream(ms);
+        }
+    }
+
+    #[test]
+    fn memory_stream_seek_negative_result_fails() {
+        unsafe {
+            let ms = new_memory_stream_from_data(vec![0; 10]);
+            let mut result_pos: int64 = 0;
+
+            // Seeking before beginning should fail
+            let r = ms_seek(ms as *mut IBStream, -1, kIBSeekSet as int32, &mut result_pos);
+            assert_eq!(r, kInvalidArgument);
+
+            release_memory_stream(ms);
+        }
+    }
+
+    #[test]
+    fn memory_stream_seek_invalid_mode() {
+        unsafe {
+            let ms = new_memory_stream_from_data(vec![0; 10]);
+            let mut result_pos: int64 = 0;
+
+            let r = ms_seek(ms as *mut IBStream, 0, 99, &mut result_pos);
+            assert_eq!(r, kInvalidArgument);
+
+            release_memory_stream(ms);
+        }
+    }
+
+    // ---- MemoryStream: tell ----
+
+    #[test]
+    fn memory_stream_tell() {
+        unsafe {
+            let ms = new_memory_stream_from_data(vec![0; 50]);
+            (*ms).pos = 25;
+            let mut pos: int64 = 0;
+
+            let r = ms_tell(ms as *mut IBStream, &mut pos);
+            assert_eq!(r, kResultOk);
+            assert_eq!(pos, 25);
+
+            release_memory_stream(ms);
+        }
+    }
+
+    // ---- MemoryStream: write extends buffer ----
+
+    #[test]
+    fn memory_stream_write_extends_buffer() {
+        unsafe {
+            let ms = new_memory_stream();
+            // Write at position 0
+            let data1 = b"ABC";
+            let mut written: int32 = 0;
+            ms_write(
+                ms as *mut IBStream,
+                data1.as_ptr() as *mut c_void,
+                3,
+                &mut written,
+            );
+            assert_eq!((*ms).data.len(), 3);
+            assert_eq!((*ms).pos, 3);
+
+            // Seek past end and write more
+            (*ms).pos = 10;
+            let data2 = b"XY";
+            ms_write(
+                ms as *mut IBStream,
+                data2.as_ptr() as *mut c_void,
+                2,
+                &mut written,
+            );
+            assert_eq!((&(*ms).data).len(), 12);
+            assert_eq!((&(*ms).data)[10], b'X');
+            assert_eq!((&(*ms).data)[11], b'Y');
+            // Gap should be zeroed
+            assert_eq!((&(*ms).data)[3], 0);
+            assert_eq!((&(*ms).data)[9], 0);
+
+            release_memory_stream(ms);
+        }
+    }
+
+    // ---- MemoryStream: invalid args ----
+
+    #[test]
+    fn memory_stream_read_null_buffer() {
+        unsafe {
+            let ms = new_memory_stream_from_data(vec![1, 2, 3]);
+            let r = ms_read(ms as *mut IBStream, std::ptr::null_mut(), 3, std::ptr::null_mut());
+            assert_eq!(r, kInvalidArgument);
+            release_memory_stream(ms);
+        }
+    }
+
+    #[test]
+    fn memory_stream_write_null_buffer() {
+        unsafe {
+            let ms = new_memory_stream();
+            let r = ms_write(ms as *mut IBStream, std::ptr::null_mut(), 3, std::ptr::null_mut());
+            assert_eq!(r, kInvalidArgument);
+            release_memory_stream(ms);
+        }
+    }
+
+    #[test]
+    fn memory_stream_read_negative_bytes() {
+        unsafe {
+            let ms = new_memory_stream_from_data(vec![1, 2, 3]);
+            let mut buf = [0u8; 4];
+            let r = ms_read(
+                ms as *mut IBStream,
+                buf.as_mut_ptr() as *mut c_void,
+                -1,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(r, kInvalidArgument);
+            release_memory_stream(ms);
+        }
+    }
+
+    // ---- HostApplication: getName ----
+
+    #[test]
+    fn host_app_get_name_returns_zestbay() {
+        unsafe {
+            let app = new_host_application(std::ptr::null_mut());
+            let mut name: String128 = [0u16; 128];
+
+            let r = host_app_get_name(app as *mut IHostApplication, &mut name);
+            assert_eq!(r, kResultOk);
+
+            // Decode UTF-16
+            let len = name.iter().position(|&c| c == 0).unwrap_or(128);
+            let s = String::from_utf16(&name[..len]).unwrap();
+            assert_eq!(s, "ZestBay");
+
+            release_host_application(app);
+        }
+    }
+
+    // ---- HostApplication: createInstance ----
+
+    #[test]
+    fn host_app_create_instance_returns_not_implemented() {
+        unsafe {
+            let app = new_host_application(std::ptr::null_mut());
+            let mut obj: *mut c_void = std::ptr::null_mut();
+            let r = host_app_create_instance(
+                app as *mut IHostApplication,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut obj,
+            );
+            assert_eq!(r, kNotImplemented);
+            release_host_application(app);
+        }
+    }
+
+    // ---- HostComponentHandler: performEdit ----
+
+    #[test]
+    fn component_handler_perform_edit() {
+        unsafe {
+            let port_updates = Arc::new(PortUpdates {
+                control_inputs: vec![
+                    PortSlot { port_index: 0, value: AtomicF32::new(0.0) },
+                    PortSlot { port_index: 1, value: AtomicF32::new(0.5) },
+                ],
+                control_outputs: Vec::new(),
+                atom_outputs: Vec::new(),
+                atom_inputs: Vec::new(),
+            });
+
+            let mut param_map = HashMap::new();
+            param_map.insert(100u32, 0usize); // ParamID 100 → port_index 0
+            param_map.insert(200u32, 1usize); // ParamID 200 → port_index 1
+
+            let ch = new_host_component_handler(42, param_map, port_updates.clone());
+
+            // Perform edit on param 100
+            let r = host_ch_perform_edit(ch as *mut IComponentHandler, 100, 0.75);
+            assert_eq!(r, kResultOk);
+            assert!((port_updates.control_inputs[0].value.load() - 0.75).abs() < 1e-5);
+
+            // Perform edit on param 200
+            let r = host_ch_perform_edit(ch as *mut IComponentHandler, 200, 0.25);
+            assert_eq!(r, kResultOk);
+            assert!((port_updates.control_inputs[1].value.load() - 0.25).abs() < 1e-5);
+
+            // Unknown param ID — should not crash, still returns Ok
+            let r = host_ch_perform_edit(ch as *mut IComponentHandler, 999, 0.5);
+            assert_eq!(r, kResultOk);
+
+            release_host_component_handler(ch);
+        }
+    }
+
+    // ---- HostComponentHandler: begin/end edit are no-ops ----
+
+    #[test]
+    fn component_handler_begin_end_edit_are_noop() {
+        unsafe {
+            let port_updates = Arc::new(PortUpdates {
+                control_inputs: Vec::new(),
+                control_outputs: Vec::new(),
+                atom_outputs: Vec::new(),
+                atom_inputs: Vec::new(),
+            });
+            let ch = new_host_component_handler(1, HashMap::new(), port_updates);
+
+            assert_eq!(host_ch_begin_edit(ch as *mut IComponentHandler, 0), kResultOk);
+            assert_eq!(host_ch_end_edit(ch as *mut IComponentHandler, 0), kResultOk);
+
+            release_host_component_handler(ch);
+        }
+    }
+
+    // ---- HostRunLoop: timer registration ----
+
+    #[test]
+    fn run_loop_register_unregister_timer() {
+        unsafe {
+            let rl = new_host_run_loop();
+
+            // We can't create real ITimerHandler objects, but we can use
+            // a fake pointer to test registration/unregistration logic.
+            let fake_handler1 = 0x1000usize as *mut ITimerHandler;
+            let fake_handler2 = 0x2000usize as *mut ITimerHandler;
+
+            let r = host_run_loop_register_timer(rl as *mut IRunLoop, fake_handler1, 100);
+            assert_eq!(r, kResultOk);
+
+            let r = host_run_loop_register_timer(rl as *mut IRunLoop, fake_handler2, 200);
+            assert_eq!(r, kResultOk);
+
+            assert_eq!((*rl).timers.lock().unwrap().len(), 2);
+
+            // Unregister one
+            let r = host_run_loop_unregister_timer(rl as *mut IRunLoop, fake_handler1);
+            assert_eq!(r, kResultOk);
+            assert_eq!((*rl).timers.lock().unwrap().len(), 1);
+
+            // Unregister the other
+            let r = host_run_loop_unregister_timer(rl as *mut IRunLoop, fake_handler2);
+            assert_eq!(r, kResultOk);
+            assert_eq!((*rl).timers.lock().unwrap().len(), 0);
+
+            host_run_loop_release(rl as *mut FUnknown);
+        }
+    }
+
+    // ---- HostRunLoop: fd handler registration ----
+
+    #[test]
+    fn run_loop_register_unregister_event_handler() {
+        unsafe {
+            let rl = new_host_run_loop();
+
+            let fake_handler = 0x3000usize as *mut IEventHandler;
+
+            let r = host_run_loop_register_event_handler(rl as *mut IRunLoop, fake_handler, 42);
+            assert_eq!(r, kResultOk);
+            assert_eq!((*rl).fd_handlers.lock().unwrap().len(), 1);
+
+            let r = host_run_loop_unregister_event_handler(rl as *mut IRunLoop, fake_handler);
+            assert_eq!(r, kResultOk);
+            assert_eq!((*rl).fd_handlers.lock().unwrap().len(), 0);
+
+            host_run_loop_release(rl as *mut FUnknown);
+        }
+    }
+
+    // ---- HostRunLoop: null handler rejected ----
+
+    #[test]
+    fn run_loop_null_timer_handler_rejected() {
+        unsafe {
+            let rl = new_host_run_loop();
+            let r = host_run_loop_register_timer(rl as *mut IRunLoop, std::ptr::null_mut(), 100);
+            assert_eq!(r, kInvalidArgument);
+            assert_eq!((*rl).timers.lock().unwrap().len(), 0);
+            host_run_loop_release(rl as *mut FUnknown);
+        }
+    }
+
+    #[test]
+    fn run_loop_null_event_handler_rejected() {
+        unsafe {
+            let rl = new_host_run_loop();
+            let r = host_run_loop_register_event_handler(rl as *mut IRunLoop, std::ptr::null_mut(), 0);
+            assert_eq!(r, kInvalidArgument);
+            assert_eq!((*rl).fd_handlers.lock().unwrap().len(), 0);
+            host_run_loop_release(rl as *mut FUnknown);
+        }
+    }
+
+    // ---- Ref counting ----
+
+    #[test]
+    fn host_application_ref_counting() {
+        unsafe {
+            let app = new_host_application(std::ptr::null_mut());
+            // Initial ref_count = 1
+            let count = host_app_add_ref(app as *mut FUnknown);
+            assert_eq!(count, 2);
+
+            let count = host_app_add_ref(app as *mut FUnknown);
+            assert_eq!(count, 3);
+
+            let count = host_app_release(app as *mut FUnknown);
+            assert_eq!(count, 2);
+
+            let count = host_app_release(app as *mut FUnknown);
+            assert_eq!(count, 1);
+
+            // Final release deallocates
+            let count = host_app_release(app as *mut FUnknown);
+            assert_eq!(count, 0);
+        }
+    }
+
+    #[test]
+    fn memory_stream_ref_counting() {
+        unsafe {
+            let ms = new_memory_stream();
+            let count = ms_add_ref(ms as *mut FUnknown);
+            assert_eq!(count, 2);
+
+            let count = ms_release(ms as *mut FUnknown);
+            assert_eq!(count, 1);
+
+            // Final release
+            let count = ms_release(ms as *mut FUnknown);
+            assert_eq!(count, 0);
         }
     }
 }

@@ -16,6 +16,10 @@ bump new_version:
     sed -i 's/^Version:.*/Version:        {{new_version}}/' pkg/rpm/zestbay.spec
     @echo "Bumped to {{new_version}}"
 
+# Run all tests
+test:
+    cargo test --workspace
+
 # Build release binary
 build:
     cargo build --workspace --release

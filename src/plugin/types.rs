@@ -396,3 +396,240 @@ impl PortUpdates {
 }
 
 pub type SharedPortUpdates = Arc<PortUpdates>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- AtomicF32 ----
+
+    #[test]
+    fn atomic_f32_store_load() {
+        let a = AtomicF32::new(0.0);
+        assert!((a.load() - 0.0).abs() < f32::EPSILON);
+
+        a.store(3.14);
+        assert!((a.load() - 3.14).abs() < 1e-5);
+    }
+
+    #[test]
+    fn atomic_f32_negative() {
+        let a = AtomicF32::new(-1.5);
+        assert!((a.load() - (-1.5)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn atomic_f32_special_values() {
+        let a = AtomicF32::new(f32::INFINITY);
+        assert!(a.load().is_infinite());
+
+        a.store(f32::NEG_INFINITY);
+        assert!(a.load().is_infinite() && a.load().is_sign_negative());
+
+        a.store(f32::NAN);
+        assert!(a.load().is_nan());
+    }
+
+    // ---- PortSlot ----
+
+    #[test]
+    fn port_slot_basic() {
+        let slot = PortSlot {
+            port_index: 5,
+            value: AtomicF32::new(0.42),
+        };
+        assert_eq!(slot.port_index, 5);
+        assert!((slot.value.load() - 0.42).abs() < 1e-5);
+    }
+
+    // ---- AtomPortBuffer ----
+
+    #[test]
+    fn atom_port_buffer_write_then_read() {
+        let buf = AtomPortBuffer::new(0);
+        buf.write(b"hello");
+        let data = buf.read();
+        assert_eq!(data, Some(b"hello".to_vec()));
+
+        // Second read should be empty (consumed)
+        let data2 = buf.read();
+        assert_eq!(data2, None);
+    }
+
+    #[test]
+    fn atom_port_buffer_empty_read() {
+        let buf = AtomPortBuffer::new(0);
+        assert_eq!(buf.read(), None);
+    }
+
+    #[test]
+    fn atom_port_buffer_overwrite() {
+        let buf = AtomPortBuffer::new(0);
+        buf.write(b"first");
+        buf.write(b"second");
+        let data = buf.read();
+        assert_eq!(data, Some(b"second".to_vec()));
+    }
+
+    // ---- PortUpdates ----
+
+    #[test]
+    fn port_updates_snapshot_all() {
+        let pu = PortUpdates {
+            control_inputs: vec![
+                PortSlot { port_index: 0, value: AtomicF32::new(0.1) },
+                PortSlot { port_index: 1, value: AtomicF32::new(0.2) },
+            ],
+            control_outputs: vec![
+                PortSlot { port_index: 2, value: AtomicF32::new(0.3) },
+            ],
+            atom_outputs: Vec::new(),
+            atom_inputs: Vec::new(),
+        };
+        let snapshot = pu.snapshot_all();
+        assert_eq!(snapshot.len(), 3);
+        assert_eq!(snapshot[0].0, 0);
+        assert!((snapshot[0].1 - 0.1).abs() < 1e-5);
+        assert_eq!(snapshot[1].0, 1);
+        assert!((snapshot[1].1 - 0.2).abs() < 1e-5);
+        assert_eq!(snapshot[2].0, 2);
+        assert!((snapshot[2].1 - 0.3).abs() < 1e-5);
+    }
+
+    // ---- PluginFormat ----
+
+    #[test]
+    fn plugin_format_as_str() {
+        assert_eq!(PluginFormat::Lv2.as_str(), "LV2");
+        assert_eq!(PluginFormat::Clap.as_str(), "CLAP");
+        assert_eq!(PluginFormat::Vst3.as_str(), "VST3");
+    }
+
+    #[test]
+    fn plugin_format_display() {
+        assert_eq!(format!("{}", PluginFormat::Lv2), "LV2");
+        assert_eq!(format!("{}", PluginFormat::Clap), "CLAP");
+        assert_eq!(format!("{}", PluginFormat::Vst3), "VST3");
+    }
+
+    // ---- PluginPortType ----
+
+    #[test]
+    fn port_type_predicates() {
+        assert!(PluginPortType::AudioInput.is_audio());
+        assert!(PluginPortType::AudioOutput.is_audio());
+        assert!(!PluginPortType::ControlInput.is_audio());
+
+        assert!(PluginPortType::ControlInput.is_control());
+        assert!(PluginPortType::ControlOutput.is_control());
+        assert!(!PluginPortType::AudioInput.is_control());
+
+        assert!(PluginPortType::AudioInput.is_input());
+        assert!(PluginPortType::ControlInput.is_input());
+        assert!(PluginPortType::AtomInput.is_input());
+        assert!(!PluginPortType::AudioOutput.is_input());
+
+        assert!(PluginPortType::AudioOutput.is_output());
+        assert!(PluginPortType::ControlOutput.is_output());
+        assert!(PluginPortType::AtomOutput.is_output());
+        assert!(!PluginPortType::AudioInput.is_output());
+    }
+
+    // ---- PluginCategory ----
+
+    #[test]
+    fn category_from_class_label() {
+        assert_eq!(PluginCategory::from_class_label("Amplifier"), PluginCategory::Amplifier);
+        assert_eq!(PluginCategory::from_class_label("Analyser"), PluginCategory::Analyser);
+        assert_eq!(PluginCategory::from_class_label("Analyzer"), PluginCategory::Analyser);
+        assert_eq!(PluginCategory::from_class_label("Chorus"), PluginCategory::Chorus);
+        assert_eq!(PluginCategory::from_class_label("Compressor"), PluginCategory::Compressor);
+        assert_eq!(PluginCategory::from_class_label("Delay"), PluginCategory::Delay);
+        assert_eq!(PluginCategory::from_class_label("Distortion"), PluginCategory::Distortion);
+        assert_eq!(PluginCategory::from_class_label("Dynamics"), PluginCategory::Dynamics);
+        assert_eq!(PluginCategory::from_class_label("Equaliser"), PluginCategory::Equaliser);
+        assert_eq!(PluginCategory::from_class_label("Equalizer"), PluginCategory::Equaliser);
+        assert_eq!(PluginCategory::from_class_label("EQ Plugin"), PluginCategory::Equaliser);
+        assert_eq!(PluginCategory::from_class_label("Filter"), PluginCategory::Filter);
+        assert_eq!(PluginCategory::from_class_label("Instrument"), PluginCategory::Instrument);
+        assert_eq!(PluginCategory::from_class_label("Reverb"), PluginCategory::Reverb);
+        assert_eq!(PluginCategory::from_class_label("Spatial"), PluginCategory::Spatial);
+        assert_eq!(PluginCategory::from_class_label("Utility"), PluginCategory::Utility);
+    }
+
+    #[test]
+    fn category_from_class_label_unknown() {
+        let cat = PluginCategory::from_class_label("SomethingWeird");
+        assert!(matches!(cat, PluginCategory::Other(_)));
+    }
+
+    #[test]
+    fn category_display_name() {
+        assert_eq!(PluginCategory::Reverb.display_name(), "Reverb");
+        assert_eq!(PluginCategory::Instrument.display_name(), "Instrument");
+        assert_eq!(PluginCategory::Other("Custom".to_string()).display_name(), "Custom");
+    }
+
+    // ---- PluginInfo helpers ----
+
+    #[test]
+    fn plugin_info_is_effect() {
+        let info = PluginInfo {
+            uri: String::new(), name: String::new(), format: PluginFormat::Vst3,
+            category: PluginCategory::Reverb, author: None, ports: Vec::new(),
+            audio_inputs: 2, audio_outputs: 2,
+            control_inputs: 0, control_outputs: 0,
+            required_features: Vec::new(), compatible: true, has_ui: false,
+            library_path: String::new(),
+        };
+        assert!(info.is_effect());
+        assert!(!info.is_instrument());
+        assert!(!info.is_analyser());
+    }
+
+    #[test]
+    fn plugin_info_is_instrument() {
+        let info = PluginInfo {
+            uri: String::new(), name: String::new(), format: PluginFormat::Vst3,
+            category: PluginCategory::Instrument, author: None, ports: Vec::new(),
+            audio_inputs: 0, audio_outputs: 2,
+            control_inputs: 0, control_outputs: 0,
+            required_features: Vec::new(), compatible: true, has_ui: false,
+            library_path: String::new(),
+        };
+        assert!(info.is_instrument());
+        assert!(!info.is_effect());
+        assert!(!info.is_analyser());
+    }
+
+    #[test]
+    fn plugin_info_is_analyser() {
+        let info = PluginInfo {
+            uri: String::new(), name: String::new(), format: PluginFormat::Vst3,
+            category: PluginCategory::Analyser, author: None, ports: Vec::new(),
+            audio_inputs: 2, audio_outputs: 0,
+            control_inputs: 0, control_outputs: 0,
+            required_features: Vec::new(), compatible: true, has_ui: false,
+            library_path: String::new(),
+        };
+        assert!(info.is_analyser());
+        assert!(!info.is_effect());
+        assert!(!info.is_instrument());
+    }
+
+    // ---- SavedPluginInstance default format ----
+
+    #[test]
+    fn saved_plugin_instance_default_format_is_lv2() {
+        let json = r#"{"plugin_uri":"test","display_name":"Test","bypassed":false,"parameters":[]}"#;
+        let saved: SavedPluginInstance = serde_json::from_str(json).unwrap();
+        assert_eq!(saved.format, "LV2");
+    }
+
+    #[test]
+    fn saved_plugin_instance_explicit_format() {
+        let json = r#"{"plugin_uri":"test","display_name":"Test","bypassed":false,"parameters":[],"format":"VST3"}"#;
+        let saved: SavedPluginInstance = serde_json::from_str(json).unwrap();
+        assert_eq!(saved.format, "VST3");
+    }
+}

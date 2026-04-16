@@ -95,6 +95,125 @@ impl ResolvedMappings {
 unsafe impl Send for ResolvedMappings {}
 unsafe impl Sync for ResolvedMappings {}
 
+#[cfg(test)]
+mod resolved_mappings_tests {
+    use super::*;
+    use crate::plugin::types::*;
+    use std::sync::Arc;
+
+    fn make_entry(device: &str, channel: Option<u8>, cc: u8, msg_type: MidiMessageType) -> ResolvedMappingEntry {
+        let port_updates = Arc::new(PortUpdates {
+            control_inputs: vec![PortSlot { port_index: 0, value: AtomicF32::new(0.0) }],
+            control_outputs: Vec::new(),
+            atom_outputs: Vec::new(),
+            atom_inputs: Vec::new(),
+        });
+        ResolvedMappingEntry {
+            port_updates,
+            port_index: 0,
+            instance_id: 1,
+            min: 0.0,
+            max: 1.0,
+            mode: MappingMode::Continuous,
+            source: MidiCcSource {
+                device_name: device.to_string(),
+                channel,
+                cc,
+                message_type: msg_type,
+            },
+            is_logarithmic: false,
+            is_toggle: false,
+        }
+    }
+
+    #[test]
+    fn find_exact_channel_match() {
+        let mappings = ResolvedMappings::new(vec![
+            make_entry("dev1", Some(5), 10, MidiMessageType::Cc),
+        ]);
+        assert!(mappings.find("dev1", 5, 10, MidiMessageType::Cc).is_some());
+    }
+
+    #[test]
+    fn find_no_match_wrong_channel() {
+        let mappings = ResolvedMappings::new(vec![
+            make_entry("dev1", Some(5), 10, MidiMessageType::Cc),
+        ]);
+        assert!(mappings.find("dev1", 3, 10, MidiMessageType::Cc).is_none());
+    }
+
+    #[test]
+    fn find_wildcard_channel_fallback() {
+        let mappings = ResolvedMappings::new(vec![
+            make_entry("dev1", None, 10, MidiMessageType::Cc), // wildcard
+        ]);
+        // Should match any channel
+        assert!(mappings.find("dev1", 3, 10, MidiMessageType::Cc).is_some());
+        assert!(mappings.find("dev1", 15, 10, MidiMessageType::Cc).is_some());
+    }
+
+    #[test]
+    fn find_exact_preferred_over_wildcard() {
+        let mut exact = make_entry("dev1", Some(5), 10, MidiMessageType::Cc);
+        exact.instance_id = 100;
+        let mut wildcard = make_entry("dev1", None, 10, MidiMessageType::Cc);
+        wildcard.instance_id = 200;
+
+        let mappings = ResolvedMappings::new(vec![exact, wildcard]);
+
+        let found = mappings.find("dev1", 5, 10, MidiMessageType::Cc).unwrap();
+        assert_eq!(found.instance_id, 100); // exact wins
+    }
+
+    #[test]
+    fn find_wrong_device() {
+        let mappings = ResolvedMappings::new(vec![
+            make_entry("dev1", Some(0), 10, MidiMessageType::Cc),
+        ]);
+        assert!(mappings.find("dev2", 0, 10, MidiMessageType::Cc).is_none());
+    }
+
+    #[test]
+    fn find_wrong_message_type() {
+        let mappings = ResolvedMappings::new(vec![
+            make_entry("dev1", Some(0), 60, MidiMessageType::Cc),
+        ]);
+        assert!(mappings.find("dev1", 0, 60, MidiMessageType::Note).is_none());
+    }
+
+    #[test]
+    fn find_any_device_exact_channel() {
+        let mappings = ResolvedMappings::new(vec![
+            make_entry("dev1", Some(5), 10, MidiMessageType::Cc),
+        ]);
+        // find_any_device ignores device_name
+        assert!(mappings.find_any_device(5, 10, MidiMessageType::Cc).is_some());
+    }
+
+    #[test]
+    fn find_any_device_wildcard_channel() {
+        let mappings = ResolvedMappings::new(vec![
+            make_entry("dev1", None, 10, MidiMessageType::Cc),
+        ]);
+        assert!(mappings.find_any_device(3, 10, MidiMessageType::Cc).is_some());
+    }
+
+    #[test]
+    fn find_any_device_no_match() {
+        let mappings = ResolvedMappings::new(vec![
+            make_entry("dev1", Some(5), 10, MidiMessageType::Cc),
+        ]);
+        assert!(mappings.find_any_device(3, 10, MidiMessageType::Cc).is_none());
+    }
+
+    #[test]
+    fn empty_mappings() {
+        let mappings = ResolvedMappings::empty();
+        assert!(mappings.find("dev", 0, 1, MidiMessageType::Cc).is_none());
+        assert!(mappings.find_any_device(0, 1, MidiMessageType::Cc).is_none());
+    }
+}
+
 struct FilterData {
     filter: *mut pipewire::sys::pw_filter,
     event_tx: std::sync::mpsc::Sender<crate::pipewire::PwEvent>,

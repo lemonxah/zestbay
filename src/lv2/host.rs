@@ -884,3 +884,98 @@ impl Lv2Manager {
             .map(|(id, _)| *id)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- safe_clamp ----
+
+    #[test]
+    fn safe_clamp_normal() {
+        assert_eq!(safe_clamp(0.5, 0.0, 1.0), 0.5);
+        assert_eq!(safe_clamp(-1.0, 0.0, 1.0), 0.0);
+        assert_eq!(safe_clamp(2.0, 0.0, 1.0), 1.0);
+    }
+
+    #[test]
+    fn safe_clamp_at_bounds() {
+        assert_eq!(safe_clamp(0.0, 0.0, 1.0), 0.0);
+        assert_eq!(safe_clamp(1.0, 0.0, 1.0), 1.0);
+    }
+
+    #[test]
+    fn safe_clamp_nan_min_returns_value() {
+        let result = safe_clamp(0.5, f32::NAN, 1.0);
+        assert_eq!(result, 0.5);
+    }
+
+    #[test]
+    fn safe_clamp_nan_max_returns_value() {
+        let result = safe_clamp(0.5, 0.0, f32::NAN);
+        assert_eq!(result, 0.5);
+    }
+
+    #[test]
+    fn safe_clamp_both_nan_returns_value() {
+        let result = safe_clamp(42.0, f32::NAN, f32::NAN);
+        assert_eq!(result, 42.0);
+    }
+
+    #[test]
+    fn safe_clamp_negative_range() {
+        assert_eq!(safe_clamp(-5.0, -10.0, -1.0), -5.0);
+        assert_eq!(safe_clamp(-15.0, -10.0, -1.0), -10.0);
+        assert_eq!(safe_clamp(0.0, -10.0, -1.0), -1.0);
+    }
+
+    // ---- init_atom_sequence ----
+
+    #[test]
+    fn init_atom_sequence_input() {
+        let mut buf = vec![0xFFu8; 64];
+        init_atom_sequence(&mut buf, 64, false, 42);
+
+        // Input: size = 8 (just the sequence body header)
+        let size = u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        assert_eq!(size, 8);
+
+        // Type URID
+        let type_urid = u32::from_ne_bytes([buf[4], buf[5], buf[6], buf[7]]);
+        assert_eq!(type_urid, 42);
+
+        // Body: frame count = 0, pad = 0
+        let frame = u32::from_ne_bytes([buf[8], buf[9], buf[10], buf[11]]);
+        assert_eq!(frame, 0);
+        let pad = u32::from_ne_bytes([buf[12], buf[13], buf[14], buf[15]]);
+        assert_eq!(pad, 0);
+    }
+
+    #[test]
+    fn init_atom_sequence_output() {
+        let mut buf = vec![0xFFu8; 64];
+        init_atom_sequence(&mut buf, 64, true, 99);
+
+        // Output: size = capacity - 8
+        let size = u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        assert_eq!(size, 56); // 64 - 8
+    }
+
+    #[test]
+    fn init_atom_sequence_zeros_buffer() {
+        let mut buf = vec![0xFFu8; 32];
+        init_atom_sequence(&mut buf, 32, false, 1);
+
+        // Everything within capacity should be zeroed (except the header fields)
+        for i in 16..32 {
+            assert_eq!(buf[i], 0, "byte {} should be zero", i);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "atom buffer too small")]
+    fn init_atom_sequence_too_small() {
+        let mut buf = vec![0u8; 8];
+        init_atom_sequence(&mut buf, 8, false, 1);
+    }
+}
