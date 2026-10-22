@@ -70,12 +70,28 @@ Item {
 
     property int contextNodeId: -1
     property var contextNode: null
+    // Canvas point of the last right-click on empty canvas (for "Add Plugin...").
+    property var contextCanvasPos: null
+    // Where the next user-added plugin should appear; consumed by the plugin
+    // node named pendingPluginName (or any new plugin when the name is empty).
     property var pendingPluginPosition: null
+    property string pendingPluginName: ""
     property string defaultNodeKey: ""
 
     // Local bypass overrides for instant visual feedback
-    // Maps nodeId -> bool (true = bypassed). Cleared on each refreshData().
+    // Maps nodeId -> bool (true = bypassed). An entry is dropped as soon as a
+    // refresh reports the backend's bypass state, or when the node goes away.
     property var localBypassState: ({})
+
+    // Per-node caches, rebuilt by refreshData(): sorted port lists, node
+    // heights, z-order index, and the unique layout key of each node.
+    property var sortedPortsByNode: ({})
+    property var nodeHeights: ({})
+    property var nodeZ: ({})
+    property var uniqueKeyById: ({})
+    // Node widths need text measurement (a canvas context); recomputed on the
+    // next paint after the data or theme changed.
+    property bool widthsDirty: true
 
     // Snap guides: drawn while dragging
     readonly property real snapThreshold: 5  // pixels in canvas space
@@ -116,7 +132,43 @@ Item {
     // Redraw graph when system theme changes
     Connections {
         target: Theme
-        function onDarkChanged() { canvas.requestPaint() }
+        function onDarkChanged() {
+            widthsDirty = true
+            canvas.requestPaint()
+        }
+    }
+
+    function portSortCmp(a, b) {
+        var am = a.mediaType === "Midi" ? 0 : 1
+        var bm = b.mediaType === "Midi" ? 0 : 1
+        return am !== bm ? am - bm : naturalCmp(a.name, b.name)
+    }
+
+    function getSortedPorts(nodeId) {
+        return sortedPortsByNode[nodeId] || { inputs: [], outputs: [] }
+    }
+
+    // Selection entries remember what they referred to, so a recycled
+    // PipeWire id can never make a selection point at an unrelated object.
+    function linkSig(link) {
+        return { o: link.outputPortId, i: link.inputPortId,
+                 on: link.outputNodeId, inn: link.inputNodeId }
+    }
+
+    function linkMatchesSig(link, sig) {
+        return !!link && !!sig && link.outputPortId === sig.o && link.inputPortId === sig.i
+               && link.outputNodeId === sig.on && link.inputNodeId === sig.inn
+    }
+
+    function nodeSig(node) {
+        return { key: (node && node.layoutKey) || "" }
+    }
+
+    function findLinkData(linkId) {
+        for (var i = 0; i < links.length; i++) {
+            if (links[i].id === linkId) return links[i]
+        }
+        return null
     }
 
     function naturalCmp(a, b) {
@@ -203,6 +255,30 @@ Item {
         }
         portsByNode = newPorts
 
+        var newSorted = {}
+        var newHeights = {}
+        var newZ = {}
+        for (var si = 0; si < nodes.length; si++) {
+            var sn = nodes[si]
+            var sp = newPorts[sn.id] || []
+            var sorted = {
+                inputs: sp.filter(function(p) { return p.direction === "Input" }).sort(portSortCmp),
+                outputs: sp.filter(function(p) { return p.direction === "Output" }).sort(portSortCmp)
+            }
+            newSorted[sn.id] = sorted
+            var rows = Math.max(sorted.inputs.length, sorted.outputs.length, 1)
+            var hgt = headerHeight + nodePadding * 2 + rows * (portHeight + portSpacing)
+            if (sn.type === "Plugin")
+                hgt += buttonRowHeight + nodePadding
+            newHeights[sn.id] = hgt
+            newZ[sn.id] = si
+        }
+        sortedPortsByNode = newSorted
+        nodeHeights = newHeights
+        nodeZ = newZ
+        uniqueKeyById = buildUniqueLayoutKeys()
+        widthsDirty = true
+
         var newPortMedia = {}
         for (var nid in newPorts) {
             var pp = newPorts[nid]
@@ -229,10 +305,50 @@ Item {
             if (!liveIds[staleP]) delete autoPlaced[staleP]
         }
 
+        // Selections must refer to the same objects they did when made: drop
+        // entries whose id vanished or now belongs to something else.
+        var liveNodeById = {}
+        for (var ln = 0; ln < nodes.length; ln++) liveNodeById[nodes[ln].id] = nodes[ln]
+        var keptNodes = {}
+        var nodesPruned = false
+        for (var selN in selectedNodes) {
+            var selNode = liveNodeById[selN]
+            if (selNode && selectedNodes[selN] && selectedNodes[selN].key === (selNode.layoutKey || "")) {
+                keptNodes[selN] = selectedNodes[selN]
+            } else {
+                nodesPruned = true
+            }
+        }
+        if (nodesPruned) selectedNodes = keptNodes
+
+        var liveLinkById = {}
+        for (var lk = 0; lk < links.length; lk++) liveLinkById[links[lk].id] = links[lk]
+        var keptLinks = {}
+        var linksPruned = false
+        for (var selL in selectedLinks) {
+            if (linkMatchesSig(liveLinkById[selL], selectedLinks[selL])) {
+                keptLinks[selL] = selectedLinks[selL]
+            } else {
+                linksPruned = true
+            }
+        }
+        if (linksPruned) selectedLinks = keptLinks
+
+        // The backend's bypass state wins once it is reported.
+        var bypassPruned = false
+        for (var bpId in localBypassState) {
+            var bpNode = liveNodeById[bpId]
+            if (!bpNode || bpNode.pluginBypassed !== undefined) {
+                delete localBypassState[bpId]
+                bypassPruned = true
+            }
+        }
+        if (bypassPruned) localBypassState = localBypassState
+
         for (var ni = 0; ni < nodes.length; ni++) {
             var n = nodes[ni]
             if (n.id in nodePositions) continue
-            var key = n.layoutKey || ""
+            var key = uniqueKeyById[n.id] || ""
 
             if (key && savedLayout[key]) {
                 // Known position from a previous session/placement. Restore it
@@ -240,12 +356,14 @@ Item {
                 // PipeWire id, same layoutKey) must reappear where the user left it.
                 var saved = savedLayout[key]
                 nodePositions[n.id] = { x: saved[0], y: saved[1] }
-            } else if (n.type === "Plugin" && pendingPluginPosition) {
+            } else if (n.type === "Plugin" && pendingPluginPosition
+                       && (pendingPluginName === "" || n.name === pendingPluginName)) {
                 // User-added plugin: try to drop it on a free spot near the
                 // add-point. If there's no room nearby, place it "in hand" so the
                 // user can position it themselves.
                 var anchor = pendingPluginPosition
                 pendingPluginPosition = null
+                pendingPluginName = ""
                 nodePositions[n.id] = { x: anchor.x, y: anchor.y }
                 var spot = findFreeSpot(n, anchor.x, anchor.y, true)
                 if (spot) {
@@ -276,8 +394,8 @@ Item {
             }
 
             // Auto-pin plugins so their manual placement sticks across restarts.
-            if (n.type === "Plugin" && key && !pinnedNodes[key]) {
-                pinnedNodes[key] = true
+            if (n.type === "Plugin" && n.layoutKey && !pinnedNodes[n.layoutKey]) {
+                pinnedNodes[n.layoutKey] = true
                 pinnedNodes = pinnedNodes
                 persistPinned()
             }
@@ -580,7 +698,7 @@ Item {
         }
         for (var ni = 0; ni < nodes.length; ni++) {
             var n = nodes[ni]
-            var key = n.layoutKey || ""
+            var key = uniqueKeyById[n.id] || ""
             var pos = nodePositions[n.id]
             if (key && pos) {
                 layoutObj[key] = [pos.x, pos.y]
@@ -726,7 +844,13 @@ Item {
 
         MenuItem {
             text: "Add Plugin..."
-            onTriggered: graphView.openPluginBrowser()
+            onTriggered: {
+                if (contextCanvasPos) {
+                    pendingPluginPosition = { x: contextCanvasPos.x, y: contextCanvasPos.y }
+                    pendingPluginName = ""
+                }
+                graphView.openPluginBrowser()
+            }
         }
 
         MenuSeparator {}
@@ -832,13 +956,14 @@ Item {
         controller.save_pinned(JSON.stringify(arr))
     }
 
-    // Build a mapping from node.id → unique layout key, disambiguating
-    // duplicates by appending #1, #2, etc. (sorted by node ID for stability).
+    // Build a mapping from node.id → unique layout key, disambiguating nodes
+    // that share a layoutKey by appending #1, #2, ... in node-id (creation)
+    // order. Used for both saving and restoring layout.json, so duplicates get
+    // distinct, stable keys and never persist ephemeral ids.
     function buildUniqueLayoutKeys() {
         var sorted = []
         for (var i = 0; i < nodes.length; i++) {
             var n = nodes[i]
-            if (n.layoutKey && hiddenNodes[n.layoutKey]) continue
             var key = n.layoutKey || ""
             if (key) sorted.push({ id: n.id, key: key })
         }
@@ -854,51 +979,47 @@ Item {
         return result
     }
 
+    // Sizes of the visible nodes, keyed by node id. Hidden nodes are left out
+    // so the backend doesn't lay them out.
     function collectNodeSizes() {
         var sizesObj = {}
         for (var ni = 0; ni < nodes.length; ni++) {
             var n = nodes[ni]
             if (n.layoutKey && hiddenNodes[n.layoutKey]) continue
-            var key = n.layoutKey || ""
-            if (key) {
-                sizesObj[key] = [getNodeWidth(n.id) || minNodeWidth, calculateNodeHeight(n)]
-            }
+            sizesObj[n.id] = [getNodeWidth(n.id) || minNodeWidth, calculateNodeHeight(n)]
         }
         return sizesObj
     }
 
     function collectPinnedPositions() {
-        var uniqueKeys = buildUniqueLayoutKeys()
         var pinned = {}
         for (var ni = 0; ni < nodes.length; ni++) {
             var n = nodes[ni]
-            var baseKey = n.layoutKey || ""
-            var uKey = uniqueKeys[n.id] || ""
-            if (uKey && baseKey && pinnedNodes[baseKey] && nodePositions[n.id]) {
+            if (n.layoutKey && hiddenNodes[n.layoutKey]) continue
+            if (nodeIsPinned(n) && nodePositions[n.id]) {
                 var pos = nodePositions[n.id]
-                pinned[uKey] = [pos.x, pos.y]
+                pinned[n.id] = [pos.x, pos.y]
             }
         }
         return pinned
     }
 
-    function runAutoLayout(pinnedOverride) {
-        var sizes = collectNodeSizes()
-        var pinPositions = pinnedOverride || collectPinnedPositions()
-        var sizesJson = JSON.stringify(sizes)
-        var pinnedJson = JSON.stringify(pinPositions)
+    function runAutoLayout() {
+        var sizesJson = JSON.stringify(collectNodeSizes())
+        var pinnedJson = JSON.stringify(collectPinnedPositions())
         var resultJson = controller.auto_layout(sizesJson, pinnedJson)
         try {
+            // Result is keyed by node id. Only the laid-out nodes move; hidden
+            // nodes keep their positions and saved entries for absent devices
+            // and plugins stay in savedLayout (persistLayout merges into it).
             var positions = JSON.parse(resultJson)
-            var uniqueKeys = buildUniqueLayoutKeys()
-            nodePositions = {}
-            savedLayout = positions
             for (var ni = 0; ni < nodes.length; ni++) {
                 var n = nodes[ni]
-                var key = uniqueKeys[n.id] || ""
-                if (key && positions[key]) {
-                    var pos = positions[key]
+                var pos = positions[n.id]
+                if (pos && pos.length >= 2) {
                     nodePositions[n.id] = { x: pos[0], y: pos[1] }
+                    delete autoPlaced[n.id]
+                    delete awaitingLinkPlacement[n.id]
                 }
             }
             canvas.requestPaint()
@@ -908,20 +1029,13 @@ Item {
         }
     }
 
-    // Does a node of size w×h placed at (x, y) clear every other visible node,
-    // keeping at least `spacing` px of gap? `ignoreId` is excluded (the node
-    // being placed).
-    function spotIsFree(x, y, w, h, ignoreId, spacing) {
-        for (var oi = 0; oi < nodes.length; oi++) {
-            var other = nodes[oi]
-            if (other.id === ignoreId) continue
-            if (other.layoutKey && hiddenNodes[other.layoutKey]) continue
-            var opos = nodePositions[other.id]
-            if (!opos) continue
-            var ow = getNodeWidth(other.id) || minNodeWidth
-            var oh = calculateNodeHeight(other)
-            if (x < opos.x + ow + spacing && x + w + spacing > opos.x &&
-                y < opos.y + oh + spacing && y + h + spacing > opos.y) {
+    // Does a node of size w×h placed at (x, y) clear every obstacle rect,
+    // keeping at least `spacing` px of gap?
+    function spotIsFree(x, y, w, h, obstacles, spacing) {
+        for (var oi = 0; oi < obstacles.length; oi++) {
+            var o = obstacles[oi]
+            if (x < o.x + o.w + spacing && x + w + spacing > o.x &&
+                y < o.y + o.h + spacing && y + h + spacing > o.y) {
                 return false
             }
         }
@@ -931,19 +1045,37 @@ Item {
     // Find the nearest free spot for `node` starting at (anchorX, anchorY),
     // searching outward in a grid spiral. When `bounded` is true the search
     // gives up after a few rings (caller falls back to in-hand placement);
-    // when false it searches far enough that a spot is always found.
+    // when false it always returns a spot (falling back to the right of
+    // everything). Work is capped: obstacles are gathered once and only those
+    // near the search area are tested.
     function findFreeSpot(node, anchorX, anchorY, bounded) {
         var w = getNodeWidth(node.id) || minNodeWidth
         var h = calculateNodeHeight(node)
         var spacing = 20
         var stepX = w + spacing
         var stepY = h + spacing
+        var maxRings = bounded ? 4 : 24
 
-        if (spotIsFree(anchorX, anchorY, w, h, node.id, spacing)) {
+        var reachX = (maxRings + 1) * stepX + maxNodeWidth
+        var reachY = (maxRings + 1) * stepY + h
+        var obstacles = []
+        var maxRight = -Infinity
+        for (var oi = 0; oi < nodes.length; oi++) {
+            var other = nodes[oi]
+            if (other.id === node.id) continue
+            if (other.layoutKey && hiddenNodes[other.layoutKey]) continue
+            var opos = nodePositions[other.id]
+            if (!opos) continue
+            var ow = getNodeWidth(other.id) || minNodeWidth
+            maxRight = Math.max(maxRight, opos.x + ow)
+            if (Math.abs(opos.x - anchorX) > reachX || Math.abs(opos.y - anchorY) > reachY) continue
+            obstacles.push({ x: opos.x, y: opos.y, w: ow, h: calculateNodeHeight(other) })
+        }
+
+        if (spotIsFree(anchorX, anchorY, w, h, obstacles, spacing)) {
             return { x: anchorX, y: anchorY }
         }
 
-        var maxRings = bounded ? 4 : 80
         for (var ring = 1; ring <= maxRings; ring++) {
             for (var dx = -ring; dx <= ring; dx++) {
                 for (var dy = -ring; dy <= ring; dy++) {
@@ -951,13 +1083,15 @@ Item {
                     if (Math.abs(dx) !== ring && Math.abs(dy) !== ring) continue
                     var cx = anchorX + dx * stepX
                     var cy = anchorY + dy * stepY
-                    if (spotIsFree(cx, cy, w, h, node.id, spacing)) {
+                    if (spotIsFree(cx, cy, w, h, obstacles, spacing)) {
                         return { x: cx, y: cy }
                     }
                 }
             }
         }
-        return null
+        if (bounded) return null
+        // Nothing nearby: to the right of every node is always free.
+        return { x: (maxRight > -Infinity ? maxRight : anchorX) + spacing * 2, y: anchorY }
     }
 
     // Anchor point for auto-appearing nodes: the centre of the existing
@@ -1029,6 +1163,8 @@ Item {
     }
 
     function calculateNodeHeight(node) {
+        var cached = nodeHeights[node.id]
+        if (cached !== undefined) return cached
         var ports = portsByNode[node.id] || []
         var inputs = ports.filter(function(p) { return p.direction === "Input" }).length
         var outputs = ports.filter(function(p) { return p.direction === "Output" }).length
@@ -1083,8 +1219,26 @@ Item {
         return { x: cx * zoom + panX, y: cy * zoom + panY }
     }
 
+    // Is canvas point (cx, cy) covered by a visible node drawn above z-index `z`?
+    function coveredAbove(cx, cy, z) {
+        for (var i = nodes.length - 1; i > z; i--) {
+            var n = nodes[i]
+            if (n.layoutKey && hiddenNodes[n.layoutKey]) continue
+            var pos = nodePositions[n.id]
+            if (!pos) continue
+            if (cx >= pos.x && cx <= pos.x + getNodeWidth(n.id) &&
+                cy >= pos.y && cy <= pos.y + calculateNodeHeight(n)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    // Nearest port under the cursor whose node isn't covered there by a node
+    // drawn on top of it.
     function findPortAt(sx, sy) {
         var hitRadius = portRadius * zoom * 2.5
+        var c = toCanvas(sx, sy)
         var bestId = -1
         var bestDist = hitRadius + 1
         for (var pid in portPositions) {
@@ -1094,7 +1248,7 @@ Item {
             var dx = sx - screenX
             var dy = sy - screenY
             var dist = Math.sqrt(dx*dx + dy*dy)
-            if (dist < bestDist) {
+            if (dist < bestDist && !coveredAbove(c.x, c.y, pp.z !== undefined ? pp.z : -1)) {
                 bestDist = dist
                 bestId = parseInt(pid)
             }
@@ -1138,53 +1292,55 @@ Item {
         return -1
     }
 
+    // Pin glyph hit box (canvas coords relative to the node's top-right).
+    readonly property real pinAreaWidth: 20
+
+    // Only the topmost node under the cursor can have its pin/buttons hit.
     function findPinButtonAt(sx, sy) {
+        var topId = findNodeAt(sx, sy)
+        if (topId < 0) return null
+        var n = findNodeData(topId)
+        var pos = n ? nodePositions[n.id] : null
+        if (!pos) return null
         var c = toCanvas(sx, sy)
-        for (var i = nodes.length - 1; i >= 0; i--) {
-            var n = nodes[i]
-            if (n.layoutKey && hiddenNodes[n.layoutKey]) continue
-            var pos = nodePositions[n.id]
-            if (!pos) continue
-            var nw = getNodeWidth(n.id)
-            var btnX = pos.x + nw - 18
-            var btnY = pos.y + 2
-            var btnSize = 16
-            if (c.x >= btnX && c.x <= btnX + btnSize &&
-                c.y >= btnY && c.y <= btnY + btnSize) {
-                return n
-            }
+        var nw = getNodeWidth(n.id)
+        var btnX = pos.x + nw - 18
+        var btnY = pos.y + 2
+        var btnSize = 16
+        if (c.x >= btnX && c.x <= btnX + btnSize &&
+            c.y >= btnY && c.y <= btnY + btnSize) {
+            return n
         }
         return null
     }
 
     function findButtonAt(sx, sy) {
+        var topId = findNodeAt(sx, sy)
+        if (topId < 0) return null
+        var n = findNodeData(topId)
+        if (!n || n.type !== "Plugin") return null
+        var pos = nodePositions[n.id]
+        if (!pos) return null
         var c = toCanvas(sx, sy)
-        for (var i = nodes.length - 1; i >= 0; i--) {
-            var n = nodes[i]
-            if (n.type !== "Plugin") continue
-            if (n.layoutKey && hiddenNodes[n.layoutKey]) continue
-            var pos = nodePositions[n.id]
-            if (!pos) continue
-            var h = calculateNodeHeight(n)
-            var nw = getNodeWidth(n.id)
-            var btnY = pos.y + h - buttonRowHeight - nodePadding
-            var btnH = buttonRowHeight
-            var btnW = (nw - nodePadding * 4) / 3
-            // On/Off button
-            if (c.x >= pos.x + nodePadding && c.x <= pos.x + nodePadding + btnW &&
-                c.y >= btnY && c.y <= btnY + btnH) {
-                return { button: "onoff", nodeId: n.id, bypassed: isNodeBypassed(n) }
-            }
-            // UI button
-            if (c.x >= pos.x + nodePadding * 2 + btnW && c.x <= pos.x + nodePadding * 2 + btnW * 2 &&
-                c.y >= btnY && c.y <= btnY + btnH) {
-                return { button: "ui", nodeId: n.id, hasUi: n.pluginHasUi !== false }
-            }
-            // Params button
-            if (c.x >= pos.x + nodePadding * 3 + btnW * 2 && c.x <= pos.x + nodePadding * 3 + btnW * 3 &&
-                c.y >= btnY && c.y <= btnY + btnH) {
-                return { button: "params", nodeId: n.id }
-            }
+        var h = calculateNodeHeight(n)
+        var nw = getNodeWidth(n.id)
+        var btnY = pos.y + h - buttonRowHeight - nodePadding
+        var btnH = buttonRowHeight
+        var btnW = (nw - nodePadding * 4) / 3
+        // On/Off button
+        if (c.x >= pos.x + nodePadding && c.x <= pos.x + nodePadding + btnW &&
+            c.y >= btnY && c.y <= btnY + btnH) {
+            return { button: "onoff", nodeId: n.id, bypassed: isNodeBypassed(n) }
+        }
+        // UI button
+        if (c.x >= pos.x + nodePadding * 2 + btnW && c.x <= pos.x + nodePadding * 2 + btnW * 2 &&
+            c.y >= btnY && c.y <= btnY + btnH) {
+            return { button: "ui", nodeId: n.id, hasUi: n.pluginHasUi !== false }
+        }
+        // Params button
+        if (c.x >= pos.x + nodePadding * 3 + btnW * 2 && c.x <= pos.x + nodePadding * 3 + btnW * 3 &&
+            c.y >= btnY && c.y <= btnY + btnH) {
+            return { button: "params", nodeId: n.id }
         }
         return null
     }
@@ -1197,7 +1353,10 @@ Item {
             var ctx = getContext("2d")
             ctx.reset()
 
-            calculateNodeWidths(ctx)
+            if (widthsDirty) {
+                calculateNodeWidths(ctx)
+                widthsDirty = false
+            }
 
             ctx.fillStyle = "" + Theme.windowBg
             ctx.fillRect(0, 0, width, height)
@@ -1217,21 +1376,19 @@ Item {
 
                 var x = pos.x
                 var y = pos.y
-                var ports = portsByNode[node.id] || []
-                var inputs = ports.filter(function(p) { return p.direction === "Input" })
-                    .sort(function(a, b) { var am = a.mediaType === "Midi" ? 0 : 1; var bm = b.mediaType === "Midi" ? 0 : 1; return am !== bm ? am - bm : naturalCmp(a.name, b.name) })
-                var outputs = ports.filter(function(p) { return p.direction === "Output" })
-                    .sort(function(a, b) { var am = a.mediaType === "Midi" ? 0 : 1; var bm = b.mediaType === "Midi" ? 0 : 1; return am !== bm ? am - bm : naturalCmp(a.name, b.name) })
+                var sortedPorts = getSortedPorts(node.id)
+                var inputs = sortedPorts.inputs
+                var outputs = sortedPorts.outputs
                 var nw = getNodeWidth(node.id)
 
                 var portBaseY = y + headerHeight + nodePadding
                 for (var pi = 0; pi < inputs.length; pi++) {
                     var py = portBaseY + pi * (portHeight + portSpacing) + portHeight / 2
-                    newPortPositions[inputs[pi].id] = { cx: x, cy: py }
+                    newPortPositions[inputs[pi].id] = { cx: x, cy: py, nodeId: node.id, z: ni }
                 }
                 for (var po = 0; po < outputs.length; po++) {
                     var pyo = portBaseY + po * (portHeight + portSpacing) + portHeight / 2
-                    newPortPositions[outputs[po].id] = { cx: x + nw, cy: pyo }
+                    newPortPositions[outputs[po].id] = { cx: x + nw, cy: pyo, nodeId: node.id, z: ni }
                 }
             }
 
@@ -1241,7 +1398,7 @@ Item {
                 var fromPos = newPortPositions[link.outputPortId]
                 var toPos = newPortPositions[link.inputPortId]
                 if (fromPos && toPos) {
-                    var isSelected = selectedLinks[link.id] === true
+                    var isSelected = !!selectedLinks[link.id]
                     var isMidiLink = portMediaTypes[link.outputPortId] === "Midi"
                                   || portMediaTypes[link.inputPortId] === "Midi"
                     var linkColor = isSelected ? ("" + Theme.colLinkSelected)
@@ -1262,15 +1419,13 @@ Item {
 
                 var nx = pos2.x
                 var ny = pos2.y
-                var nPorts = portsByNode[node2.id] || []
-                var nInputs = nPorts.filter(function(p) { return p.direction === "Input" })
-                    .sort(function(a, b) { var am = a.mediaType === "Midi" ? 0 : 1; var bm = b.mediaType === "Midi" ? 0 : 1; return am !== bm ? am - bm : naturalCmp(a.name, b.name) })
-                var nOutputs = nPorts.filter(function(p) { return p.direction === "Output" })
-                    .sort(function(a, b) { var am = a.mediaType === "Midi" ? 0 : 1; var bm = b.mediaType === "Midi" ? 0 : 1; return am !== bm ? am - bm : naturalCmp(a.name, b.name) })
+                var nSorted = getSortedPorts(node2.id)
+                var nInputs = nSorted.inputs
+                var nOutputs = nSorted.outputs
                 var nh = calculateNodeHeight(node2)
                 var nnw = getNodeWidth(node2.id)
 
-                var isNodeSelected = selectedNodes[node2.id] === true
+                var isNodeSelected = !!selectedNodes[node2.id]
                 var isDefaultNode = defaultNodeKey !== "" && node2.layoutKey === defaultNodeKey
                 ctx.fillStyle = "" + colNodeBg
                 if (isNodeSelected) {
@@ -1339,7 +1494,7 @@ Item {
                     ctx.font = "bold 8px sans-serif"
                     var badgeW = ctx.measureText(fmt).width + 6
                     var badgeH = 12
-                    var badgeX = nx + nnw - badgeW - 4
+                    var badgeX = nx + nnw - badgeW - pinAreaWidth
                     var badgeY = ny + 3
                     var br = 2
                     ctx.fillStyle = badgeColor
@@ -1566,7 +1721,7 @@ Item {
                     contextNodeId = -1
                     contextNode = null
                     var cPos = toCanvas(mouse.x, mouse.y)
-                    pendingPluginPosition = { x: cPos.x, y: cPos.y }
+                    contextCanvasPos = { x: cPos.x, y: cPos.y }
                     canvasContextMenu.popup()
                 }
                 return
@@ -1616,14 +1771,14 @@ Item {
                 var nodeIdDrag = findNodeAt(mouse.x, mouse.y)
                 if (nodeIdDrag >= 0) {
                     var ctrlHeld = (mouse.modifiers & Qt.ControlModifier)
-                    var nodeIsSelected = selectedNodes[nodeIdDrag] === true
+                    var nodeIsSelected = !!selectedNodes[nodeIdDrag]
 
                     if (ctrlHeld) {
                         var newSel = Object.assign({}, selectedNodes)
                         if (nodeIsSelected) {
                             delete newSel[nodeIdDrag]
                         } else {
-                            newSel[nodeIdDrag] = true
+                            newSel[nodeIdDrag] = nodeSig(findNodeData(nodeIdDrag))
                         }
                         selectedNodes = newSel
                         selectedLinks = {}
@@ -1656,17 +1811,18 @@ Item {
                 var clickedLinkId = findLinkAt(mouse.x, mouse.y)
                 if (clickedLinkId >= 0) {
                     var ctrlHeldLink = (mouse.modifiers & Qt.ControlModifier)
+                    var clickedLink = findLinkData(clickedLinkId)
                     if (ctrlHeldLink) {
                         var newSelLinks = Object.assign({}, selectedLinks)
                         if (newSelLinks[clickedLinkId]) {
                             delete newSelLinks[clickedLinkId]
-                        } else {
-                            newSelLinks[clickedLinkId] = true
+                        } else if (clickedLink) {
+                            newSelLinks[clickedLinkId] = linkSig(clickedLink)
                         }
                         selectedLinks = newSelLinks
                     } else {
                         var freshSel = {}
-                        freshSel[clickedLinkId] = true
+                        if (clickedLink) freshSel[clickedLinkId] = linkSig(clickedLink)
                         selectedLinks = freshSel
                         selectedNodes = {}
                     }
@@ -2048,7 +2204,7 @@ Item {
             if (fromPos && toPos) {
                 if (bezierIntersectsRect(fromPos.cx, fromPos.cy, toPos.cx, toPos.cy,
                                          rx, ry, rw, rh)) {
-                    result[link.id] = true
+                    result[link.id] = linkSig(link)
                 }
             }
         }
@@ -2075,7 +2231,7 @@ Item {
             var nr = nx + getNodeWidth(n.id)
             var nb = ny + h
             if (nx < rr && nr > rx && ny < rb && nb > ry) {
-                result[n.id] = true
+                result[n.id] = nodeSig(n)
             }
         }
         return result
@@ -2084,8 +2240,10 @@ Item {
     function deleteSelectedLinks() {
         var count = 0
         for (var linkId in selectedLinks) {
-            if (selectedLinks[linkId]) {
-                controller.disconnect_link(parseInt(linkId))
+            var lid = parseInt(linkId)
+            // Only disconnect a link that is still the one that was selected.
+            if (linkMatchesSig(findLinkData(lid), selectedLinks[linkId])) {
+                controller.disconnect_link(lid)
                 count++
             }
         }
