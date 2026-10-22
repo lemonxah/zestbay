@@ -702,6 +702,14 @@ impl Lv2PluginInstance {
         }
     }
 
+    pub fn set_bypassed(&mut self, bypassed: bool) {
+        self.bypassed = bypassed;
+    }
+
+    pub fn is_bypassed(&self) -> bool {
+        self.bypassed
+    }
+
     pub fn get_parameters(&self) -> Vec<Lv2ParameterValue> {
         self.control_inputs
             .iter()

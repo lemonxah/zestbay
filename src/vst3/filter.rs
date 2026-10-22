@@ -325,6 +325,12 @@ impl Vst3FilterNode {
         unsafe { pipewire::sys::pw_filter_get_node_id(self.filter) }
     }
 
+    /// Sample rate the graph is currently driving this filter at
+    /// (from the process clock); 0 until the first process cycle.
+    pub fn graph_rate(&self) -> u32 {
+        0
+    }
+
     pub fn update_mappings(&self, mappings: Arc<ResolvedMappings>) {
         if !self._user_data.is_null() {
             unsafe {

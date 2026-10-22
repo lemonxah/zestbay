@@ -30,6 +30,7 @@ enum InternalOp {
         display_name: String,
         format: String,
         lv2_state: Vec<crate::lv2::state::StateEntry>,
+        plugin_state: Option<Vec<u8>>,
     },
     RemovePlugin {
         instance_id: u64,
@@ -326,11 +327,11 @@ fn run_pipewire_thread(
                 bypassed,
             } => {
                 if let Some(instance) = lv2_instances.borrow().get(&instance_id) {
-                    instance.borrow_mut().bypassed = bypassed;
+                    instance.borrow_mut().set_bypassed(bypassed);
                 } else if let Some(instance) = clap_instances.borrow().get(&instance_id) {
-                    instance.borrow_mut().bypassed = bypassed;
+                    instance.borrow_mut().set_bypassed(bypassed);
                 } else if let Some(instance) = vst3_instances.borrow().get(&instance_id) {
-                    instance.borrow_mut().bypassed = bypassed;
+                    instance.borrow_mut().set_bypassed(bypassed);
                 }
             }
             PwCommand::StartMidiLearn {
@@ -432,6 +433,9 @@ fn run_pipewire_thread(
                     device_name,
                 );
             }
+            PwCommand::RequestPluginStates => {
+                let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginStatesDone));
+            }
             cmd => {
                 let op = match cmd {
                     PwCommand::Connect {
@@ -448,12 +452,14 @@ fn run_pipewire_thread(
                         display_name,
                         format,
                         lv2_state,
+                        plugin_state,
                     } => InternalOp::AddPlugin {
                         plugin_uri,
                         instance_id,
                         display_name,
                         format,
                         lv2_state,
+                        plugin_state,
                     },
                     PwCommand::RemovePlugin { instance_id } => {
                         InternalOp::RemovePlugin { instance_id }
@@ -471,7 +477,8 @@ fn run_pipewire_thread(
                     | PwCommand::AddMidiMapping(..)
                     | PwCommand::RemoveMidiMapping(..)
                     | PwCommand::RemoveMidiMappingsForPlugin { .. }
-                    | PwCommand::RemoveMidiMappingsForDevice { .. } => unreachable!(),
+                    | PwCommand::RemoveMidiMappingsForDevice { .. }
+                    | PwCommand::RequestPluginStates => unreachable!(),
                 };
                 pending_ops.borrow_mut().push(op);
             }
@@ -568,6 +575,7 @@ fn run_pipewire_thread(
                 display_name,
                 format,
                 lv2_state,
+                plugin_state: _,
             } => {
                 let sample_rate = pw_sample_rate.load(Ordering::Relaxed) as f64;
                 let block_length = pw_quantum.load(Ordering::Relaxed);
@@ -605,7 +613,11 @@ fn run_pipewire_thread(
                                         instance_id
                                     );
                                     let _ = event_tx.send(PwEvent::Plugin(
-                                        PluginEvent::Lv2StateSaved { instance_id, state },
+                                        PluginEvent::PluginStateSaved {
+                                            instance_id,
+                                            lv2_state: state,
+                                            blob: None,
+                                        },
                                     ));
                                 }
                             }

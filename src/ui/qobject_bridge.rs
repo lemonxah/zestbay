@@ -605,6 +605,7 @@ impl qobject::AppController {
                         display_name: sp.display_name,
                         format: format_str,
                         lv2_state: sp.lv2_state,
+                        plugin_state: None,
                     });
                 }
             }
@@ -885,7 +886,12 @@ impl qobject::AppController {
                         QString::from(existing_label.as_str()),
                     );
                 }
-                PluginEvent::Lv2StateSaved { instance_id, state } => {
+                PluginEvent::PluginStatesDone => {}
+                PluginEvent::PluginStateSaved {
+                    instance_id,
+                    lv2_state: state,
+                    blob: _,
+                } => {
                     log::info!(
                         "LV2 state received: {} entries for instance {}",
                         state.len(),
@@ -2078,6 +2084,7 @@ impl qobject::AppController {
                 display_name: display_name.clone(),
                 format: format_str,
                 lv2_state: Vec::new(),
+                plugin_state: None,
             });
         }
 

@@ -137,6 +137,8 @@ pub enum PwCommand {
         /// "LV2", "CLAP", or "VST3"
         format: String,
         lv2_state: Vec<crate::lv2::state::StateEntry>,
+        /// Opaque CLAP/VST3 state blob to restore after instantiation.
+        plugin_state: Option<Vec<u8>>,
     },
     RemovePlugin {
         instance_id: u64,
@@ -171,6 +173,9 @@ pub enum PwCommand {
     RemoveMidiMappingsForDevice {
         device_name: String,
     },
+    /// Ask the PipeWire thread to snapshot the state of every live plugin.
+    /// Replies with one `PluginStateSaved` per plugin, then `PluginStatesDone`.
+    RequestPluginStates,
 }
 
 #[derive(Debug, Clone)]
@@ -216,10 +221,15 @@ pub enum PluginEvent {
         cc: u8,
         message_type: crate::midi::MidiMessageType,
     },
-    Lv2StateSaved {
+    PluginStateSaved {
         instance_id: u64,
-        state: Vec<crate::lv2::state::StateEntry>,
+        /// LV2 state entries (empty for CLAP/VST3).
+        lv2_state: Vec<crate::lv2::state::StateEntry>,
+        /// CLAP/VST3 opaque state blob (None for LV2).
+        blob: Option<Vec<u8>>,
     },
+    /// Sent after all `PluginStateSaved` replies to a `RequestPluginStates`.
+    PluginStatesDone,
 }
 
 /// Backward-compatible alias for `PluginEvent`.

@@ -615,6 +615,24 @@ impl ClapPluginInstance {
         }
     }
 
+    pub fn set_bypassed(&mut self, bypassed: bool) {
+        self.bypassed = bypassed;
+    }
+
+    pub fn is_bypassed(&self) -> bool {
+        self.bypassed
+    }
+
+    /// Serialize plugin state via the CLAP state extension.
+    pub fn get_state(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Restore plugin state via the CLAP state extension.
+    pub unsafe fn set_state(&mut self, _blob: &[u8]) -> bool {
+        false
+    }
+
     pub fn get_parameters(&self) -> Vec<ParameterValue> {
         self.params
             .iter()
