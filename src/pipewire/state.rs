@@ -77,6 +77,15 @@ impl GraphState {
         *self.change_counter.read()
     }
 
+    /// Forget every node, port and link (e.g. after the PipeWire connection
+    /// was lost; the registry repopulates the graph on reconnect).
+    pub fn clear(&self) {
+        self.links.write().clear();
+        self.ports.write().clear();
+        self.nodes.write().clear();
+        self.mark_changed();
+    }
+
     pub fn insert_node(&self, node: Node) {
         let media_type = node.media_type;
         let node_id = node.id;

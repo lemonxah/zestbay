@@ -2,122 +2,139 @@
 //
 // Ranking phase: assign each node to a column/layer.
 //
-// Implements the network simplex algorithm for optimal rank assignment,
-// adapted from Gansner et al. 1993 (doi:10.1109/32.221135).
-// Falls back to longest-path ranking from topological generations.
+//   1. Break cycles (reverse DFS back edges; self-loops are dropped earlier).
+//   2. Longest-path ranking from sources.
+//   3. Tightening: nodes with more outgoing than incoming edges are pulled
+//      right toward their successors (shortens total edge length); source
+//      devices/streams stay in the leftmost column.
+//   4. Sink placement: sink-only nodes go to the rightmost column of their
+//      component; isolated sinks go to the global last column.
+//   5. Balancing of pass-through nodes into less populated columns.
 
-use super::graph::LayoutGraph;
+use super::graph::{LayoutGraph, LayoutNodeKind};
 
-/// Assign ranks to all nodes using longest-path ranking from topological generations,
-/// then optimize with the network simplex heuristic.
+/// Assign ranks to all nodes.  Afterwards every edge goes from a lower to a
+/// strictly higher rank and the minimum rank is 0.
 pub fn compute_ranks(graph: &mut LayoutGraph) {
     let n = graph.nodes.len();
     if n == 0 {
         return;
     }
 
-    // Phase 1: Initial ranking via topological generations (longest path from sources).
-    // This gives rank(v) = length of the longest path from any source to v.
-    initial_ranking(graph);
+    let reversed = graph.break_cycles();
+    if reversed > 0 {
+        log::debug!("Layout: reversed {} feedback edge(s) to break cycles", reversed);
+    }
 
-    // Phase 2: Network simplex optimization to minimize total edge length.
-    network_simplex(graph);
+    let order = initial_ranking(graph);
+    tighten_ranks(graph, &order);
+    normalize_components(graph);
+    place_sinks(graph);
+    balance(graph);
 
-    // Phase 3: Normalize ranks to start at 0 per connected component and balance.
-    normalize_and_balance(graph);
+    debug_assert!(graph
+        .edges
+        .iter()
+        .all(|e| graph.nodes[e.to_node].rank > graph.nodes[e.from_node].rank));
 }
 
-/// Initial ranking: assign each node a rank equal to its topological generation.
-/// This is the longest-path-from-sources approach.
-fn initial_ranking(graph: &mut LayoutGraph) {
+/// Longest-path ranking: rank(v) = length of the longest path from a source.
+/// Returns the nodes in topological order.
+fn initial_ranking(graph: &mut LayoutGraph) -> Vec<usize> {
     let generations = graph.topological_generations();
     for (gen_idx, generation) in generations.iter().enumerate() {
         for &node_idx in generation {
             graph.nodes[node_idx].rank = gen_idx as i32;
         }
     }
+    generations.into_iter().flatten().collect()
 }
 
-/// Network simplex optimization for rank assignment.
-///
-/// The full network simplex is complex. We implement a simplified version:
-/// For each edge, the "slack" is rank(to) - rank(from) - 1.
-/// We iteratively try to reduce total slack by adjusting ranks.
-fn network_simplex(graph: &mut LayoutGraph) {
-    let n = graph.nodes.len();
-    if n == 0 {
-        return;
-    }
-
-    // Build a feasible spanning tree using tight edges (slack=0).
-    // Then iteratively improve by swapping tree/non-tree edges.
-
-    let max_iterations = (50.0 * (n as f64).sqrt()) as usize;
-
-    for _iter in 0..max_iterations {
-        // Find an edge with negative cut value (i.e., moving it would reduce total length).
-        // Simplified: find any edge where we can tighten the rank difference.
-        let mut improved = false;
-
-        for ei in 0..graph.edges.len() {
-            let edge = &graph.edges[ei];
-            let from_rank = graph.nodes[edge.from_node].rank;
-            let to_rank = graph.nodes[edge.to_node].rank;
-            let slack = to_rank - from_rank - 1;
-
-            if slack > 0 {
-                // Try to pull the target node closer (decrease its rank).
-                // Only do this if it doesn't violate any other edge constraint.
-                let min_rank_from_preds = graph.in_edges[edge.to_node]
-                    .iter()
-                    .map(|&ei2| graph.nodes[graph.edges[ei2].from_node].rank + 1)
-                    .max()
-                    .unwrap_or(0);
-
-                let new_rank = min_rank_from_preds;
-                if new_rank < to_rank {
-                    graph.nodes[edge.to_node].rank = new_rank;
-                    improved = true;
-                }
-            }
-        }
-
-        if !improved {
-            break;
-        }
-    }
+fn is_source_kind(kind: LayoutNodeKind) -> bool {
+    matches!(kind, LayoutNodeKind::Source | LayoutNodeKind::StreamOutput)
 }
 
-/// Normalize ranks to start at 0 and balance nodes with equal in/out degree.
-fn normalize_and_balance(graph: &mut LayoutGraph) {
-    let components = graph.connected_components();
+fn is_sink_kind(kind: LayoutNodeKind) -> bool {
+    matches!(kind, LayoutNodeKind::Sink | LayoutNodeKind::StreamInput)
+}
 
-    for component in &components {
-        if component.is_empty() {
+/// Pull nodes with out-degree > in-degree as far right as their successors
+/// allow.  Moving such a node right by one shortens more edges than it
+/// lengthens, so this strictly reduces total edge length.  Processed in
+/// reverse topological order so successors are final first.
+fn tighten_ranks(graph: &mut LayoutGraph, topo_order: &[usize]) {
+    for &v in topo_order.iter().rev() {
+        let in_deg = graph.in_edges[v].len();
+        let out_deg = graph.out_edges[v].len();
+        if out_deg <= in_deg {
             continue;
         }
-
-        // Normalize: shift so minimum rank in this component is 0
-        let min_rank = component
+        if in_deg == 0 && is_source_kind(graph.nodes[v].kind) {
+            continue;
+        }
+        let max_rank = graph.out_edges[v]
             .iter()
-            .map(|&i| graph.nodes[i].rank)
+            .map(|&ei| graph.nodes[graph.edges[ei].to_node].rank - 1)
             .min()
-            .unwrap();
-        for &i in component {
-            graph.nodes[i].rank -= min_rank;
+            .unwrap_or(graph.nodes[v].rank);
+        if max_rank > graph.nodes[v].rank {
+            graph.nodes[v].rank = max_rank;
+        }
+    }
+}
+
+/// Shift each connected component so its minimum rank is 0.
+fn normalize_components(graph: &mut LayoutGraph) {
+    for component in graph.connected_components() {
+        let min_rank = component.iter().map(|&i| graph.nodes[i].rank).min().unwrap_or(0);
+        if min_rank != 0 {
+            for &i in &component {
+                graph.nodes[i].rank -= min_rank;
+            }
+        }
+    }
+}
+
+/// Sink-only nodes (incoming but no outgoing edges) go to the last column of
+/// their component — except plugins with an unconnected output, which stay
+/// next to their input.  Isolated sink devices/streams go to the global last
+/// column, other isolated nodes to column 0.
+fn place_sinks(graph: &mut LayoutGraph) {
+    let mut isolated_sinks = Vec::new();
+    for component in graph.connected_components() {
+        if component.len() == 1 {
+            let v = component[0];
+            graph.nodes[v].rank = 0;
+            if is_sink_kind(graph.nodes[v].kind) {
+                isolated_sinks.push(v);
+            }
+            continue;
+        }
+        let comp_max = component.iter().map(|&i| graph.nodes[i].rank).max().unwrap_or(0);
+        for &v in &component {
+            if graph.out_edges[v].is_empty()
+                && !graph.in_edges[v].is_empty()
+                && graph.nodes[v].kind != LayoutNodeKind::Plugin
+            {
+                graph.nodes[v].rank = comp_max;
+            }
         }
     }
 
-    // Global normalization
-    let global_min = graph.nodes.iter().map(|n| n.rank).min().unwrap_or(0);
-    if global_min != 0 {
-        for node in &mut graph.nodes {
-            node.rank -= global_min;
+    if !isolated_sinks.is_empty() {
+        let max_rank = graph.nodes.iter().map(|n| n.rank).max().unwrap_or(0);
+        let has_others = isolated_sinks.len() < graph.nodes.len();
+        let last = if has_others { max_rank.max(1) } else { max_rank };
+        for v in isolated_sinks {
+            graph.nodes[v].rank = last;
         }
     }
+}
 
-    // Balance: nodes with equal in-degree and out-degree can be moved
-    // to less populated columns to reduce column height variance.
+/// Balance: nodes with equal in-degree and out-degree can be moved within
+/// their feasible range to less populated columns to reduce column height
+/// variance.
+fn balance(graph: &mut LayoutGraph) {
     let max_rank = graph.nodes.iter().map(|n| n.rank).max().unwrap_or(0);
     let mut col_sizes: Vec<usize> = vec![0; (max_rank + 1) as usize];
     for node in &graph.nodes {
@@ -132,8 +149,6 @@ fn normalize_and_balance(graph: &mut LayoutGraph) {
         }
 
         let current_rank = graph.nodes[i].rank;
-
-        // Find valid rank range
         let min_from_preds = graph.in_edges[i]
             .iter()
             .map(|&ei| graph.nodes[graph.edges[ei].from_node].rank + 1)
@@ -149,7 +164,6 @@ fn normalize_and_balance(graph: &mut LayoutGraph) {
             continue;
         }
 
-        // Find the least populated column in the valid range
         let best_rank = (min_from_preds..=max_from_succs)
             .min_by_key(|&r| col_sizes[r as usize])
             .unwrap_or(current_rank);
@@ -229,5 +243,79 @@ pub fn insert_dummy_nodes(graph: &mut LayoutGraph) {
         // (mark it as disconnected by removing from out/in lists)
         graph.out_edges[from_node].retain(|&e| e != original_ei);
         graph.in_edges[to_node].retain(|&e| e != original_ei);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::graph::LayoutConfig;
+
+    fn ranks(graph: &LayoutGraph) -> Vec<i32> {
+        graph.nodes.iter().map(|n| n.rank).collect()
+    }
+
+    #[test]
+    fn cycle_nodes_spread_across_columns() {
+        // S → A → B → C → A, C → T
+        let nodes = vec![
+            (1, "S".into(), "Source", 100.0, 50.0),
+            (2, "A".into(), "Plugin", 100.0, 50.0),
+            (3, "B".into(), "Plugin", 100.0, 50.0),
+            (4, "C".into(), "Plugin", 100.0, 50.0),
+            (5, "T".into(), "Sink", 100.0, 50.0),
+        ];
+        let links = vec![
+            (10, 1, 0, 2, 0),
+            (11, 2, 0, 3, 0),
+            (12, 3, 0, 4, 0),
+            (13, 4, 0, 2, 0),
+            (14, 4, 0, 5, 0),
+        ];
+        let mut g = LayoutGraph::new(nodes, vec![], links, LayoutConfig::default());
+        compute_ranks(&mut g);
+        assert_eq!(ranks(&g), vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn isolated_sink_goes_last_isolated_source_first() {
+        let nodes = vec![
+            (1, "Mic".into(), "Source", 100.0, 50.0),
+            (2, "EQ".into(), "Plugin", 100.0, 50.0),
+            (3, "Spk".into(), "Sink", 100.0, 50.0),
+            (4, "LoneSink".into(), "Sink", 100.0, 50.0),
+            (5, "LoneSrc".into(), "Source", 100.0, 50.0),
+        ];
+        let links = vec![(10, 1, 0, 2, 0), (11, 2, 0, 3, 0)];
+        let mut g = LayoutGraph::new(nodes, vec![], links, LayoutConfig::default());
+        compute_ranks(&mut g);
+        assert_eq!(ranks(&g), vec![0, 1, 2, 2, 0]);
+    }
+
+    #[test]
+    fn sink_moves_to_component_last_column_and_generator_tightens() {
+        // Mic → EQ → Comp → Spk, Mic → Rec (sink), Gen(plugin, no inputs) → Comp
+        let nodes = vec![
+            (1, "Mic".into(), "Source", 100.0, 50.0),
+            (2, "EQ".into(), "Plugin", 100.0, 50.0),
+            (3, "Comp".into(), "Plugin", 100.0, 50.0),
+            (4, "Spk".into(), "Sink", 100.0, 50.0),
+            (5, "Rec".into(), "StreamInput", 100.0, 50.0),
+            (6, "Gen".into(), "Plugin", 100.0, 50.0),
+        ];
+        let links = vec![
+            (10, 1, 0, 2, 0),
+            (11, 2, 0, 3, 0),
+            (12, 3, 0, 4, 0),
+            (13, 1, 0, 5, 0),
+            (14, 6, 0, 3, 0),
+        ];
+        let mut g = LayoutGraph::new(nodes, vec![], links, LayoutConfig::default());
+        compute_ranks(&mut g);
+        let r = ranks(&g);
+        assert_eq!(r[0], 0, "source stays left");
+        assert_eq!(r[3], 3);
+        assert_eq!(r[4], 3, "sink-only stream goes to last column");
+        assert_eq!(r[5], 1, "generator pulled next to its successor");
     }
 }
