@@ -84,10 +84,9 @@ Item {
     property var localBypassState: ({})
 
     // Per-node caches, rebuilt by refreshData(): sorted port lists, node
-    // heights, z-order index, and the unique layout key of each node.
+    // heights, and the unique layout key of each node.
     property var sortedPortsByNode: ({})
     property var nodeHeights: ({})
-    property var nodeZ: ({})
     property var uniqueKeyById: ({})
     // Node widths need text measurement (a canvas context); recomputed on the
     // next paint after the data or theme changed.
@@ -257,13 +256,12 @@ Item {
 
         var newSorted = {}
         var newHeights = {}
-        var newZ = {}
         for (var si = 0; si < nodes.length; si++) {
             var sn = nodes[si]
             var sp = newPorts[sn.id] || []
             var sorted = {
-                inputs: sp.filter(function(p) { return p.direction === "Input" }).sort(portSortCmp),
-                outputs: sp.filter(function(p) { return p.direction === "Output" }).sort(portSortCmp)
+                inputs: sp.filter(function(p) { return p.direction === "Input" }).sort(function(a, b) { return portSortCmp(a, b) }),
+                outputs: sp.filter(function(p) { return p.direction === "Output" }).sort(function(a, b) { return portSortCmp(a, b) })
             }
             newSorted[sn.id] = sorted
             var rows = Math.max(sorted.inputs.length, sorted.outputs.length, 1)
@@ -271,11 +269,9 @@ Item {
             if (sn.type === "Plugin")
                 hgt += buttonRowHeight + nodePadding
             newHeights[sn.id] = hgt
-            newZ[sn.id] = si
         }
         sortedPortsByNode = newSorted
         nodeHeights = newHeights
-        nodeZ = newZ
         uniqueKeyById = buildUniqueLayoutKeys()
         widthsDirty = true
 

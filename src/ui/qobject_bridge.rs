@@ -406,6 +406,15 @@ pub struct AppControllerRust {
     /// plugins.json could not be parsed at startup — never snapshot it as known-good.
     plugins_load_failed: bool,
 
+    /// PipeWire connection dropped; the graph is being torn down/rebuilt.
+    pw_reconnecting: bool,
+    /// Links are not persisted until this time (graph still settling after a
+    /// reconnect or an in-place plugin reload).
+    links_suppressed_until: Option<Instant>,
+    /// MIDI mappings whose device is unplugged: kept on disk and re-added
+    /// when the device comes back.
+    dormant_midi_mappings: Vec<crate::midi::MidiCcMapping>,
+
     prefs: Preferences,
 
     tray_state: Option<TrayState>,
@@ -455,6 +464,9 @@ impl Default for AppControllerRust {
             state_request_sent_at: None,
             last_state_autosave: Instant::now(),
             plugins_load_failed: false,
+            pw_reconnecting: false,
+            links_suppressed_until: None,
+            dormant_midi_mappings: Vec::new(),
             prefs: Preferences::default(),
             tray_state: None,
             cpu_usage: QString::from("0.0%"),
@@ -753,8 +765,16 @@ impl qobject::AppController {
             if let Some(rx) = rx {
                 while let Ok(event) = rx.try_recv() {
                     match event {
-                        PwEvent::NodeChanged(_)
-                        | PwEvent::NodeRemoved(_)
+                        PwEvent::NodeChanged(_) => {
+                            changed = true;
+                            if self.rust().pw_reconnecting {
+                                // Nodes are coming back; give the graph a few
+                                // seconds to fill in before links are saved.
+                                self.as_mut().rust_mut().pw_reconnecting = false;
+                                self.as_mut().suppress_link_persist(LINK_SETTLE_AFTER_RECONNECT);
+                            }
+                        }
+                        PwEvent::NodeRemoved(_)
                         | PwEvent::PortChanged(_)
                         | PwEvent::PortRemoved { .. }
                         | PwEvent::BatchComplete => {
@@ -766,6 +786,9 @@ impl qobject::AppController {
                         }
                         PwEvent::Error(msg) => {
                             log::error!("PipeWire error: {}", msg);
+                            if msg.contains("reconnecting to PipeWire") {
+                                self.as_mut().rust_mut().pw_reconnecting = true;
+                            }
                             if !errors.contains(&msg) {
                                 errors.push(msg);
                             }
@@ -796,6 +819,19 @@ impl qobject::AppController {
                         pw_node_id,
                         display_name
                     );
+                    // A PluginAdded for an instance that already had a node is
+                    // a re-add (PipeWire reconnect or in-place reload at a new
+                    // sample rate), not a new plugin.
+                    let re_added = self
+                        .rust()
+                        .plugin_manager
+                        .as_ref()
+                        .and_then(|mgr| mgr.get_instance(instance_id))
+                        .is_some_and(|info| info.pw_node_id.is_some());
+                    if re_added {
+                        log::info!("Plugin instance {} re-added (reconnect/reload)", instance_id);
+                        self.as_mut().suppress_link_persist(LINK_SETTLE_AFTER_RECONNECT);
+                    }
                     if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager {
                         mgr.set_instance_pw_node_id(instance_id, pw_node_id);
                     }
@@ -975,6 +1011,23 @@ impl qobject::AppController {
                         .filter(|m| m.source == *source)
                         .map(|m| (m.target.instance_id, m.target.port_index as u32))
                         .collect();
+                    // Removed because its device was unplugged: keep it (on
+                    // disk too) and re-add it when the device returns.
+                    let device_gone = self.rust().graph.as_ref().is_some_and(|g| {
+                        !node_name_present(g, &g.get_all_nodes(), &source.device_name)
+                    });
+                    if device_gone {
+                        let gone: Vec<crate::midi::MidiCcMapping> = self
+                            .rust()
+                            .midi_mappings
+                            .iter()
+                            .filter(|m| m.source == *source)
+                            .cloned()
+                            .collect();
+                        let mut rust = self.as_mut().rust_mut();
+                        rust.dormant_midi_mappings.retain(|m| m.source != *source);
+                        rust.dormant_midi_mappings.extend(gone);
+                    }
                     self.as_mut().rust_mut().midi_mappings.retain(|m| m.source != *source);
                     self.as_mut().persist_midi();
                     for (iid, pidx) in removed {
@@ -1048,6 +1101,7 @@ impl qobject::AppController {
             self.as_mut().rust_mut().last_change_time = Some(Instant::now());
             self.as_mut().rust_mut().rules_apply_pending = true;
             self.as_mut().rust_mut().links_retry_due = true;
+            self.as_mut().revive_dormant_midi_mappings();
         }
 
         // Pending (remembered) links are merged into every persist, so link
@@ -1146,7 +1200,7 @@ impl qobject::AppController {
                     .map(|t| t.elapsed() >= Duration::from_millis(links_persist_ms))
                     .unwrap_or(false)
         };
-        if should_persist_links {
+        if should_persist_links && !self.links_persist_suppressed() {
             self.as_mut().rust_mut().links_dirty = false;
             self.as_mut().rust_mut().links_dirty_since = None;
             self.as_mut().persist_links_now();
@@ -1343,7 +1397,55 @@ impl qobject::AppController {
     }
 
     fn persist_midi(self: Pin<&mut Self>) {
-        persist_midi_mappings(&self.rust().midi_mappings, self.rust().plugin_manager.as_ref());
+        let mut all = self.rust().midi_mappings.clone();
+        for m in &self.rust().dormant_midi_mappings {
+            if !all.iter().any(|a| a.source == m.source || a.target == m.target) {
+                all.push(m.clone());
+            }
+        }
+        persist_midi_mappings(&all, self.rust().plugin_manager.as_ref());
+    }
+
+    /// Re-add mappings whose MIDI device has reappeared.
+    fn revive_dormant_midi_mappings(mut self: Pin<&mut Self>) {
+        if self.rust().dormant_midi_mappings.is_empty() {
+            return;
+        }
+        let Some(graph) = self.rust().graph.clone() else {
+            return;
+        };
+        let all_nodes = graph.get_all_nodes();
+        let (back, still): (Vec<_>, Vec<_>) = std::mem::take(
+            &mut self.as_mut().rust_mut().dormant_midi_mappings,
+        )
+        .into_iter()
+        .partition(|m| node_name_present(&graph, &all_nodes, &m.source.device_name));
+        self.as_mut().rust_mut().dormant_midi_mappings = still;
+        if back.is_empty() {
+            return;
+        }
+        log::info!("MIDI device back: re-adding {} mapping(s)", back.len());
+        if let Some(ref tx) = self.rust().cmd_tx {
+            for m in back {
+                let _ = tx.send(PwCommand::AddMidiMapping(m));
+            }
+        }
+    }
+
+    fn suppress_link_persist(mut self: Pin<&mut Self>, for_how_long: Duration) {
+        let until = Instant::now() + for_how_long;
+        let current = self.rust().links_suppressed_until;
+        if current.is_none_or(|t| t < until) {
+            self.as_mut().rust_mut().links_suppressed_until = Some(until);
+        }
+    }
+
+    fn links_persist_suppressed(&self) -> bool {
+        self.rust().pw_reconnecting
+            || self
+                .rust()
+                .links_suppressed_until
+                .is_some_and(|t| Instant::now() < t)
     }
 
     /// Remove every MIDI mapping that targets `instance_id` (plugin removed).
@@ -1351,6 +1453,15 @@ impl qobject::AppController {
         if let Some(ref tx) = self.rust().cmd_tx {
             let _ = tx.send(PwCommand::RemoveMidiMappingsForPlugin { instance_id });
         }
+        let had_dormant = self
+            .rust()
+            .dormant_midi_mappings
+            .iter()
+            .any(|m| m.target.instance_id == instance_id);
+        self.as_mut()
+            .rust_mut()
+            .dormant_midi_mappings
+            .retain(|m| m.target.instance_id != instance_id);
         let removed: Vec<u32> = self
             .rust()
             .midi_mappings
@@ -1359,6 +1470,9 @@ impl qobject::AppController {
             .map(|m| m.target.port_index as u32)
             .collect();
         if removed.is_empty() {
+            if had_dormant {
+                self.as_mut().persist_midi();
+            }
             return;
         }
         self.as_mut()
@@ -1994,7 +2108,11 @@ impl qobject::AppController {
         }
         let restore_complete = self.rust().restore_instance_ids.is_empty();
         remove_crash_marker();
-        self.as_mut().persist_links_now();
+        // While PipeWire is reconnecting the graph is empty/partial; links.json
+        // already holds the last good state.
+        if !self.links_persist_suppressed() {
+            self.as_mut().persist_links_now();
+        }
         persist_active_plugins(self.rust().plugin_manager.as_ref());
         // Only a session that really loaded plugins.json (no safe mode, no
         // parse failure, restore finished) may become the known-good snapshot.
@@ -2508,7 +2626,7 @@ impl qobject::AppController {
     }
 
     pub fn remove_midi_mapping_for_param(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         instance_id: u64,
         port_index: u32,
     ) {
@@ -2516,6 +2634,13 @@ impl qobject::AppController {
             instance_id,
             port_index: port_index as usize,
         };
+        if self.rust().dormant_midi_mappings.iter().any(|m| m.target == target) {
+            self.as_mut()
+                .rust_mut()
+                .dormant_midi_mappings
+                .retain(|m| m.target != target);
+            self.as_mut().persist_midi();
+        }
         let source = self.rust().midi_mappings
             .iter()
             .find(|m| m.target == target)
@@ -3637,6 +3762,10 @@ impl PendingLink {
 
 /// How long a requested connect may take to show up before we give up on it.
 const LINK_CONNECT_GRACE: Duration = Duration::from_secs(5);
+
+/// After a PipeWire reconnect or in-place plugin reload, links aren't saved
+/// until the graph has had this long to come back.
+const LINK_SETTLE_AFTER_RECONNECT: Duration = Duration::from_secs(5);
 
 fn default_lv2_format_str() -> String {
     "LV2".to_string()
