@@ -32,10 +32,11 @@ pub enum MappingMode {
     /// Continuous: CC 0-127 is mapped linearly to [min, max].
     /// This is the default for sliders / knobs.
     Continuous,
-    /// Toggle: a CC value > 63 flips the parameter on/off.
-    /// Each "press" (transition from <= 63 to > 63) toggles.
+    /// Toggle: each "press" flips the parameter on/off.  A press is a CC
+    /// going from <= 63 to > 63, or a note-on (any velocity > 0) after a
+    /// note-off / velocity-0 note-on.
     Toggle,
-    /// Momentary: CC > 63 = on, CC <= 63 = off.
+    /// Momentary: CC > 63 / note-on = on, CC <= 63 / note-off = off.
     /// The parameter follows the button state exactly.
     Momentary,
 }

@@ -1,7 +1,6 @@
-use std::cell::RefCell;
+use std::cell::{RefCell, UnsafeCell};
 use std::ffi::CString;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use pipewire::core::CoreRc;
@@ -9,8 +8,8 @@ use pipewire::core::CoreRc;
 use super::host::Lv2PluginInstance;
 use super::types::*;
 use crate::midi::filter::ResolvedMappings;
-use crate::midi::processing::MidiProcessingState;
-use crate::plugin::cpu_stats::{global_cpu_tracker, PluginTimingSlot};
+use crate::midi::rt::{FilterMain, FilterPorts, FilterRt, FilterShared, new_filter_halves};
+use crate::plugin::cpu_stats::global_cpu_tracker;
 
 pub struct Lv2FilterNode {
     filter: *mut pipewire::sys::pw_filter,
@@ -18,6 +17,7 @@ pub struct Lv2FilterNode {
     _events: Box<pipewire::sys::pw_filter_events>,
     _user_data: *mut FilterData,
     _core: CoreRc,
+    main: FilterMain,
     pub instance_id: PluginInstanceId,
     pub display_name: String,
 }
@@ -37,34 +37,25 @@ struct PortData {
     index: u32,
 }
 
+/// User data of the pw_filter callbacks.
+///
+/// `shared` (atomics only) may be read from any thread.  `rt` is touched
+/// exclusively by the RT `process` callback once the filter is connected
+/// (before that only by `new`), hence the `UnsafeCell`.
 struct FilterData {
+    shared: Arc<FilterShared>,
+    rt: UnsafeCell<FilterRt>,
+    /// Plugin instance owned by an `Rc<RefCell<..>>` on the main thread.
+    /// See `on_process` for the aliasing rules.
     instance_ptr: *mut Lv2PluginInstance,
-    filter: *mut pipewire::sys::pw_filter,
-    instance_id: PluginInstanceId,
-    display_name: String,
-    event_tx: std::sync::mpsc::Sender<crate::pipewire::PwEvent>,
-    node_id_sent: bool,
-    shutting_down: AtomicBool,
-    input_port_ptrs: Vec<*mut std::ffi::c_void>,
-    output_port_ptrs: Vec<*mut std::ffi::c_void>,
-    midi_in_port_ptr: *mut std::ffi::c_void,
-    midi_out_port_ptr: *mut std::ffi::c_void,
-    n_audio_inputs: usize,
-    n_audio_outputs: usize,
-    /// Plugin accepts MIDI input (feed PipeWire MIDI to LV2 atom input buffers)
-    has_midi_in: bool,
-    cpu_slot: Arc<PluginTimingSlot>,
-    midi_state: MidiProcessingState,
 }
-
-unsafe impl Send for FilterData {}
 
 impl Lv2FilterNode {
     pub fn new(
         core: &CoreRc,
         config: FilterConfig,
         plugin_instance: Rc<RefCell<Lv2PluginInstance>>,
-        event_tx: std::sync::mpsc::Sender<crate::pipewire::PwEvent>,
+        _event_tx: std::sync::mpsc::Sender<crate::pipewire::PwEvent>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let c_name = CString::new(config.display_name.as_str())
             .unwrap_or_else(|_| CString::new("LV2 Plugin").unwrap());
@@ -110,28 +101,88 @@ impl Lv2FilterNode {
             return Err("Failed to create pw_filter".into());
         }
 
-        let instance_ptr = plugin_instance.as_ptr();
+        // Ports are created before the filter is connected, so the RT
+        // callback cannot run yet.  A port that fails to be created keeps a
+        // null entry and is fed from scratch memory.
+        let mut ports = FilterPorts {
+            inputs: Vec::with_capacity(config.audio_inputs),
+            outputs: Vec::with_capacity(config.audio_outputs),
+            midi_in: std::ptr::null_mut(),
+            midi_out: std::ptr::null_mut(),
+        };
+
+        for i in 0..config.audio_inputs {
+            let port_name = CString::new(format!("input_{}", i)).unwrap();
+            let port_data = unsafe {
+                add_port(
+                    filter,
+                    libspa::sys::SPA_DIRECTION_INPUT,
+                    &port_name,
+                    b"32 bit float mono audio\0",
+                )
+            };
+            if port_data.is_null() {
+                log::error!("Failed to add input port {}", i);
+            } else {
+                unsafe { (*(port_data as *mut PortData)).index = i as u32 };
+            }
+            ports.inputs.push(port_data);
+        }
+
+        for i in 0..config.audio_outputs {
+            let port_name = CString::new(format!("output_{}", i)).unwrap();
+            let port_data = unsafe {
+                add_port(
+                    filter,
+                    libspa::sys::SPA_DIRECTION_OUTPUT,
+                    &port_name,
+                    b"32 bit float mono audio\0",
+                )
+            };
+            if port_data.is_null() {
+                log::error!("Failed to add output port {}", i);
+            } else {
+                unsafe { (*(port_data as *mut PortData)).index = i as u32 };
+            }
+            ports.outputs.push(port_data);
+        }
+
+        // MIDI input port
+        let port_name = CString::new("midi_in").unwrap();
+        ports.midi_in = unsafe {
+            add_port(
+                filter,
+                libspa::sys::SPA_DIRECTION_INPUT,
+                &port_name,
+                b"8 bit raw midi\0",
+            )
+        };
+        if ports.midi_in.is_null() {
+            log::error!("Failed to add MIDI input port for {}", config.display_name);
+        }
+
+        // MIDI output port
+        let port_name = CString::new("midi_out").unwrap();
+        ports.midi_out = unsafe {
+            add_port(
+                filter,
+                libspa::sys::SPA_DIRECTION_OUTPUT,
+                &port_name,
+                b"8 bit raw midi\0",
+            )
+        };
+        if ports.midi_out.is_null() {
+            log::error!("Failed to add MIDI output port for {}", config.display_name);
+        }
 
         let cpu_slot =
             global_cpu_tracker().register(config.instance_id, config.display_name.clone());
+        let (main, rt) = new_filter_halves(ports, config.has_midi_in, cpu_slot);
 
         let user_data = Box::into_raw(Box::new(FilterData {
-            instance_ptr,
-            filter,
-            instance_id: config.instance_id,
-            display_name: config.display_name.clone(),
-            event_tx,
-            node_id_sent: false,
-            shutting_down: AtomicBool::new(false),
-            input_port_ptrs: Vec::with_capacity(config.audio_inputs),
-            output_port_ptrs: Vec::with_capacity(config.audio_outputs),
-            midi_in_port_ptr: std::ptr::null_mut(),
-            midi_out_port_ptr: std::ptr::null_mut(),
-            n_audio_inputs: config.audio_inputs,
-            n_audio_outputs: config.audio_outputs,
-            has_midi_in: config.has_midi_in,
-            cpu_slot,
-            midi_state: MidiProcessingState::new(),
+            shared: main.shared.clone(),
+            rt: UnsafeCell::new(rt),
+            instance_ptr: plugin_instance.as_ptr(),
         }));
 
         let events = Box::new(pipewire::sys::pw_filter_events {
@@ -157,136 +208,6 @@ impl Lv2FilterNode {
             );
         }
 
-        for i in 0..config.audio_inputs {
-            let port_name = CString::new(format!("input_{}", i)).unwrap();
-            let port_props = unsafe {
-                pipewire::sys::pw_properties_new(
-                    c_str(b"port.name\0"),
-                    port_name.as_ptr(),
-                    c_str(b"format.dsp\0"),
-                    c_str(b"32 bit float mono audio\0"),
-                    std::ptr::null::<std::os::raw::c_char>(),
-                )
-            };
-            let port_data = unsafe {
-                pipewire::sys::pw_filter_add_port(
-                    filter,
-                    libspa::sys::SPA_DIRECTION_INPUT,
-                    pipewire::sys::pw_filter_port_flags_PW_FILTER_PORT_FLAG_MAP_BUFFERS,
-                    std::mem::size_of::<PortData>(),
-                    port_props,
-                    std::ptr::null_mut(),
-                    0,
-                )
-            };
-            if port_data.is_null() {
-                log::error!("Failed to add input port {}", i);
-            } else {
-                let pd = port_data as *mut PortData;
-                unsafe {
-                    (*pd).index = i as u32;
-                    (*user_data).input_port_ptrs.push(port_data);
-                }
-            }
-        }
-
-        for i in 0..config.audio_outputs {
-            let port_name = CString::new(format!("output_{}", i)).unwrap();
-            let port_props = unsafe {
-                pipewire::sys::pw_properties_new(
-                    c_str(b"port.name\0"),
-                    port_name.as_ptr(),
-                    c_str(b"format.dsp\0"),
-                    c_str(b"32 bit float mono audio\0"),
-                    std::ptr::null::<std::os::raw::c_char>(),
-                )
-            };
-            let port_data = unsafe {
-                pipewire::sys::pw_filter_add_port(
-                    filter,
-                    libspa::sys::SPA_DIRECTION_OUTPUT,
-                    pipewire::sys::pw_filter_port_flags_PW_FILTER_PORT_FLAG_MAP_BUFFERS,
-                    std::mem::size_of::<PortData>(),
-                    port_props,
-                    std::ptr::null_mut(),
-                    0,
-                )
-            };
-            if port_data.is_null() {
-                log::error!("Failed to add output port {}", i);
-            } else {
-                let pd = port_data as *mut PortData;
-                unsafe {
-                    (*pd).index = i as u32;
-                    (*user_data).output_port_ptrs.push(port_data);
-                }
-            }
-        }
-
-        // MIDI input port
-        {
-            let port_name = CString::new("midi_in").unwrap();
-            let port_props = unsafe {
-                pipewire::sys::pw_properties_new(
-                    c_str(b"port.name\0"),
-                    port_name.as_ptr(),
-                    c_str(b"format.dsp\0"),
-                    c_str(b"8 bit raw midi\0"),
-                    std::ptr::null::<std::os::raw::c_char>(),
-                )
-            };
-            let port_data = unsafe {
-                pipewire::sys::pw_filter_add_port(
-                    filter,
-                    libspa::sys::SPA_DIRECTION_INPUT,
-                    pipewire::sys::pw_filter_port_flags_PW_FILTER_PORT_FLAG_MAP_BUFFERS,
-                    std::mem::size_of::<PortData>(),
-                    port_props,
-                    std::ptr::null_mut(),
-                    0,
-                )
-            };
-            if port_data.is_null() {
-                log::error!("Failed to add MIDI input port for {}", config.display_name);
-            } else {
-                unsafe {
-                    (*user_data).midi_in_port_ptr = port_data;
-                }
-            }
-        }
-
-        // MIDI output port
-        {
-            let port_name = CString::new("midi_out").unwrap();
-            let port_props = unsafe {
-                pipewire::sys::pw_properties_new(
-                    c_str(b"port.name\0"),
-                    port_name.as_ptr(),
-                    c_str(b"format.dsp\0"),
-                    c_str(b"8 bit raw midi\0"),
-                    std::ptr::null::<std::os::raw::c_char>(),
-                )
-            };
-            let port_data = unsafe {
-                pipewire::sys::pw_filter_add_port(
-                    filter,
-                    libspa::sys::SPA_DIRECTION_OUTPUT,
-                    pipewire::sys::pw_filter_port_flags_PW_FILTER_PORT_FLAG_MAP_BUFFERS,
-                    std::mem::size_of::<PortData>(),
-                    port_props,
-                    std::ptr::null_mut(),
-                    0,
-                )
-            };
-            if port_data.is_null() {
-                log::error!("Failed to add MIDI output port for {}", config.display_name);
-            } else {
-                unsafe {
-                    (*user_data).midi_out_port_ptr = port_data;
-                }
-            }
-        }
-
         let flags = pipewire::sys::pw_filter_flags_PW_FILTER_FLAG_RT_PROCESS;
         let ret =
             unsafe { pipewire::sys::pw_filter_connect(filter, flags, std::ptr::null_mut(), 0) };
@@ -295,6 +216,7 @@ impl Lv2FilterNode {
                 pipewire::sys::pw_filter_destroy(filter);
                 drop(Box::from_raw(user_data));
             }
+            global_cpu_tracker().unregister(config.instance_id);
             return Err(format!("Failed to connect pw_filter: error {}", ret).into());
         }
 
@@ -312,6 +234,7 @@ impl Lv2FilterNode {
             _events: events,
             _user_data: user_data,
             _core: core.clone(),
+            main,
             instance_id: config.instance_id,
             display_name: config.display_name,
         })
@@ -327,44 +250,30 @@ impl Lv2FilterNode {
     /// Sample rate the graph is currently driving this filter at
     /// (from the process clock); 0 until the first process cycle.
     pub fn graph_rate(&self) -> u32 {
-        0
+        self.main.graph_rate()
     }
 
-    /// Forward events queued by the RT callback. Called from the PipeWire
-    /// main loop on every tick.
-    pub fn drain_events(&self, _event_tx: &std::sync::mpsc::Sender<crate::pipewire::PwEvent>) {}
+    /// Forward events queued by the RT callback (parameter changes from MIDI
+    /// mappings, MIDI learn captures, PluginAdded once the node id is known)
+    /// and release mapping tables the RT callback no longer uses.
+    /// Must be called from the PipeWire main loop on every tick.
+    pub fn drain_events(&self, event_tx: &std::sync::mpsc::Sender<crate::pipewire::PwEvent>) {
+        self.main
+            .drain_events(event_tx, self.instance_id, &self.display_name, || {
+                self.node_id()
+            });
+    }
 
     pub fn update_mappings(&self, mappings: Arc<ResolvedMappings>) {
-        if !self._user_data.is_null() {
-            unsafe {
-                *(*self._user_data).midi_state.mappings.write() = mappings;
-            }
-        }
+        self.main.update_mappings(mappings);
     }
 
     pub fn set_learn_mode(&self, enabled: bool) {
-        if !self._user_data.is_null() {
-            unsafe {
-                (*self._user_data)
-                    .midi_state
-                    .learn_captured
-                    .store(false, Ordering::SeqCst);
-                (*self._user_data)
-                    .midi_state
-                    .learn_mode
-                    .store(enabled, Ordering::SeqCst);
-            }
-        }
+        self.main.set_learn_mode(enabled);
     }
 
     pub fn disconnect(&mut self) {
-        if !self._user_data.is_null() {
-            unsafe {
-                (*self._user_data)
-                    .shutting_down
-                    .store(true, Ordering::SeqCst);
-            }
-        }
+        self.main.set_shutting_down();
         if !self.filter.is_null() {
             unsafe {
                 pipewire::sys::pw_filter_disconnect(self.filter);
@@ -377,13 +286,7 @@ impl Drop for Lv2FilterNode {
     fn drop(&mut self) {
         global_cpu_tracker().unregister(self.instance_id);
 
-        if !self._user_data.is_null() {
-            unsafe {
-                (*self._user_data)
-                    .shutting_down
-                    .store(true, Ordering::SeqCst);
-            }
-        }
+        self.main.set_shutting_down();
 
         if !self.filter.is_null() {
             unsafe {
@@ -404,6 +307,34 @@ impl Drop for Lv2FilterNode {
 #[inline]
 fn c_str(bytes: &[u8]) -> *const std::os::raw::c_char {
     bytes.as_ptr() as *const std::os::raw::c_char
+}
+
+/// # Safety
+/// `filter` must be a valid, not yet connected pw_filter; `format` must be NUL-terminated.
+unsafe fn add_port(
+    filter: *mut pipewire::sys::pw_filter,
+    direction: libspa::sys::spa_direction,
+    name: &CString,
+    format: &[u8],
+) -> *mut std::ffi::c_void {
+    unsafe {
+        let port_props = pipewire::sys::pw_properties_new(
+            c_str(b"port.name\0"),
+            name.as_ptr(),
+            c_str(b"format.dsp\0"),
+            c_str(format),
+            std::ptr::null::<std::os::raw::c_char>(),
+        );
+        pipewire::sys::pw_filter_add_port(
+            filter,
+            direction,
+            pipewire::sys::pw_filter_port_flags_PW_FILTER_PORT_FLAG_MAP_BUFFERS,
+            std::mem::size_of::<PortData>(),
+            port_props,
+            std::ptr::null_mut(),
+            0,
+        )
+    }
 }
 
 unsafe extern "C" fn on_state_changed(
@@ -430,25 +361,13 @@ unsafe extern "C" fn on_state_changed(
     if state == pipewire::sys::pw_filter_state_PW_FILTER_STATE_PAUSED
         || state == pipewire::sys::pw_filter_state_PW_FILTER_STATE_STREAMING
     {
-        let fd = unsafe { &mut *(data as *mut FilterData) };
-        if !fd.node_id_sent && !fd.filter.is_null() {
-            let node_id = unsafe { pipewire::sys::pw_filter_get_node_id(fd.filter) };
-            if node_id != 0 && node_id != u32::MAX {
-                log::info!(
-                    "LV2 filter node ID resolved: instance {} -> pw_node {}",
-                    fd.instance_id,
-                    node_id
-                );
-                let _ = fd.event_tx.send(crate::pipewire::PwEvent::Plugin(
-                    crate::pipewire::PluginEvent::PluginAdded {
-                        instance_id: fd.instance_id,
-                        pw_node_id: node_id,
-                        display_name: fd.display_name.clone(),
-                    },
-                ));
-                fd.node_id_sent = true;
-            }
-        }
+        // Only the shared atomics are touched here; PluginAdded is emitted
+        // by `drain_events` on the next tick.
+        let fd = data as *const FilterData;
+        let shared = unsafe { &(*fd).shared };
+        shared
+            .ready
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -457,118 +376,21 @@ unsafe extern "C" fn on_process(
     position: *mut libspa::sys::spa_io_position,
 ) {
     unsafe {
-        let fd = &mut *(data as *mut FilterData);
+        let fd = &*(data as *const FilterData);
+        // SAFETY: only this callback accesses `rt` while the filter is connected.
+        let rt = &mut *fd.rt.get();
+        let instance_ptr = fd.instance_ptr;
 
-        if fd.shutting_down.load(Ordering::Acquire) {
-            return;
-        }
-
-        let (n_samples, rate) = if !position.is_null() {
-            (
-                (*position).clock.duration as u32,
-                (*position).clock.rate.denom as u32,
-            )
-        } else {
-            return;
-        };
-
-        if n_samples == 0 || n_samples > 8192 {
-            return;
-        }
-
-        // Extract MIDI events from PipeWire buffer for plugin feeding
-        let mut midi_events_buf =
-            [crate::midi::processing::RawMidiEvent { offset: 0, data: [0; 3], size: 0 };
-                crate::midi::processing::MAX_MIDI_EVENTS];
-        let mut n_midi_events = 0usize;
-
-        if !fd.midi_in_port_ptr.is_null() {
-            let midi_in_buf = pipewire::sys::pw_filter_get_dsp_buffer(fd.midi_in_port_ptr, 0);
-            let midi_out_buf = if !fd.midi_out_port_ptr.is_null() {
-                pipewire::sys::pw_filter_get_dsp_buffer(fd.midi_out_port_ptr, n_samples)
-            } else {
-                std::ptr::null_mut()
-            };
-
-            // Extract raw MIDI events before CC processing (for plugin feeding)
-            if fd.has_midi_in {
-                n_midi_events = crate::midi::processing::extract_midi_events(
-                    midi_in_buf,
-                    &mut midi_events_buf,
-                );
-            }
-
-            if let Some(capture) = crate::midi::processing::process_midi_buffer(
-                midi_in_buf,
-                &mut fd.midi_state,
-                &fd.event_tx,
-                fd.instance_id,
-            ) {
-                let _ = fd.event_tx.send(crate::pipewire::PwEvent::Plugin(
-                    crate::pipewire::PluginEvent::MidiCcReceived {
-                        device_name: fd.display_name.clone(),
-                        channel: capture.channel,
-                        cc: capture.cc,
-                        message_type: capture.message_type,
-                    },
-                ));
-            }
-            crate::midi::processing::forward_midi_buffer(midi_in_buf, midi_out_buf);
-        }
-
-        let inst = &mut *fd.instance_ptr;
-
-        let n_in = fd.n_audio_inputs;
-        let n_out = fd.n_audio_outputs;
-
-        let mut input_bufs: Vec<&[f32]> = Vec::with_capacity(n_in);
-        for port_ptr in &fd.input_port_ptrs {
-            let buf = pipewire::sys::pw_filter_get_dsp_buffer(*port_ptr, n_samples);
-            if !buf.is_null() {
-                input_bufs.push(std::slice::from_raw_parts(
-                    buf as *const f32,
-                    n_samples as usize,
-                ));
-            } else {
-                static SILENCE: [f32; 8192] = [0.0; 8192];
-                input_bufs.push(&SILENCE[..n_samples as usize]);
-            }
-        }
-
-        // Scratch buffer for unconnected output ports — the plugin still
-        // needs somewhere to write even if no one is listening.
-        // Using a single large buffer split into non-overlapping slices.
-        static mut SCRATCH: [f32; 8192 * 16] = [0.0; 8192 * 16];
-        let scratch_base = &raw mut SCRATCH;
-        let mut scratch_offset = 0usize;
-        let mut output_bufs: Vec<&mut [f32]> = Vec::with_capacity(n_out);
-        for port_ptr in &fd.output_port_ptrs {
-            let buf = pipewire::sys::pw_filter_get_dsp_buffer(*port_ptr, n_samples);
-            if !buf.is_null() {
-                output_bufs.push(std::slice::from_raw_parts_mut(
-                    buf as *mut f32,
-                    n_samples as usize,
-                ));
-            } else {
-                let ns = n_samples as usize;
-                let slice = std::slice::from_raw_parts_mut(
-                    (*scratch_base).as_mut_ptr().add(scratch_offset),
-                    ns,
-                );
-                scratch_offset += ns;
-                output_bufs.push(slice);
-            }
-        }
-
-        let t0 = std::time::Instant::now();
-        inst.process(
-            &input_bufs,
-            &mut output_bufs,
-            n_samples as usize,
-            &midi_events_buf[..n_midi_events],
-        );
-        let elapsed = t0.elapsed().as_nanos() as u64;
-        fd.cpu_slot
-            .record(elapsed, inst.last_worker_ns, n_samples, rate);
+        rt.run_cycle(position, |inputs, outputs, n_samples, midi_events| {
+            // Aliasing invariant: the main thread owns the instance through an
+            // Rc<RefCell<..>> and may borrow it while we run, so it must only
+            // call methods that touch atomics (set_parameter / set_bypassed /
+            // get_parameters, contract K1) or anything else only while this
+            // filter is disconnected.  The `&mut` here is created per block
+            // and never outlives the `process` call.
+            let inst = &mut *instance_ptr;
+            inst.process(inputs, outputs, n_samples, midi_events);
+            inst.last_worker_ns
+        });
     }
 }
