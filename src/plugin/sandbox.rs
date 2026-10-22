@@ -17,8 +17,9 @@
 //!   plugin is safe before doing it for real in the host process.
 
 use std::io::{Read, Write};
-use std::process::Command;
-use std::time::Duration;
+use std::process::{Child, Command, ExitStatus};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -43,7 +44,8 @@ pub enum SandboxResult<T> {
 ///
 /// The closure receives no arguments and must return a `T: Serialize`.
 /// The child serializes `T` to JSON, writes it to a pipe, and exits.
-/// The parent reads the pipe and deserializes.
+/// The parent drains the pipe while waiting (so output larger than the pipe
+/// buffer cannot stall the child) and deserializes.
 ///
 /// If the child segfaults or is killed by a signal, `SandboxResult::Crashed`
 /// is returned.  The parent process is unaffected.
@@ -64,10 +66,15 @@ where
     T: Serialize + for<'de> Deserialize<'de>,
     F: FnOnce() -> T,
 {
-    // Create a pipe for child → parent communication
+    // Create a pipe for child → parent communication.  O_CLOEXEC keeps the
+    // fds from leaking into processes exec'd by other threads; the forked
+    // child still has its write end since fork does not exec.
     let mut pipe_fds = [0i32; 2];
-    if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } != 0 {
-        return SandboxResult::ForkFailed("pipe() failed".to_string());
+    if unsafe { libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return SandboxResult::ForkFailed(format!(
+            "pipe2() failed: {}",
+            std::io::Error::last_os_error()
+        ));
     }
     let (read_fd, write_fd) = (pipe_fds[0], pipe_fds[1]);
 
@@ -122,24 +129,11 @@ where
 
         child_pid => {
             // ===== PARENT PROCESS =====
-            // Close write end
             unsafe { libc::close(write_fd) };
 
-            // Set up timeout if requested
-            let deadline = timeout.map(|d| std::time::Instant::now() + d);
-
-            // Wait for child with optional timeout
-            let wait_result = wait_for_child(child_pid, deadline);
-
-            // Read pipe data regardless of wait result (child may have written
-            // partial data before crashing)
-            let mut pipe_data = Vec::new();
-            {
-                let mut file: std::fs::File =
-                    unsafe { std::os::unix::io::FromRawFd::from_raw_fd(read_fd) };
-                let _ = file.read_to_end(&mut pipe_data);
-                // File will close read_fd on drop
-            }
+            let deadline = timeout.map(|d| Instant::now() + d);
+            let (wait_result, pipe_data) = collect_child_output(child_pid, read_fd, deadline);
+            unsafe { libc::close(read_fd) };
 
             match wait_result {
                 WaitResult::Exited(0) => {
@@ -163,18 +157,7 @@ where
                     signal: Some(sig),
                     description: format!("child killed by signal {} ({})", sig, signal_name(sig)),
                 },
-                WaitResult::Timeout => {
-                    // Kill the child
-                    unsafe {
-                        libc::kill(child_pid, libc::SIGKILL);
-                    }
-                    // Reap the zombie
-                    let mut status = 0i32;
-                    unsafe {
-                        libc::waitpid(child_pid, &mut status, 0);
-                    }
-                    SandboxResult::Timeout
-                }
+                WaitResult::Timeout => SandboxResult::Timeout,
                 WaitResult::Error(e) => SandboxResult::ForkFailed(format!("waitpid failed: {}", e)),
             }
         }
@@ -217,7 +200,7 @@ where
 
         child_pid => {
             // ===== PARENT PROCESS =====
-            let deadline = timeout.map(|d| std::time::Instant::now() + d);
+            let deadline = timeout.map(|d| Instant::now() + d);
             let wait_result = wait_for_child(child_pid, deadline);
 
             match wait_result {
@@ -235,14 +218,7 @@ where
                     false
                 }
                 WaitResult::Timeout => {
-                    log::warn!("sandbox: probe child timed out, killing");
-                    unsafe {
-                        libc::kill(child_pid, libc::SIGKILL);
-                    }
-                    let mut status = 0i32;
-                    unsafe {
-                        libc::waitpid(child_pid, &mut status, 0);
-                    }
+                    log::warn!("sandbox: probe child timed out, killed");
                     false
                 }
                 WaitResult::Error(e) => {
@@ -254,18 +230,52 @@ where
     }
 }
 
+/// Result of an [`exec_probe_outcome`] run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProbeOutcome {
+    /// The probe instantiated the plugin and exited cleanly.
+    Ok,
+    /// The probe process was killed by a signal (segfault, abort, ...).
+    Crashed { signal: i32 },
+    /// The probe process exited with a non-zero code (load failure, panic).
+    Failed { code: Option<i32> },
+    /// The probe did not finish within the timeout and was killed.
+    Timeout { secs: u64 },
+    /// The probe could not be run at all (fail-open: treated as safe).
+    Unavailable(String),
+}
+
+impl ProbeOutcome {
+    /// Whether the plugin may be loaded in the host process.
+    pub fn is_safe(&self) -> bool {
+        matches!(self, ProbeOutcome::Ok | ProbeOutcome::Unavailable(_))
+    }
+
+    /// Short human-readable reason, suitable for "Plugin 'X' {describe()}.".
+    pub fn describe(&self) -> String {
+        match self {
+            ProbeOutcome::Ok => "passed the safety probe".to_string(),
+            ProbeOutcome::Crashed { signal } => {
+                format!("crashed during the safety probe ({})", signal_name(*signal))
+            }
+            ProbeOutcome::Failed { code: Some(c) } => {
+                format!("failed to load during the safety probe (exit code {})", c)
+            }
+            ProbeOutcome::Failed { code: None } => {
+                "failed to load during the safety probe".to_string()
+            }
+            ProbeOutcome::Timeout { secs } => {
+                format!("did not finish loading within {} s during the safety probe", secs)
+            }
+            ProbeOutcome::Unavailable(e) => format!("could not be safety-probed ({})", e),
+        }
+    }
+}
+
 /// Probe a plugin by spawning a **clean** child process via `fork + exec`.
 ///
-/// Unlike [`fork_probe`], this does *not* inherit the parent's in-memory
-/// state (PipeWire connections, lilv worlds, Qt, etc.), so plugins that rely
-/// on clean global state will not false-positive as crashed.
-///
-/// `format` must be one of `"lv2"`, `"clap"`, or `"vst3"`.
-/// `uri` is the plugin URI.
-/// `sample_rate` is passed to the probe for instantiation.
-/// `block_length` is only used for LV2 probes.
-///
-/// Returns `true` if the probe process exited successfully.
+/// Compatibility wrapper around [`exec_probe_outcome`] without a library path.
+/// Returns `true` if the plugin is considered safe to load.
 pub fn exec_probe(
     format: &str,
     uri: &str,
@@ -273,86 +283,157 @@ pub fn exec_probe(
     block_length: u32,
     timeout: Option<Duration>,
 ) -> bool {
+    exec_probe_outcome(format, uri, None, sample_rate, block_length, timeout).is_safe()
+}
+
+/// Probe a plugin by spawning a **clean** child process via `fork + exec`.
+///
+/// Unlike [`fork_probe`], this does *not* inherit the parent's in-memory
+/// state (PipeWire connections, lilv worlds, Qt, etc.), so plugins that rely
+/// on clean global state will not false-positive as crashed.
+///
+/// `format` must be one of `"lv2"`, `"clap"`, or `"vst3"`.
+/// `uri` is the plugin URI / id.
+/// `library_path` (CLAP file / VST3 bundle) lets the probe load just that
+/// library instead of looking the plugin up by scanning; ignored for LV2.
+/// `sample_rate` is passed to the probe for instantiation.
+/// `block_length` is only used for LV2 probes.
+pub fn exec_probe_outcome(
+    format: &str,
+    uri: &str,
+    library_path: Option<&str>,
+    sample_rate: f64,
+    block_length: u32,
+    timeout: Option<Duration>,
+) -> ProbeOutcome {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
             log::error!("sandbox: cannot determine current exe for probe: {}", e);
-            return true; // fail-open: allow the plugin
+            return ProbeOutcome::Unavailable(e.to_string());
         }
     };
 
-    let mut child = match Command::new(&exe)
-        .arg("--probe-plugin")
+    let mut cmd = Command::new(&exe);
+    cmd.arg("--probe-plugin")
         .arg(format)
         .arg(uri)
         .arg(sample_rate.to_string())
-        .arg(block_length.to_string())
-        .env("RUST_LOG", "debug")
+        .arg(block_length.to_string());
+    if let Some(lib) = library_path.filter(|l| !l.is_empty()) {
+        cmd.arg(lib);
+    }
+    cmd.env("RUST_LOG", "warn")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             log::error!("sandbox: failed to spawn probe process: {}", e);
-            return true; // fail-open
+            return ProbeOutcome::Unavailable(e.to_string());
         }
     };
 
-    let result = if let Some(dur) = timeout {
-        // Poll with timeout
-        let deadline = std::time::Instant::now() + dur;
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break Some(status),
-                Ok(None) => {
-                    if std::time::Instant::now() >= deadline {
-                        log::warn!("sandbox: probe process timed out, killing");
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        break None;
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(e) => {
-                    log::error!("sandbox: probe wait error: {}", e);
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break None;
-                }
-            }
-        }
-    } else {
-        child.wait().ok()
-    };
+    let (result, stderr_output) = wait_child_capturing_stderr(&mut child, timeout);
+    let outcome = probe_outcome_from(result, timeout);
 
-    // Capture stderr for diagnostics
-    let stderr_output = child
-        .stderr
-        .take()
-        .and_then(|mut e| {
-            let mut buf = String::new();
-            e.read_to_string(&mut buf).ok().map(|_| buf)
-        })
-        .unwrap_or_default();
-
-    match result {
-        Some(status) if status.success() => true,
-        Some(status) => {
-            log::warn!("sandbox: probe process exited with {:?}", status);
-            if !stderr_output.is_empty() {
-                for line in stderr_output.lines().take(50) {
-                    log::warn!("sandbox: probe stderr: {}", line);
-                }
-            }
-            false
-        }
-        None => {
-            log::warn!("sandbox: probe process timed out or failed");
-            false
+    if !outcome.is_safe() {
+        log::warn!("sandbox: probe of {} '{}' {}", format, uri, outcome.describe());
+        let text = String::from_utf8_lossy(&stderr_output);
+        let lines: Vec<&str> = text.lines().collect();
+        for line in &lines[lines.len().saturating_sub(50)..] {
+            log::warn!("sandbox: probe stderr: {}", line);
         }
     }
+    outcome
+}
+
+fn probe_outcome_from(result: ChildWait, timeout: Option<Duration>) -> ProbeOutcome {
+    use std::os::unix::process::ExitStatusExt;
+    match result {
+        ChildWait::Exited(status) if status.success() => ProbeOutcome::Ok,
+        ChildWait::Exited(status) => match status.signal() {
+            Some(sig) => ProbeOutcome::Crashed { signal: sig },
+            None => ProbeOutcome::Failed { code: status.code() },
+        },
+        ChildWait::TimedOut => ProbeOutcome::Timeout {
+            secs: timeout.map(|d| d.as_secs()).unwrap_or(0),
+        },
+        ChildWait::Error(e) => ProbeOutcome::Unavailable(e),
+    }
+}
+
+/// How much probe stderr to keep for diagnostics (older output is dropped).
+const STDERR_CAP: usize = 256 * 1024;
+
+enum ChildWait {
+    Exited(ExitStatus),
+    TimedOut,
+    Error(String),
+}
+
+/// Wait for `child` (optionally with a timeout, killing it on expiry) while a
+/// helper thread drains its stderr concurrently, so a chatty child can never
+/// block on a full pipe.  Returns the wait result and the captured stderr tail.
+fn wait_child_capturing_stderr(
+    child: &mut Child,
+    timeout: Option<Duration>,
+) -> (ChildWait, Vec<u8>) {
+    let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    if let Some(mut stderr) = child.stderr.take() {
+        let buf = captured.clone();
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 8192];
+            loop {
+                match stderr.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let mut b = buf.lock().unwrap_or_else(|e| e.into_inner());
+                        b.extend_from_slice(&chunk[..n]);
+                        if b.len() > STDERR_CAP {
+                            // Keep the tail: the last lines are the interesting ones.
+                            let excess = b.len() - STDERR_CAP;
+                            b.drain(..excess);
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+            let _ = done_tx.send(());
+        });
+    } else {
+        drop(done_tx);
+    }
+
+    let deadline = timeout.map(|d| Instant::now() + d);
+    let result = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break ChildWait::Exited(status),
+            Ok(None) => {
+                if deadline.is_some_and(|dl| Instant::now() >= dl) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break ChildWait::TimedOut;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break ChildWait::Error(e.to_string());
+            }
+        }
+    };
+
+    // The reader finishes at EOF once the child is gone.  A grandchild that
+    // inherited stderr could keep it open, so don't wait for it indefinitely.
+    let _ = done_rx.recv_timeout(Duration::from_millis(500));
+    let out = std::mem::take(&mut *captured.lock().unwrap_or_else(|e| e.into_inner()));
+    (result, out)
 }
 
 /// Entry point for `--probe-plugin` subprocess.
@@ -361,15 +442,18 @@ pub fn exec_probe(
 /// It will instantiate the plugin and exit.  Never returns on success
 /// (calls `std::process::exit`).
 pub fn run_probe_main(args: &[String]) -> ! {
-    // args: [format, uri, sample_rate, block_length]
+    // args: [format, uri, sample_rate, block_length, (library_path)]
     if args.len() < 4 {
-        eprintln!("probe: usage: --probe-plugin <format> <uri> <sample_rate> <block_length>");
+        eprintln!(
+            "probe: usage: --probe-plugin <format> <uri> <sample_rate> <block_length> [library_path]"
+        );
         std::process::exit(2);
     }
     let format = &args[0];
     let uri = &args[1];
     let sample_rate: f64 = args[2].parse().unwrap_or(48000.0);
     let block_length: u32 = args[3].parse().unwrap_or(1024);
+    let library_path = args.get(4).filter(|s| !s.is_empty());
 
     match format.as_str() {
         "lv2" => {
@@ -443,7 +527,11 @@ pub fn run_probe_main(args: &[String]) -> ! {
             eprintln!("probe: instantiation completed successfully");
         }
         "clap" => {
-            if let Some(info) = crate::clap::scanner::find_plugin(uri) {
+            let info = match library_path {
+                Some(lib) => Some(probe_plugin_info(uri, lib, crate::plugin::types::PluginFormat::Clap)),
+                None => crate::clap::scanner::find_plugin(uri),
+            };
+            if let Some(info) = info {
                 let _inst = unsafe {
                     crate::clap::host::ClapPluginInstance::new(
                         &info.library_path,
@@ -455,7 +543,11 @@ pub fn run_probe_main(args: &[String]) -> ! {
             }
         }
         "vst3" => {
-            if let Some(info) = crate::vst3::scanner::find_plugin(uri) {
+            let info = match library_path {
+                Some(lib) => Some(probe_plugin_info(uri, lib, crate::plugin::types::PluginFormat::Vst3)),
+                None => crate::vst3::scanner::find_plugin(uri),
+            };
+            if let Some(info) = info {
                 let _inst = unsafe {
                     crate::vst3::host::Vst3PluginInstance::new(
                         &info.library_path,
@@ -475,6 +567,33 @@ pub fn run_probe_main(args: &[String]) -> ! {
     std::process::exit(0);
 }
 
+/// Minimal `PluginInfo` for a CLAP/VST3 probe when the parent already knows
+/// the library path.  The hosts only read the library path, id, name and
+/// category from it; everything else comes from the plugin itself, so no
+/// scan is needed in the probe process.
+fn probe_plugin_info(
+    uri: &str,
+    library_path: &str,
+    format: crate::plugin::types::PluginFormat,
+) -> crate::plugin::types::PluginInfo {
+    crate::plugin::types::PluginInfo {
+        uri: uri.to_string(),
+        name: uri.to_string(),
+        format,
+        category: crate::plugin::types::PluginCategory::Other(String::new()),
+        author: None,
+        ports: Vec::new(),
+        audio_inputs: 0,
+        audio_outputs: 0,
+        control_inputs: 0,
+        control_outputs: 0,
+        required_features: Vec::new(),
+        compatible: true,
+        has_ui: false,
+        library_path: library_path.to_string(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -486,38 +605,134 @@ enum WaitResult {
     Error(String),
 }
 
-fn wait_for_child(pid: i32, deadline: Option<std::time::Instant>) -> WaitResult {
+fn decode_status(status: i32) -> WaitResult {
+    if libc::WIFEXITED(status) {
+        WaitResult::Exited(libc::WEXITSTATUS(status))
+    } else if libc::WIFSIGNALED(status) {
+        WaitResult::Signaled(libc::WTERMSIG(status))
+    } else {
+        WaitResult::Exited(-1)
+    }
+}
+
+/// Non-blocking reap.  `None` while the child is still running.
+fn try_reap(pid: i32) -> Option<WaitResult> {
     loop {
         let mut status = 0i32;
         let ret = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
-
         if ret < 0 {
             let errno = std::io::Error::last_os_error();
             if errno.raw_os_error() == Some(libc::EINTR) {
                 continue;
             }
-            return WaitResult::Error(errno.to_string());
+            return Some(WaitResult::Error(errno.to_string()));
         }
-
         if ret == pid {
-            // Child finished
-            if libc::WIFEXITED(status) {
-                return WaitResult::Exited(libc::WEXITSTATUS(status));
-            }
-            if libc::WIFSIGNALED(status) {
-                return WaitResult::Signaled(libc::WTERMSIG(status));
-            }
-            return WaitResult::Exited(-1);
+            return Some(decode_status(status));
+        }
+        return None;
+    }
+}
+
+/// Kill the child and reap it (blocking — SIGKILL cannot be ignored).
+fn kill_and_reap(pid: i32) {
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    loop {
+        let mut status = 0i32;
+        let ret = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if ret < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        break;
+    }
+}
+
+/// Read everything currently available from a non-blocking fd.
+/// Returns `true` on EOF.
+fn drain_nonblocking(fd: i32, out: &mut Vec<u8>) -> bool {
+    let mut chunk = [0u8; 16384];
+    loop {
+        let n = unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
+        if n > 0 {
+            out.extend_from_slice(&chunk[..n as usize]);
+            continue;
+        }
+        if n == 0 {
+            return true;
+        }
+        match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(libc::EAGAIN) => return false,
+            _ => return true,
+        }
+    }
+}
+
+/// Collect the child's output from `read_fd` while waiting for it to exit.
+///
+/// The pipe is drained concurrently (poll with a deadline) so a child whose
+/// output exceeds the pipe buffer never blocks, and a hung child is killed at
+/// the deadline without the parent ever blocking on the pipe.
+fn collect_child_output(
+    pid: i32,
+    read_fd: i32,
+    deadline: Option<Instant>,
+) -> (WaitResult, Vec<u8>) {
+    unsafe {
+        let flags = libc::fcntl(read_fd, libc::F_GETFL);
+        libc::fcntl(read_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
+
+    let mut data = Vec::new();
+    let mut eof = false;
+    loop {
+        if !eof {
+            eof = drain_nonblocking(read_fd, &mut data);
         }
 
-        // ret == 0 means child still running
-        if let Some(dl) = deadline {
-            if std::time::Instant::now() >= dl {
-                return WaitResult::Timeout;
+        if let Some(res) = try_reap(pid) {
+            // Child is gone: pick up whatever it wrote before exiting.
+            if !eof {
+                drain_nonblocking(read_fd, &mut data);
             }
+            return (res, data);
         }
 
-        // Sleep briefly before polling again
+        let wait_ms = match deadline {
+            Some(dl) => {
+                let now = Instant::now();
+                if now >= dl {
+                    kill_and_reap(pid);
+                    return (WaitResult::Timeout, data);
+                }
+                (dl - now).as_millis().min(50) as i32
+            }
+            None => 50,
+        };
+
+        if eof {
+            // Writer closed; the child is exiting — just wait for it.
+            std::thread::sleep(Duration::from_millis(wait_ms.clamp(1, 5) as u64));
+        } else {
+            let mut pfd = libc::pollfd {
+                fd: read_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            unsafe { libc::poll(&mut pfd, 1, wait_ms.max(1)) };
+        }
+    }
+}
+
+fn wait_for_child(pid: i32, deadline: Option<Instant>) -> WaitResult {
+    loop {
+        if let Some(res) = try_reap(pid) {
+            return res;
+        }
+        if deadline.is_some_and(|dl| Instant::now() >= dl) {
+            kill_and_reap(pid);
+            return WaitResult::Timeout;
+        }
         std::thread::sleep(Duration::from_millis(5));
     }
 }
@@ -530,6 +745,106 @@ fn signal_name(sig: i32) -> &'static str {
         libc::SIGFPE => "SIGFPE (floating point exception)",
         libc::SIGKILL => "SIGKILL (killed)",
         libc::SIGILL => "SIGILL (illegal instruction)",
+        libc::SIGTERM => "SIGTERM (terminated)",
         _ => "unknown signal",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fork_scan_returns_value() {
+        match fork_scan(|| vec![1u32, 2, 3], Some(Duration::from_secs(10))) {
+            SandboxResult::Ok(v) => assert_eq!(v, vec![1, 2, 3]),
+            other => panic!("unexpected {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fork_scan_large_output_succeeds() {
+        // Far larger than the 64 KiB pipe buffer.
+        let res = fork_scan(|| "x".repeat(1024 * 1024), Some(Duration::from_secs(20)));
+        match res {
+            SandboxResult::Ok(s) => assert_eq!(s.len(), 1024 * 1024),
+            other => panic!("unexpected {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fork_scan_hung_child_times_out_promptly() {
+        let start = Instant::now();
+        let res: SandboxResult<u32> = fork_scan(
+            || loop {
+                unsafe { libc::sleep(1000) };
+            },
+            Some(Duration::from_millis(300)),
+        );
+        assert!(matches!(res, SandboxResult::Timeout), "got {:?}", res);
+        assert!(start.elapsed() < Duration::from_secs(5), "took {:?}", start.elapsed());
+    }
+
+    #[test]
+    fn fork_scan_reports_signal() {
+        let res: SandboxResult<u32> = fork_scan(
+            || {
+                unsafe { libc::raise(libc::SIGSEGV) };
+                0
+            },
+            Some(Duration::from_secs(10)),
+        );
+        match res {
+            SandboxResult::Crashed { signal, .. } => assert_eq!(signal, Some(libc::SIGSEGV)),
+            other => panic!("unexpected {:?}", other),
+        }
+    }
+
+    #[test]
+    fn large_stderr_does_not_hang() {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("head -c 2000000 /dev/zero | tr '\\0' 'e' >&2; echo tail-marker >&2; exit 3")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn sh");
+        let timeout = Some(Duration::from_secs(20));
+        let (res, err) = wait_child_capturing_stderr(&mut child, timeout);
+        assert!(err.len() <= STDERR_CAP);
+        assert!(String::from_utf8_lossy(&err).contains("tail-marker"));
+        assert_eq!(probe_outcome_from(res, timeout), ProbeOutcome::Failed { code: Some(3) });
+    }
+
+    #[test]
+    fn probe_timeout_is_not_a_crash() {
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn sleep");
+        let start = Instant::now();
+        let timeout = Some(Duration::from_millis(300));
+        let (res, _) = wait_child_capturing_stderr(&mut child, timeout);
+        let outcome = probe_outcome_from(res, timeout);
+        assert!(matches!(outcome, ProbeOutcome::Timeout { .. }), "got {:?}", outcome);
+        assert!(!outcome.is_safe());
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn probe_signal_is_crash() {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("kill -SEGV $$")
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn sh");
+        let (res, _) = wait_child_capturing_stderr(&mut child, Some(Duration::from_secs(10)));
+        assert_eq!(
+            probe_outcome_from(res, None),
+            ProbeOutcome::Crashed { signal: libc::SIGSEGV }
+        );
     }
 }

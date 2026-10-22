@@ -1,10 +1,16 @@
 // SPDX-License-Identifier: MIT
 //
 // Y-coordinate assignment using the Brandes-Köpf algorithm.
-// Runs in 4 directions (right-down, right-up, left-down, left-up)
-// and combines them for a balanced layout.
+// Runs in 4 directions (left→right / right→left alignment, each compacted
+// downward and upward) and combines them for a balanced layout.
 //
-// Reference: Brandes & Köpf, 2001 (doi:10.1007/3-540-45848-4_3)
+// Reference: Brandes & Köpf, 2001 (doi:10.1007/3-540-45848-4_3), with the
+// class-shift computation done as a separate longest-path pass over the
+// class separation constraints (cf. Brandes, Walter & Zink, 2020 erratum).
+//
+// Expects every edge to span exactly one column (dummy nodes inserted).
+
+use std::collections::HashSet;
 
 use super::graph::{LayoutDirection, LayoutGraph};
 
@@ -15,379 +21,336 @@ pub fn assign_y_coords(graph: &mut LayoutGraph) {
         return;
     }
 
-    match graph.config.direction {
-        LayoutDirection::Balanced => {
-            // Run all 4 directions and take the balanced average
-            let mut layouts: Vec<Vec<f64>> = Vec::new();
+    let marked = mark_type1_conflicts(graph);
 
-            for &(reverse_cols, up) in &[
-                (false, false), // right-down
-                (false, true),  // right-up
-                (true, false),  // left-down
-                (true, true),   // left-up
-            ] {
-                let layout = compute_single_direction(graph, reverse_cols, up);
-                layouts.push(layout);
-            }
-
-            // Balance: align all 4 layouts to the same bounding box
-            balance_layouts(&mut layouts, graph);
-
-            for i in 0..n {
-                let mut values: Vec<f64> = layouts.iter().map(|l| l[i]).collect();
-                values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                graph.nodes[i].y = (values[1] + values[2]) / 2.0;
-            }
-        }
-        LayoutDirection::RightDown => {
-            let layout = compute_single_direction(graph, false, false);
-            for (i, &y) in layout.iter().enumerate() {
-                graph.nodes[i].y = y;
-            }
-        }
-        LayoutDirection::RightUp => {
-            let layout = compute_single_direction(graph, false, true);
-            for (i, &y) in layout.iter().enumerate() {
-                graph.nodes[i].y = y;
-            }
-        }
-        LayoutDirection::LeftDown => {
-            let layout = compute_single_direction(graph, true, false);
-            for (i, &y) in layout.iter().enumerate() {
-                graph.nodes[i].y = y;
-            }
-        }
-        LayoutDirection::LeftUp => {
-            let layout = compute_single_direction(graph, true, true);
-            for (i, &y) in layout.iter().enumerate() {
-                graph.nodes[i].y = y;
-            }
-        }
-    }
-}
-
-/// Compute y-coordinates for a single direction.
-/// Returns a vec of y values indexed by node index.
-fn compute_single_direction(graph: &mut LayoutGraph, reverse_columns: bool, up: bool) -> Vec<f64> {
-    let margin_y = graph.config.margin_y;
-
-    for node in &mut graph.nodes {
-        node.bk_reset();
-    }
-
-    // For "up" direction: reverse the order within each column so the compaction
-    // places nodes in the opposite vertical direction.
-    if up {
-        for col in &mut graph.columns {
-            col.reverse();
-        }
-        for col_idx in 0..graph.columns.len() {
-            for (order, &node_idx) in graph.columns[col_idx].iter().enumerate() {
-                graph.nodes[node_idx].order = order;
-            }
-        }
-    }
-
-    let col_indices: Vec<usize> = if reverse_columns {
-        (0..graph.columns.len()).rev().collect()
-    } else {
-        (0..graph.columns.len()).collect()
+    let single = |graph: &LayoutGraph, right_to_left: bool, up: bool| {
+        compute_single_direction(graph, &marked, right_to_left, up)
     };
 
-    let marked_edges = mark_conflicts(graph, &col_indices, up);
-    horizontal_alignment(graph, &col_indices, &marked_edges, up);
-    vertical_compaction(graph, &col_indices, margin_y, up);
+    let ys: Vec<f64> = match graph.config.direction {
+        LayoutDirection::Balanced => {
+            let mut layouts: Vec<Vec<f64>> = [(false, false), (false, true), (true, false), (true, true)]
+                .iter()
+                .map(|&(rl, up)| single(graph, rl, up))
+                .collect();
 
-    let dir_sign = if up { -1.0 } else { 1.0 };
-    let layout: Vec<f64> = graph.nodes.iter().map(|n| n.y * dir_sign).collect();
+            // Align all 4 layouts to the same origin before averaging.
+            balance_layouts(&mut layouts);
 
-    if up {
-        for col in &mut graph.columns {
-            col.reverse();
+            // Average of the two median candidates.  Every candidate layout is
+            // overlap-free and separation is preserved by order statistics, so
+            // the combined layout is overlap-free too.
+            (0..n)
+                .map(|i| {
+                    let mut values: Vec<f64> = layouts.iter().map(|l| l[i]).collect();
+                    values.sort_by(|a, b| a.total_cmp(b));
+                    (values[1] + values[2]) / 2.0
+                })
+                .collect()
         }
-        for col_idx in 0..graph.columns.len() {
-            for (order, &node_idx) in graph.columns[col_idx].iter().enumerate() {
-                graph.nodes[node_idx].order = order;
-            }
-        }
-    }
+        LayoutDirection::RightDown => single(graph, false, false),
+        LayoutDirection::RightUp => single(graph, false, true),
+        LayoutDirection::LeftDown => single(graph, true, false),
+        LayoutDirection::LeftUp => single(graph, true, true),
+    };
 
-    for node in &mut graph.nodes {
-        node.bk_reset();
+    for (node, y) in graph.nodes.iter_mut().zip(ys) {
+        node.y = y;
     }
-
-    layout
 }
 
-/// Mark conflicting edges: edges that cross "inner segments" (dummy-to-dummy edges).
-/// Returns a set of (from_node, to_node) pairs that are marked as conflicts.
-fn mark_conflicts(
-    graph: &LayoutGraph,
-    col_indices: &[usize],
-    _up: bool,
-) -> std::collections::HashSet<(usize, usize)> {
-    let mut marked = std::collections::HashSet::new();
+/// Mark type-1 conflicts: non-inner edges that cross an inner segment
+/// (dummy→dummy edge).  Inner segments get alignment priority so long edges
+/// stay straight.  Returns the set of marked (from_node, to_node) pairs.
+///
+/// Linear per layer pair: `l` continues from where the previous segment
+/// stopped instead of rescanning from 0.
+fn mark_type1_conflicts(graph: &LayoutGraph) -> HashSet<(usize, usize)> {
+    let mut marked = HashSet::new();
 
-    // For each pair of adjacent columns, mark edges that cross inner segments
-    for window in col_indices.windows(2) {
-        let prev_col_idx = window[0];
-        let curr_col_idx = window[1];
+    let inner_pred = |v: usize| -> Option<usize> {
+        if !graph.nodes[v].is_dummy {
+            return None;
+        }
+        graph.in_edges[v]
+            .iter()
+            .map(|&ei| graph.edges[ei].from_node)
+            .find(|&u| graph.nodes[u].is_dummy)
+    };
 
-        let curr_col = &graph.columns[curr_col_idx];
-        let prev_col = &graph.columns[prev_col_idx];
-
-        if curr_col.is_empty() || prev_col.is_empty() {
+    for i in 0..graph.columns.len().saturating_sub(1) {
+        let upper = &graph.columns[i];
+        let lower = &graph.columns[i + 1];
+        if upper.is_empty() || lower.is_empty() {
             continue;
         }
 
-        let mut k_0: usize = 0;
-
-        for (l_1, &u) in curr_col.iter().enumerate() {
-            // Check if u is connected to a dummy node in prev_col (inner segment)
-            let is_inner = graph.nodes[u].is_dummy
-                && graph
-                    .predecessors(u)
-                    .iter()
-                    .any(|&p| graph.nodes[p].is_dummy);
-
-            let k_1 = if is_inner {
-                let pred = graph.predecessors(u);
-                pred.iter()
-                    .filter_map(|&p| {
-                        if prev_col.contains(&p) {
-                            Some(graph.nodes[p].order)
-                        } else {
-                            None
-                        }
-                    })
-                    .next()
-                    .unwrap_or(prev_col.len() - 1)
-            } else if l_1 == curr_col.len() - 1 {
-                prev_col.len() - 1
-            } else {
+        let mut k0 = 0usize;
+        let mut l = 0usize;
+        for l1 in 0..lower.len() {
+            let inner = inner_pred(lower[l1]);
+            if l1 != lower.len() - 1 && inner.is_none() {
                 continue;
-            };
+            }
+            let k1 = inner
+                .map(|u| graph.nodes[u].order)
+                .unwrap_or(upper.len() - 1);
 
-            // Mark crossing edges
-            for l in 0..=l_1.min(curr_col.len() - 1) {
-                let v = curr_col[l];
-                if graph.nodes[v].is_dummy
-                    && graph
-                        .predecessors(v)
-                        .iter()
-                        .any(|&p| graph.nodes[p].is_dummy)
-                {
-                    continue;
-                }
-
-                for &pred in &graph.predecessors(v) {
-                    if prev_col.iter().any(|&p| p == pred) {
-                        let k = graph.nodes[pred].order;
-                        if k < k_0 || k > k_1 {
-                            marked.insert((pred, v));
-                        }
+            while l <= l1 {
+                let v = lower[l];
+                for &ei in &graph.in_edges[v] {
+                    let u = graph.edges[ei].from_node;
+                    let k = graph.nodes[u].order;
+                    if k < k0 || k > k1 {
+                        marked.insert((u, v));
                     }
                 }
+                l += 1;
             }
-
-            k_0 = k_1;
+            k0 = k1;
         }
     }
 
     marked
 }
 
-/// Horizontal alignment: form blocks of nodes that will be vertically aligned.
-/// Each block is a chain connected via `root` and `aligned` pointers.
-fn horizontal_alignment(
-    graph: &mut LayoutGraph,
-    col_indices: &[usize],
-    marked_edges: &std::collections::HashSet<(usize, usize)>,
-    _up: bool,
-) {
-    for &col_idx in col_indices.iter().skip(1) {
-        let col = graph.columns[col_idx].clone();
-        let mut prev_aligned_pos: i32 = -1;
-
-        for &v in &col {
-            // Get predecessors in the previous column, sorted by their order
-            let prev_col_idx = if col_idx > 0 { col_idx - 1 } else { continue };
-            let prev_col = &graph.columns[prev_col_idx];
-
-            let mut preds_in_prev: Vec<usize> = graph
-                .predecessors(v)
-                .into_iter()
-                .filter(|p| prev_col.contains(p))
-                .collect();
-            preds_in_prev.sort_by_key(|&p| graph.nodes[p].order);
-
-            if preds_in_prev.is_empty() {
-                continue;
-            }
-
-            // Find the median predecessor(s)
-            let m = (preds_in_prev.len() as f64 - 1.0) / 2.0;
-            let lo = m.floor() as usize;
-            let hi = m.ceil() as usize;
-
-            for &u in &preds_in_prev[lo..=hi] {
-                // Check constraints
-                if graph.nodes[v].aligned != v {
-                    continue;
-                }
-                if marked_edges.contains(&(u, v)) {
-                    continue;
-                }
-                let u_pos = graph.nodes[u].order as i32;
-                if prev_aligned_pos >= u_pos {
-                    continue;
-                }
-
-                // Align v with u
-                graph.nodes[u].aligned = v;
-                graph.nodes[v].root = graph.nodes[u].root;
-                graph.nodes[v].aligned = graph.nodes[v].root;
-                prev_aligned_pos = u_pos;
-            }
-        }
-    }
+/// Per-direction working state.  Columns are stored in "local" vertical order
+/// (reversed for upward compaction) so the core algorithm is always top-down.
+struct Bk<'a> {
+    graph: &'a LayoutGraph,
+    cols: Vec<Vec<usize>>,
+    col_of: Vec<usize>,
+    pos: Vec<usize>,
+    up: bool,
+    margin_y: f64,
+    root: Vec<usize>,
+    align: Vec<usize>,
+    sink: Vec<usize>,
+    y: Vec<Option<f64>>,
 }
 
-/// Vertical compaction: assign actual y positions to blocks.
-fn vertical_compaction(graph: &mut LayoutGraph, _col_indices: &[usize], margin_y: f64, up: bool) {
-    let n = graph.nodes.len();
-
-    // Place blocks
-    let mut placed = vec![false; n];
-    for i in 0..n {
-        if graph.nodes[i].root == i {
-            place_block(graph, i, &mut placed, margin_y, up);
+impl<'a> Bk<'a> {
+    fn new(graph: &'a LayoutGraph, up: bool) -> Self {
+        let n = graph.nodes.len();
+        let mut cols = graph.columns.clone();
+        if up {
+            for col in &mut cols {
+                col.reverse();
+            }
+        }
+        let mut col_of = vec![0; n];
+        let mut pos = vec![0; n];
+        for (c, col) in cols.iter().enumerate() {
+            for (p, &v) in col.iter().enumerate() {
+                col_of[v] = c;
+                pos[v] = p;
+            }
+        }
+        Self {
+            graph,
+            cols,
+            col_of,
+            pos,
+            up,
+            margin_y: graph.config.margin_y,
+            root: (0..n).collect(),
+            align: (0..n).collect(),
+            sink: (0..n).collect(),
+            y: vec![None; n],
         }
     }
 
-    // Compute class shifts
-    for col in &graph.columns {
-        for window in col.windows(2) {
-            let v = window[0];
-            let u = window[1];
-            let v_sink = graph.nodes[v].sink;
-            let u_sink = graph.nodes[u].sink;
-            if v_sink != u_sink {
-                let delta = if up {
-                    graph.nodes[u].height + margin_y
-                } else {
-                    graph.nodes[v].height + margin_y
-                };
-                let s_c = graph.nodes[u].y + graph.nodes[u].inner_shift
-                    - graph.nodes[v].y
-                    - graph.nodes[v].inner_shift
-                    - delta;
-                let v_sink_shift = graph.nodes[v_sink].shift;
-                let u_sink_shift = graph.nodes[u_sink].shift;
-                graph.nodes[v_sink].shift = v_sink_shift.min(u_sink_shift + s_c);
-            }
-        }
-
-        // Initialize shift for first sink in column
-        if !col.is_empty() {
-            let first_sink = graph.nodes[col[0]].sink;
-            if graph.nodes[first_sink].shift == f64::INFINITY {
-                graph.nodes[first_sink].shift = 0.0;
-            }
-        }
+    /// Minimum distance between the tops of `a` and `b`, where `a` directly
+    /// precedes `b` in local order.  Physically the upper node's height counts.
+    fn delta(&self, a: usize, b: usize) -> f64 {
+        let upper = if self.up { b } else { a };
+        self.graph.nodes[upper].height + self.margin_y
     }
 
-    // Apply shifts
-    for i in 0..n {
-        let sink = graph.nodes[i].sink;
-        let shift = graph.nodes[sink].shift;
-        let inner = graph.nodes[i].inner_shift;
-        if shift != f64::INFINITY {
-            graph.nodes[i].y += shift + inner;
+    /// Neighbours of `v` in the previously swept column, sorted by local position.
+    fn sweep_neighbors(&self, v: usize, right_to_left: bool, prev_col: usize) -> Vec<usize> {
+        let g = self.graph;
+        let mut nbrs: Vec<usize> = if right_to_left {
+            g.out_edges[v].iter().map(|&ei| g.edges[ei].to_node).collect()
         } else {
-            graph.nodes[i].y += inner;
-        }
+            g.in_edges[v].iter().map(|&ei| g.edges[ei].from_node).collect()
+        };
+        nbrs.retain(|&u| self.col_of[u] == prev_col);
+        nbrs.sort_by_key(|&u| self.pos[u]);
+        nbrs.dedup();
+        nbrs
     }
-}
 
-/// Recursively place a block root, computing its y position.
-fn place_block(graph: &mut LayoutGraph, root: usize, placed: &mut [bool], margin_y: f64, up: bool) {
-    if placed[root] {
-        return;
-    }
-    placed[root] = true;
-    graph.nodes[root].y = 0.0;
+    fn horizontal_alignment(&mut self, marked: &HashSet<(usize, usize)>, right_to_left: bool) {
+        let num_cols = self.cols.len();
+        let sweep: Vec<usize> = if right_to_left {
+            (0..num_cols).rev().collect()
+        } else {
+            (0..num_cols).collect()
+        };
 
-    let mut first = true;
-
-    // Iterate through the block
-    let mut w = root;
-    loop {
-        // Find the column and position of w
-        let col_idx = graph.nodes[w].rank as usize;
-        if col_idx >= graph.columns.len() {
-            break;
-        }
-        let col = &graph.columns[col_idx];
-        let pos = graph.nodes[w].order;
-
-        if pos > 0 {
-            // Get the node above w in its column
-            let neighbor = col[pos - 1];
-            let neighbor_root = graph.nodes[neighbor].root;
-
-            // Place the neighbor's block first
-            place_block(graph, neighbor_root, placed, margin_y, up);
-
-            // Set sink
-            if graph.nodes[root].sink == root {
-                graph.nodes[root].sink = graph.nodes[neighbor_root].sink;
-            }
-
-            // Compute position relative to neighbor
-            if graph.nodes[root].sink == graph.nodes[neighbor_root].sink {
-                let delta = if up {
-                    graph.nodes[w].height + margin_y
+        for w in sweep.windows(2) {
+            let (prev_col, col) = (w[0], w[1]);
+            let mut r: isize = -1;
+            for idx in 0..self.cols[col].len() {
+                let v = self.cols[col][idx];
+                let nbrs = self.sweep_neighbors(v, right_to_left, prev_col);
+                if nbrs.is_empty() {
+                    continue;
+                }
+                let d = nbrs.len();
+                let medians = if d % 2 == 1 {
+                    vec![(d - 1) / 2]
                 } else {
-                    graph.nodes[neighbor].height + margin_y
+                    vec![d / 2 - 1, d / 2]
                 };
-                let s_b = graph.nodes[neighbor_root].y + graph.nodes[neighbor].inner_shift
-                    - graph.nodes[w].inner_shift
-                    + delta;
+                for m in medians {
+                    if self.align[v] != v {
+                        break;
+                    }
+                    let u = nbrs[m];
+                    let is_marked = if right_to_left {
+                        marked.contains(&(v, u))
+                    } else {
+                        marked.contains(&(u, v))
+                    };
+                    if !is_marked && r < self.pos[u] as isize {
+                        self.align[u] = v;
+                        self.root[v] = self.root[u];
+                        self.align[v] = self.root[v];
+                        r = self.pos[u] as isize;
+                    }
+                }
+            }
+        }
+    }
 
-                if first {
-                    graph.nodes[root].y = s_b;
-                    first = false;
-                } else {
-                    graph.nodes[root].y = graph.nodes[root].y.max(s_b);
+    fn place_block(&mut self, v: usize) {
+        if self.y[v].is_some() {
+            return;
+        }
+        self.y[v] = Some(0.0);
+        let mut w = v;
+        loop {
+            let p = self.pos[w];
+            if p > 0 {
+                let above = self.cols[self.col_of[w]][p - 1];
+                let u = self.root[above];
+                self.place_block(u);
+                if self.sink[v] == v {
+                    self.sink[v] = self.sink[u];
+                }
+                if self.sink[v] == self.sink[u] {
+                    let cand = self.y[u].unwrap_or(0.0) + self.delta(above, w);
+                    let cur = self.y[v].unwrap_or(0.0);
+                    self.y[v] = Some(cur.max(cand));
+                }
+            }
+            w = self.align[w];
+            if w == v {
+                break;
+            }
+        }
+    }
+
+    /// Place every block relative to its class, then separate the classes.
+    /// Returns top-down local y per node (all finite).
+    fn vertical_compaction(&mut self) -> Vec<f64> {
+        let n = self.graph.nodes.len();
+        for v in 0..n {
+            if self.root[v] == v {
+                self.place_block(v);
+            }
+        }
+
+        let rel = |s: &Self, v: usize| s.y[s.root[v]].unwrap_or(0.0);
+        let class = |s: &Self, v: usize| s.sink[s.root[v]];
+
+        // Class separation constraints: shift[cb] >= shift[ca] + weight.
+        let mut out: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+        let mut indeg = vec![0usize; n];
+        for col in &self.cols {
+            for win in col.windows(2) {
+                let (a, b) = (win[0], win[1]);
+                let (ca, cb) = (class(self, a), class(self, b));
+                if ca != cb {
+                    let weight = rel(self, a) + self.delta(a, b) - rel(self, b);
+                    out[ca].push((cb, weight));
+                    indeg[cb] += 1;
                 }
             }
         }
 
-        // Propagate y to all nodes in this block
-        graph.nodes[w].y = graph.nodes[root].y;
-        graph.nodes[w].sink = graph.nodes[root].sink;
-
-        // Move to next in alignment chain
-        let next = graph.nodes[w].aligned;
-        if next == root {
-            break;
+        // Longest path over the class DAG (Kahn, deterministic FIFO order).
+        let mut shift = vec![0.0f64; n];
+        let mut queue: std::collections::VecDeque<usize> =
+            (0..n).filter(|&c| self.sink[c] == c && indeg[c] == 0).collect();
+        let mut done = vec![false; n];
+        loop {
+            while let Some(c) = queue.pop_front() {
+                done[c] = true;
+                for &(t, wgt) in &out[c] {
+                    shift[t] = shift[t].max(shift[c] + wgt);
+                    indeg[t] -= 1;
+                    if indeg[t] == 0 {
+                        queue.push_back(t);
+                    }
+                }
+            }
+            // Defensive: a cyclic class graph should not occur; if it does,
+            // force the lowest pending class through (the sweep below keeps
+            // the result overlap-free).
+            match (0..n).find(|&c| self.sink[c] == c && !done[c]) {
+                Some(c) => {
+                    indeg[c] = 0;
+                    queue.push_back(c);
+                }
+                None => break,
+            }
         }
-        w = next;
+
+        let mut ys: Vec<f64> = (0..n).map(|v| rel(self, v) + shift[class(self, v)]).collect();
+
+        // Safety net: guarantee separation within every column.
+        for col in &self.cols {
+            for win in col.windows(2) {
+                let (a, b) = (win[0], win[1]);
+                let min_b = ys[a] + self.delta(a, b);
+                if ys[b] < min_b {
+                    ys[b] = min_b;
+                }
+            }
+        }
+        ys
     }
 }
 
-/// Align all 4 layouts so their bounding boxes match before trimmed-mean averaging.
-/// Each layout is shifted so its minimum y is 0.
-fn balance_layouts(layouts: &mut [Vec<f64>], graph: &LayoutGraph) {
-    if layouts.is_empty() || graph.nodes.is_empty() {
-        return;
+/// Compute y-coordinates (top-left) for a single direction.
+/// Returns a vec of y values indexed by node index.
+fn compute_single_direction(
+    graph: &LayoutGraph,
+    marked: &HashSet<(usize, usize)>,
+    right_to_left: bool,
+    up: bool,
+) -> Vec<f64> {
+    let mut bk = Bk::new(graph, up);
+    bk.horizontal_alignment(marked, right_to_left);
+    let ys = bk.vertical_compaction();
+    if up {
+        ys.into_iter().map(|y| -y).collect()
+    } else {
+        ys
     }
+}
 
+/// Align all layouts so their minimum y is 0 before median averaging.
+fn balance_layouts(layouts: &mut [Vec<f64>]) {
     for layout in layouts.iter_mut() {
         let min_val = layout.iter().copied().fold(f64::INFINITY, f64::min);
-        for y in layout.iter_mut() {
-            *y -= min_val;
+        if min_val.is_finite() {
+            for y in layout.iter_mut() {
+                *y -= min_val;
+            }
         }
     }
 }
