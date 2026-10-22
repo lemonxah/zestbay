@@ -3,101 +3,28 @@
 //! VST3 plugins provide their GUI via `IEditController::createView()` which
 //! returns an `IPlugView`.  We embed the view in a host-created X11 window,
 //! similar to the CLAP GUI approach.
+//!
+//! Threading: the PipeWire thread is the VST3 UI thread.  The view is
+//! created, attached, resized and removed there, and the per-view IRunLoop
+//! (timers + fd handlers) and host-window X11 events are serviced there from
+//! [`idle`], which the PipeWire manager calls on every timer tick.  There is
+//! no GUI helper thread, so when [`close_vst3_gui`] returns nothing for that
+//! view can still run.
 
 use std::collections::HashMap;
-use std::os::raw::{c_char, c_int, c_long, c_ulong, c_void};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::os::raw::c_void;
 use std::sync::Mutex;
+use std::sync::atomic::Ordering;
 
-use vst3::Steinberg::*;
 use vst3::Steinberg::Linux::IRunLoop_iid;
 use vst3::Steinberg::Vst::{IEditController, ViewType};
+use vst3::Steinberg::*;
 
+use crate::clap::threading;
+use crate::clap::x11::HostWindow;
 use crate::plugin::types::PluginInstanceId;
 
-use super::com_host::{HostRunLoop, run_loop_tick};
-
-// ---------------------------------------------------------------------------
-// X11 FFI bindings (shared with CLAP — ideally in a common module, but
-// duplicated here to keep the VST3 module self-contained)
-// ---------------------------------------------------------------------------
-
-#[link(name = "X11")]
-unsafe extern "C" {
-    fn XOpenDisplay(display_name: *const c_char) -> *mut c_void;
-    fn XCloseDisplay(display: *mut c_void) -> c_int;
-    fn XCreateSimpleWindow(
-        display: *mut c_void,
-        parent: c_ulong,
-        x: c_int,
-        y: c_int,
-        width: c_int,
-        height: c_int,
-        border_width: c_int,
-        border: c_ulong,
-        background: c_ulong,
-    ) -> c_ulong;
-    fn XMapWindow(display: *mut c_void, window: c_ulong) -> c_int;
-    fn XDestroyWindow(display: *mut c_void, window: c_ulong) -> c_int;
-    fn XDefaultRootWindow(display: *mut c_void) -> c_ulong;
-    fn XDefaultScreen(display: *mut c_void) -> c_int;
-    fn XBlackPixel(display: *mut c_void, screen: c_int) -> c_ulong;
-    fn XWhitePixel(display: *mut c_void, screen: c_int) -> c_ulong;
-    fn XPending(display: *mut c_void) -> c_int;
-    fn XNextEvent(display: *mut c_void, event: *mut [u8; 192]) -> c_int;
-    fn XFlush(display: *mut c_void) -> c_int;
-    fn XStoreName(display: *mut c_void, window: c_ulong, name: *const c_char) -> c_int;
-    fn XResizeWindow(
-        display: *mut c_void,
-        window: c_ulong,
-        width: c_int,
-        height: c_int,
-    ) -> c_int;
-    fn XSelectInput(display: *mut c_void, window: c_ulong, event_mask: c_long) -> c_int;
-    fn XInternAtom(
-        display: *mut c_void,
-        atom_name: *const c_char,
-        only_if_exists: c_int,
-    ) -> c_ulong;
-    fn XSetWMProtocols(
-        display: *mut c_void,
-        window: c_ulong,
-        protocols: *mut c_ulong,
-        count: c_int,
-    ) -> c_int;
-    fn XSync(display: *mut c_void, discard: c_int) -> c_int;
-    fn XQueryTree(
-        display: *mut c_void,
-        window: c_ulong,
-        root_return: *mut c_ulong,
-        parent_return: *mut c_ulong,
-        children_return: *mut *mut c_ulong,
-        nchildren_return: *mut std::os::raw::c_uint,
-    ) -> c_int;
-    fn XSetInputFocus(
-        display: *mut c_void,
-        focus: c_ulong,
-        revert_to: c_int,
-        time: c_ulong,
-    ) -> c_int;
-    fn XFree(data: *mut c_void) -> c_int;
-}
-
-const STRUCTURE_NOTIFY_MASK: c_long = 1 << 17;
-const SUBSTRUCTURE_NOTIFY_MASK: c_long = 1 << 19;
-const EXPOSURE_MASK: c_long = 1 << 15;
-const FOCUS_CHANGE_MASK: c_long = 1 << 21;
-
-// X11 event types
-const FOCUS_IN: i32 = 9;
-const MAP_NOTIFY: i32 = 19;
-const REPARENT_NOTIFY: i32 = 21;
-const CONFIGURE_NOTIFY: i32 = 22;
-const CLIENT_MESSAGE: i32 = 33;
-
-// XSetInputFocus revert_to constants
-const REVERT_TO_PARENT: c_int = 2;
-const CURRENT_TIME: c_ulong = 0;
+use super::com_host::{HostRunLoop, run_loop_clear, run_loop_tick};
 
 // ---------------------------------------------------------------------------
 // IPlugFrame implementation (COM object the plugin calls for resize)
@@ -161,9 +88,7 @@ unsafe extern "system" fn host_plug_frame_query_interface(
 unsafe extern "system" fn host_plug_frame_add_ref(this: *mut FUnknown) -> uint32 {
     unsafe {
         let frame = this as *mut HostPlugFrame;
-        let old = (*frame)
-            .ref_count
-            .fetch_add(1, Ordering::Relaxed);
+        let old = (*frame).ref_count.fetch_add(1, Ordering::Relaxed);
         old + 1
     }
 }
@@ -171,10 +96,13 @@ unsafe extern "system" fn host_plug_frame_add_ref(this: *mut FUnknown) -> uint32
 unsafe extern "system" fn host_plug_frame_release(this: *mut FUnknown) -> uint32 {
     unsafe {
         let frame = this as *mut HostPlugFrame;
-        let old = (*frame).ref_count.fetch_sub(1, Ordering::Relaxed);
+        let old = (*frame).ref_count.fetch_sub(1, Ordering::AcqRel);
         if old == 1 {
-            // Last reference — deallocate
-            drop(Box::from_raw(frame));
+            // Last reference — drop our run loop ref and deallocate
+            let frame = Box::from_raw(frame);
+            if !frame.run_loop.is_null() {
+                super::com_host::host_run_loop_release(frame.run_loop as *mut FUnknown);
+            }
             return 0;
         }
         old - 1
@@ -192,9 +120,9 @@ unsafe extern "system" fn host_plug_frame_resize_view(
         }
         let frame = this as *mut HostPlugFrame;
         let instance_id = (*frame).instance_id;
-        let rect = &*new_size;
-        let w = (rect.right - rect.left).max(1);
-        let h = (rect.bottom - rect.top).max(1);
+        let rect = *new_size;
+        let w = (rect.right - rect.left).max(1) as u32;
+        let h = (rect.bottom - rect.top).max(1) as u32;
 
         log::debug!(
             "VST3 IPlugFrame::resizeView {}x{} (instance {})",
@@ -203,27 +131,46 @@ unsafe extern "system" fn host_plug_frame_resize_view(
             instance_id
         );
 
-        // Resize the X11 host window
-        with_guis(|m| {
-            if let Some(state) = m.get(&instance_id) {
-                if !state.x11_display.is_null() && state.x11_window != 0 {
-                    XResizeWindow(state.x11_display, state.x11_window, w, h);
-                    XFlush(state.x11_display);
+        if !threading::is_main_thread() {
+            // Applied (with onSize) by the next `idle` on the thread that
+            // owns the Display.
+            let known = with_guis(|m| match m.get_mut(&instance_id) {
+                Some(s) => {
+                    s.pending_size = Some(rect);
+                    true
                 }
-            }
-        });
-
-        // Notify the plugin view of the new size
-        if !view.is_null() {
-            ((*(*view).vtbl).onSize)(view, new_size);
+                None => false,
+            });
+            return if known { kResultOk } else { kResultFalse };
         }
 
+        let known = with_guis(|m| match m.get(&instance_id) {
+            Some(s) => {
+                s.window.resize(w, h);
+                true
+            }
+            None => false,
+        });
+        if !known {
+            return kResultFalse;
+        }
+        // Notify the plugin view of the new size (outside the registry lock).
+        if !view.is_null() {
+            let mut r = rect;
+            ((*(*view).vtbl).onSize)(view, &mut r);
+        }
         kResultOk
     }
 }
 
-/// Allocate a new HostPlugFrame (ref_count starts at 1).
+/// Allocate a new HostPlugFrame (ref_count starts at 1).  Takes its own
+/// reference on `run_loop`.
 fn new_host_plug_frame(instance_id: PluginInstanceId, run_loop: *mut HostRunLoop) -> *mut HostPlugFrame {
+    if !run_loop.is_null() {
+        unsafe {
+            super::com_host::host_run_loop_add_ref(run_loop as *mut FUnknown);
+        }
+    }
     let frame = Box::new(HostPlugFrame {
         vtbl: &HOST_PLUG_FRAME_VTBL,
         ref_count: std::sync::atomic::AtomicU32::new(1),
@@ -238,25 +185,26 @@ fn new_host_plug_frame(instance_id: PluginInstanceId, run_loop: *mut HostRunLoop
 // ---------------------------------------------------------------------------
 
 struct Vst3GuiState {
-    #[allow(dead_code)]
-    instance_id: PluginInstanceId,
+    controller: *mut IEditController,
     view: *mut IPlugView,
     plug_frame: *mut HostPlugFrame,
-    x11_display: *mut c_void,
-    x11_window: c_ulong,
-    running: std::sync::Arc<AtomicBool>,
     run_loop: *mut HostRunLoop,
+    window: HostWindow,
+    event_tx: std::sync::mpsc::Sender<crate::pipewire::PwEvent>,
+    /// Resize requested off the main thread, applied by `idle`.
+    pending_size: Option<ViewRect>,
 }
 
 unsafe impl Send for Vst3GuiState {}
 
+/// Never hold this lock while calling into plugin code.
 static OPEN_GUIS: Mutex<Option<HashMap<PluginInstanceId, Vst3GuiState>>> = Mutex::new(None);
 
 fn with_guis<F, R>(f: F) -> R
 where
     F: FnOnce(&mut HashMap<PluginInstanceId, Vst3GuiState>) -> R,
 {
-    let mut lock = OPEN_GUIS.lock().unwrap();
+    let mut lock = OPEN_GUIS.lock().unwrap_or_else(|e| e.into_inner());
     let map = lock.get_or_insert_with(HashMap::new);
     f(map)
 }
@@ -270,17 +218,17 @@ where
 /// `controller_ptr` must be a valid `*mut IEditController` with a live refcount.
 ///
 /// # Safety
-/// Called from the PW thread.
+/// Called from the PW thread (the VST3 UI thread).
 pub unsafe fn open_vst3_gui(
     controller_ptr: *mut IEditController,
     instance_id: PluginInstanceId,
     display_name: &str,
     event_tx: &std::sync::mpsc::Sender<crate::pipewire::PwEvent>,
-    cmd_tx: &std::sync::mpsc::Sender<crate::pipewire::PwCommand>,
+    _cmd_tx: &std::sync::mpsc::Sender<crate::pipewire::PwCommand>,
 ) {
-    // Already open?
-    let already = with_guis(|m| m.contains_key(&instance_id));
-    if already {
+    threading::set_main_thread();
+
+    if with_guis(|m| m.contains_key(&instance_id)) {
         log::warn!("VST3 GUI already open for instance {}", instance_id);
         return;
     }
@@ -291,49 +239,17 @@ pub unsafe fn open_vst3_gui(
     }
 
     unsafe {
-        // Verify controller is valid by checking parameter count
-        let param_count = ((*(*controller_ptr).vtbl).getParameterCount)(controller_ptr);
-        log::info!(
-            "VST3: controller has {} params, calling createView for '{}' (instance {})",
-            param_count, display_name, instance_id,
-        );
-
-        // Try createView — some plugins need this on the "main thread".
-        // Try from current thread first, then from a dedicated UI thread if null.
-        let mut view = ((*(*controller_ptr).vtbl).createView)(controller_ptr, ViewType::kEditor);
-
-        if view.is_null() {
-            // Retry from a fresh thread — some VST3 plugins check thread identity
-            log::info!("VST3: createView returned null on PW thread, retrying from UI thread");
-
-            let ctrl_addr = controller_ptr as usize;
-            let (tx, rx) = std::sync::mpsc::channel::<usize>();
-            std::thread::Builder::new()
-                .name("vst3-ui-create".into())
-                .spawn(move || {
-                    unsafe {
-                        let ctrl = ctrl_addr as *mut IEditController;
-                        let v = ((*(*ctrl).vtbl).createView)(ctrl, ViewType::kEditor);
-                        let _ = tx.send(v as usize);
-                    }
-                })
-                .ok();
-
-            if let Ok(v) = rx.recv_timeout(std::time::Duration::from_secs(2)) {
-                view = v as *mut IPlugView;
-            }
-        }
-
+        let view = ((*(*controller_ptr).vtbl).createView)(controller_ptr, ViewType::kEditor);
         if view.is_null() {
             log::warn!(
                 "VST3: createView returned null for '{}' (instance {}). \
                  This plugin may not support embedded UI.",
-                display_name, instance_id,
+                display_name,
+                instance_id,
             );
             return;
         }
 
-        // Check X11 support
         let supported =
             ((*(*view).vtbl).isPlatformTypeSupported)(view, kPlatformTypeX11EmbedWindowID);
         if supported != kResultOk {
@@ -345,308 +261,191 @@ pub unsafe fn open_vst3_gui(
             return;
         }
 
-        // Create a run loop for this GUI (for timer/fd registration)
+        // Run loop for this GUI (timers/fds), handed out via IPlugFrame.
         let run_loop = super::com_host::new_host_run_loop();
-
-        // Create our IPlugFrame (with run_loop for IRunLoop QI)
         let plug_frame = new_host_plug_frame(instance_id, run_loop);
-
-        // setFrame
         ((*(*view).vtbl).setFrame)(view, plug_frame as *mut IPlugFrame);
 
-        // getSize
         let mut rect: ViewRect = std::mem::zeroed();
-        let size_ok = ((*(*view).vtbl).getSize)(view, &mut rect);
-        let (width, height) = if size_ok == kResultOk {
+        let (width, height) = if ((*(*view).vtbl).getSize)(view, &mut rect) == kResultOk {
             (
-                (rect.right - rect.left).max(100),
-                (rect.bottom - rect.top).max(100),
+                (rect.right - rect.left).max(100) as u32,
+                (rect.bottom - rect.top).max(100) as u32,
             )
         } else {
             (800, 600)
         };
+        log::info!("VST3 GUI size: {}x{} (instance {})", width, height, instance_id);
 
-        log::info!(
-            "VST3 GUI size: {}x{} (instance {})",
-            width,
-            height,
-            instance_id
-        );
-
-        // Open X11 display
-        let display = XOpenDisplay(std::ptr::null());
-        if display.is_null() {
-            log::error!("VST3: cannot open X11 display");
-            ((*(*view).vtbl).setFrame)(view, std::ptr::null_mut());
-            ((*(*view).vtbl).base.release)(view as *mut FUnknown);
-            host_plug_frame_release(plug_frame as *mut FUnknown);
+        let Some(window) = HostWindow::open(display_name, width, height) else {
+            release_view(view, plug_frame, run_loop, false);
             return;
-        }
+        };
+        let x11_window = window.window;
 
-        let screen = XDefaultScreen(display);
-        let root = XDefaultRootWindow(display);
-
-        let window = XCreateSimpleWindow(
-            display,
-            root,
-            0,
-            0,
-            width as c_int,
-            height as c_int,
-            0,
-            XBlackPixel(display, screen),
-            XWhitePixel(display, screen),
-        );
-
-        if window == 0 {
-            log::error!("VST3: XCreateSimpleWindow failed");
-            XCloseDisplay(display);
-            ((*(*view).vtbl).setFrame)(view, std::ptr::null_mut());
-            ((*(*view).vtbl).base.release)(view as *mut FUnknown);
-            host_plug_frame_release(plug_frame as *mut FUnknown);
-            return;
-        }
-
-        let title = std::ffi::CString::new(display_name).unwrap_or_default();
-        XStoreName(display, window, title.as_ptr());
-
-        XSelectInput(
-            display,
-            window,
-            STRUCTURE_NOTIFY_MASK | SUBSTRUCTURE_NOTIFY_MASK | EXPOSURE_MASK | FOCUS_CHANGE_MASK,
-        );
-
-        let wm_delete = XInternAtom(display, c"WM_DELETE_WINDOW".as_ptr(), 0);
-        let mut protocols = [wm_delete];
-        XSetWMProtocols(display, window, protocols.as_mut_ptr(), 1);
-
-        XMapWindow(display, window);
-        XFlush(display);
-        // Ensure the window is fully realized before attaching the plugin view.
-        // Yabridge needs the parent window to exist on the X server before it
-        // can reparent its Wine window into it.
-        XSync(display, 0);
-
-        // Attach the plugin view to our X11 window
-        let attached = ((*(*view).vtbl).attached)(
-            view,
-            window as *mut c_void,
-            kPlatformTypeX11EmbedWindowID,
-        );
-        if attached != kResultOk {
-            log::error!(
-                "VST3: IPlugView::attached failed (instance {})",
-                instance_id
-            );
-            XDestroyWindow(display, window);
-            XCloseDisplay(display);
-            ((*(*view).vtbl).setFrame)(view, std::ptr::null_mut());
-            ((*(*view).vtbl).base.release)(view as *mut FUnknown);
-            host_plug_frame_release(plug_frame as *mut FUnknown);
-            return;
-        }
-
-        let running = std::sync::Arc::new(AtomicBool::new(true));
-
-        // Register state
+        // Register before attached() so resizeView during attach finds us.
         with_guis(|m| {
             m.insert(
                 instance_id,
                 Vst3GuiState {
-                    instance_id,
+                    controller: controller_ptr,
                     view,
                     plug_frame,
-                    x11_display: display,
-                    x11_window: window,
-                    running: running.clone(),
                     run_loop,
+                    window,
+                    event_tx: event_tx.clone(),
+                    pending_size: None,
                 },
             );
         });
 
-        // Spawn X11 event loop thread
-        let display_addr = display as usize;
-        let run_loop_addr = run_loop as usize;
-        let cmd_tx_clone = cmd_tx.clone();
-        let running_clone = running.clone();
-        std::thread::Builder::new()
-            .name(format!("vst3-gui-{}", instance_id))
-            .spawn(move || {
-                let display = display_addr as *mut c_void;
-                let run_loop = run_loop_addr as *mut HostRunLoop;
-                x11_event_loop(
-                    display,
-                    window,
-                    wm_delete,
-                    instance_id,
-                    running_clone,
-                    cmd_tx_clone,
-                    run_loop,
-                );
-            })
-            .ok();
-
-        log::info!(
-            "VST3 embedded X11 GUI opened for instance {}",
-            instance_id
+        let attached = ((*(*view).vtbl).attached)(
+            view,
+            x11_window as *mut c_void,
+            kPlatformTypeX11EmbedWindowID,
         );
+        if attached != kResultOk {
+            log::error!("VST3: IPlugView::attached failed (instance {})", instance_id);
+            if let Some(state) = with_guis(|m| m.remove(&instance_id)) {
+                let window = state.window;
+                release_view(state.view, state.plug_frame, state.run_loop, false);
+                drop(window);
+            }
+            return;
+        }
+
+        with_guis(|m| {
+            if let Some(s) = m.get(&instance_id) {
+                s.window.flush();
+            }
+        });
+
+        log::info!("VST3 embedded X11 GUI opened for instance {}", instance_id);
         let _ = event_tx.send(crate::pipewire::PwEvent::Plugin(
             crate::pipewire::PluginEvent::PluginUiOpened { instance_id },
         ));
     }
 }
 
-/// Query the first child window of `parent` via XQueryTree.
-/// Returns 0 if no children found.
-unsafe fn find_child_window(display: *mut c_void, parent: c_ulong) -> c_ulong {
+/// removed() (if attached), clear the frame, release the view, the frame
+/// and our run loop reference.  Leftover run-loop handlers are dropped
+/// without being called.
+unsafe fn release_view(
+    view: *mut IPlugView,
+    plug_frame: *mut HostPlugFrame,
+    run_loop: *mut HostRunLoop,
+    attached: bool,
+) {
     unsafe {
-        let mut root_ret: c_ulong = 0;
-        let mut parent_ret: c_ulong = 0;
-        let mut children: *mut c_ulong = std::ptr::null_mut();
-        let mut nchildren: std::os::raw::c_uint = 0;
-
-        let status = XQueryTree(
-            display,
-            parent,
-            &mut root_ret,
-            &mut parent_ret,
-            &mut children,
-            &mut nchildren,
-        );
-
-        let child = if status != 0 && nchildren > 0 && !children.is_null() {
-            *children
-        } else {
-            0
-        };
-
-        if !children.is_null() {
-            XFree(children as *mut c_void);
+        if attached {
+            ((*(*view).vtbl).removed)(view);
         }
-
-        child
+        ((*(*view).vtbl).setFrame)(view, std::ptr::null_mut());
+        ((*(*view).vtbl).base.release)(view as *mut FUnknown);
+        run_loop_clear(run_loop);
+        host_plug_frame_release(plug_frame as *mut FUnknown);
+        if !run_loop.is_null() {
+            super::com_host::host_run_loop_release(run_loop as *mut FUnknown);
+        }
     }
 }
 
-/// X11 event loop for a VST3 GUI window.
-fn x11_event_loop(
-    display: *mut c_void,
-    window: c_ulong,
-    wm_delete_atom: c_ulong,
-    instance_id: PluginInstanceId,
-    running: std::sync::Arc<AtomicBool>,
-    cmd_tx: std::sync::mpsc::Sender<crate::pipewire::PwCommand>,
-    run_loop: *mut HostRunLoop,
-) {
-    let tick = std::time::Duration::from_millis(8);
+/// Tear down a registered GUI: view first, then the X11 window.
+unsafe fn teardown(state: Vst3GuiState) {
+    unsafe {
+        release_view(state.view, state.plug_frame, state.run_loop, true);
+    }
+    drop(state.window);
+}
 
-    // Track the plugin's embedded child window (e.g. yabridge's Wine window).
-    // Initially 0 — discovered via ReparentNotify/MapNotify from XQueryTree.
-    let mut child_window: c_ulong = 0;
+/// Service all VST3 GUIs: run-loop timers/fds, pending resizes and host
+/// window events.  Must be called on the PipeWire thread on every manager
+/// tick.
+pub fn idle() {
+    if !threading::is_main_thread() {
+        return;
+    }
+    let ids: Vec<PluginInstanceId> = with_guis(|m| m.keys().copied().collect());
+    let mut to_close = Vec::new();
+    for id in ids {
+        let Some((view, run_loop, pending)) = with_guis(|m| {
+            m.get_mut(&id)
+                .map(|s| (s.view, s.run_loop, s.pending_size.take()))
+        }) else {
+            continue;
+        };
 
-    while running.load(Ordering::Acquire) {
         unsafe {
-            // Service IRunLoop timers and fd event handlers
             run_loop_tick(run_loop);
 
-            while XPending(display) > 0 {
-                let mut event = std::mem::zeroed::<[u8; 192]>();
-                XNextEvent(display, &mut event);
-
-                let event_type = *(event.as_ptr() as *const i32);
-                match event_type {
-                    CLIENT_MESSAGE => {
-                        let atom = *((event.as_ptr() as *const u8).add(56) as *const c_ulong);
-                        if atom == wm_delete_atom {
-                            log::info!(
-                                "VST3 GUI window close requested (instance {})",
-                                instance_id
-                            );
-                            running.store(false, Ordering::Release);
-                            let _ = cmd_tx.send(crate::pipewire::PwCommand::ClosePluginUI {
-                                instance_id,
-                            });
-                            break;
-                        }
+            if let Some(mut rect) = pending {
+                let w = (rect.right - rect.left).max(1) as u32;
+                let h = (rect.bottom - rect.top).max(1) as u32;
+                with_guis(|m| {
+                    if let Some(s) = m.get(&id) {
+                        s.window.resize(w, h);
                     }
-                    REPARENT_NOTIFY | MAP_NOTIFY => {
-                        // A child window was reparented into or mapped within
-                        // our host window. This happens when yabridge embeds
-                        // its Wine window. Detect it so we can forward focus.
-                        let detected = find_child_window(display, window);
-                        if detected != 0 && detected != child_window {
-                            child_window = detected;
-                            log::info!(
-                                "VST3 GUI: child window 0x{:x} detected (instance {})",
-                                child_window, instance_id,
-                            );
-                        }
-                    }
-                    FOCUS_IN => {
-                        // Our host window received focus. Forward it to the
-                        // plugin's child window so keyboard input reaches the
-                        // embedded UI (critical for yabridge/Wine windows).
-                        if child_window != 0 {
-                            XSetInputFocus(display, child_window, REVERT_TO_PARENT, CURRENT_TIME);
-                            XFlush(display);
-                        }
-                    }
-                    CONFIGURE_NOTIFY => {
-                        // Child window resized — logged for debugging.
-                        // Actual resize coordination is handled by IPlugFrame::resizeView.
-                    }
-                    _ => {}
-                }
+                });
+                ((*(*view).vtbl).onSize)(view, &mut rect);
             }
         }
-        std::thread::sleep(tick);
-    }
 
-    log::debug!("VST3 X11 event loop exiting for instance {}", instance_id);
+        let close = with_guis(|m| match m.get_mut(&id) {
+            Some(s) => unsafe { s.window.pump() },
+            None => false,
+        });
+        if close {
+            log::info!("VST3 GUI window close requested (instance {})", id);
+            to_close.push(id);
+        }
+    }
+    for id in to_close {
+        if let Some(state) = with_guis(|m| m.remove(&id)) {
+            let tx = state.event_tx.clone();
+            unsafe { teardown(state) };
+            let _ = tx.send(crate::pipewire::PwEvent::Plugin(
+                crate::pipewire::PluginEvent::PluginUiClosed { instance_id: id },
+            ));
+            log::info!("VST3 GUI closed for instance {}", id);
+        }
+    }
 }
 
 /// Close a VST3 plugin GUI if open.
 ///
-/// Must be called from the main (PW) thread.
+/// Must be called from the main (PW) thread.  When this returns the view is
+/// removed and released and no run-loop callback for it can still run.
 pub fn close_vst3_gui(
     instance_id: PluginInstanceId,
     event_tx: &std::sync::mpsc::Sender<crate::pipewire::PwEvent>,
 ) {
-    let state = with_guis(|m| m.remove(&instance_id));
-
-    if let Some(state) = state {
-        state.running.store(false, Ordering::Release);
-
-        unsafe {
-            // Detach the view
-            ((*(*state.view).vtbl).removed)(state.view);
-
-            // Clear the frame reference
-            ((*(*state.view).vtbl).setFrame)(state.view, std::ptr::null_mut());
-
-            // Release the view
-            ((*(*state.view).vtbl).base.release)(state.view as *mut FUnknown);
-
-            // Release our plug frame
-            host_plug_frame_release(state.plug_frame as *mut FUnknown);
-
-            // Release the run loop
-            if !state.run_loop.is_null() {
-                super::com_host::host_run_loop_release(state.run_loop as *mut FUnknown);
-            }
-
-            // Clean up X11
-            if !state.x11_display.is_null() && state.x11_window != 0 {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                XDestroyWindow(state.x11_display, state.x11_window);
-                XCloseDisplay(state.x11_display);
-            }
-        }
-
+    if let Some(state) = with_guis(|m| m.remove(&instance_id)) {
+        unsafe { teardown(state) };
         let _ = event_tx.send(crate::pipewire::PwEvent::Plugin(
             crate::pipewire::PluginEvent::PluginUiClosed { instance_id },
         ));
-
         log::info!("VST3 GUI closed for instance {}", instance_id);
+    }
+}
+
+/// Close any GUI still open for `controller` (used when the instance is dropped).
+pub(crate) fn force_close_for_controller(controller: *mut IEditController) {
+    if controller.is_null() {
+        return;
+    }
+    let found = with_guis(|m| {
+        let id = m
+            .iter()
+            .find(|(_, s)| std::ptr::eq(s.controller, controller))
+            .map(|(id, _)| *id)?;
+        m.remove(&id).map(|s| (id, s))
+    });
+    if let Some((id, state)) = found {
+        let tx = state.event_tx.clone();
+        unsafe { teardown(state) };
+        let _ = tx.send(crate::pipewire::PwEvent::Plugin(
+            crate::pipewire::PluginEvent::PluginUiClosed { instance_id: id },
+        ));
+        log::info!("VST3 GUI closed for instance {} (plugin dropped)", id);
     }
 }
