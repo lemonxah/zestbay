@@ -27,7 +27,19 @@ pub static PLUGINS_FROZEN: AtomicBool = AtomicBool::new(false);
 /// Dangerous — a crashing plugin will take down the entire process.
 pub static NO_PROBE: AtomicBool = AtomicBool::new(false);
 
+#[link(name = "X11")]
+unsafe extern "C" {
+    fn XInitThreads() -> std::os::raw::c_int;
+}
+
 fn main() {
+    // Plugin UIs (LV2/CLAP/VST3 X11 editors) call Xlib from several threads;
+    // Xlib must be put into thread-safe mode before any other Xlib call and
+    // before any thread is spawned.
+    if unsafe { XInitThreads() } == 0 {
+        eprintln!("XInitThreads failed; X11 plugin UIs may be unstable");
+    }
+
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let args: Vec<String> = std::env::args().collect();
