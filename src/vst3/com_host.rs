@@ -13,9 +13,8 @@
 //! - **IRunLoop** — Linux-specific. Plugins (esp. JUCE-based) register timers
 //!   and file-descriptor event handlers that must be serviced on the GUI thread.
 
-use std::collections::HashMap;
 use std::os::raw::c_void;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use vst3::Steinberg::IBStream_::IStreamSeekMode_::*;
@@ -178,20 +177,61 @@ pub unsafe fn release_host_component_handler(ch: *mut HostComponentHandler) {
 // IComponentHandler
 // =========================================================================
 
+/// State shared between a VST3 instance, its component handler and the
+/// audio thread.  Indexed by parameter index (== port_index).
+pub struct Vst3SharedParams {
+    /// Shared port updates: normalized values, host ⇄ processor.
+    pub port_updates: SharedPortUpdates,
+    /// VST3 ParamID per parameter index.
+    pub ids: Vec<ParamID>,
+    /// (ParamID, index), sorted by id for RT-safe lookup.
+    pub id_index: Vec<(ParamID, usize)>,
+    /// f32 bits of the value the edit controller is known to hold.  The
+    /// main thread pushes slot values that differ to `setParamNormalized`.
+    pub controller_bits: Vec<AtomicU32>,
+    /// Accumulated `restartComponent` flags, consumed on the main thread.
+    pub restart_flags: AtomicI32,
+}
+
+impl Vst3SharedParams {
+    pub fn new(port_updates: SharedPortUpdates, ids: Vec<ParamID>) -> Self {
+        let mut id_index: Vec<(ParamID, usize)> =
+            ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+        id_index.sort_unstable_by_key(|&(id, _)| id);
+        let controller_bits = port_updates
+            .control_inputs
+            .iter()
+            .map(|s| AtomicU32::new(s.value.load().to_bits()))
+            .collect();
+        Self {
+            port_updates,
+            ids,
+            id_index,
+            controller_bits,
+            restart_flags: AtomicI32::new(0),
+        }
+    }
+
+    /// Parameter index for a ParamID (no allocation; RT-safe).
+    pub fn index_of(&self, id: ParamID) -> Option<usize> {
+        self.id_index
+            .binary_search_by_key(&id, |&(pid, _)| pid)
+            .ok()
+            .map(|pos| self.id_index[pos].1)
+    }
+}
+
 /// Our host-side IComponentHandler.
 ///
 /// When the plugin's GUI changes a parameter, it calls `performEdit()`.
-/// We write the new value into the shared `PortUpdates` so the audio thread
-/// picks it up.
+/// We write the new value into the shared slot; the next `process()` sends
+/// it to the processor via inputParameterChanges.
 #[repr(C)]
 pub struct HostComponentHandler {
     vtbl: *const IComponentHandlerVtbl,
     ref_count: AtomicU32,
     pub instance_id: PluginInstanceId,
-    /// Mapping from VST3 ParamID → port_index in SharedPortUpdates.
-    pub param_map: Arc<Mutex<HashMap<u32, usize>>>,
-    /// Shared port updates for lock-free parameter sync.
-    pub port_updates: SharedPortUpdates,
+    pub shared: Arc<Vst3SharedParams>,
 }
 
 unsafe impl Send for HostComponentHandler {}
@@ -263,22 +303,15 @@ unsafe extern "system" fn host_ch_perform_edit(
     value_normalized: ParamValue,
 ) -> tresult {
     unsafe {
-        let ch = this as *mut HostComponentHandler;
-        let port_updates = &(*ch).port_updates;
-
-        if let Ok(param_map) = (*ch).param_map.lock() {
-            if let Some(&port_index) = param_map.get(&id) {
-                if let Some(slot) = port_updates
-                    .control_inputs
-                    .iter()
-                    .find(|s| s.port_index == port_index)
-                {
-                    slot.value.store(value_normalized as f32);
-                    return kResultOk;
-                }
+        let shared = &(*(this as *mut HostComponentHandler)).shared;
+        if let Some(idx) = shared.index_of(id) {
+            if let Some(slot) = shared.port_updates.control_inputs.get(idx) {
+                let v = value_normalized.clamp(0.0, 1.0) as f32;
+                // The controller already holds this value; don't echo it back.
+                shared.controller_bits[idx].store(v.to_bits(), Ordering::Relaxed);
+                slot.value.store(v);
             }
         }
-
         kResultOk
     }
 }
@@ -288,31 +321,31 @@ unsafe extern "system" fn host_ch_end_edit(_this: *mut IComponentHandler, _id: P
 }
 
 unsafe extern "system" fn host_ch_restart_component(
-    _this: *mut IComponentHandler,
+    this: *mut IComponentHandler,
     flags: int32,
 ) -> tresult {
     log::debug!(
         "VST3 IComponentHandler::restartComponent(flags=0x{:x})",
         flags
     );
-    // We could handle specific restart flags here (e.g., kParamValuesChanged
-    // to re-read param values, kLatencyChanged to update latency compensation).
-    // For now, acknowledge the request.
+    // Acted on by Vst3PluginInstance::idle() on the main thread.
+    unsafe {
+        let shared = &(*(this as *mut HostComponentHandler)).shared;
+        shared.restart_flags.fetch_or(flags, Ordering::AcqRel);
+    }
     kResultOk
 }
 
 /// Allocate a new HostComponentHandler (ref_count starts at 1).
 pub fn new_host_component_handler(
     instance_id: PluginInstanceId,
-    param_map: HashMap<u32, usize>,
-    port_updates: SharedPortUpdates,
+    shared: Arc<Vst3SharedParams>,
 ) -> *mut HostComponentHandler {
     let ch = Box::new(HostComponentHandler {
         vtbl: &HOST_COMPONENT_HANDLER_VTBL,
         ref_count: AtomicU32::new(1),
         instance_id,
-        param_map: Arc::new(Mutex::new(param_map)),
-        port_updates,
+        shared,
     });
     Box::into_raw(ch)
 }
@@ -337,8 +370,8 @@ struct FdEntry {
 /// Our host-side IRunLoop for Linux.
 ///
 /// VST3 plugins (especially JUCE-based) register timers and file descriptor
-/// event handlers via this interface. We service them from the X11 event
-/// loop thread.
+/// event handlers via this interface. We service them from the plugin main
+/// thread (see `run_loop_tick`).
 #[repr(C)]
 pub struct HostRunLoop {
     vtbl: *const IRunLoopVtbl,
@@ -483,8 +516,12 @@ pub fn new_host_run_loop() -> *mut HostRunLoop {
 
 /// Fire any due timers and poll any registered file descriptors.
 ///
-/// Must be called from the GUI event loop thread (the same thread that
-/// the plugin's GUI is running on).
+/// Must be called on the plugin main thread (the PipeWire thread), which is
+/// also where the view is created, attached and removed — so a handler can
+/// never be called concurrently with (or after) the view's teardown.
+/// Handlers are called without holding the run loop locks (plugins may
+/// (un)register from inside callbacks), are re-checked right before each
+/// call, and are kept alive with addRef/release around the call.
 ///
 /// # Safety
 /// The `run_loop` must be a valid `*mut HostRunLoop`.
@@ -493,43 +530,86 @@ pub unsafe fn run_loop_tick(run_loop: *mut HostRunLoop) {
         if run_loop.is_null() {
             return;
         }
+        let rl = &*run_loop;
 
-        // Collect due timers, then fire them outside the lock.
-        // Plugins (esp. JUCE) may re-register timers from within onTimer(),
-        // which would deadlock if we held the lock during the callback.
-        let mut timers_to_fire: Vec<*mut ITimerHandler> = Vec::new();
-        if let Ok(mut timers) = (*run_loop).timers.lock() {
-            let now = std::time::Instant::now();
-            for entry in timers.iter_mut() {
-                let elapsed = now.duration_since(entry.last_fired);
-                if elapsed.as_millis() >= entry.interval_ms as u128 {
-                    entry.last_fired = now;
-                    timers_to_fire.push(entry.handler);
+        let now = std::time::Instant::now();
+        let due: Vec<*mut ITimerHandler> = {
+            let mut timers = rl.timers.lock().unwrap_or_else(|e| e.into_inner());
+            timers
+                .iter_mut()
+                .filter(|e| now.duration_since(e.last_fired).as_millis() >= e.interval_ms as u128)
+                .map(|e| {
+                    e.last_fired = now;
+                    e.handler
+                })
+                .collect()
+        };
+        for handler in due {
+            let alive = {
+                let timers = rl.timers.lock().unwrap_or_else(|e| e.into_inner());
+                let alive = timers.iter().any(|e| e.handler == handler);
+                if alive {
+                    funknown_add_ref(handler as *mut FUnknown);
                 }
+                alive
+            };
+            if alive {
+                ((*(*handler).vtbl).onTimer)(handler);
+                funknown_release(handler as *mut FUnknown);
             }
         }
-        for handler in timers_to_fire {
-            ((*(*handler).vtbl).onTimer)(handler);
-        }
 
-        // Same pattern for fd handlers: collect, release lock, then fire.
-        let mut fds_to_fire: Vec<(*mut IEventHandler, std::os::raw::c_int)> = Vec::new();
-        if let Ok(fds) = (*run_loop).fd_handlers.lock() {
-            for entry in fds.iter() {
-                let mut pfd = libc::pollfd {
-                    fd: entry.fd,
-                    events: libc::POLLIN,
-                    revents: 0,
-                };
-                let ret = libc::poll(&mut pfd, 1, 0);
-                if ret > 0 && (pfd.revents & libc::POLLIN) != 0 {
-                    fds_to_fire.push((entry.handler, entry.fd));
+        let fds: Vec<(*mut IEventHandler, std::os::raw::c_int)> = {
+            let fds = rl.fd_handlers.lock().unwrap_or_else(|e| e.into_inner());
+            fds.iter().map(|e| (e.handler, e.fd)).collect()
+        };
+        for (handler, fd) in fds {
+            let mut pfd = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            if libc::poll(&mut pfd, 1, 0) <= 0 || pfd.revents == 0 {
+                continue;
+            }
+            let alive = {
+                let fds = rl.fd_handlers.lock().unwrap_or_else(|e| e.into_inner());
+                let alive = fds.iter().any(|e| e.handler == handler && e.fd == fd);
+                if alive {
+                    funknown_add_ref(handler as *mut FUnknown);
                 }
+                alive
+            };
+            if alive {
+                ((*(*handler).vtbl).onFDIsSet)(handler, fd);
+                funknown_release(handler as *mut FUnknown);
             }
         }
-        for (handler, fd) in fds_to_fire {
-            ((*(*handler).vtbl).onFDIsSet)(handler, fd);
-        }
+    }
+}
+
+/// Drop all registered handlers (without calling them).  Used when a view
+/// is torn down and the plugin did not unregister everything itself.
+pub fn run_loop_clear(run_loop: *mut HostRunLoop) {
+    if run_loop.is_null() {
+        return;
+    }
+    unsafe {
+        let rl = &*run_loop;
+        rl.timers.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        rl.fd_handlers.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+}
+
+unsafe fn funknown_add_ref(obj: *mut FUnknown) {
+    unsafe {
+        ((*(*obj).vtbl).addRef)(obj);
+    }
+}
+
+unsafe fn funknown_release(obj: *mut FUnknown) {
+    unsafe {
+        ((*(*obj).vtbl).release)(obj);
     }
 }
 
@@ -1092,21 +1172,24 @@ mod tests {
                 atom_inputs: Vec::new(),
             });
 
-            let mut param_map = HashMap::new();
-            param_map.insert(100u32, 0usize); // ParamID 100 → port_index 0
-            param_map.insert(200u32, 1usize); // ParamID 200 → port_index 1
-
-            let ch = new_host_component_handler(42, param_map, port_updates.clone());
+            // ParamID 200 → index 0, ParamID 100 → index 1 (unsorted on purpose)
+            let shared = Arc::new(Vst3SharedParams::new(port_updates.clone(), vec![200, 100]));
+            let ch = new_host_component_handler(42, shared.clone());
 
             // Perform edit on param 100
             let r = host_ch_perform_edit(ch as *mut IComponentHandler, 100, 0.75);
             assert_eq!(r, kResultOk);
-            assert!((port_updates.control_inputs[0].value.load() - 0.75).abs() < 1e-5);
+            assert!((port_updates.control_inputs[1].value.load() - 0.75).abs() < 1e-5);
+            // The controller already has the edited value.
+            assert_eq!(
+                shared.controller_bits[1].load(Ordering::Relaxed),
+                0.75f32.to_bits()
+            );
 
             // Perform edit on param 200
             let r = host_ch_perform_edit(ch as *mut IComponentHandler, 200, 0.25);
             assert_eq!(r, kResultOk);
-            assert!((port_updates.control_inputs[1].value.load() - 0.25).abs() < 1e-5);
+            assert!((port_updates.control_inputs[0].value.load() - 0.25).abs() < 1e-5);
 
             // Unknown param ID — should not crash, still returns Ok
             let r = host_ch_perform_edit(ch as *mut IComponentHandler, 999, 0.5);
@@ -1127,11 +1210,34 @@ mod tests {
                 atom_outputs: Vec::new(),
                 atom_inputs: Vec::new(),
             });
-            let ch = new_host_component_handler(1, HashMap::new(), port_updates);
+            let shared = Arc::new(Vst3SharedParams::new(port_updates, Vec::new()));
+            let ch = new_host_component_handler(1, shared);
 
             assert_eq!(host_ch_begin_edit(ch as *mut IComponentHandler, 0), kResultOk);
             assert_eq!(host_ch_end_edit(ch as *mut IComponentHandler, 0), kResultOk);
 
+            release_host_component_handler(ch);
+        }
+    }
+
+    #[test]
+    fn component_handler_restart_flags_accumulate() {
+        unsafe {
+            let port_updates = Arc::new(PortUpdates {
+                control_inputs: Vec::new(),
+                control_outputs: Vec::new(),
+                atom_outputs: Vec::new(),
+                atom_inputs: Vec::new(),
+            });
+            let shared = Arc::new(Vst3SharedParams::new(port_updates, Vec::new()));
+            let ch = new_host_component_handler(1, shared.clone());
+            let ich = ch as *mut IComponentHandler;
+            assert_eq!(host_ch_restart_component(ich, RestartFlags_::kParamValuesChanged), kResultOk);
+            assert_eq!(host_ch_restart_component(ich, RestartFlags_::kIoChanged), kResultOk);
+            assert_eq!(
+                shared.restart_flags.swap(0, Ordering::AcqRel),
+                RestartFlags_::kParamValuesChanged | RestartFlags_::kIoChanged
+            );
             release_host_component_handler(ch);
         }
     }

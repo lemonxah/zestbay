@@ -19,12 +19,17 @@ const VST3_SEARCH_DIRS: &[&str] = &[
     "/usr/local/lib64/vst3",
 ];
 
-/// Scan all standard directories and return a list of VST3 plugin infos.
-/// Look up a single plugin by URI without the caller needing a full scan.
+static CACHE: crate::clap::scanner::ScanCache = crate::clap::scanner::ScanCache::new();
+
+/// Look up a single plugin by URI.  Served from the cache of the last
+/// `scan_plugins()`; a miss rescans at most once per cooldown period.
 pub fn find_plugin(uri: &str) -> Option<PluginInfo> {
-    scan_plugins().into_iter().find(|p| p.uri == uri)
+    CACHE.find(uri, || {
+        scan_plugins();
+    })
 }
 
+/// Scan all standard directories and return a list of VST3 plugin infos.
 pub fn scan_plugins() -> Vec<PluginInfo> {
     let mut plugins = Vec::new();
     let dirs = expand_search_dirs();
@@ -39,6 +44,7 @@ pub fn scan_plugins() -> Vec<PluginInfo> {
 
     plugins.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     log::info!("VST3: found {} plugins total", plugins.len());
+    CACHE.store(&plugins);
     plugins
 }
 
@@ -121,18 +127,31 @@ fn sandboxed_scan_vst3_bundle(bundle_path: &Path, plugins: &mut Vec<PluginInfo>)
     }
 }
 
+/// Known `Contents/<arch>-linux` directory names.
+const ARCH_DIRS: &[&str] = &["x86_64-linux", "aarch64-linux", "i386-linux", "armv7l-linux"];
+
+/// VST3 bundle directory for an architecture as named by `std::env::consts::ARCH`.
+fn arch_dir_for(arch: &str) -> String {
+    match arch {
+        "x86" => "i386-linux".to_string(),
+        "arm" => "armv7l-linux".to_string(),
+        other => format!("{other}-linux"),
+    }
+}
+
+/// Bundle architecture directories to try: the host CPU's first, then the
+/// other known ones.
+fn arch_dir_candidates() -> Vec<String> {
+    let native = arch_dir_for(std::env::consts::ARCH);
+    let mut dirs = vec![native.clone()];
+    dirs.extend(ARCH_DIRS.iter().filter(|d| **d != native).map(|d| d.to_string()));
+    dirs
+}
+
 /// Resolve the shared library path inside a .vst3 bundle.
 /// VST3 bundle structure: `<name>.vst3/Contents/<arch>/<name>.so`
 pub fn find_bundle_binary(bundle_path: &Path) -> Option<PathBuf> {
-    // Try standard architecture directory names
-    let arch_dirs = [
-        "x86_64-linux",
-        "i386-linux",
-        "aarch64-linux",
-        "armv7l-linux",
-    ];
-
-    for arch in &arch_dirs {
+    for arch in arch_dir_candidates() {
         let contents_dir = bundle_path.join("Contents").join(arch);
         if contents_dir.is_dir() {
             if let Ok(entries) = std::fs::read_dir(&contents_dir) {
@@ -625,7 +644,7 @@ mod tests {
     fn find_bundle_binary_standard_layout() {
         // Create a temp directory mimicking a .vst3 bundle
         let tmp = std::env::temp_dir().join("test_plugin.vst3");
-        let arch_dir = tmp.join("Contents").join("x86_64-linux");
+        let arch_dir = tmp.join("Contents").join(arch_dir_for(std::env::consts::ARCH));
         std::fs::create_dir_all(&arch_dir).unwrap();
         let so_path = arch_dir.join("test_plugin.so");
         std::fs::write(&so_path, b"fake").unwrap();
@@ -634,6 +653,39 @@ mod tests {
         assert!(result.is_some());
         assert_eq!(result.unwrap(), so_path);
 
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn arch_dir_names() {
+        assert_eq!(arch_dir_for("x86_64"), "x86_64-linux");
+        assert_eq!(arch_dir_for("aarch64"), "aarch64-linux");
+        assert_eq!(arch_dir_for("x86"), "i386-linux");
+        assert_eq!(arch_dir_for("arm"), "armv7l-linux");
+        let c = arch_dir_candidates();
+        assert_eq!(c[0], arch_dir_for(std::env::consts::ARCH));
+        // No duplicates, all known dirs present.
+        for d in ARCH_DIRS {
+            assert_eq!(c.iter().filter(|x| x == d).count(), 1);
+        }
+    }
+
+    #[test]
+    fn find_bundle_binary_prefers_host_arch() {
+        let tmp = std::env::temp_dir().join("test_multiarch.vst3");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let native = arch_dir_for(std::env::consts::ARCH);
+        let mut expected = None;
+        for arch in ARCH_DIRS.iter().map(|s| s.to_string()).chain([native.clone()]) {
+            let dir = tmp.join("Contents").join(&arch);
+            std::fs::create_dir_all(&dir).unwrap();
+            let so = dir.join("multi.so");
+            std::fs::write(&so, b"fake").unwrap();
+            if arch == native {
+                expected = Some(so);
+            }
+        }
+        assert_eq!(find_bundle_binary(&tmp), expected);
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 
@@ -655,7 +707,7 @@ mod tests {
     #[test]
     fn find_bundle_binary_no_so_file() {
         let tmp = std::env::temp_dir().join("test_no_so.vst3");
-        let arch_dir = tmp.join("Contents").join("x86_64-linux");
+        let arch_dir = tmp.join("Contents").join(arch_dir_for(std::env::consts::ARCH));
         std::fs::create_dir_all(&arch_dir).unwrap();
         // Write a non-.so file
         std::fs::write(arch_dir.join("readme.txt"), b"not a plugin").unwrap();
