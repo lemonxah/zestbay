@@ -14,6 +14,17 @@ ApplicationWindow {
 
     required property var controller
 
+    // Emitted with the new plugin's display name when one is added.
+    signal pluginAdded(string displayName)
+    // Emitted when the browser closes without adding a plugin.
+    signal cancelled()
+
+    property bool addedPlugin: false
+
+    onVisibleChanged: {
+        if (!visible && !addedPlugin) cancelled()
+    }
+
     property var allPlugins: []
     property var filteredPlugins: []
     property var categories: []
@@ -76,6 +87,7 @@ ApplicationWindow {
     }
 
     function open() {
+        addedPlugin = false
         loadPlugins()
         searchField.text = ""
         visible = true
@@ -233,7 +245,9 @@ ApplicationWindow {
                         enabled: plugin.compatible !== false
                         onClicked: {
                             if (plugin.uri) {
-                                controller.add_plugin(plugin.uri)
+                                var addedName = controller.add_plugin(plugin.uri)
+                                pluginBrowser.addedPlugin = true
+                                if (addedName) pluginBrowser.pluginAdded(addedName)
                                 pluginBrowser.visible = false
                             }
                         }

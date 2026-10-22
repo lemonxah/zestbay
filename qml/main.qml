@@ -78,8 +78,19 @@ ApplicationWindow {
             graphView.refreshData();
         }
         function onError_occurred(message) {
-            errorDialogText.text = message;
-            errorDialog.open();
+            // Errors can arrive in bursts (e.g. while PipeWire reconnects):
+            // add to the open dialog instead of replacing it.
+            if (errorDialog.visible) {
+                if (errorDialogText.text.indexOf(message) < 0) {
+                    var combined = errorDialogText.text + "\n\n" + message;
+                    if (combined.length > 4000)
+                        combined = "\u2026" + combined.substring(combined.length - 4000);
+                    errorDialogText.text = combined;
+                }
+            } else {
+                errorDialogText.text = message;
+                errorDialog.open();
+            }
         }
         function onShow_window_requested() {
             mainWindow.visible = true;
@@ -366,6 +377,13 @@ ApplicationWindow {
     PluginBrowser {
         id: pluginBrowser
         controller: controller
+        onPluginAdded: displayName => {
+            graphView.pendingPluginName = displayName
+        }
+        onCancelled: {
+            graphView.pendingPluginPosition = null
+            graphView.pendingPluginName = ""
+        }
     }
 
     PluginParams {

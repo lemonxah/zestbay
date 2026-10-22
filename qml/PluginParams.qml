@@ -19,8 +19,11 @@ ApplicationWindow {
     property string pluginName: ""
     property string pluginUri: ""
     property bool pluginBypassed: false
-    property var parameters: []
     property int instanceId: -1
+    // Port indices currently in paramModel (to detect a changed parameter set).
+    property var paramPorts: []
+    // Bumped whenever MIDI mappings change so the mapping labels re-evaluate.
+    property int mappingsRevision: 0
 
     property int midiLearnInstanceId: -1
     property int midiLearnPortIndex: -1
@@ -28,15 +31,53 @@ ApplicationWindow {
     property string conflictSourceJson: ""
     property string conflictExistingLabel: ""
 
+    ListModel {
+        id: paramModel
+    }
+
+    // Parameter values arrive through pluginParameterChanged; this slow poll
+    // only keeps name/bypass (and the parameter set) in sync.
     Timer {
         id: refreshTimer
-        interval: 200
+        interval: 1000
         running: pluginParams.visible
         repeat: true
         onTriggered: loadParams()
     }
 
+    Connections {
+        target: controller
+        function onPlugin_parameter_changed(instance_id, port_index, value) {
+            if (!pluginParams.visible || instance_id !== pluginParams.instanceId) return
+            var row = pluginParams.rowForPort(port_index)
+            if (row >= 0) paramModel.setProperty(row, "value", value)
+        }
+        function onMidi_mapping_added(mapping_json) {
+            pluginParams.mappingsRevision++
+        }
+        function onMidi_mapping_removed(instance_id, port_index) {
+            pluginParams.mappingsRevision++
+        }
+    }
+
+    function rowForPort(portIndex) {
+        for (var i = 0; i < paramModel.count; i++) {
+            if (paramModel.get(i).portIndex === portIndex) return i
+        }
+        return -1
+    }
+
+    // Parameter info by LV2 port index (not by list position).
+    function findParamByPort(portIndex) {
+        var row = rowForPort(portIndex)
+        return row >= 0 ? paramModel.get(row) : null
+    }
+
     function openForNode(nodeId) {
+        if (nodeId !== pluginNodeId) {
+            paramModel.clear()
+            paramPorts = []
+        }
         pluginNodeId = nodeId
         loadParams()
         visible = true
@@ -53,9 +94,38 @@ ApplicationWindow {
             pluginUri = data.pluginUri || ""
             pluginBypassed = data.bypassed || false
             instanceId = data.instanceId || -1
-            parameters = data.parameters || []
+            var params = data.parameters || []
+            var ports = params.map(function(p) { return p.portIndex })
+            var sameSet = ports.length === paramPorts.length
+            for (var k = 0; sameSet && k < ports.length; k++) {
+                if (ports[k] !== paramPorts[k]) sameSet = false
+            }
+            if (!sameSet) {
+                paramModel.clear()
+                for (var i = 0; i < params.length; i++) {
+                    var p = params[i]
+                    paramModel.append({
+                        portIndex: p.portIndex,
+                        symbol: p.symbol || "",
+                        name: p.name || "",
+                        value: p.value,
+                        min: p.min,
+                        max: p.max,
+                        defaultValue: p["default"],
+                        isToggle: !!p.isToggle
+                    })
+                }
+                paramPorts = ports
+            } else {
+                // Same parameters: only touch values that actually differ.
+                for (var j = 0; j < params.length; j++) {
+                    if (paramModel.get(j).value !== params[j].value)
+                        paramModel.setProperty(j, "value", params[j].value)
+                }
+            }
         } catch(e) {
-            parameters = []
+            paramModel.clear()
+            paramPorts = []
         }
     }
 
@@ -70,7 +140,8 @@ ApplicationWindow {
         midiConflictDialog.open()
     }
 
-    function getMidiMappingText(portIndex) {
+    // `revision` is only there so bindings re-run when mappings change.
+    function getMidiMappingText(portIndex, revision) {
         if (instanceId < 0 || portIndex === undefined) return ""
         try {
             var json = controller.get_midi_mapping_for_param_json(instanceId, portIndex)
@@ -91,6 +162,12 @@ ApplicationWindow {
         anchors.centerIn: parent
         modal: true
         width: Math.min(pluginParams.width * 0.8, 400)
+
+        // Escape / closing without choosing keeps the existing mapping.
+        onRejected: {
+            controller.dismiss_midi_conflict()
+            clearMidiLearnState()
+        }
 
         ColumnLayout {
             width: parent.width
@@ -117,26 +194,19 @@ ApplicationWindow {
 
                 Button {
                     text: "Cancel"
-                    onClicked: {
-                        clearMidiLearnState()
-                        midiConflictDialog.close()
-                    }
+                    onClicked: midiConflictDialog.reject()
                 }
 
                 Button {
                     text: "Reassign"
                     highlighted: true
                     onClicked: {
+                        // The backend remembers the learned mapping that hit the
+                        // conflict: it removes the existing mapping for that
+                        // control and adds the new one for this parameter.
+                        controller.reassign_midi_mapping()
+                        clearMidiLearnState()
                         midiConflictDialog.close()
-                        if (midiLearnInstanceId >= 0 && midiLearnPortIndex >= 0) {
-                            var p = parameters[midiLearnPortIndex] || {}
-                            controller.start_midi_learn(
-                                midiLearnInstanceId,
-                                midiLearnPortIndex,
-                                pluginName + " > " + (p.name || ""),
-                                p.isToggle ? "toggle" : "continuous"
-                            )
-                        }
                     }
                 }
             }
@@ -187,15 +257,15 @@ ApplicationWindow {
         }
 
         Label {
-            text: parameters.length + " parameter" + (parameters.length !== 1 ? "s" : "")
+            text: paramModel.count + " parameter" + (paramModel.count !== 1 ? "s" : "")
             opacity: 0.6
-            visible: parameters.length > 0
+            visible: paramModel.count > 0
         }
 
         Label {
             text: "No control parameters"
             opacity: 0.5
-            visible: parameters.length === 0
+            visible: paramModel.count === 0
             Layout.alignment: Qt.AlignHCenter
         }
 
@@ -204,7 +274,7 @@ ApplicationWindow {
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
-            model: parameters.length
+            model: paramModel
             spacing: 2
 
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
@@ -212,15 +282,18 @@ ApplicationWindow {
             delegate: Rectangle {
                 id: paramDelegate
                 required property int index
+                required property var model
                 width: paramList.width - 12
                 height: 72
                 color: index % 2 === 0 ? Theme.rowEven : Theme.rowOdd
                 radius: 3
 
-                property var param: parameters[index] || {}
+                // Model row object: its role properties (value, ...) notify.
+                property var param: model
                 property bool isLearning: pluginParams.midiLearnInstanceId === pluginParams.instanceId
                                           && pluginParams.midiLearnPortIndex === param.portIndex
-                property string midiMapping: pluginParams.getMidiMappingText(param.portIndex)
+                property string midiMapping: pluginParams.getMidiMappingText(param.portIndex,
+                                                                             pluginParams.mappingsRevision)
 
                 ColumnLayout {
                     anchors.fill: parent
@@ -400,10 +473,10 @@ ApplicationWindow {
                             implicitHeight: 20
                             font.pointSize: 8
                             ToolTip.visible: hovered
-                            ToolTip.text: "Reset to default (" + (param.default !== undefined ? param.default.toFixed(3) : "") + ")"
+                            ToolTip.text: "Reset to default (" + (param.defaultValue !== undefined ? param.defaultValue.toFixed(3) : "") + ")"
                             onClicked: {
                                 if (pluginNodeId >= 0 && param.portIndex !== undefined) {
-                                    controller.set_plugin_parameter(pluginNodeId, param.portIndex, param.default)
+                                    controller.set_plugin_parameter(pluginNodeId, param.portIndex, param.defaultValue)
                                 }
                             }
                         }

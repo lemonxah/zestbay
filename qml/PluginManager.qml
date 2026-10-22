@@ -15,8 +15,19 @@ ApplicationWindow {
     required property var controller
 
     property var plugins: []
-    property int selectedIndex: -1
-    property var selectedPlugin: selectedIndex >= 0 && selectedIndex < plugins.length ? plugins[selectedIndex] : null
+    // Selection is tracked by stable id: the list is reloaded (and may be
+    // reordered) on every refresh.
+    property string selectedStableId: ""
+    property int selectedIndex: indexOfPlugin(plugins, selectedStableId)
+    property var selectedPlugin: selectedIndex >= 0 ? plugins[selectedIndex] : null
+
+    function indexOfPlugin(list, stableId) {
+        if (!stableId) return -1
+        for (var i = 0; i < list.length; i++) {
+            if (list[i].stableId === stableId) return i
+        }
+        return -1
+    }
 
     function loadPlugins() {
         try {
@@ -24,13 +35,13 @@ ApplicationWindow {
         } catch(e) {
             plugins = []
         }
-        if (selectedIndex >= plugins.length) {
-            selectedIndex = -1
+        if (selectedStableId && indexOfPlugin(plugins, selectedStableId) < 0) {
+            selectedStableId = ""
         }
     }
 
     function open() {
-        selectedIndex = -1
+        selectedStableId = ""
         loadPlugins()
         visible = true
         raise()
@@ -121,7 +132,7 @@ ApplicationWindow {
                             id: pluginMouse
                             anchors.fill: parent
                             hoverEnabled: true
-                            onClicked: selectedIndex = index
+                            onClicked: selectedStableId = plugin.stableId || ""
                         }
                     }
                 }
@@ -188,7 +199,7 @@ ApplicationWindow {
                             onClicked: {
                                 if (selectedPlugin) {
                                     controller.remove_plugin_by_stable_id(selectedPlugin.stableId)
-                                    selectedIndex = -1
+                                    selectedStableId = ""
                                     loadPlugins()
                                 }
                             }
