@@ -93,6 +93,12 @@ pub struct PluginPortInfo {
     /// CLAP stepped 0–1, VST3 `stepCount == 1`).
     #[serde(default)]
     pub is_toggle: bool,
+    /// Number of discrete steps between min and max (0 = continuous).
+    #[serde(default)]
+    pub step_count: u32,
+    /// Port declares a logarithmic scale (LV2 `pprops:logarithmic`).
+    #[serde(default)]
+    pub is_logarithmic: bool,
 }
 
 // ---------------------------------------------------------------------------

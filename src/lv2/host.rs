@@ -308,6 +308,8 @@ pub struct ControlPort {
     pub max: f32,
     pub default: f32,
     pub is_toggle: bool,
+    pub step_count: u32,
+    pub is_logarithmic: bool,
 }
 
 impl Lv2PluginInstance {
@@ -448,6 +450,8 @@ impl Lv2PluginInstance {
                         max: port_info.max_value,
                         default,
                         is_toggle: port_info.is_toggle,
+                        step_count: port_info.step_count,
+                        is_logarithmic: port_info.is_logarithmic,
                     });
                 }
                 Lv2PortType::ControlOutput => {
@@ -460,6 +464,8 @@ impl Lv2PluginInstance {
                         max: port_info.max_value,
                         default: port_info.default_value,
                         is_toggle: false,
+                        step_count: 0,
+                        is_logarithmic: false,
                     });
                 }
                 Lv2PortType::AtomInput => {

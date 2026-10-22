@@ -13,6 +13,8 @@ pub struct ResolvedMappingEntry {
     pub source: MidiCcSource,
     pub is_logarithmic: bool,
     pub is_toggle: bool,
+    /// Discrete steps between min and max (0 = continuous).
+    pub step_count: u32,
 }
 
 /// Immutable snapshot of all resolved mappings for one plugin.
@@ -96,6 +98,7 @@ mod resolved_mappings_tests {
             },
             is_logarithmic: false,
             is_toggle: false,
+            step_count: 0,
         }
     }
 

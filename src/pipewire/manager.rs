@@ -181,7 +181,9 @@ pub fn start(
         }
     });
 
-    let tick = tick_interval_ms.max(1);
+    // The tick also pumps CLAP/VST3 GUIs (this thread is their main thread),
+    // so keep it short enough for plugin windows to stay responsive.
+    let tick = tick_interval_ms.clamp(1, 20);
     let cooldown = operation_cooldown_ms.max(1);
     let cmd_tx_for_pw = cmd_tx.clone();
 
@@ -802,13 +804,56 @@ impl Host {
             }
         }
 
-        // Per-instance main-thread pump goes here once the hosts expose it
-        // (CLAP request_callback/on_main_thread + needs_restart()/restart(),
-        // VST3 restartComponent handling and controller sync). Iterate
-        // clap_instances / vst3_instances and call e.g. `inst.borrow_mut().idle()`.
+        self.pump_plugin_hosts(now);
 
         if self.changes_pending.replace(false) {
             let _ = self.event_tx.send(PwEvent::BatchComplete);
+        }
+    }
+
+    /// CLAP/VST3 main-thread work: GUI timers/fds/X11 events, plugin
+    /// callbacks, controller sync and restart requests. This thread is the
+    /// plugins' main thread, so this must run on every tick.
+    fn pump_plugin_hosts(&self, now: Instant) {
+        crate::clap::ui::idle();
+        crate::vst3::ui::idle();
+
+        let mut needs_reload: Vec<u64> = Vec::new();
+        let clap: Vec<(u64, Rc<RefCell<crate::clap::host::ClapPluginInstance>>)> = self
+            .clap_instances
+            .borrow()
+            .iter()
+            .map(|(id, inst)| (*id, inst.clone()))
+            .collect();
+        for (id, inst) in clap {
+            let mut i = inst.borrow_mut();
+            i.idle();
+            if i.needs_restart() && !i.restart() {
+                needs_reload.push(id);
+            }
+        }
+        let vst3: Vec<(u64, Rc<RefCell<crate::vst3::host::Vst3PluginInstance>>)> = self
+            .vst3_instances
+            .borrow()
+            .iter()
+            .map(|(id, inst)| (*id, inst.clone()))
+            .collect();
+        for (id, inst) in vst3 {
+            let mut i = inst.borrow_mut();
+            i.idle();
+            if i.needs_restart() && !i.restart() {
+                needs_reload.push(id);
+            }
+        }
+
+        for id in needs_reload {
+            if let Some(last) = self.last_reload.borrow().get(&id)
+                && now.duration_since(*last) < MIN_RELOAD_INTERVAL
+            {
+                continue;
+            }
+            self.last_reload.borrow_mut().insert(id, now);
+            self.reload_plugin(id, self.current_rate(), now);
         }
     }
 
@@ -1650,8 +1695,9 @@ impl Host {
                 max: cp.max,
                 mode: mapping.mode,
                 source: mapping.source.clone(),
-                is_logarithmic: detect_logarithmic(cp.min, cp.max),
+                is_logarithmic: cp.is_logarithmic && cp.min > 0.0 && cp.max > cp.min,
                 is_toggle: cp.is_toggle,
+                step_count: cp.step_count,
             });
         }
 
@@ -1666,8 +1712,10 @@ impl Host {
                 max: p.max as f32,
                 mode: mapping.mode,
                 source: mapping.source.clone(),
-                is_logarithmic: detect_logarithmic(p.min as f32, p.max as f32),
+                // CLAP exposes no scale hint; map linearly.
+                is_logarithmic: false,
                 is_toggle: p.is_toggle,
+                step_count: p.step_count,
             });
         }
 
@@ -1684,6 +1732,7 @@ impl Host {
                 source: mapping.source.clone(),
                 is_logarithmic: false,
                 is_toggle: p.is_toggle,
+                step_count: p.step_count,
             });
         }
 
@@ -2010,10 +2059,6 @@ fn create_link(
     if let Err(e) = core.create_object::<PwLink>("link-factory", &props) {
         log::error!("Failed to create link: {}", e);
     }
-}
-
-fn detect_logarithmic(min: f32, max: f32) -> bool {
-    min > 0.0 && max / min > 100.0
 }
 
 #[cfg(test)]

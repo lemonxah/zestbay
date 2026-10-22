@@ -57,6 +57,9 @@ pub fn classify_lv2_ports(
     let atom_class = world.new_uri("http://lv2plug.in/ns/ext/atom#AtomPort");
     let cv_class = world.new_uri("http://lv2plug.in/ns/lv2core#CVPort");
     let toggled_prop = world.new_uri("http://lv2plug.in/ns/lv2core#toggled");
+    let integer_prop = world.new_uri("http://lv2plug.in/ns/lv2core#integer");
+    let enumeration_prop = world.new_uri("http://lv2plug.in/ns/lv2core#enumeration");
+    let logarithmic_prop = world.new_uri("http://lv2plug.in/ns/ext/port-props#logarithmic");
 
     let mut ports = Vec::new();
     let mut audio_inputs = 0usize;
@@ -110,6 +113,14 @@ pub fn classify_lv2_ports(
         };
 
         let is_toggle = is_control && is_input && port.has_property(&toggled_prop);
+        let is_stepped = is_control
+            && (port.has_property(&integer_prop) || port.has_property(&enumeration_prop));
+        let step_count = if is_stepped && port_range.max > port_range.min {
+            (port_range.max - port_range.min).round() as u32
+        } else {
+            0
+        };
+        let is_logarithmic = is_control && port.has_property(&logarithmic_prop);
 
         ports.push(Lv2PortInfo {
             index: i,
@@ -124,6 +135,8 @@ pub fn classify_lv2_ports(
             min_value: port_range.min,
             max_value: port_range.max,
             is_toggle,
+            step_count,
+            is_logarithmic,
         });
     }
 
