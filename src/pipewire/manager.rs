@@ -55,8 +55,8 @@ enum InternalOp {
 
 enum ProbeStatus {
     Pending,
-    Running(Receiver<bool>),
-    Done(bool),
+    Running(Receiver<crate::plugin::sandbox::ProbeOutcome>),
+    Done(crate::plugin::sandbox::ProbeOutcome),
 }
 
 /// Everything needed to (re-)create a plugin instance.
@@ -83,14 +83,14 @@ impl AddRequest {
             ProbeStatus::Done(_) => true,
             ProbeStatus::Pending => false,
             ProbeStatus::Running(rx) => match rx.try_recv() {
-                Ok(safe) => {
-                    self.probe = ProbeStatus::Done(safe);
+                Ok(outcome) => {
+                    self.probe = ProbeStatus::Done(outcome);
                     true
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => false,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    // Probe worker died; exec_probe itself fails open.
-                    self.probe = ProbeStatus::Done(true);
+                    // Probe worker died; fail open like exec_probe does.
+                    self.probe = ProbeStatus::Done(crate::plugin::sandbox::ProbeOutcome::Ok);
                     true
                 }
             },
@@ -670,7 +670,7 @@ impl Host {
                 bypassed: false,
                 sample_rate: None,
                 probe: if crate::NO_PROBE.load(std::sync::atomic::Ordering::SeqCst) {
-                    ProbeStatus::Done(true)
+                    ProbeStatus::Done(crate::plugin::sandbox::ProbeOutcome::Ok)
                 } else {
                     ProbeStatus::Pending
                 },
@@ -712,18 +712,22 @@ impl Host {
                 None => log::debug!("Link {} already gone", link_id),
             },
             InternalOp::AddPlugin(req) => {
-                if let ProbeStatus::Done(false) = req.probe {
+                if let ProbeStatus::Done(outcome) = &req.probe
+                    && !outcome.is_safe()
+                {
                     log::error!(
-                        "{} plugin '{}' ({}) crashed during sandbox probe — skipping",
+                        "{} plugin '{}' ({}) {} — skipping",
                         req.format,
                         req.display_name,
-                        req.plugin_uri
+                        req.plugin_uri,
+                        outcome.describe()
                     );
                     let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
                         instance_id: Some(req.instance_id),
                         message: format!(
-                            "Plugin '{}' crashed during safety probe (segfault). It has been blocked to protect ZestBay.",
-                            req.display_name
+                            "Plugin '{}' {}. It has been blocked to protect ZestBay.",
+                            req.display_name,
+                            outcome.describe()
                         ),
                         fatal: true,
                     }));
@@ -846,18 +850,25 @@ impl Host {
                 _ => ("lv2", quantum),
             };
             let uri = req.plugin_uri.clone();
+            // CLAP/VST3: hand the probe the library path so the child doesn't scan.
+            let lib = match fmt {
+                "clap" => crate::clap::scanner::find_plugin(&uri).map(|i| i.library_path),
+                "vst3" => crate::vst3::scanner::find_plugin(&uri).map(|i| i.library_path),
+                _ => None,
+            };
             let (tx, rx) = std::sync::mpsc::channel();
             let spawned = std::thread::Builder::new()
                 .name("zestbay-probe".into())
                 .spawn(move || {
-                    let safe = crate::plugin::sandbox::exec_probe(
+                    let outcome = crate::plugin::sandbox::exec_probe_outcome(
                         fmt,
                         &uri,
+                        lib.as_deref(),
                         rate,
                         block,
                         Some(PROBE_TIMEOUT),
                     );
-                    let _ = tx.send(safe);
+                    let _ = tx.send(outcome);
                 });
             req.probe = match spawned {
                 Ok(_) => {
@@ -866,7 +877,7 @@ impl Host {
                 }
                 Err(e) => {
                     log::error!("Failed to spawn probe thread: {}", e);
-                    ProbeStatus::Done(true)
+                    ProbeStatus::Done(crate::plugin::sandbox::ProbeOutcome::Ok)
                 }
             };
         }
@@ -1181,7 +1192,7 @@ impl Host {
             bypassed,
             sample_rate: None,
             // Already proven safe in this process.
-            probe: ProbeStatus::Done(true),
+            probe: ProbeStatus::Done(crate::plugin::sandbox::ProbeOutcome::Ok),
         })
     }
 
