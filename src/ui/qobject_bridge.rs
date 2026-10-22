@@ -384,6 +384,7 @@ pub struct AppControllerRust {
     /// have not reported back yet (added or failed).
     restore_instance_ids: std::collections::HashSet<u64>,
     restore_started_at: Option<std::time::Instant>,
+    restore_batch_size: usize,
     /// Saved links not (yet) present in the graph. Kept across persists so a
     /// device or plugin that is absent right now doesn't lose its links.
     pending_links: Vec<PendingLink>,
@@ -453,6 +454,7 @@ impl Default for AppControllerRust {
             params_dirty_since: None,
             restore_instance_ids: std::collections::HashSet::new(),
             restore_started_at: None,
+            restore_batch_size: 0,
             pending_links: Vec::new(),
             last_graph_links: Vec::new(),
             forgotten_link_nodes: std::collections::HashSet::new(),
@@ -583,6 +585,7 @@ impl qobject::AppController {
             let restore_uris: Vec<String> = saved.iter().map(|sp| sp.uri.clone()).collect();
             write_crash_marker(&restore_uris);
             self.as_mut().rust_mut().restore_started_at = Some(Instant::now());
+            self.as_mut().rust_mut().restore_batch_size = saved.len();
             for sp in saved {
                 let instance_id = self.rust().next_instance_id;
                 self.as_mut().rust_mut().next_instance_id += 1;
@@ -834,6 +837,9 @@ impl qobject::AppController {
                     }
                     if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager {
                         mgr.set_instance_pw_node_id(instance_id, pw_node_id);
+                        if let Some(info) = mgr.get_instance_mut(instance_id) {
+                            info.active = true;
+                        }
                     }
                     if pw_node_id != 0
                         && pw_node_id != u32::MAX
@@ -846,7 +852,11 @@ impl qobject::AppController {
                         .forgotten_link_nodes
                         .remove(&display_name);
 
-                    if let Some(ref mgr) = self.rust().plugin_manager
+                    // A reload/reconnect restores params and bypass on the
+                    // PipeWire side (on top of the plugin's restored state);
+                    // only a first add gets the saved values from here.
+                    if !re_added
+                        && let Some(ref mgr) = self.rust().plugin_manager
                         && let Some(info) = mgr.get_instance(instance_id)
                         && (!info.parameters.is_empty() || info.bypassed)
                         && let Some(ref tx) = self.rust().cmd_tx
@@ -915,6 +925,19 @@ impl qobject::AppController {
                         param_updates.push((instance_id, port, value));
                     }
                 }
+                PluginEvent::PluginSkipped { instance_id } => {
+                    // Not running this session, but its entry (state, params,
+                    // links, MIDI mappings) stays in the config.
+                    changed = true;
+                    log::warn!("Plugin instance {} skipped for this session", instance_id);
+                    if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager
+                        && let Some(info) = mgr.get_instance_mut(instance_id)
+                    {
+                        info.active = false;
+                        info.pw_node_id = None;
+                    }
+                    self.as_mut().finish_restore_of(instance_id);
+                }
                 PluginEvent::PluginUiOpened { instance_id } => {
                     log::info!("LV2 plugin UI opened: instance={}", instance_id);
                 }
@@ -954,11 +977,14 @@ impl qobject::AppController {
                             self.as_mut().finish_restore_of(id);
                         }
 
-                        if let Some(name) = plugin_name {
-                            errors.push(format!("Plugin \"{}\" failed to load: {}", name, message));
-                        } else {
-                            errors.push(format!("Plugin failed to load: {}", message));
-                        }
+                        errors.push(match (plugin_name, fatal) {
+                            (Some(name), true) => {
+                                format!("Plugin \"{}\" failed to load: {}", name, message)
+                            }
+                            (Some(name), false) => format!("Plugin \"{}\": {}", name, message),
+                            (None, true) => format!("Plugin failed to load: {}", message),
+                            (None, false) => message,
+                        });
                     } else {
                         errors.push(message);
                     }
@@ -1238,15 +1264,18 @@ impl qobject::AppController {
             self.as_mut().error_occurred(qmsg);
         }
 
-        const RESTORE_TIMEOUT_SECS: u64 = 30;
+        // The restore completes when every plugin of the batch reported back
+        // (PluginAdded, PluginSkipped or a fatal PluginError); this is a safety
+        // cap, scaled with the batch since probes and adds run in sequence.
         if !self.rust().restore_instance_ids.is_empty() {
             if let Some(started) = self.rust().restore_started_at {
-                if started.elapsed() > std::time::Duration::from_secs(RESTORE_TIMEOUT_SECS) {
+                let cap = restore_safety_cap(self.rust().restore_batch_size);
+                if started.elapsed() > cap {
                     let remaining = self.rust().restore_instance_ids.len();
                     log::error!(
                         "Plugin restore timed out after {}s with {} plugin(s) still pending. \
                          Clearing restore state.",
-                        RESTORE_TIMEOUT_SECS,
+                        cap.as_secs(),
                         remaining,
                     );
                     self.as_mut().rust_mut().restore_instance_ids.clear();
@@ -3775,6 +3804,12 @@ fn load_saved_plugins() -> Result<Vec<SavedPlugin>, ()> {
     load_config::<Vec<SavedPlugin>>("plugins.json").map(Option::unwrap_or_default)
 }
 
+/// Upper bound on how long the startup restore may take before it is
+/// considered finished anyway: 30 s plus 15 s per plugin in the batch.
+fn restore_safety_cap(batch_size: usize) -> Duration {
+    Duration::from_secs(30 + 15 * batch_size as u64)
+}
+
 fn persist_active_plugins(plugin_manager: Option<&PluginManager>) {
     if crate::PLUGINS_FROZEN.load(std::sync::atomic::Ordering::SeqCst) {
         log::info!("persist_active_plugins: skipped (plugins frozen in safe mode)");
@@ -4529,6 +4564,13 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].target.instance_id, 42);
         assert_eq!(out[0].target.port_index, 1);
+    }
+
+    #[test]
+    fn restore_safety_cap_scales_with_batch() {
+        assert_eq!(restore_safety_cap(0), Duration::from_secs(30));
+        assert_eq!(restore_safety_cap(1), Duration::from_secs(45));
+        assert_eq!(restore_safety_cap(20), Duration::from_secs(330));
     }
 
     #[test]

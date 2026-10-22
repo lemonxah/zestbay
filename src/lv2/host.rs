@@ -257,7 +257,8 @@ pub struct Lv2PluginInstance {
     /// Worker thread for plugins that require the worker#schedule feature
     pub worker: Option<Lv2Worker>,
     _unused_worker_setup: Option<Lv2WorkerSetup>,
-    _world: lilv::World,
+    /// Keeps the lilv world alive for as long as the instance.
+    _lilv_plugin: lilv::plugin::Plugin,
     _urid_map: Box<lv2_raw::urid::LV2UridMap>,
     _urid_unmap: Box<super::urid::LV2UridUnmap>,
     _log_setup: Lv2LogSetup,
@@ -314,7 +315,7 @@ pub struct ControlPort {
 
 impl Lv2PluginInstance {
     pub unsafe fn new(
-        world: lilv::World,
+        world: &lilv::World,
         plugin: &lilv::plugin::Plugin,
         plugin_info: &Lv2PluginInfo,
         sample_rate: f64,
@@ -663,7 +664,7 @@ impl Lv2PluginInstance {
             instance: active_instance,
             worker,
             _unused_worker_setup: unused_worker_setup,
-            _world: world,
+            _lilv_plugin: plugin.clone(),
             _urid_map: urid_map,
             _urid_unmap: urid_unmap,
             _log_setup: log_setup,

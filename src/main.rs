@@ -39,6 +39,9 @@ fn main() {
     if unsafe { XInitThreads() } == 0 {
         eprintln!("XInitThreads failed; X11 plugin UIs may be unstable");
     }
+    // In-process LV2 GTK UIs are X11-embedded.  Set before any thread is
+    // spawned: setenv races with getenv on other threads.
+    unsafe { std::env::set_var("GDK_BACKEND", "x11") };
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 

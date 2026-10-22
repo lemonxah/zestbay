@@ -172,6 +172,8 @@ pub enum PwCommand {
     RemoveMidiMappingsForPlugin {
         instance_id: u64,
     },
+    /// Not sent by anything at present (unplugged devices keep their
+    /// mappings dormant in the UI instead); kept for API completeness.
     RemoveMidiMappingsForDevice {
         device_name: String,
     },
@@ -205,6 +207,13 @@ pub enum PluginEvent {
         instance_id: Option<u64>,
         message: String,
         fatal: bool,
+    },
+    /// The plugin could not be loaded (probe timeout/failure, failed
+    /// instantiation or reload) and is skipped for this session.  It is not
+    /// running, but its saved configuration, state and mappings are kept.
+    /// Followed by a non-fatal `PluginError` explaining why.
+    PluginSkipped {
+        instance_id: u64,
     },
     MidiLearnStarted {
         instance_id: u64,

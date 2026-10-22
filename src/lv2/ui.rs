@@ -662,9 +662,8 @@ unsafe extern "C" fn destroy_instance_id_data(data: *mut c_void, _closure: *mut 
 
 fn gtk_thread_main(cmd_rx: std::sync::mpsc::Receiver<GtkCommand>) {
     let _ = GTK_THREAD_ID.set(std::thread::current().id());
+    // GDK_BACKEND=x11 is set in main() before any thread is spawned.
     unsafe {
-        std::env::set_var("GDK_BACKEND", "x11");
-
         gtk_init(ptr::null_mut(), ptr::null_mut());
     }
 
@@ -770,15 +769,9 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
 
     take_gtk_destroyed(instance_id);
 
-    let world = lilv::World::with_load_all();
-    let uri_node = world.new_uri(&req.plugin_uri);
-
-    let plugin = match world
-        .plugins()
-        .iter()
-        .find(|p| p.uri().as_uri() == uri_node.as_uri())
-    {
-        Some(p) => p,
+    // The GTK thread's own cached world.
+    let (world, plugin) = match super::find_in_thread_world(&req.plugin_uri) {
+        Some(found) => found,
         None => {
             log::error!("Plugin not found: {}", req.plugin_uri);
             send_ui_error(&req, format!("Plugin not found: {}", req.plugin_uri));
@@ -1222,7 +1215,7 @@ pub fn open_plugin_ui(
     }) as f32;
 
     // Try to find the UI info to determine if it's X11
-    let world = lilv::World::with_load_all();
+    let world = super::thread_world();
     let uri_node = world.new_uri(plugin_uri);
     let plugin = world.plugins().iter().find(|p| p.uri().as_uri() == uri_node.as_uri());
 
@@ -1329,13 +1322,34 @@ pub fn open_plugin_ui(
     }));
 }
 
+/// Result of [`close_plugin_ui`].
+pub enum UiCloseStatus {
+    /// No in-process UI can touch the plugin instance any more.
+    Closed,
+    /// The GTK thread did not confirm in time: an in-process UI may still
+    /// use the instance (instance-access / data-access) until the close is
+    /// acknowledged, so the instance must be kept alive until then.
+    Pending(PendingUiClose),
+}
+
+/// A close the GTK thread has not acknowledged yet.
+pub struct PendingUiClose(std::sync::mpsc::Receiver<()>);
+
+impl PendingUiClose {
+    /// True once the GTK thread destroyed the UI (or is gone).
+    pub fn is_done(&self) -> bool {
+        !matches!(self.0.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty))
+    }
+}
+
 /// Close the plugin UI for `instance_id` (in-process or bridge).
 ///
 /// For in-process UIs this blocks (up to ~2 s) until the GTK thread has
 /// destroyed the UI, so the caller may free the plugin instance afterwards.
-/// It does not wait when called on the GTK thread itself or when the GTK
-/// thread is not running.
-pub fn close_plugin_ui(instance_id: u64) {
+/// If the GTK thread does not confirm in time, `Pending` is returned and the
+/// instance must not be freed yet.  It does not wait when called on the GTK
+/// thread itself or when the GTK thread is not running.
+pub fn close_plugin_ui(instance_id: u64) -> UiCloseStatus {
     // Bridge UIs live in another process and never touch the instance's
     // memory; closing them is fire-and-forget.
     if let Ok(mut guard) = UI_BRIDGE.lock()
@@ -1345,7 +1359,7 @@ pub fn close_plugin_ui(instance_id: u64) {
     }
 
     if GTK_CMD_TX.get().is_none() {
-        return;
+        return UiCloseStatus::Closed;
     }
 
     if on_gtk_thread() {
@@ -1354,7 +1368,7 @@ pub fn close_plugin_ui(instance_id: u64) {
             destroyed_by_gtk: false,
             ack: None,
         });
-        return;
+        return UiCloseStatus::Closed;
     }
 
     let (ack_tx, ack_rx) = std::sync::mpsc::channel::<()>();
@@ -1363,16 +1377,17 @@ pub fn close_plugin_ui(instance_id: u64) {
         destroyed_by_gtk: false,
         ack: Some(ack_tx),
     }) {
-        return; // GTK thread gone
+        return UiCloseStatus::Closed; // GTK thread gone
     }
     match ack_rx.recv_timeout(CLOSE_TIMEOUT) {
         // Ok: closed.  Disconnected: the command was dropped (thread exiting).
-        Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {}
+        Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => UiCloseStatus::Closed,
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
             log::warn!(
                 "Timed out waiting for the GTK thread to close the UI of instance {}",
                 instance_id
             );
+            UiCloseStatus::Pending(PendingUiClose(ack_rx))
         }
     }
 }

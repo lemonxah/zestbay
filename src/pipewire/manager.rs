@@ -28,6 +28,13 @@ const MAX_PARALLEL_PROBES: usize = 4;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Minimum time between two sample-rate reloads of the same instance.
 const MIN_RELOAD_INTERVAL: Duration = Duration::from_secs(5);
+/// A plugin that needs a layout-changing restart again this soon after being
+/// (re)loaded counts as a rapid repeat.
+const RESTART_LOOP_WINDOW: Duration = Duration::from_secs(10);
+/// Rapid restart reloads allowed before the plugin is left silenced.
+const MAX_RAPID_RESTART_RELOADS: u32 = 2;
+/// How often parameter changes made inside plugins are reported.
+const PARAM_REPORT_INTERVAL: Duration = Duration::from_millis(100);
 
 enum InternalOp {
     Connect {
@@ -98,6 +105,37 @@ impl AddRequest {
     }
 }
 
+/// Detects plugins that need a layout-changing restart (and so a reload)
+/// again right after every reload.
+#[derive(Default)]
+struct RestartLoopGuard {
+    last_reload: Option<Instant>,
+    rapid: u32,
+}
+
+impl RestartLoopGuard {
+    /// A restart-triggered reload is wanted at `now`.  Returns false when the
+    /// plugin keeps needing one right after being reloaded.
+    fn allow(&mut self, now: Instant) -> bool {
+        match self.last_reload {
+            Some(t) if now.duration_since(t) < RESTART_LOOP_WINDOW => self.rapid += 1,
+            _ => self.rapid = 0,
+        }
+        if self.rapid > MAX_RAPID_RESTART_RELOADS {
+            return false;
+        }
+        self.last_reload = Some(now);
+        true
+    }
+}
+
+/// An LV2 instance whose in-process UI did not confirm closing in time. Its
+/// filter is gone; the instance stays alive until the UI is destroyed.
+struct Lv2Zombie {
+    _instance: Rc<RefCell<crate::lv2::host::Lv2PluginInstance>>,
+    pending: crate::lv2::ui::PendingUiClose,
+}
+
 #[derive(Clone)]
 struct PluginMeta {
     plugin_uri: String,
@@ -130,6 +168,7 @@ struct Carryover {
     midi_mappings: crate::midi::MidiMappingTable,
     plugins: Vec<AddRequest>,
     relinks: Vec<PendingRelink>,
+    lv2_zombies: Vec<Lv2Zombie>,
 }
 
 /// Routes UI commands to the currently running PipeWire loop. While the
@@ -295,10 +334,14 @@ fn run_pipewire_thread(
         vst3_filters: RefCell::new(HashMap::new()),
         meta: RefCell::new(HashMap::new()),
         midi_mapping_table: RefCell::new(std::mem::take(&mut carry.midi_mappings)),
-        midi_learn_state: RefCell::new(None),
         pending_ops: RefCell::new(VecDeque::new()),
         relinks: RefCell::new(Vec::new()),
         last_reload: RefCell::new(HashMap::new()),
+        restart_guards: RefCell::new(HashMap::new()),
+        silenced: RefCell::new(HashSet::new()),
+        lv2_zombies: RefCell::new(std::mem::take(&mut carry.lv2_zombies)),
+        reported_params: RefCell::new(HashMap::new()),
+        last_param_report: Cell::new(Instant::now()),
         last_op_time: Cell::new(Instant::now() - Duration::from_secs(1)),
         changes_pending: Cell::new(false),
     });
@@ -406,6 +449,7 @@ fn run_pipewire_thread(
     carry.plugins = plugins;
     carry.relinks = relinks;
     carry.midi_mappings = host.midi_mapping_table.take();
+    carry.lv2_zombies = host.lv2_zombies.take();
 
     Err(lost
         .borrow_mut()
@@ -438,11 +482,17 @@ struct Host {
     meta: RefCell<HashMap<u64, PluginMeta>>,
 
     midi_mapping_table: RefCell<crate::midi::MidiMappingTable>,
-    midi_learn_state: RefCell<Option<crate::midi::MidiLearnState>>,
 
     pending_ops: RefCell<VecDeque<InternalOp>>,
     relinks: RefCell<Vec<PendingRelink>>,
     last_reload: RefCell<HashMap<u64, Instant>>,
+    restart_guards: RefCell<HashMap<u64, RestartLoopGuard>>,
+    /// Kept parked (silent) after restart-reloading too often.
+    silenced: RefCell<HashSet<u64>>,
+    lv2_zombies: RefCell<Vec<Lv2Zombie>>,
+    /// Parameter values last reported to the UI, per instance.
+    reported_params: RefCell<HashMap<u64, Vec<(usize, f32)>>>,
+    last_param_report: Cell<Instant>,
     last_op_time: Cell<Instant>,
     changes_pending: Cell<bool>,
 }
@@ -463,17 +513,8 @@ impl Host {
         match global.type_ {
             ObjectType::Node => {
                 if let Some(node) = parse_node(global) {
-                    if node.node_type == Some(NodeType::Plugin)
-                        && let Some(props) = global.props.as_ref()
-                        && let Some(id_str) = props.get("zestbay.plugin.instance_id")
-                        && let Ok(instance_id) = id_str.parse::<u64>()
-                    {
-                        let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::PluginAdded {
-                            instance_id,
-                            pw_node_id: global.id,
-                            display_name: node.display_name().to_string(),
-                        }));
-                    }
+                    // PluginAdded is sent once per instantiation by the
+                    // plugin's filter (drain_events), not from here.
                     self.graph.insert_node(node.clone());
                     let _ = self.event_tx.send(PwEvent::NodeChanged(node));
                     self.changes_pending.set(true);
@@ -546,24 +587,42 @@ impl Host {
                 port_index,
                 value,
             } => {
-                let found = if let Some(inst) = self.lv2_instances.borrow().get(&instance_id) {
-                    inst.borrow_mut().set_parameter(port_index, value);
-                    true
-                } else if let Some(inst) = self.clap_instances.borrow().get(&instance_id) {
-                    inst.borrow_mut().set_parameter(port_index, value);
-                    true
-                } else if let Some(inst) = self.vst3_instances.borrow().get(&instance_id) {
-                    inst.borrow_mut().set_parameter(port_index, value);
-                    true
-                } else {
-                    false
-                };
-                if found {
-                    let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::ParameterChanged {
-                        instance_id,
-                        port_index,
-                        value,
-                    }));
+                // The clamped value the slot now holds.
+                let applied: Option<Option<f32>> =
+                    if let Some(inst) = self.lv2_instances.borrow().get(&instance_id) {
+                        let inst = inst.borrow_mut();
+                        inst.set_parameter(port_index, value);
+                        Some(slot_value(&inst.port_updates, port_index))
+                    } else if let Some(inst) = self.clap_instances.borrow().get(&instance_id) {
+                        let inst = inst.borrow_mut();
+                        inst.set_parameter(port_index, value);
+                        Some(slot_value(&inst.port_updates, port_index))
+                    } else if let Some(inst) = self.vst3_instances.borrow().get(&instance_id) {
+                        let inst = inst.borrow_mut();
+                        inst.set_parameter(port_index, value);
+                        Some(slot_value(&inst.port_updates, port_index))
+                    } else {
+                        None
+                    };
+                match applied {
+                    Some(Some(value)) => {
+                        if let Some(prev) = self.reported_params.borrow_mut().get_mut(&instance_id) {
+                            upsert_param(prev, port_index, value);
+                        }
+                        let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::ParameterChanged {
+                            instance_id,
+                            port_index,
+                            value,
+                        }));
+                    }
+                    Some(None) => {}
+                    // Not instantiated yet (e.g. replayed after a reconnect):
+                    // apply it when the queued add runs.
+                    None => {
+                        self.patch_queued_add(instance_id, |req| {
+                            upsert_param(&mut req.params, port_index, value)
+                        });
+                    }
                 }
             }
             PwCommand::SetPluginBypass {
@@ -576,22 +635,17 @@ impl Host {
                     inst.borrow_mut().set_bypassed(bypassed);
                 } else if let Some(inst) = self.vst3_instances.borrow().get(&instance_id) {
                     inst.borrow_mut().set_bypassed(bypassed);
+                } else {
+                    self.patch_queued_add(instance_id, |req| req.bypassed = bypassed);
                 }
             }
             PwCommand::StartMidiLearn {
                 instance_id,
                 port_index,
-                label,
-                mode,
+                ..
             } => {
-                *self.midi_learn_state.borrow_mut() = Some(crate::midi::MidiLearnState {
-                    target: crate::midi::MidiCcTarget {
-                        instance_id,
-                        port_index,
-                    },
-                    label,
-                    mode,
-                });
+                // Only one filter learns at a time.
+                self.set_learn_mode_all(false);
                 if let Some(filter) = self.lv2_filters.borrow().get(&instance_id) {
                     filter.set_learn_mode(true);
                 } else if let Some(filter) = self.clap_filters.borrow().get(&instance_id) {
@@ -605,16 +659,7 @@ impl Host {
                 }));
             }
             PwCommand::CancelMidiLearn => {
-                *self.midi_learn_state.borrow_mut() = None;
-                for filter in self.lv2_filters.borrow().values() {
-                    filter.set_learn_mode(false);
-                }
-                for filter in self.clap_filters.borrow().values() {
-                    filter.set_learn_mode(false);
-                }
-                for filter in self.vst3_filters.borrow().values() {
-                    filter.set_learn_mode(false);
-                }
+                self.set_learn_mode_all(false);
                 let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::MidiLearnCancelled));
             }
             PwCommand::AddMidiMapping(mapping) => self.add_midi_mapping(mapping),
@@ -693,6 +738,49 @@ impl Host {
         self.pending_ops.borrow_mut().push_back(op);
     }
 
+    fn set_learn_mode_all(&self, enabled: bool) {
+        for filter in self.lv2_filters.borrow().values() {
+            filter.set_learn_mode(enabled);
+        }
+        for filter in self.clap_filters.borrow().values() {
+            filter.set_learn_mode(enabled);
+        }
+        for filter in self.vst3_filters.borrow().values() {
+            filter.set_learn_mode(enabled);
+        }
+    }
+
+    /// Apply `f` to the queued (not yet instantiated) add of `instance_id`,
+    /// if there is one.
+    fn patch_queued_add(&self, instance_id: u64, f: impl FnOnce(&mut AddRequest)) {
+        let mut ops = self.pending_ops.borrow_mut();
+        // The last queued add is the one that ends up live.
+        let queued = ops.iter_mut().rev().find_map(|op| match op {
+            InternalOp::AddPlugin(req) if req.instance_id == instance_id => Some(req),
+            _ => None,
+        });
+        match queued {
+            Some(req) => f(req),
+            None => log::debug!("Instance {} is not loaded; command ignored", instance_id),
+        }
+    }
+
+    /// The plugin is not loaded this session; the UI keeps its saved
+    /// configuration.  Sends `PluginSkipped` + a non-fatal `PluginError`.
+    fn skip_plugin(&self, instance_id: u64, reason: &str) {
+        let _ = self
+            .event_tx
+            .send(PwEvent::Plugin(PluginEvent::PluginSkipped { instance_id }));
+        let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
+            instance_id: Some(instance_id),
+            message: format!(
+                "{}. It was skipped for this session; its saved settings are kept.",
+                reason
+            ),
+            fatal: false,
+        }));
+    }
+
     fn handle_op(&self, op: InternalOp) {
         match op {
             InternalOp::Connect {
@@ -724,21 +812,28 @@ impl Host {
                         req.plugin_uri,
                         outcome.describe()
                     );
-                    let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
-                        instance_id: Some(req.instance_id),
-                        message: format!(
-                            "Plugin '{}' {}. It has been blocked to protect ZestBay.",
-                            req.display_name,
-                            outcome.describe()
-                        ),
-                        fatal: true,
-                    }));
+                    if matches!(outcome, crate::plugin::sandbox::ProbeOutcome::Crashed { .. }) {
+                        let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
+                            instance_id: Some(req.instance_id),
+                            message: format!(
+                                "Plugin '{}' {}. It has been blocked to protect ZestBay.",
+                                req.display_name,
+                                outcome.describe()
+                            ),
+                            fatal: true,
+                        }));
+                    } else {
+                        // Timeouts and load failures may be transient.
+                        self.skip_plugin(req.instance_id, &format!("It {}", outcome.describe()));
+                    }
                     return;
                 }
                 self.add_plugin(&req);
             }
             InternalOp::RemovePlugin { instance_id } => {
                 self.remove_plugin(instance_id);
+                self.restart_guards.borrow_mut().remove(&instance_id);
+                self.silenced.borrow_mut().remove(&instance_id);
                 self.relinks.borrow_mut().retain(|r| {
                     r.output.instance_id != Some(instance_id)
                         && r.input.instance_id != Some(instance_id)
@@ -749,7 +844,8 @@ impl Host {
             }
             InternalOp::OpenPluginUI { instance_id } => self.open_plugin_ui(instance_id),
             InternalOp::ClosePluginUI { instance_id } => {
-                crate::lv2::ui::close_plugin_ui(instance_id);
+                // The instance stays alive, so an unconfirmed close is harmless.
+                let _ = crate::lv2::ui::close_plugin_ui(instance_id);
                 crate::clap::ui::close_clap_gui(instance_id, &self.event_tx);
                 crate::vst3::ui::close_vst3_gui(instance_id, &self.event_tx);
             }
@@ -764,23 +860,42 @@ impl Host {
         let now = Instant::now();
 
         self.drain_filter_events();
+        self.report_param_changes(now);
+        self.release_lv2_zombies();
         self.check_sample_rates(now);
 
-        // Link operations are cheap: run them all right away.
-        let link_ops: Vec<InternalOp> = {
+        // Link and UI operations are cheap: run them right away instead of
+        // queueing them behind plugin adds (and their probes).  A UI op for
+        // an instance with an add/remove still queued keeps its place.
+        let quick_ops: Vec<InternalOp> = {
             let mut ops = self.pending_ops.borrow_mut();
-            let mut link_ops = Vec::new();
+            let mut quick = Vec::new();
             let mut rest = VecDeque::with_capacity(ops.len());
+            let mut busy: HashSet<u64> = HashSet::new();
             for op in ops.drain(..) {
                 match op {
-                    InternalOp::Connect { .. } | InternalOp::Disconnect { .. } => link_ops.push(op),
+                    InternalOp::Connect { .. } | InternalOp::Disconnect { .. } => quick.push(op),
+                    InternalOp::OpenPluginUI { instance_id }
+                    | InternalOp::ClosePluginUI { instance_id }
+                        if !busy.contains(&instance_id) =>
+                    {
+                        quick.push(op)
+                    }
+                    InternalOp::AddPlugin(ref req) => {
+                        busy.insert(req.instance_id);
+                        rest.push_back(op);
+                    }
+                    InternalOp::RemovePlugin { instance_id } => {
+                        busy.insert(instance_id);
+                        rest.push_back(op);
+                    }
                     other => rest.push_back(other),
                 }
             }
             *ops = rest;
-            link_ops
+            quick
         };
-        for op in link_ops {
+        for op in quick_ops {
             self.handle_op(op);
         }
 
@@ -818,7 +933,10 @@ impl Host {
         crate::clap::ui::idle();
         crate::vst3::ui::idle();
 
-        let mut needs_reload: Vec<u64> = Vec::new();
+        // A failed restart parks the instance (audio thread excluded) until
+        // it is dropped, so a parked instance is reloaded on every tick
+        // until that succeeds (or the loop guard gives up).
+        let mut parked: Vec<u64> = Vec::new();
         let clap: Vec<(u64, Rc<RefCell<crate::clap::host::ClapPluginInstance>>)> = self
             .clap_instances
             .borrow()
@@ -828,8 +946,11 @@ impl Host {
         for (id, inst) in clap {
             let mut i = inst.borrow_mut();
             i.idle();
-            if i.needs_restart() && !i.restart() {
-                needs_reload.push(id);
+            if i.needs_restart() {
+                i.restart();
+            }
+            if i.is_parked() {
+                parked.push(id);
             }
         }
         let vst3: Vec<(u64, Rc<RefCell<crate::vst3::host::Vst3PluginInstance>>)> = self
@@ -841,20 +962,107 @@ impl Host {
         for (id, inst) in vst3 {
             let mut i = inst.borrow_mut();
             i.idle();
-            if i.needs_restart() && !i.restart() {
-                needs_reload.push(id);
+            if i.needs_restart() {
+                i.restart();
+            }
+            if i.is_parked() {
+                parked.push(id);
             }
         }
 
-        for id in needs_reload {
-            if let Some(last) = self.last_reload.borrow().get(&id)
-                && now.duration_since(*last) < MIN_RELOAD_INTERVAL
-            {
-                continue;
-            }
-            self.last_reload.borrow_mut().insert(id, now);
-            self.reload_plugin(id, self.current_rate(), now);
+        for id in parked {
+            self.reload_parked(id, now);
         }
+    }
+
+    /// Reload an instance a failed restart left parked.  Not throttled (it
+    /// is silent until reloaded), but plugins that keep needing it right
+    /// after every reload are left silenced.
+    fn reload_parked(&self, instance_id: u64, now: Instant) {
+        if self.silenced.borrow().contains(&instance_id) {
+            return;
+        }
+        let allowed = self
+            .restart_guards
+            .borrow_mut()
+            .entry(instance_id)
+            .or_default()
+            .allow(now);
+        if !allowed {
+            self.silenced.borrow_mut().insert(instance_id);
+            let name = self
+                .meta
+                .borrow()
+                .get(&instance_id)
+                .map(|m| m.display_name.clone())
+                .unwrap_or_default();
+            log::error!(
+                "'{}' (instance {}) keeps changing its audio layout after reloads; leaving it silenced",
+                name,
+                instance_id
+            );
+            let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
+                instance_id: Some(instance_id),
+                message: "It keeps changing its audio layout right after being reloaded. \
+                          It has been silenced; remove and re-add it to try again."
+                    .to_string(),
+                fatal: false,
+            }));
+            return;
+        }
+        log::info!("Instance {} needs a reload after a failed restart", instance_id);
+        self.reload_plugin(instance_id, self.current_rate(), now);
+    }
+
+    /// Report parameter changes made inside plugins (GUI edits, output
+    /// params, rescans, MIDI mappings) that no command echoed.
+    fn report_param_changes(&self, now: Instant) {
+        if now.duration_since(self.last_param_report.get()) < PARAM_REPORT_INTERVAL {
+            return;
+        }
+        self.last_param_report.set(now);
+
+        let mut current: Vec<(u64, Vec<(usize, f32)>)> = Vec::new();
+        for (id, inst) in self.lv2_instances.borrow().iter() {
+            current.push((*id, slot_values(&inst.borrow().port_updates)));
+        }
+        for (id, inst) in self.clap_instances.borrow().iter() {
+            current.push((*id, slot_values(&inst.borrow().port_updates)));
+        }
+        for (id, inst) in self.vst3_instances.borrow().iter() {
+            current.push((*id, slot_values(&inst.borrow().port_updates)));
+        }
+
+        let mut reported = self.reported_params.borrow_mut();
+        for (instance_id, values) in current {
+            let Some(prev) = reported.get_mut(&instance_id) else {
+                // New instance: its values so far are the baseline.
+                reported.insert(instance_id, values);
+                continue;
+            };
+            for (port_index, value) in diff_params(prev, &values) {
+                let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::ParameterChanged {
+                    instance_id,
+                    port_index,
+                    value,
+                }));
+            }
+        }
+    }
+
+    /// Free LV2 instances whose late UI close has been acknowledged.
+    fn release_lv2_zombies(&self) {
+        if self.lv2_zombies.borrow().is_empty() {
+            return;
+        }
+        let zombies = std::mem::take(&mut *self.lv2_zombies.borrow_mut());
+        let (done, keep): (Vec<Lv2Zombie>, Vec<Lv2Zombie>) =
+            zombies.into_iter().partition(|z| z.pending.is_done());
+        self.lv2_zombies.borrow_mut().extend(keep);
+        if !done.is_empty() {
+            log::info!("Freeing {} LV2 instance(s) whose UI has now closed", done.len());
+        }
+        drop(done);
     }
 
     fn drain_filter_events(&self) {
@@ -932,7 +1140,9 @@ impl Host {
     // Plugin lifecycle
     // -----------------------------------------------------------------------
 
-    fn add_plugin(&self, req: &AddRequest) {
+    /// Instantiate `req`.  On failure the plugin is skipped for this session
+    /// (non-fatal) and false is returned.
+    fn add_plugin(&self, req: &AddRequest) -> bool {
         let sr = req.sample_rate.unwrap_or_else(|| self.current_rate()) as f64;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match req.format.as_str() {
@@ -964,12 +1174,8 @@ impl Host {
                 req.plugin_uri,
                 message
             );
-            let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
-                instance_id: Some(req.instance_id),
-                message,
-                fatal: true,
-            }));
-            return;
+            self.skip_plugin(req.instance_id, &message);
+            return false;
         }
 
         self.meta.borrow_mut().insert(
@@ -990,22 +1196,19 @@ impl Host {
             req.instance_id,
             sr
         );
+        true
     }
 
     fn instantiate_lv2(&self, req: &AddRequest, sr: f64) -> Result<(), String> {
-        let world = lilv::World::with_load_all();
-        let uri_node = world.new_uri(&req.plugin_uri);
-        let lilv_plugin = world
-            .plugins()
-            .iter()
-            .find(|p| p.uri().as_uri() == uri_node.as_uri())
+        // One loaded world per thread, reused (reloaded only on a miss).
+        let (world, lilv_plugin) = crate::lv2::find_in_thread_world(&req.plugin_uri)
             .ok_or_else(|| format!("Plugin not found: {}", req.plugin_uri))?;
         let plugin_info = build_plugin_info(&world, &lilv_plugin)
             .ok_or_else(|| format!("Failed to parse plugin info: {}", req.plugin_uri))?;
 
         let mut inst = unsafe {
             crate::lv2::host::Lv2PluginInstance::new(
-                world,
+                &world,
                 &lilv_plugin,
                 &plugin_info,
                 sr,
@@ -1072,16 +1275,18 @@ impl Host {
     fn instantiate_clap(&self, req: &AddRequest, sr: f64) -> Result<(), String> {
         let info = crate::clap::scanner::find_plugin(&req.plugin_uri)
             .ok_or_else(|| format!("CLAP plugin not found: {}", req.plugin_uri))?;
-        let mut inst = unsafe {
-            crate::clap::host::ClapPluginInstance::new(&info.library_path, &req.plugin_uri, &info, sr)
+        // The saved state is loaded before activation (state-dependent ports).
+        let inst = unsafe {
+            crate::clap::host::ClapPluginInstance::new(
+                &info.library_path,
+                &req.plugin_uri,
+                &info,
+                sr,
+                req.plugin_state.as_deref(),
+            )
         }
         .ok_or_else(|| format!("Failed to instantiate CLAP plugin: {}", req.plugin_uri))?;
 
-        if let Some(blob) = &req.plugin_state
-            && !unsafe { inst.set_state(blob) }
-        {
-            log::warn!("CLAP state restore failed for '{}'", req.display_name);
-        }
         for &(port_index, value) in &req.params {
             inst.set_parameter(port_index, value);
         }
@@ -1116,16 +1321,18 @@ impl Host {
     fn instantiate_vst3(&self, req: &AddRequest, sr: f64) -> Result<(), String> {
         let info = crate::vst3::scanner::find_plugin(&req.plugin_uri)
             .ok_or_else(|| format!("VST3 plugin not found: {}", req.plugin_uri))?;
-        let mut inst = unsafe {
-            crate::vst3::host::Vst3PluginInstance::new(&info.library_path, &req.plugin_uri, &info, sr)
+        // The saved state is restored before setup/activation.
+        let inst = unsafe {
+            crate::vst3::host::Vst3PluginInstance::new(
+                &info.library_path,
+                &req.plugin_uri,
+                &info,
+                sr,
+                req.plugin_state.as_deref(),
+            )
         }
         .ok_or_else(|| format!("Failed to instantiate VST3 plugin: {}", req.plugin_uri))?;
 
-        if let Some(blob) = &req.plugin_state
-            && !unsafe { inst.set_state(blob) }
-        {
-            log::warn!("VST3 state restore failed for '{}'", req.display_name);
-        }
         for &(port_index, value) in &req.params {
             inst.set_parameter(port_index, value);
         }
@@ -1161,11 +1368,25 @@ impl Host {
     /// filter (stops processing), then drop the instance. Emits nothing.
     fn remove_plugin(&self, instance_id: u64) -> bool {
         let found = if self.lv2_instances.borrow().contains_key(&instance_id) {
-            crate::lv2::ui::close_plugin_ui(instance_id);
+            let ui = crate::lv2::ui::close_plugin_ui(instance_id);
             let filter = self.lv2_filters.borrow_mut().remove(&instance_id);
             drop(filter);
             let inst = self.lv2_instances.borrow_mut().remove(&instance_id);
-            drop(inst);
+            match (ui, inst) {
+                // An in-process UI may still use the instance: keep it alive
+                // until the GTK thread confirms the close.
+                (crate::lv2::ui::UiCloseStatus::Pending(pending), Some(instance)) => {
+                    log::warn!(
+                        "Keeping LV2 instance {} alive until its UI has closed",
+                        instance_id
+                    );
+                    self.lv2_zombies.borrow_mut().push(Lv2Zombie {
+                        _instance: instance,
+                        pending,
+                    });
+                }
+                (_, inst) => drop(inst),
+            }
             true
         } else if self.clap_instances.borrow().contains_key(&instance_id) {
             crate::clap::ui::close_clap_gui(instance_id, &self.event_tx);
@@ -1185,6 +1406,7 @@ impl Host {
             false
         };
         self.meta.borrow_mut().remove(&instance_id);
+        self.reported_params.borrow_mut().remove(&instance_id);
         found
     }
 
@@ -1405,19 +1627,20 @@ impl Host {
             return;
         };
         log::info!(
-            "Graph rate changed to {} Hz: reloading '{}' (instance {})",
-            rate,
+            "Reloading '{}' (instance {}) at {} Hz",
             req.display_name,
-            instance_id
+            instance_id,
+            rate
         );
         req.sample_rate = Some(rate);
         let relinks = self.plugin_links(instance_id, true, now + RELINK_TIMEOUT_RELOAD);
 
         self.remove_plugin(instance_id);
-        self.add_plugin(&req);
-        self.relinks
-            .borrow_mut()
-            .extend(relinks.into_iter().map(|(_, r)| r));
+        if self.add_plugin(&req) {
+            self.relinks
+                .borrow_mut()
+                .extend(relinks.into_iter().map(|(_, r)| r));
+        }
     }
 
     /// Tear everything down (connection lost). Returns what must be
@@ -1484,10 +1707,18 @@ impl Host {
 
     /// K2: one `PluginStateSaved` per live plugin, then `PluginStatesDone`.
     fn send_plugin_states(&self) {
+        // A failed save sends nothing for that plugin, so the UI keeps the
+        // state it already has.
         for (&instance_id, inst) in self.lv2_instances.borrow().iter() {
             let inst = inst.borrow();
             let lv2_state = if inst.has_state_interface() {
-                unsafe { inst.save_state() }.unwrap_or_default()
+                match unsafe { inst.save_state() } {
+                    Some(state) => state,
+                    None => {
+                        log::warn!("LV2 state save failed for instance {}", instance_id);
+                        continue;
+                    }
+                }
             } else {
                 Vec::new()
             };
@@ -1497,16 +1728,22 @@ impl Host {
                 blob: None,
             }));
         }
-        for (&instance_id, inst) in self.clap_instances.borrow().iter() {
-            let blob = inst.borrow().get_state();
-            let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::PluginStateSaved {
-                instance_id,
-                lv2_state: Vec::new(),
-                blob,
-            }));
-        }
-        for (&instance_id, inst) in self.vst3_instances.borrow().iter() {
-            let blob = inst.borrow().get_state();
+        let blobs: Vec<(u64, Option<Vec<u8>>)> = self
+            .clap_instances
+            .borrow()
+            .iter()
+            .map(|(&id, inst)| (id, inst.borrow().get_state()))
+            .chain(
+                self.vst3_instances
+                    .borrow()
+                    .iter()
+                    .map(|(&id, inst)| (id, inst.borrow().get_state())),
+            )
+            .collect();
+        for (instance_id, blob) in blobs {
+            if blob.is_none() {
+                continue;
+            }
             let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::PluginStateSaved {
                 instance_id,
                 lv2_state: Vec::new(),
@@ -1977,6 +2214,50 @@ fn build_plugin_info(
     })
 }
 
+/// Current (port index, value) of every control input slot.
+fn slot_values(updates: &crate::plugin::types::PortUpdates) -> Vec<(usize, f32)> {
+    updates
+        .control_inputs
+        .iter()
+        .map(|s| (s.port_index, s.value.load()))
+        .collect()
+}
+
+fn slot_value(updates: &crate::plugin::types::PortUpdates, port_index: usize) -> Option<f32> {
+    updates
+        .control_inputs
+        .iter()
+        .find(|s| s.port_index == port_index)
+        .map(|s| s.value.load())
+}
+
+/// Set `port_index` to `value` in a (port, value) list, adding it if absent.
+fn upsert_param(params: &mut Vec<(usize, f32)>, port_index: usize, value: f32) {
+    match params.iter_mut().find(|(p, _)| *p == port_index) {
+        Some(entry) => entry.1 = value,
+        None => params.push((port_index, value)),
+    }
+}
+
+/// Values in `current` that differ from `reported`, which is updated to
+/// `current`.  If the port list changed, `reported` is just reset.
+fn diff_params(reported: &mut Vec<(usize, f32)>, current: &[(usize, f32)]) -> Vec<(usize, f32)> {
+    let same_ports = reported.len() == current.len()
+        && reported.iter().zip(current).all(|(a, b)| a.0 == b.0);
+    if !same_ports {
+        *reported = current.to_vec();
+        return Vec::new();
+    }
+    let mut changed = Vec::new();
+    for (prev, &(port_index, value)) in reported.iter_mut().zip(current) {
+        if prev.1.to_bits() != value.to_bits() {
+            prev.1 = value;
+            changed.push((port_index, value));
+        }
+    }
+    changed
+}
+
 /// A link from a node to itself is only allowed between different port
 /// groups (e.g. two devices behind one MIDI bridge node).
 fn is_allowed_same_node_link(output: &Port, input: &Port) -> bool {
@@ -2077,6 +2358,55 @@ mod tests {
             port_group: group.map(String::from),
             port_alias: None,
         }
+    }
+
+    #[test]
+    fn restart_loop_guard_gives_up_on_rapid_repeats() {
+        let t0 = Instant::now();
+        let mut g = RestartLoopGuard::default();
+        assert!(g.allow(t0));
+        assert!(g.allow(t0 + Duration::from_secs(3)));
+        assert!(g.allow(t0 + Duration::from_secs(6)));
+        assert!(!g.allow(t0 + Duration::from_secs(9)));
+    }
+
+    #[test]
+    fn restart_loop_guard_resets_after_a_quiet_window() {
+        let t0 = Instant::now();
+        let mut g = RestartLoopGuard::default();
+        assert!(g.allow(t0));
+        assert!(g.allow(t0 + Duration::from_secs(5)));
+        assert!(g.allow(t0 + Duration::from_secs(9)));
+        // Ran fine for longer than the window: a fresh streak.
+        let later = t0 + Duration::from_secs(9) + RESTART_LOOP_WINDOW;
+        assert!(g.allow(later));
+        assert!(g.allow(later + Duration::from_secs(1)));
+        assert!(g.allow(later + Duration::from_secs(2)));
+        assert!(!g.allow(later + Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn diff_params_reports_only_changes() {
+        let mut reported = vec![(0, 0.5), (1, 1.0)];
+        assert!(diff_params(&mut reported, &[(0, 0.5), (1, 1.0)]).is_empty());
+        assert_eq!(diff_params(&mut reported, &[(0, 0.25), (1, 1.0)]), vec![(0, 0.25)]);
+        assert_eq!(reported, vec![(0, 0.25), (1, 1.0)]);
+        assert!(diff_params(&mut reported, &[(0, 0.25), (1, 1.0)]).is_empty());
+    }
+
+    #[test]
+    fn diff_params_resets_when_ports_change() {
+        let mut reported = vec![(0, 0.5)];
+        assert!(diff_params(&mut reported, &[(0, 0.1), (1, 0.2)]).is_empty());
+        assert_eq!(reported, vec![(0, 0.1), (1, 0.2)]);
+    }
+
+    #[test]
+    fn upsert_param_replaces_or_appends() {
+        let mut params = vec![(3, 1.0)];
+        upsert_param(&mut params, 3, 2.0);
+        upsert_param(&mut params, 5, 0.5);
+        assert_eq!(params, vec![(3, 2.0), (5, 0.5)]);
     }
 
     #[test]
