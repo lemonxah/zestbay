@@ -16,6 +16,10 @@ pub type LV2_State_Handle = *mut c_void;
 #[allow(non_camel_case_types)]
 pub type LV2_State_Status = u32;
 pub const LV2_STATE_SUCCESS: LV2_State_Status = 0;
+pub const LV2_STATE_ERR_BAD_FLAGS: LV2_State_Status = 3;
+
+pub const LV2_STATE_IS_POD: u32 = 1;
+pub const LV2_STATE_IS_PORTABLE: u32 = 2;
 
 #[allow(non_camel_case_types)]
 pub type LV2_State_Store_Function = unsafe extern "C" fn(
@@ -104,6 +108,18 @@ unsafe extern "C" fn store_callback(
 ) -> LV2_State_Status {
     unsafe {
         let ctx = &mut *(handle as *mut StoreContext);
+        if flags & LV2_STATE_IS_POD == 0 {
+            // Values are persisted as JSON bytes; non-POD data (pointers,
+            // handles) cannot survive that.
+            log::warn!(
+                "LV2 state: skipping non-POD value for key {:?}",
+                ctx.mapper.unmap(key)
+            );
+            return LV2_STATE_ERR_BAD_FLAGS;
+        }
+        if value.is_null() && size > 0 {
+            return 1;
+        }
         let key_uri = match ctx.mapper.unmap(key) {
             Some(uri) => uri,
             None => return 1,
@@ -112,7 +128,11 @@ unsafe extern "C" fn store_callback(
             Some(uri) => uri,
             None => return 1,
         };
-        let data = std::slice::from_raw_parts(value as *const u8, size).to_vec();
+        let data = if size == 0 {
+            Vec::new()
+        } else {
+            std::slice::from_raw_parts(value as *const u8, size).to_vec()
+        };
         ctx.entries.push(StateEntry {
             key_uri,
             type_uri,
@@ -159,21 +179,22 @@ pub unsafe fn save_plugin_state(
     handle: *mut c_void,
     iface: *const LV2_State_Interface,
     mapper: &Arc<UridMapper>,
+    paths: &Lv2StatePathSetup,
 ) -> Option<Vec<StateEntry>> {
     let mut ctx = StoreContext {
         entries: Vec::new(),
         mapper: mapper.clone(),
     };
-    let null_feature: *const lv2_raw::core::LV2Feature = std::ptr::null();
-    let features = &null_feature as *const *const lv2_raw::core::LV2Feature;
+    let path_features = paths.make_features();
+    let features = feature_ptrs(&path_features);
 
     let status = unsafe {
         ((*iface).save)(
             handle,
             store_callback,
             &mut ctx as *mut StoreContext as LV2_State_Handle,
-            0,
-            features,
+            LV2_STATE_IS_POD | LV2_STATE_IS_PORTABLE,
+            features.as_ptr(),
         )
     };
     if status == LV2_STATE_SUCCESS {
@@ -189,6 +210,7 @@ pub unsafe fn restore_plugin_state(
     iface: *const LV2_State_Interface,
     mapper: &Arc<UridMapper>,
     entries: &[StateEntry],
+    paths: &Lv2StatePathSetup,
 ) {
     let retrieve_entries: Vec<RetrieveEntry> = entries
         .iter()
@@ -202,21 +224,30 @@ pub unsafe fn restore_plugin_state(
     let ctx = RetrieveContext {
         entries: retrieve_entries,
     };
-    let null_feature: *const lv2_raw::core::LV2Feature = std::ptr::null();
-    let features = &null_feature as *const *const lv2_raw::core::LV2Feature;
+    let path_features = paths.make_features();
+    let features = feature_ptrs(&path_features);
 
     let status = unsafe {
         ((*iface).restore)(
             handle,
             retrieve_callback,
             &ctx as *const RetrieveContext as LV2_State_Handle,
-            0,
-            features,
+            LV2_STATE_IS_POD | LV2_STATE_IS_PORTABLE,
+            features.as_ptr(),
         )
     };
     if status != LV2_STATE_SUCCESS {
         log::warn!("LV2 state restore failed with status {}", status);
     }
+}
+
+/// NULL-terminated pointer array over `features` (which must outlive it).
+fn feature_ptrs(features: &[lv2_raw::core::LV2Feature]) -> Vec<*const lv2_raw::core::LV2Feature> {
+    features
+        .iter()
+        .map(|f| f as *const _)
+        .chain(std::iter::once(std::ptr::null()))
+        .collect()
 }
 
 // ── State path features (makePath, freePath, mapPath) ──
@@ -248,7 +279,16 @@ struct LV2_State_Map_Path {
 }
 
 struct StatePathContext {
-    state_dir: std::path::PathBuf,
+    /// Per-plugin-URI base directory.
+    base_dir: std::path::PathBuf,
+    /// Per-instance directory (base_dir/<scope>); changed by `set_scope`.
+    state_dir: parking_lot::Mutex<std::path::PathBuf>,
+}
+
+impl StatePathContext {
+    fn dir(&self) -> std::path::PathBuf {
+        self.state_dir.lock().clone()
+    }
 }
 
 fn sanitize_uri(uri: &str) -> String {
@@ -283,11 +323,13 @@ unsafe extern "C" fn make_path_callback(
             Ok(s) => s,
             Err(_) => return std::ptr::null_mut(),
         };
-        if let Err(e) = std::fs::create_dir_all(&ctx.state_dir) {
-            log::warn!("LV2 state makePath: failed to create dir {:?}: {}", ctx.state_dir, e);
+        let state_dir = ctx.dir();
+        let full = state_dir.join(rel_path);
+        let parent = full.parent().unwrap_or(&state_dir);
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            log::warn!("LV2 state makePath: failed to create dir {:?}: {}", parent, e);
             return std::ptr::null_mut();
         }
-        let full = ctx.state_dir.join(rel_path);
         let full_str = full.to_string_lossy();
         malloc_cstring(&full_str)
     }
@@ -316,8 +358,7 @@ unsafe extern "C" fn abstract_path_callback(
             Err(_) => return std::ptr::null_mut(),
         };
         let abs_path = std::path::Path::new(abs);
-        let state_dir_str = ctx.state_dir.to_string_lossy();
-        if let Ok(rel) = abs_path.strip_prefix(&*state_dir_str) {
+        if let Ok(rel) = abs_path.strip_prefix(ctx.dir()) {
             malloc_cstring(&rel.to_string_lossy())
         } else {
             malloc_cstring(abs)
@@ -342,7 +383,7 @@ unsafe extern "C" fn absolute_path_callback(
         let full = if rel_path.is_absolute() {
             rel_path.to_path_buf()
         } else {
-            ctx.state_dir.join(rel_path)
+            ctx.dir().join(rel_path)
         };
         malloc_cstring(&full.to_string_lossy())
     }
@@ -358,15 +399,21 @@ pub struct Lv2StatePathSetup {
 unsafe impl Send for Lv2StatePathSetup {}
 
 impl Lv2StatePathSetup {
-    pub fn new(plugin_uri: &str) -> Self {
+    /// `default_scope` names the per-instance directory used until
+    /// `set_scope` is called (so unscoped instances never share files).
+    pub fn new(plugin_uri: &str, default_scope: &str) -> Self {
         let config_dir = dirs::config_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("~/.config"));
-        let state_dir = config_dir
+        let base_dir = config_dir
             .join("zestbay")
             .join("plugin-state")
             .join(sanitize_uri(plugin_uri));
+        let state_dir = base_dir.join(sanitize_uri(default_scope));
 
-        let ctx = Box::new(StatePathContext { state_dir });
+        let ctx = Box::new(StatePathContext {
+            base_dir,
+            state_dir: parking_lot::Mutex::new(state_dir),
+        });
         let ctx_ptr = Box::into_raw(ctx);
         let handle = ctx_ptr as *mut c_void;
 
@@ -392,6 +439,25 @@ impl Lv2StatePathSetup {
             map_path_struct,
             ctx_ptr,
         }
+    }
+
+    /// Scope makePath/mapPath files to a persistent instance identity.
+    pub fn set_scope(&self, scope: &str) {
+        let ctx = unsafe { &*self.ctx_ptr };
+        *ctx.state_dir.lock() = ctx.base_dir.join(sanitize_uri(scope));
+    }
+
+    pub fn state_dir(&self) -> std::path::PathBuf {
+        unsafe { &*self.ctx_ptr }.dir()
+    }
+
+    /// makePath, freePath and mapPath features (for instantiate/save/restore).
+    pub fn make_features(&self) -> [lv2_raw::core::LV2Feature; 3] {
+        [
+            self.make_make_path_feature(),
+            self.make_free_path_feature(),
+            self.make_map_path_feature(),
+        ]
     }
 
     pub fn make_make_path_feature(&self) -> lv2_raw::core::LV2Feature {
@@ -422,5 +488,88 @@ impl Drop for Lv2StatePathSetup {
             unsafe { drop(Box::from_raw(self.ctx_ptr)) };
             self.ctx_ptr = std::ptr::null_mut();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scope_changes_state_dir_per_instance() {
+        let a = Lv2StatePathSetup::new("http://example.org/plug", "default-1");
+        let b = Lv2StatePathSetup::new("http://example.org/plug", "default-2");
+        assert_ne!(a.state_dir(), b.state_dir());
+        a.set_scope("stable-a");
+        b.set_scope("stable-b");
+        assert!(a.state_dir().ends_with("stable-a"));
+        assert!(b.state_dir().ends_with("stable-b"));
+        assert_eq!(a.state_dir().parent(), b.state_dir().parent());
+    }
+
+    #[test]
+    fn absolute_and_abstract_paths_round_trip() {
+        let setup = Lv2StatePathSetup::new("http://example.org/plug", "x");
+        setup.set_scope("round-trip");
+        let handle = setup.ctx_ptr as *mut c_void;
+        unsafe {
+            let abs = absolute_path_callback(handle, c"sample.wav".as_ptr());
+            let abs_str = std::ffi::CStr::from_ptr(abs).to_str().unwrap().to_string();
+            assert!(abs_str.ends_with("round-trip/sample.wav"));
+            let rel = abstract_path_callback(handle, abs);
+            assert_eq!(std::ffi::CStr::from_ptr(rel).to_str().unwrap(), "sample.wav");
+            free_path_callback(handle, abs);
+            free_path_callback(handle, rel);
+        }
+    }
+
+    unsafe extern "C" fn pod_save(
+        _instance: *mut c_void,
+        store: LV2_State_Store_Function,
+        handle: LV2_State_Handle,
+        flags: u32,
+        features: *const *const lv2_raw::core::LV2Feature,
+    ) -> LV2_State_Status {
+        assert_eq!(flags, LV2_STATE_IS_POD | LV2_STATE_IS_PORTABLE);
+        unsafe {
+            let mut n = 0;
+            while !(*features.add(n)).is_null() {
+                n += 1;
+            }
+            assert_eq!(n, 3);
+            let mapper = (*(handle as *mut StoreContext)).mapper.clone();
+            let key = mapper.map("urn:key");
+            let ty = mapper.map("urn:type");
+            let val = [1u8, 2, 3];
+            store(handle, key, val.as_ptr() as *const c_void, 3, ty, LV2_STATE_IS_POD);
+            let key2 = mapper.map("urn:ptr");
+            store(handle, key2, val.as_ptr() as *const c_void, 3, ty, 0);
+        }
+        LV2_STATE_SUCCESS
+    }
+
+    unsafe extern "C" fn noop_restore(
+        _instance: *mut c_void,
+        _retrieve: LV2_State_Retrieve_Function,
+        _handle: LV2_State_Handle,
+        _flags: u32,
+        _features: *const *const lv2_raw::core::LV2Feature,
+    ) -> LV2_State_Status {
+        LV2_STATE_SUCCESS
+    }
+
+    #[test]
+    fn save_passes_features_and_skips_non_pod() {
+        let mapper = Arc::new(UridMapper::new());
+        let paths = Lv2StatePathSetup::new("http://example.org/plug", "save");
+        let iface = LV2_State_Interface {
+            save: pod_save,
+            restore: noop_restore,
+        };
+        let entries =
+            unsafe { save_plugin_state(std::ptr::null_mut(), &iface, &mapper, &paths) }.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key_uri, "urn:key");
+        assert_eq!(entries[0].value, vec![1, 2, 3]);
     }
 }

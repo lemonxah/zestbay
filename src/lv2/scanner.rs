@@ -9,8 +9,6 @@ const PROVIDED_FEATURES: &[&str] = &[
     "http://lv2plug.in/ns/ext/log#log",
     "http://lv2plug.in/ns/ext/options#options",
     "http://lv2plug.in/ns/ext/buf-size#boundedBlockLength",
-    "http://lv2plug.in/ns/ext/buf-size#fixedBlockLength",
-    "http://lv2plug.in/ns/ext/buf-size#powerOf2BlockLength",
     "http://lv2plug.in/ns/ext/state#interface",
     "http://lv2plug.in/ns/ext/state#makePath",
     "http://lv2plug.in/ns/ext/state#freePath",
@@ -23,6 +21,22 @@ const PROVIDED_FEATURES: &[&str] = &[
     "http://lv2plug.in/ns/lv2core#isLive",
     "http://lv2plug.in/ns/lv2core#inPlaceBroken",
 ];
+
+/// Default value for a control port: the declared `lv2:default` if it is a
+/// finite number, otherwise 0 clamped into whatever finite bounds exist.
+pub fn resolve_control_default(default: f32, min: f32, max: f32) -> f32 {
+    if default.is_finite() {
+        return default;
+    }
+    let mut value = 0.0f32;
+    if min.is_finite() {
+        value = value.max(min);
+    }
+    if max.is_finite() {
+        value = value.min(max);
+    }
+    value
+}
 
 pub struct Lv2PortClassification {
     pub ports: Vec<Lv2PortInfo>,
@@ -89,6 +103,9 @@ pub fn classify_lv2_ports(
         } else if is_atom && is_output {
             Lv2PortType::AtomOutput
         } else {
+            // Unknown port class (e.g. an old event port).  The host still
+            // connects it to a dummy buffer at instantiation time.
+            log::debug!("LV2 port {} ('{}') has an unsupported class", i, port_symbol);
             continue;
         };
 
@@ -99,7 +116,11 @@ pub fn classify_lv2_ports(
             symbol: port_symbol,
             name: port_name,
             port_type,
-            default_value: port_range.default,
+            default_value: if is_control {
+                resolve_control_default(port_range.default, port_range.min, port_range.max)
+            } else {
+                port_range.default
+            },
             min_value: port_range.min,
             max_value: port_range.max,
             is_toggle,
@@ -196,4 +217,36 @@ pub fn scan_plugins_with_world(world: &World) -> Vec<Lv2PluginInfo> {
 
     plugins.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     plugins
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_kept_when_finite() {
+        assert_eq!(resolve_control_default(0.5, 0.0, 1.0), 0.5);
+    }
+
+    #[test]
+    fn nan_default_falls_back_to_zero_in_range() {
+        assert_eq!(resolve_control_default(f32::NAN, -1.0, 1.0), 0.0);
+        assert_eq!(resolve_control_default(f32::NAN, 20.0, 20000.0), 20.0);
+        assert_eq!(resolve_control_default(f32::NAN, -60.0, -6.0), -6.0);
+    }
+
+    #[test]
+    fn nan_default_with_partial_bounds() {
+        assert_eq!(resolve_control_default(f32::NAN, f32::NAN, f32::NAN), 0.0);
+        assert_eq!(resolve_control_default(f32::NAN, 5.0, f32::NAN), 5.0);
+        assert_eq!(resolve_control_default(f32::NAN, f32::NAN, -3.0), -3.0);
+    }
+
+    #[test]
+    fn fixed_block_length_not_provided() {
+        assert!(!PROVIDED_FEATURES.contains(&"http://lv2plug.in/ns/ext/buf-size#fixedBlockLength"));
+        assert!(
+            !PROVIDED_FEATURES.contains(&"http://lv2plug.in/ns/ext/buf-size#powerOf2BlockLength")
+        );
+    }
 }
