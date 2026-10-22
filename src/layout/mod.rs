@@ -7,7 +7,7 @@
 // https://github.com/Leonardo-Pike-Excell/node-arrange
 //
 // The pipeline consists of 5 phases:
-//   1. Ranking: Assign each node to a column/layer (network simplex)
+//   1. Ranking: Assign each node to a column/layer (cycle breaking, longest path, tightening)
 //   2. Dummy nodes: Insert virtual nodes for edges spanning multiple layers
 //   3. Ordering: Minimize edge crossings via barycenter heuristic
 //   4. Y-coordinates: Brandes-Köpf vertical positioning (4-direction balanced)
@@ -28,9 +28,9 @@ pub type LayoutResult = HashMap<NodeId, (f64, f64)>;
 
 /// `pinned`: nodes with fixed positions — participate in ranking/ordering but keep their positions.
 pub fn sugiyama_layout(
-    nodes: Vec<(NodeId, String, &str, f64, f64)>,
-    ports: Vec<(u32, u32, usize, bool)>,
-    links: Vec<(u32, u32, u32, u32, u32)>,
+    mut nodes: Vec<(NodeId, String, &str, f64, f64)>,
+    mut ports: Vec<(u32, u32, usize, bool)>,
+    mut links: Vec<(u32, u32, u32, u32, u32)>,
     config: LayoutConfig,
     pinned: &HashMap<NodeId, (f64, f64)>,
 ) -> LayoutResult {
@@ -38,6 +38,14 @@ pub fn sugiyama_layout(
         return HashMap::new();
     }
 
+    // Callers often build these from HashMap iteration; sort so the result
+    // only depends on the graph, not on input order.
+    nodes.sort_by_key(|n| n.0);
+    nodes.dedup_by_key(|n| n.0);
+    ports.sort_by_key(|p| (p.0, p.1));
+    links.sort_by_key(|l| (l.0, l.1, l.2, l.3, l.4));
+
+    let margin_y = config.margin_y;
     let mut graph = LayoutGraph::new(nodes, ports, links, config);
 
     log::debug!(
@@ -61,71 +69,141 @@ pub fn sugiyama_layout(
     y_coords::assign_y_coords(&mut graph);
     x_coords::assign_x_coords(&mut graph);
 
-    // For each pinned node, store the delta between actual and computed position.
-    let mut pin_deltas: HashMap<usize, (f64, f64)> = HashMap::new();
-    let (mut global_dx, mut global_dy, mut pin_count) = (0.0, 0.0, 0u32);
-    for node in &graph.nodes {
-        if node.is_dummy || node.id == 0 {
-            continue;
-        }
-        if let Some(&(px, py)) = pinned.get(&node.id) {
-            pin_deltas.insert(node.idx, (px - node.x, py - node.y));
-            global_dx += px - node.x;
-            global_dy += py - node.y;
-            pin_count += 1;
-        }
-    }
-    if pin_count > 0 {
-        global_dx /= pin_count as f64;
-        global_dy /= pin_count as f64;
-    }
-
-    // BFS from each free node to find the nearest pinned node's delta.
-    let nearest_pin_offset = |start_idx: usize| -> (f64, f64) {
-        if pin_deltas.is_empty() {
-            return (0.0, 0.0);
-        }
-        let mut visited = vec![false; graph.nodes.len()];
-        let mut queue = std::collections::VecDeque::new();
-        queue.push_back(start_idx);
-        visited[start_idx] = true;
-        while let Some(v) = queue.pop_front() {
-            if let Some(&delta) = pin_deltas.get(&v) {
-                return delta;
-            }
-            for &ei in &graph.out_edges[v] {
-                let w = graph.edges[ei].to_node;
-                if !visited[w] {
-                    visited[w] = true;
-                    queue.push_back(w);
-                }
-            }
-            for &ei in &graph.in_edges[v] {
-                let w = graph.edges[ei].from_node;
-                if !visited[w] {
-                    visited[w] = true;
-                    queue.push_back(w);
-                }
-            }
-        }
-        (global_dx, global_dy)
+    let result = if pinned.is_empty() {
+        graph
+            .nodes
+            .iter()
+            .filter(|n| !n.is_dummy)
+            .map(|n| (n.id, (n.x, n.y)))
+            .collect()
+    } else {
+        apply_pins(&graph, pinned, margin_y)
     };
-
-    let mut result = HashMap::new();
-    for node in &graph.nodes {
-        if node.is_dummy || node.id == 0 {
-            continue;
-        }
-        if let Some(&pos) = pinned.get(&node.id) {
-            result.insert(node.id, pos);
-        } else {
-            let (dx, dy) = nearest_pin_offset(node.idx);
-            result.insert(node.id, (node.x + dx, node.y + dy));
-        }
-    }
 
     log::debug!("Layout: complete, {} positions", result.len());
     result
+}
+
+/// Pinned nodes keep their positions; every free node is moved by the delta
+/// (pinned − computed) of its nearest pinned node in the graph (or the average
+/// delta if it is not connected to any pin), then pushed clear of anything it
+/// would overlap.
+fn apply_pins(
+    graph: &LayoutGraph,
+    pinned: &HashMap<NodeId, (f64, f64)>,
+    margin_y: f64,
+) -> LayoutResult {
+    let n = graph.nodes.len();
+    let is_real = |i: usize| !graph.nodes[i].is_dummy;
+
+    // Multi-source BFS from all pinned nodes (in index order, so ties resolve
+    // deterministically): each node inherits the delta of the pin that
+    // reaches it first.
+    let mut delta: Vec<Option<(f64, f64)>> = vec![None; n];
+    let mut queue = std::collections::VecDeque::new();
+    let (mut sum_dx, mut sum_dy, mut pin_count) = (0.0, 0.0, 0usize);
+    for node in &graph.nodes {
+        if !is_real(node.idx) {
+            continue;
+        }
+        if let Some(&(px, py)) = pinned.get(&node.id) {
+            let d = (px - node.x, py - node.y);
+            delta[node.idx] = Some(d);
+            sum_dx += d.0;
+            sum_dy += d.1;
+            pin_count += 1;
+            queue.push_back(node.idx);
+        }
+    }
+    while let Some(v) = queue.pop_front() {
+        let d = delta[v];
+        let nbrs = graph.out_edges[v]
+            .iter()
+            .map(|&ei| graph.edges[ei].to_node)
+            .chain(graph.in_edges[v].iter().map(|&ei| graph.edges[ei].from_node));
+        for w in nbrs {
+            if delta[w].is_none() {
+                delta[w] = d;
+                queue.push_back(w);
+            }
+        }
+    }
+    let fallback = if pin_count > 0 {
+        (sum_dx / pin_count as f64, sum_dy / pin_count as f64)
+    } else {
+        (0.0, 0.0)
+    };
+
+    let mut result: LayoutResult = HashMap::new();
+    // Occupied rectangles (x, y, w, h): pins first, then free nodes as placed.
+    let mut placed: Vec<(f64, f64, f64, f64)> = Vec::new();
+    let mut free: Vec<(usize, f64, f64)> = Vec::new();
+    for node in graph.nodes.iter().filter(|n| is_real(n.idx)) {
+        if let Some(&pos) = pinned.get(&node.id) {
+            result.insert(node.id, pos);
+            placed.push((pos.0, pos.1, node.width, node.height));
+        } else {
+            let (dx, dy) = delta[node.idx].unwrap_or(fallback);
+            free.push((node.idx, node.x + dx, node.y + dy));
+        }
+    }
+
+    // Place free nodes column by column, top to bottom, so their relative
+    // order is kept when they have to make room.
+    free.sort_by(|a, b| {
+        graph.nodes[a.0]
+            .rank
+            .cmp(&graph.nodes[b.0].rank)
+            .then(a.2.total_cmp(&b.2))
+            .then(a.0.cmp(&b.0))
+    });
+    for (idx, x, y) in free {
+        let node = &graph.nodes[idx];
+        let y = nearest_free_y(&placed, x, y, node.width, node.height, margin_y);
+        placed.push((x, y, node.width, node.height));
+        result.insert(node.id, (x, y));
+    }
+    result
+}
+
+/// True if rectangle (x, y, w, h) overlaps `r` horizontally and comes closer
+/// than `gap` vertically.
+fn collides(r: &(f64, f64, f64, f64), x: f64, y: f64, w: f64, h: f64, gap: f64) -> bool {
+    const EPS: f64 = 1e-6;
+    x < r.0 + r.2 - EPS
+        && r.0 < x + w - EPS
+        && y < r.1 + r.3 + gap - EPS
+        && r.1 < y + h + gap - EPS
+}
+
+/// The y closest to `y` at which a w×h rectangle at `x` keeps `gap` from
+/// every rectangle in `placed` (searching both downward and upward).
+fn nearest_free_y(placed: &[(f64, f64, f64, f64)], x: f64, y: f64, w: f64, h: f64, gap: f64) -> f64 {
+    let search = |down: bool| -> f64 {
+        let mut cy = y;
+        // Each step moves strictly past at least one rectangle, so this ends
+        // after at most placed.len() steps.
+        for _ in 0..=placed.len() {
+            let hits = placed.iter().filter(|r| collides(r, x, cy, w, h, gap));
+            let next = if down {
+                hits.map(|r| r.1 + r.3 + gap).fold(f64::NEG_INFINITY, f64::max)
+            } else {
+                hits.map(|r| r.1 - h - gap).fold(f64::INFINITY, f64::min)
+            };
+            if !next.is_finite() {
+                return cy;
+            }
+            cy = next;
+        }
+        cy
+    };
+    let down = search(true);
+    let up = search(false);
+    if (up - y).abs() < (down - y).abs() {
+        up
+    } else {
+        down
+    }
 }
 
 #[cfg(test)]
@@ -223,19 +301,14 @@ mod tests {
         let result = sugiyama_layout(nodes, vec![], vec![], LayoutConfig::default(), &no_pins);
 
         assert_eq!(result.len(), 3);
-        let mut ys: Vec<f64> = result.values().map(|p| p.1).collect();
-        ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        // Isolated sources stay in the first column, isolated sinks go last.
+        assert_eq!(result[&1].0, result[&3].0);
+        assert!(result[&2].0 > result[&1].0);
         assert!(
-            ys[1] - ys[0] >= 80.0,
-            "Nodes too close: y[0]={}, y[1]={}",
-            ys[0],
-            ys[1]
-        );
-        assert!(
-            ys[2] - ys[1] >= 80.0,
-            "Nodes too close: y[1]={}, y[2]={}",
-            ys[1],
-            ys[2]
+            (result[&1].1 - result[&3].1).abs() >= 80.0,
+            "Nodes too close: {:?} {:?}",
+            result[&1],
+            result[&3]
         );
     }
 
@@ -447,5 +520,232 @@ mod tests {
             sp.1,
             max_dist
         );
+    }
+
+    type Node = (NodeId, String, &'static str, f64, f64);
+    type Link = (u32, u32, u32, u32, u32);
+
+    fn node(id: NodeId, kind: &'static str, h: f64) -> Node {
+        (id, format!("n{}", id), kind, 180.0, h)
+    }
+
+    /// Links between nodes; port ids are derived from the link id.
+    fn links(pairs: &[(u32, u32)]) -> Vec<Link> {
+        pairs
+            .iter()
+            .enumerate()
+            .map(|(i, &(a, b))| (1000 + i as u32, a, 10_000 + i as u32, b, 20_000 + i as u32))
+            .collect()
+    }
+
+    fn ports_for(links: &[Link]) -> Vec<(u32, u32, usize, bool)> {
+        links
+            .iter()
+            .flat_map(|l| [(l.2, l.1, 0, true), (l.4, l.3, 0, false)])
+            .collect()
+    }
+
+    fn assert_no_overlap(nodes: &[Node], result: &LayoutResult) {
+        for (i, a) in nodes.iter().enumerate() {
+            for b in &nodes[i + 1..] {
+                let (pa, pb) = (result[&a.0], result[&b.0]);
+                assert!(pa.0.is_finite() && pa.1.is_finite(), "non-finite {:?}", pa);
+                let x_overlap = pa.0 < pb.0 + b.3 && pb.0 < pa.0 + a.3;
+                let y_overlap = pa.1 < pb.1 + b.4 && pb.1 < pa.1 + a.4;
+                assert!(
+                    !(x_overlap && y_overlap),
+                    "node {} at {:?} overlaps node {} at {:?}",
+                    a.0,
+                    pa,
+                    b.0,
+                    pb
+                );
+            }
+        }
+    }
+
+    fn run(nodes: &[Node], links: &[Link], pinned: &HashMap<NodeId, (f64, f64)>) -> LayoutResult {
+        sugiyama_layout(
+            nodes.to_vec(),
+            ports_for(links),
+            links.to_vec(),
+            LayoutConfig::default(),
+            pinned,
+        )
+    }
+
+    #[test]
+    fn test_cycle_and_self_loop() {
+        // S → A → B → C → A (cycle), B → B (self-loop), C → T
+        let nodes = vec![
+            node(1, "Source", 80.0),
+            node(2, "Plugin", 100.0),
+            node(3, "Plugin", 120.0),
+            node(4, "Plugin", 90.0),
+            node(5, "Sink", 80.0),
+        ];
+        let l = links(&[(1, 2), (2, 3), (3, 4), (4, 2), (3, 3), (4, 5)]);
+        let result = run(&nodes, &l, &HashMap::new());
+        assert_eq!(result.len(), 5);
+        let xs: Vec<f64> = (1..=5).map(|id| result[&id].0).collect();
+        for w in xs.windows(2) {
+            assert!(w[0] < w[1], "cycle nodes should spread across columns: {:?}", xs);
+        }
+        assert_no_overlap(&nodes, &result);
+    }
+
+    #[test]
+    fn test_pure_cycle_no_panic() {
+        let nodes = vec![node(1, "Plugin", 80.0), node(2, "Plugin", 80.0), node(3, "Plugin", 80.0)];
+        let l = links(&[(1, 2), (2, 3), (3, 1), (1, 1)]);
+        let result = run(&nodes, &l, &HashMap::new());
+        let mut xs: Vec<f64> = result.values().map(|p| p.0).collect();
+        xs.sort_by(f64::total_cmp);
+        xs.dedup();
+        assert_eq!(xs.len(), 3, "each cycle node gets its own column");
+    }
+
+    fn sample_graph() -> (Vec<Node>, Vec<Link>) {
+        let nodes = vec![
+            node(1, "Source", 80.0),
+            node(2, "StreamOutput", 60.0),
+            node(3, "Plugin", 140.0),
+            node(4, "Plugin", 100.0),
+            node(5, "Plugin", 120.0),
+            node(6, "Sink", 80.0),
+            node(7, "StreamInput", 80.0),
+            node(8, "Duplex", 200.0),
+            node(9, "Sink", 80.0),
+        ];
+        let l = links(&[
+            (1, 3),
+            (3, 4),
+            (4, 5),
+            (5, 6),
+            (2, 6),
+            (2, 4),
+            (1, 7),
+            (8, 5),
+            (3, 6),
+            (1, 6),
+            (8, 9),
+            (5, 3),
+        ]);
+        (nodes, l)
+    }
+
+    #[test]
+    fn test_deterministic_under_shuffled_input() {
+        let (nodes, l) = sample_graph();
+        let reference = run(&nodes, &l, &HashMap::new());
+        for shift in 1..nodes.len() {
+            let mut n2 = nodes.clone();
+            n2.rotate_left(shift);
+            let mut l2 = l.clone();
+            l2.rotate_left(shift % l.len());
+            l2.reverse();
+            let mut p2 = ports_for(&l2);
+            p2.reverse();
+            let result = sugiyama_layout(n2, p2, l2, LayoutConfig::default(), &HashMap::new());
+            assert_eq!(result, reference, "layout changed with input order (shift {})", shift);
+        }
+    }
+
+    #[test]
+    fn test_mixed_heights_connected_no_overlap() {
+        let (nodes, l) = sample_graph();
+        let result = run(&nodes, &l, &HashMap::new());
+        assert_eq!(result.len(), nodes.len());
+        assert_no_overlap(&nodes, &result);
+    }
+
+    #[test]
+    fn test_long_edges_crossing_column() {
+        // Two long edges (1→5, 2→5) and (1→4) cross the columns of the chain
+        // 1 → 3 → 6 → 4 → 5, plus a short side branch.
+        let nodes = vec![
+            node(1, "Source", 80.0),
+            node(2, "Source", 120.0),
+            node(3, "Plugin", 100.0),
+            node(6, "Plugin", 160.0),
+            node(4, "Plugin", 90.0),
+            node(5, "Sink", 80.0),
+            node(7, "Plugin", 70.0),
+        ];
+        let l = links(&[(1, 3), (3, 6), (6, 4), (4, 5), (1, 5), (2, 5), (1, 4), (2, 7), (7, 6)]);
+        let result = run(&nodes, &l, &HashMap::new());
+        assert_eq!(result.len(), nodes.len());
+        assert!(result[&1].0 < result[&3].0);
+        assert!(result[&3].0 < result[&6].0);
+        assert!(result[&6].0 < result[&4].0);
+        assert!(result[&4].0 < result[&5].0);
+        assert_no_overlap(&nodes, &result);
+    }
+
+    #[test]
+    fn test_random_graphs_no_overlap() {
+        let kinds = ["Source", "Sink", "StreamOutput", "StreamInput", "Duplex", "Plugin"];
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut rnd = move |m: u64| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) % m
+        };
+        for _ in 0..30 {
+            let count = 2 + rnd(40) as u32;
+            let nodes: Vec<Node> = (1..=count)
+                .map(|id| node(id, kinds[rnd(kinds.len() as u64) as usize], 40.0 + rnd(200) as f64))
+                .collect();
+            let pairs: Vec<(u32, u32)> = (0..rnd(count as u64 * 2))
+                .map(|_| (1 + rnd(count as u64) as u32, 1 + rnd(count as u64) as u32))
+                .collect();
+            let l = links(&pairs);
+            let result = run(&nodes, &l, &HashMap::new());
+            assert_eq!(result.len(), nodes.len());
+            assert_no_overlap(&nodes, &result);
+        }
+    }
+
+    #[test]
+    fn test_pinned_and_free_never_overlap() {
+        let (mut nodes, l) = sample_graph();
+        nodes.push(node(50, "Plugin", 150.0)); // isolated obstacle, pinned below
+        let base: HashMap<NodeId, (f64, f64)> =
+            [(3u32, (400.0, 100.0)), (6u32, (900.0, 300.0))].into_iter().collect();
+        let mut x = -200.0;
+        while x <= 1400.0 {
+            let mut y = -300.0;
+            while y <= 700.0 {
+                let mut pinned = base.clone();
+                pinned.insert(50, (x, y));
+                let result = run(&nodes, &l, &pinned);
+                assert_eq!(result[&50], (x, y));
+                assert_eq!(result[&3], (400.0, 100.0));
+                // Pinned nodes may overlap each other (user's choice), but free
+                // nodes must not overlap anything.
+                let free: Vec<&Node> = nodes.iter().filter(|n| !pinned.contains_key(&n.0)).collect();
+                for a in &free {
+                    for b in &nodes {
+                        if a.0 == b.0 {
+                            continue;
+                        }
+                        let (pa, pb) = (result[&a.0], result[&b.0]);
+                        let x_overlap = pa.0 < pb.0 + b.3 && pb.0 < pa.0 + a.3;
+                        let y_overlap = pa.1 < pb.1 + b.4 && pb.1 < pa.1 + a.4;
+                        assert!(
+                            !(x_overlap && y_overlap),
+                            "obstacle at ({}, {}): free node {} {:?} overlaps node {} {:?}",
+                            x,
+                            y,
+                            a.0,
+                            pa,
+                            b.0,
+                            pb
+                        );
+                    }
+                }
+                y += 50.0;
+            }
+            x += 100.0;
+        }
     }
 }

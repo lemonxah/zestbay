@@ -36,18 +36,6 @@ pub struct LayoutNode {
     /// Final y coordinate (top-left corner). Set by y_coords phase.
     pub y: f64,
 
-    // --- Brandes-Köpf fields ---
-    /// Block root node index.
-    pub root: usize,
-    /// Next node in alignment chain (index into graph's node vec).
-    pub aligned: usize,
-    /// Socket alignment offset within a block.
-    pub inner_shift: f64,
-    /// Class sink for vertical compaction.
-    pub sink: usize,
-    /// Class shift for vertical compaction.
-    pub shift: f64,
-
     /// Whether this is a dummy node inserted for long edges.
     pub is_dummy: bool,
     /// Index of this node in the graph's node vector.
@@ -192,11 +180,6 @@ impl LayoutNode {
             order: 0,
             x: 0.0,
             y: 0.0,
-            root: idx,
-            aligned: idx,
-            inner_shift: 0.0,
-            sink: idx,
-            shift: f64::INFINITY,
             is_dummy: false,
             idx,
         }
@@ -213,24 +196,9 @@ impl LayoutNode {
             order: 0,
             x: 0.0,
             y: 0.0,
-            root: idx,
-            aligned: idx,
-            inner_shift: 0.0,
-            sink: idx,
-            shift: f64::INFINITY,
             is_dummy: true,
             idx,
         }
-    }
-
-    /// Reset Brandes-Köpf fields for a new iteration.
-    pub fn bk_reset(&mut self) {
-        self.root = self.idx;
-        self.aligned = self.idx;
-        self.inner_shift = 0.0;
-        self.sink = self.idx;
-        self.shift = f64::INFINITY;
-        self.y = 0.0;
     }
 }
 
@@ -286,12 +254,15 @@ impl LayoutGraph {
             }
         }
 
-        // Add edges
+        // Add edges (self-loops carry no layering information and are dropped)
         for (link_id, out_node_id, out_port_id, in_node_id, in_port_id) in links {
             if let (Some(&from_idx), Some(&to_idx)) = (
                 graph.id_to_idx.get(&out_node_id),
                 graph.id_to_idx.get(&in_node_id),
             ) {
+                if from_idx == to_idx {
+                    continue;
+                }
                 let edge_idx = graph.edges.len();
                 graph.edges.push(LayoutEdge {
                     id: link_id,
@@ -346,11 +317,6 @@ impl LayoutGraph {
             .iter()
             .map(|&ei| self.edges[ei].from_node)
             .collect()
-    }
-
-    /// Get the number of real (non-dummy) nodes.
-    pub fn real_node_count(&self) -> usize {
-        self.nodes.iter().filter(|n| !n.is_dummy).count()
     }
 
     /// Build column lists from node ranks. Must be called after ranking.
@@ -427,78 +393,99 @@ impl LayoutGraph {
         components
     }
 
-    /// Topological sort. Returns node indices in topological order.
-    /// If the graph has cycles, breaks them arbitrarily.
-    pub fn topological_sort(&self) -> Vec<usize> {
+
+    /// Reverse edge `ei` in place (used to break cycles).
+    fn reverse_edge(&mut self, ei: usize) {
+        let (from, to) = (self.edges[ei].from_node, self.edges[ei].to_node);
+        self.out_edges[from].retain(|&e| e != ei);
+        self.in_edges[to].retain(|&e| e != ei);
+        let edge = &mut self.edges[ei];
+        std::mem::swap(&mut edge.from_node, &mut edge.to_node);
+        std::mem::swap(&mut edge.from_port, &mut edge.to_port);
+        self.out_edges[to].push(ei);
+        self.in_edges[from].push(ei);
+    }
+
+    /// Make the graph acyclic by reversing the back edges of a deterministic
+    /// DFS (started from source nodes first, then in index order).
+    /// Returns the number of reversed edges.
+    pub fn break_cycles(&mut self) -> usize {
         let n = self.nodes.len();
-        let mut in_degree: Vec<usize> = vec![0; n];
-        for node_idx in 0..n {
-            in_degree[node_idx] = self.in_edges[node_idx].len();
-        }
+        // 0 = unvisited, 1 = on the DFS stack, 2 = finished
+        let mut state = vec![0u8; n];
+        let mut back_edges = Vec::new();
+        let starts: Vec<usize> = (0..n)
+            .filter(|&i| self.in_edges[i].is_empty())
+            .chain(0..n)
+            .collect();
 
-        let mut queue: Vec<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
-        let mut result = Vec::with_capacity(n);
-
-        while let Some(v) = queue.pop() {
-            result.push(v);
-            for &ei in &self.out_edges[v] {
-                let w = self.edges[ei].to_node;
-                if in_degree[w] > 0 {
-                    in_degree[w] -= 1;
-                    if in_degree[w] == 0 {
-                        queue.push(w);
+        for s in starts {
+            if state[s] != 0 {
+                continue;
+            }
+            state[s] = 1;
+            let mut stack: Vec<(usize, usize)> = vec![(s, 0)];
+            while let Some(top) = stack.last_mut() {
+                let v = top.0;
+                if top.1 < self.out_edges[v].len() {
+                    let ei = self.out_edges[v][top.1];
+                    top.1 += 1;
+                    let w = self.edges[ei].to_node;
+                    match state[w] {
+                        0 => {
+                            state[w] = 1;
+                            stack.push((w, 0));
+                        }
+                        1 => back_edges.push(ei),
+                        _ => {}
                     }
+                } else {
+                    state[v] = 2;
+                    stack.pop();
                 }
             }
         }
 
-        // If some nodes weren't reached (cycles), add them anyway
-        if result.len() < n {
-            for i in 0..n {
-                if !result.contains(&i) {
-                    result.push(i);
-                }
-            }
+        for &ei in &back_edges {
+            self.reverse_edge(ei);
         }
-
-        result
+        back_edges.len()
     }
 
     /// Topological generations: group nodes into layers where each layer's
     /// nodes have all predecessors in earlier layers.
-    /// Returns layers from source to sink.
+    /// Returns layers from source to sink.  Expects an acyclic graph
+    /// (see [`break_cycles`](Self::break_cycles)).
     pub fn topological_generations(&self) -> Vec<Vec<usize>> {
         let n = self.nodes.len();
-        let mut in_degree: Vec<usize> = vec![0; n];
-        for node_idx in 0..n {
-            in_degree[node_idx] = self.in_edges[node_idx].len();
-        }
+        let mut in_degree: Vec<usize> = (0..n).map(|i| self.in_edges[i].len()).collect();
 
         let mut current: Vec<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
         let mut generations = Vec::new();
+        let mut seen = 0;
 
         while !current.is_empty() {
-            generations.push(current.clone());
+            seen += current.len();
             let mut next = Vec::new();
             for &v in &current {
                 for &ei in &self.out_edges[v] {
                     let w = self.edges[ei].to_node;
-                    if in_degree[w] > 0 {
-                        in_degree[w] -= 1;
-                        if in_degree[w] == 0 {
-                            next.push(w);
-                        }
+                    in_degree[w] -= 1;
+                    if in_degree[w] == 0 {
+                        next.push(w);
                     }
                 }
             }
-            current = next;
+            generations.push(std::mem::replace(&mut current, next));
         }
 
-        // Handle nodes in cycles: add as final generation
-        let visited: HashSet<usize> = generations.iter().flatten().copied().collect();
-        let remaining: Vec<usize> = (0..n).filter(|i| !visited.contains(i)).collect();
-        if !remaining.is_empty() {
-            generations.push(remaining);
+        // Defensive: should not happen on a DAG.  Give each leftover node its
+        // own trailing generation rather than piling them into one column.
+        if seen < n {
+            let placed: HashSet<usize> = generations.iter().flatten().copied().collect();
+            for i in (0..n).filter(|i| !placed.contains(i)) {
+                generations.push(vec![i]);
+            }
         }
 
         generations
