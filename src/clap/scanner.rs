@@ -3,8 +3,11 @@
 //! Scans standard directories for `.clap` bundles, dlopen's each one,
 //! and enumerates the plugins within via the CLAP plugin factory.
 
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use crate::plugin::types::*;
 
@@ -17,12 +20,65 @@ const CLAP_SEARCH_DIRS: &[&str] = &[
     "/usr/local/lib64/clap",
 ];
 
-/// Scan all standard directories and return a list of CLAP plugin infos.
-/// Look up a single plugin by URI without the caller needing a full scan.
-pub fn find_plugin(uri: &str) -> Option<PluginInfo> {
-    scan_plugins().into_iter().find(|p| p.uri == uri)
+/// Results of the last full scan, keyed by URI (shared shape with VST3).
+pub(crate) struct ScanCache {
+    inner: Mutex<Option<(HashMap<String, PluginInfo>, Instant)>>,
 }
 
+/// A cache miss triggers a full rescan at most this often.
+const MISS_RESCAN_COOLDOWN: Duration = Duration::from_secs(30);
+
+impl ScanCache {
+    pub(crate) const fn new() -> Self {
+        Self {
+            inner: Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn store(&self, plugins: &[PluginInfo]) {
+        let map = plugins.iter().map(|p| (p.uri.clone(), p.clone())).collect();
+        *self.inner.lock().unwrap_or_else(|e| e.into_inner()) = Some((map, Instant::now()));
+    }
+
+    pub(crate) fn get(&self, uri: &str) -> Option<PluginInfo> {
+        let lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        lock.as_ref().and_then(|(map, _)| map.get(uri).cloned())
+    }
+
+    /// Whether a miss may trigger a full rescan (never scanned, or the last
+    /// scan is older than the cooldown).
+    pub(crate) fn miss_should_rescan(&self) -> bool {
+        let lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        match lock.as_ref() {
+            None => true,
+            Some((_, at)) => at.elapsed() >= MISS_RESCAN_COOLDOWN,
+        }
+    }
+
+    /// Cached lookup; on a miss rescans with `scan` (rate limited).
+    pub(crate) fn find(&self, uri: &str, scan: impl FnOnce()) -> Option<PluginInfo> {
+        if let Some(info) = self.get(uri) {
+            return Some(info);
+        }
+        if !self.miss_should_rescan() {
+            return None;
+        }
+        scan();
+        self.get(uri)
+    }
+}
+
+static CACHE: ScanCache = ScanCache::new();
+
+/// Look up a single plugin by URI.  Served from the cache of the last
+/// `scan_plugins()`; a miss rescans at most once per cooldown period.
+pub fn find_plugin(uri: &str) -> Option<PluginInfo> {
+    CACHE.find(uri, || {
+        scan_plugins();
+    })
+}
+
+/// Scan all standard directories and return a list of CLAP plugin infos.
 pub fn scan_plugins() -> Vec<PluginInfo> {
     let mut plugins = Vec::new();
     let dirs = expand_search_dirs();
@@ -37,6 +93,7 @@ pub fn scan_plugins() -> Vec<PluginInfo> {
 
     plugins.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     log::info!("CLAP: found {} plugins total", plugins.len());
+    CACHE.store(&plugins);
     plugins
 }
 
@@ -341,6 +398,53 @@ fn category_from_features(features: &[String]) -> PluginCategory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn info(uri: &str) -> PluginInfo {
+        PluginInfo {
+            uri: uri.to_string(),
+            name: uri.to_string(),
+            format: PluginFormat::Clap,
+            category: PluginCategory::Utility,
+            author: None,
+            ports: Vec::new(),
+            audio_inputs: 0,
+            audio_outputs: 0,
+            control_inputs: 0,
+            control_outputs: 0,
+            required_features: Vec::new(),
+            compatible: true,
+            has_ui: false,
+            library_path: format!("/x/{uri}.clap"),
+        }
+    }
+
+    // ---- ScanCache ----
+
+    #[test]
+    fn cache_hit_does_not_scan() {
+        let cache = ScanCache::new();
+        cache.store(&[info("a"), info("b")]);
+        let found = cache.find("b", || panic!("must not scan on a hit"));
+        assert_eq!(found.unwrap().library_path, "/x/b.clap");
+    }
+
+    #[test]
+    fn cache_miss_scans_once_then_rate_limits() {
+        let cache = ScanCache::new();
+        let mut scans = 0;
+        assert!(cache.find("c", || {
+            scans += 1;
+            cache_store_for_test(&cache, &[info("c")]);
+        })
+        .is_some());
+        assert_eq!(scans, 1);
+        // A recent scan: a miss for an unknown URI does not rescan.
+        assert!(cache.find("missing", || panic!("rate limited")).is_none());
+    }
+
+    fn cache_store_for_test(cache: &ScanCache, plugins: &[PluginInfo]) {
+        cache.store(plugins);
+    }
 
     // ---- category_from_features ----
 
