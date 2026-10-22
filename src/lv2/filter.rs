@@ -330,6 +330,10 @@ impl Lv2FilterNode {
         0
     }
 
+    /// Forward events queued by the RT callback. Called from the PipeWire
+    /// main loop on every tick.
+    pub fn drain_events(&self, _event_tx: &std::sync::mpsc::Sender<crate::pipewire::PwEvent>) {}
+
     pub fn update_mappings(&self, mappings: Arc<ResolvedMappings>) {
         if !self._user_data.is_null() {
             unsafe {

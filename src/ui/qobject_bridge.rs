@@ -583,7 +583,7 @@ impl qobject::AppController {
                 if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager {
                     let info = crate::lv2::Lv2InstanceInfo {
                         id: instance_id,
-                        stable_id: sid,
+                        stable_id: sid.clone(),
                         plugin_uri: sp.uri.clone(),
                         format: plugin_format,
                         display_name: sp.display_name.clone(),
@@ -592,6 +592,7 @@ impl qobject::AppController {
                         active: true,
                         bypassed: sp.bypassed,
                         lv2_state: sp.lv2_state.clone(),
+                        plugin_state: None,
                     };
                     mgr.register_instance(info);
                 }
@@ -606,6 +607,7 @@ impl qobject::AppController {
                         format: format_str,
                         lv2_state: sp.lv2_state,
                         plugin_state: None,
+                        stable_id: sid,
                     });
                 }
             }
@@ -2054,10 +2056,11 @@ impl qobject::AppController {
 
         let format_str = plugin_format.as_str().to_string();
 
+        let stable_id = uuid::Uuid::new_v4().to_string();
         if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager {
             let info = crate::lv2::Lv2InstanceInfo {
                 id: instance_id,
-                stable_id: uuid::Uuid::new_v4().to_string(),
+                stable_id: stable_id.clone(),
                 plugin_uri: uri_str.clone(),
                 format: plugin_format,
                 display_name: display_name.clone(),
@@ -2066,6 +2069,7 @@ impl qobject::AppController {
                 active: true,
                 bypassed: false,
                 lv2_state: Vec::new(),
+                plugin_state: None,
             };
             mgr.register_instance(info);
         }
@@ -2085,6 +2089,7 @@ impl qobject::AppController {
                 format: format_str,
                 lv2_state: Vec::new(),
                 plugin_state: None,
+                stable_id,
             });
         }
 

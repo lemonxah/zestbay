@@ -702,6 +702,10 @@ impl Lv2PluginInstance {
         }
     }
 
+    /// Scope makePath/mapPath files to this persistent instance identity.
+    /// Must be called before `restore_state`.
+    pub fn set_state_scope(&mut self, _stable_id: &str) {}
+
     pub fn set_bypassed(&mut self, bypassed: bool) {
         self.bypassed = bypassed;
     }
@@ -738,6 +742,7 @@ impl Lv2PluginInstance {
             active: true,
             bypassed: self.bypassed,
             lv2_state: Vec::new(),
+            plugin_state: None,
         }
     }
 

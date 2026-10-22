@@ -139,6 +139,8 @@ pub enum PwCommand {
         lv2_state: Vec<crate::lv2::state::StateEntry>,
         /// Opaque CLAP/VST3 state blob to restore after instantiation.
         plugin_state: Option<Vec<u8>>,
+        /// Persistent instance identity (survives restarts, unlike instance_id).
+        stable_id: String,
     },
     RemovePlugin {
         instance_id: u64,

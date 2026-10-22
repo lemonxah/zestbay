@@ -18,6 +18,11 @@ const CLAP_SEARCH_DIRS: &[&str] = &[
 ];
 
 /// Scan all standard directories and return a list of CLAP plugin infos.
+/// Look up a single plugin by URI without the caller needing a full scan.
+pub fn find_plugin(uri: &str) -> Option<PluginInfo> {
+    scan_plugins().into_iter().find(|p| p.uri == uri)
+}
+
 pub fn scan_plugins() -> Vec<PluginInfo> {
     let mut plugins = Vec::new();
     let dirs = expand_search_dirs();

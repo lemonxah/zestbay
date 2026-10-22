@@ -443,26 +443,24 @@ pub fn run_probe_main(args: &[String]) -> ! {
             eprintln!("probe: instantiation completed successfully");
         }
         "clap" => {
-            let all_clap = crate::clap::scanner::scan_plugins();
-            if let Some(info) = all_clap.iter().find(|p| p.uri == *uri) {
+            if let Some(info) = crate::clap::scanner::find_plugin(uri) {
                 let _inst = unsafe {
                     crate::clap::host::ClapPluginInstance::new(
                         &info.library_path,
                         uri,
-                        info,
+                        &info,
                         sample_rate,
                     )
                 };
             }
         }
         "vst3" => {
-            let all_vst3 = crate::vst3::scanner::scan_plugins();
-            if let Some(info) = all_vst3.iter().find(|p| p.uri == *uri) {
+            if let Some(info) = crate::vst3::scanner::find_plugin(uri) {
                 let _inst = unsafe {
                     crate::vst3::host::Vst3PluginInstance::new(
                         &info.library_path,
                         uri,
-                        info,
+                        &info,
                         sample_rate,
                     )
                 };

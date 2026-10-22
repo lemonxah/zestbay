@@ -1149,6 +1149,7 @@ impl Vst3PluginInstance {
             active: true,
             bypassed: self.bypassed,
             lv2_state: Vec::new(),
+            plugin_state: None,
         }
     }
 

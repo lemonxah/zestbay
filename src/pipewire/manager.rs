@@ -31,6 +31,7 @@ enum InternalOp {
         format: String,
         lv2_state: Vec<crate::lv2::state::StateEntry>,
         plugin_state: Option<Vec<u8>>,
+        stable_id: String,
     },
     RemovePlugin {
         instance_id: u64,
@@ -453,6 +454,7 @@ fn run_pipewire_thread(
                         format,
                         lv2_state,
                         plugin_state,
+                        stable_id,
                     } => InternalOp::AddPlugin {
                         plugin_uri,
                         instance_id,
@@ -460,6 +462,7 @@ fn run_pipewire_thread(
                         format,
                         lv2_state,
                         plugin_state,
+                        stable_id,
                     },
                     PwCommand::RemovePlugin { instance_id } => {
                         InternalOp::RemovePlugin { instance_id }
@@ -576,6 +579,7 @@ fn run_pipewire_thread(
                 format,
                 lv2_state,
                 plugin_state: _,
+                stable_id: _,
             } => {
                 let sample_rate = pw_sample_rate.load(Ordering::Relaxed) as f64;
                 let block_length = pw_quantum.load(Ordering::Relaxed);
@@ -1160,9 +1164,8 @@ fn handle_add_clap_plugin(
     }
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let all_clap = crate::clap::scanner::scan_plugins();
-        let clap_info = match all_clap.iter().find(|p| p.uri == uri_owned) {
-            Some(info) => info.clone(),
+        let clap_info = match crate::clap::scanner::find_plugin(&uri_owned) {
+            Some(info) => info,
             None => return Err(format!("CLAP plugin not found: {}", uri_owned)),
         };
 
@@ -1291,9 +1294,8 @@ fn handle_add_vst3_plugin(
     }
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let all_vst3 = crate::vst3::scanner::scan_plugins();
-        let vst3_info = match all_vst3.iter().find(|p| p.uri == uri_owned) {
-            Some(info) => info.clone(),
+        let vst3_info = match crate::vst3::scanner::find_plugin(&uri_owned) {
+            Some(info) => info,
             None => return Err(format!("VST3 plugin not found: {}", uri_owned)),
         };
 

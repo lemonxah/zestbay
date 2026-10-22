@@ -661,6 +661,7 @@ impl ClapPluginInstance {
             active: true,
             bypassed: self.bypassed,
             lv2_state: Vec::new(),
+            plugin_state: None,
         }
     }
 }
