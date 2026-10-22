@@ -194,6 +194,8 @@ pub struct ClapParam {
     pub max: f64,
     pub default: f64,
     pub is_toggle: bool,
+    /// Discrete steps between min and max for stepped params (0 = continuous).
+    pub step_count: u32,
 }
 
 unsafe impl Send for ClapPluginInstance {}
@@ -376,10 +378,15 @@ impl ClapPluginInstance {
                         if let Some(get_val) = pe.get_value {
                             get_val(plugin_ptr, info.id, &mut value);
                         }
-                        let is_toggle = info.flags & clap_sys::ext::params::CLAP_PARAM_IS_STEPPED
-                            != 0
-                            && info.min_value == 0.0
-                            && info.max_value == 1.0;
+                        let is_stepped =
+                            info.flags & clap_sys::ext::params::CLAP_PARAM_IS_STEPPED != 0;
+                        let is_toggle =
+                            is_stepped && info.min_value == 0.0 && info.max_value == 1.0;
+                        let step_count = if is_stepped && info.max_value > info.min_value {
+                            (info.max_value - info.min_value).round() as u32
+                        } else {
+                            0
+                        };
                         params.push(ClapParam {
                             id: info.id,
                             port_index: params.len(),
@@ -388,6 +395,7 @@ impl ClapPluginInstance {
                             max: info.max_value,
                             default: info.default_value,
                             is_toggle,
+                            step_count,
                         });
                         initial_values.push(value);
                     }
@@ -1221,6 +1229,7 @@ mod tests {
             max: 1.0,
             default: 0.0,
             is_toggle: false,
+            step_count: 0,
         }
     }
 

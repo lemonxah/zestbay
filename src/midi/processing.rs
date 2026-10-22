@@ -219,6 +219,10 @@ pub(crate) fn compute_mapped_value(
                 return Some(if pressed { entry.max } else { entry.min });
             }
             let t = value as f32 / 127.0;
+            if entry.step_count > 0 {
+                let steps = entry.step_count as f32;
+                return Some(entry.min + (t * steps).round() / steps * (entry.max - entry.min));
+            }
             if entry.is_logarithmic {
                 Some(entry.min * (entry.max / entry.min).powf(t))
             } else {
@@ -483,6 +487,7 @@ mod tests {
             },
             is_logarithmic: is_log,
             is_toggle: mode == MappingMode::Toggle,
+            step_count: 0,
         };
         (entry, port_updates)
     }
@@ -558,6 +563,21 @@ mod tests {
         let at_mid = cc(&entry, &mut state, 64).unwrap();
         let linear_mid = (20.0 + 20000.0) / 2.0;
         assert!(at_mid < linear_mid); // log curve is below linear at midpoint
+    }
+
+    #[test]
+    fn continuous_stepped_param_rounds() {
+        let (mut entry, _pu) = make_entry(0.0, 4.0, MappingMode::Continuous, false);
+        entry.step_count = 4;
+        let mut state = MidiProcessingState::new();
+
+        for v in 0..=127u8 {
+            let out = cc(&entry, &mut state, v).unwrap();
+            assert_eq!(out, out.round(), "value {} gave {}", v, out);
+        }
+        assert_eq!(cc(&entry, &mut state, 0), Some(0.0));
+        assert_eq!(cc(&entry, &mut state, 127), Some(4.0));
+        assert_eq!(cc(&entry, &mut state, 64), Some(2.0));
     }
 
     #[test]

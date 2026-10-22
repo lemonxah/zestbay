@@ -670,6 +670,8 @@ pub struct Vst3Param {
     /// Is this the bypass parameter?
     pub is_bypass: bool,
     pub is_toggle: bool,
+    /// VST3 `stepCount` (0 = continuous).
+    pub step_count: u32,
 }
 
 /// Preallocated state used by `process()` (or by the main thread while the
@@ -1008,6 +1010,7 @@ impl Vst3PluginInstance {
                         default: pinfo.defaultNormalizedValue,
                         is_bypass: false,
                         is_toggle: pinfo.stepCount == 1,
+                        step_count: pinfo.stepCount.max(0) as u32,
                     });
                 }
             }
