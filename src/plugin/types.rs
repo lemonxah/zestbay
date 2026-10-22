@@ -1,7 +1,7 @@
 //! Format-agnostic plugin types used across LV2, CLAP, and VST3 backends.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -338,45 +338,231 @@ pub struct PortSlot {
     pub value: AtomicF32,
 }
 
+// ---------------------------------------------------------------------------
+// Lock-free message ring (length-prefixed byte messages over an rtrb SPSC ring)
+// ---------------------------------------------------------------------------
+
+/// Result of popping a message into a caller-provided buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MsgPop {
+    Empty,
+    /// A message of this many bytes was copied into the buffer.
+    Data(usize),
+    /// The next message (this many bytes) does not fit; it was left queued.
+    TooLarge(usize),
+}
+
+const MSG_HEADER: usize = 4;
+
+/// Producer half of a length-prefixed message ring.  Never allocates.
+pub struct MsgProducer(rtrb::Producer<u8>);
+
+/// Consumer half of a length-prefixed message ring.  Never allocates
+/// (except `pop_vec`, which is for non-RT callers).
+pub struct MsgConsumer(rtrb::Consumer<u8>);
+
+pub fn msg_ring(capacity: usize) -> (MsgProducer, MsgConsumer) {
+    let (p, c) = rtrb::RingBuffer::new(capacity);
+    (MsgProducer(p), MsgConsumer(c))
+}
+
+impl MsgProducer {
+    /// Push one message.  Returns false (dropping it) if there is not
+    /// enough free space.  Header and payload are committed together.
+    pub fn push(&mut self, data: &[u8]) -> bool {
+        self.push_parts(&[data])
+    }
+
+    /// Push one message made of several concatenated parts.
+    pub fn push_parts(&mut self, parts: &[&[u8]]) -> bool {
+        let len: usize = parts.iter().map(|p| p.len()).sum();
+        let Ok(len32) = u32::try_from(len) else {
+            return false;
+        };
+        let total = MSG_HEADER + len;
+        let Ok(mut chunk) = self.0.write_chunk(total) else {
+            return false;
+        };
+        let (a, b) = chunk.as_mut_slices();
+        let header = len32.to_ne_bytes();
+        let mut pos = 0usize;
+        let mut put = |mut bytes: &[u8]| {
+            if pos < a.len() {
+                let n = (a.len() - pos).min(bytes.len());
+                a[pos..pos + n].copy_from_slice(&bytes[..n]);
+                pos += n;
+                bytes = &bytes[n..];
+            }
+            if !bytes.is_empty() {
+                let off = pos - a.len();
+                b[off..off + bytes.len()].copy_from_slice(bytes);
+                pos += bytes.len();
+            }
+        };
+        put(&header);
+        for part in parts {
+            put(part);
+        }
+        chunk.commit_all();
+        true
+    }
+}
+
+impl MsgConsumer {
+    /// Length of the next complete message, if any.
+    pub fn peek_len(&mut self) -> Option<usize> {
+        let chunk = self.0.read_chunk(MSG_HEADER).ok()?;
+        let (a, b) = chunk.as_slices();
+        let mut header = [0u8; MSG_HEADER];
+        for (i, byte) in a.iter().chain(b.iter()).enumerate() {
+            header[i] = *byte;
+        }
+        let len = u32::from_ne_bytes(header) as usize;
+        drop(chunk);
+        if self.0.slots() >= MSG_HEADER + len {
+            Some(len)
+        } else {
+            None
+        }
+    }
+
+    /// Copy the next message into `out` and consume it.
+    pub fn pop_into(&mut self, out: &mut [u8]) -> MsgPop {
+        let Some(len) = self.peek_len() else {
+            return MsgPop::Empty;
+        };
+        if len > out.len() {
+            return MsgPop::TooLarge(len);
+        }
+        let Ok(chunk) = self.0.read_chunk(MSG_HEADER + len) else {
+            return MsgPop::Empty;
+        };
+        let (a, b) = chunk.as_slices();
+        if a.len() >= MSG_HEADER {
+            let first = &a[MSG_HEADER..];
+            out[..first.len()].copy_from_slice(first);
+            out[first.len()..len].copy_from_slice(b);
+        } else {
+            let skip = MSG_HEADER - a.len();
+            out[..len].copy_from_slice(&b[skip..]);
+        }
+        chunk.commit_all();
+        MsgPop::Data(len)
+    }
+
+    /// Drop the next message without reading it.
+    pub fn discard(&mut self) -> bool {
+        let Some(len) = self.peek_len() else {
+            return false;
+        };
+        if let Ok(chunk) = self.0.read_chunk(MSG_HEADER + len) {
+            chunk.commit_all();
+        }
+        true
+    }
+
+    /// Pop the next message into a freshly allocated Vec (non-RT only).
+    pub fn pop_vec(&mut self) -> Option<Vec<u8>> {
+        let len = self.peek_len()?;
+        let mut out = vec![0u8; len];
+        match self.pop_into(&mut out) {
+            MsgPop::Data(_) => Some(out),
+            _ => None,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        while self.discard() {}
+    }
+}
+
+/// Default capacity of an [`AtomPortBuffer`] ring, in bytes.
+pub const ATOM_RING_CAPACITY: usize = 256 * 1024;
+
+/// Lock-free queue of atom messages for one atom port.
+///
+/// * Atom inputs (UI → plugin): UI threads `write()`, the RT thread drains
+///   with `pop_into_rt()` each cycle; messages are queued, not overwritten.
+/// * Atom outputs (plugin → UI): the RT thread `write_rt()`s the output
+///   sequence after `run()` (only while a UI is listening), the UI drains
+///   with `read()`.
+///
+/// Each side sits behind a mutex only so the struct can be shared through an
+/// `Arc`; the RT side uses `try_lock`, which never blocks (it is the sole
+/// user of its half).
 pub struct AtomPortBuffer {
     pub port_index: usize,
-    bufs: [parking_lot::Mutex<Vec<u8>>; 2],
-    read_idx: AtomicU32,
+    producer: parking_lot::Mutex<MsgProducer>,
+    consumer: parking_lot::Mutex<MsgConsumer>,
+    listening: AtomicBool,
 }
 
 impl AtomPortBuffer {
     pub fn new(port_index: usize) -> Self {
+        Self::with_capacity(port_index, ATOM_RING_CAPACITY)
+    }
+
+    pub fn with_capacity(port_index: usize, capacity: usize) -> Self {
+        let (producer, consumer) = msg_ring(capacity);
         Self {
             port_index,
-            bufs: [
-                parking_lot::Mutex::new(Vec::new()),
-                parking_lot::Mutex::new(Vec::new()),
-            ],
-            read_idx: AtomicU32::new(0),
+            producer: parking_lot::Mutex::new(producer),
+            consumer: parking_lot::Mutex::new(consumer),
+            listening: AtomicBool::new(false),
         }
     }
 
-    pub fn write(&self, data: &[u8]) {
-        let write_idx = 1 - self.read_idx.load(Ordering::Acquire);
-        if let Some(mut buf) = self.bufs[write_idx as usize].try_lock() {
-            buf.clear();
-            buf.extend_from_slice(data);
-            self.read_idx.store(write_idx, Ordering::Release);
+    /// Queue a message (non-RT producer).  Returns false if the queue is full.
+    pub fn write(&self, data: &[u8]) -> bool {
+        self.producer.lock().push(data)
+    }
+
+    /// Queue a message from the RT thread.  Never blocks or allocates;
+    /// drops the message if the queue is full or contended.
+    pub fn write_rt(&self, data: &[u8]) -> bool {
+        match self.producer.try_lock() {
+            Some(mut p) => p.push(data),
+            None => false,
         }
     }
 
+    /// Pop the next message (non-RT consumer).
     pub fn read(&self) -> Option<Vec<u8>> {
-        let idx = self.read_idx.load(Ordering::Acquire);
-        if let Some(mut buf) = self.bufs[idx as usize].try_lock() {
-            if buf.is_empty() {
-                None
-            } else {
-                let data = std::mem::take(&mut *buf);
-                Some(data)
-            }
-        } else {
-            None
+        self.consumer.lock().pop_vec()
+    }
+
+    /// Pop the next message into `out` from the RT thread.
+    pub fn pop_into_rt(&self, out: &mut [u8]) -> MsgPop {
+        match self.consumer.try_lock() {
+            Some(mut c) => c.pop_into(out),
+            None => MsgPop::Empty,
         }
+    }
+
+    /// Drop the next queued message from the RT thread (e.g. one that can
+    /// never fit the plugin's port buffer).
+    pub fn discard_rt(&self) -> bool {
+        match self.consumer.try_lock() {
+            Some(mut c) => c.discard(),
+            None => false,
+        }
+    }
+
+    pub fn clear(&self) {
+        self.consumer.lock().clear();
+    }
+
+    /// Whether a consumer (UI) wants plugin→UI output.  The RT thread skips
+    /// writing output messages while nobody listens.
+    pub fn is_listening(&self) -> bool {
+        self.listening.load(Ordering::Acquire)
+    }
+
+    pub fn set_listening(&self, listening: bool) {
+        if listening {
+            self.clear();
+        }
+        self.listening.store(listening, Ordering::Release);
     }
 }
 
@@ -450,7 +636,7 @@ mod tests {
     #[test]
     fn atom_port_buffer_write_then_read() {
         let buf = AtomPortBuffer::new(0);
-        buf.write(b"hello");
+        assert!(buf.write(b"hello"));
         let data = buf.read();
         assert_eq!(data, Some(b"hello".to_vec()));
 
@@ -466,12 +652,57 @@ mod tests {
     }
 
     #[test]
-    fn atom_port_buffer_overwrite() {
+    fn atom_port_buffer_queues_messages() {
         let buf = AtomPortBuffer::new(0);
         buf.write(b"first");
         buf.write(b"second");
-        let data = buf.read();
-        assert_eq!(data, Some(b"second".to_vec()));
+        assert_eq!(buf.read(), Some(b"first".to_vec()));
+        assert_eq!(buf.read(), Some(b"second".to_vec()));
+        assert_eq!(buf.read(), None);
+    }
+
+    #[test]
+    fn atom_port_buffer_rt_pop_into() {
+        let buf = AtomPortBuffer::new(0);
+        buf.write(b"abcdef");
+        let mut small = [0u8; 4];
+        assert_eq!(buf.pop_into_rt(&mut small), MsgPop::TooLarge(6));
+        let mut out = [0u8; 16];
+        assert_eq!(buf.pop_into_rt(&mut out), MsgPop::Data(6));
+        assert_eq!(&out[..6], b"abcdef");
+        assert_eq!(buf.pop_into_rt(&mut out), MsgPop::Empty);
+    }
+
+    #[test]
+    fn atom_port_buffer_full_drops() {
+        let buf = AtomPortBuffer::with_capacity(0, 16);
+        assert!(buf.write_rt(&[1u8; 8]));
+        assert!(!buf.write_rt(&[2u8; 8]));
+        assert!(buf.discard_rt());
+        assert!(buf.write_rt(&[3u8; 8]));
+        assert_eq!(buf.read(), Some(vec![3u8; 8]));
+    }
+
+    #[test]
+    fn atom_port_buffer_listening_clears() {
+        let buf = AtomPortBuffer::new(0);
+        buf.write(b"stale");
+        assert!(!buf.is_listening());
+        buf.set_listening(true);
+        assert!(buf.is_listening());
+        assert_eq!(buf.read(), None);
+    }
+
+    #[test]
+    fn msg_ring_wraps_around() {
+        let (mut p, mut c) = msg_ring(32);
+        for i in 0..20u8 {
+            assert!(p.push_parts(&[&[i; 3], &[i; 7]]));
+            let mut out = [0u8; 10];
+            assert_eq!(c.pop_into(&mut out), MsgPop::Data(10));
+            assert_eq!(out, [[i; 3].as_slice(), [i; 7].as_slice()].concat().as_slice());
+        }
+        assert_eq!(c.peek_len(), None);
     }
 
     // ---- PortUpdates ----

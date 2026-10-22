@@ -2,15 +2,18 @@
 //!
 //! Provides `LV2_Options_Option` and `Lv2OptionsSetup` so that plugins
 //! receive sample rate, block length, and sequence size at instantiation
-//! time.  Also provides buf-size feature URIs (`boundedBlockLength`,
-//! `fixedBlockLength`) that plugins can check for host capability
-//! discovery.
+//! time.  Also provides the `buf-size#boundedBlockLength` feature that
+//! plugins can check for host capability discovery.
 //!
 //! Two features are produced:
 //!   - `options#options` — an array of `LV2_Options_Option` with the
 //!     actual values (sample rate, block lengths, sequence size)
-//!   - Buf-size features (`boundedBlockLength`, `fixedBlockLength`) —
-//!     data-less features that advertise host guarantees about block sizes
+//!   - `boundedBlockLength` — data-less feature: `run()` is never called
+//!     with more than `maxBlockLength` frames.
+//!
+//! PipeWire quanta vary at runtime and the RT filter splits large cycles,
+//! so the host does NOT advertise `fixedBlockLength` or
+//! `powerOf2BlockLength`.
 
 use std::ffi::{CStr, c_void};
 use std::sync::Arc;
@@ -22,10 +25,14 @@ use super::urid::UridMapper;
 pub const LV2_OPTIONS__OPTIONS: &CStr = c"http://lv2plug.in/ns/ext/options#options";
 pub const LV2_BUF_SIZE__BOUNDED_BLOCK_LENGTH: &CStr =
     c"http://lv2plug.in/ns/ext/buf-size#boundedBlockLength";
-pub const LV2_BUF_SIZE__FIXED_BLOCK_LENGTH: &CStr =
-    c"http://lv2plug.in/ns/ext/buf-size#fixedBlockLength";
-pub const LV2_BUF_SIZE__POWER_OF2_BLOCK_LENGTH: &CStr =
-    c"http://lv2plug.in/ns/ext/buf-size#powerOf2BlockLength";
+
+/// Largest block the host ever passes to `run()` (the RT filter splits
+/// larger PipeWire cycles).
+pub const MAX_BLOCK_LENGTH: u32 = 8192;
+/// Smallest block the host may pass to `run()`.
+pub const MIN_BLOCK_LENGTH: u32 = 1;
+/// Capacity of atom port buffers / `buf-size#sequenceSize`.
+pub const SEQUENCE_SIZE: usize = 65536;
 
 // ── Option context values ──
 
@@ -89,7 +96,7 @@ impl Lv2OptionsSetup {
     ///
     /// `urid_mapper` — shared URID mapper for resolving option URIs.
     /// `sample_rate` — the host sample rate (e.g. 48000.0).
-    /// `block_length` — the nominal/fixed block size (e.g. 1024).
+    /// `block_length` — the nominal block size (the current quantum).
     pub fn new(urid_mapper: &Arc<UridMapper>, sample_rate: f64, block_length: u32) -> Self {
         // Map all the URIDs we need
         let nominal_block_length_key =
@@ -107,11 +114,12 @@ impl Lv2OptionsSetup {
         let atom_float_type = urid_mapper.map("http://lv2plug.in/ns/ext/atom#Float");
 
         // Allocate values on the heap so pointers remain stable
-        let block_length_val = Box::new(block_length as i32);
-        let min_block_length_val = Box::new(block_length as i32);
-        let max_block_length_val = Box::new(block_length as i32);
+        let nominal = block_length.clamp(MIN_BLOCK_LENGTH, MAX_BLOCK_LENGTH);
+        let block_length_val = Box::new(nominal as i32);
+        let min_block_length_val = Box::new(MIN_BLOCK_LENGTH as i32);
+        let max_block_length_val = Box::new(MAX_BLOCK_LENGTH as i32);
         let sample_rate_val = Box::new(sample_rate as f32);
-        let sequence_size_val = Box::new(65536_i32);
+        let sequence_size_val = Box::new(SEQUENCE_SIZE as i32);
 
         let options = vec![
             // nominalBlockLength — Int
@@ -200,30 +208,53 @@ impl Lv2OptionsSetup {
         }
     }
 
-    /// Build an `LV2Feature` for `buf-size#fixedBlockLength`.
-    /// This is a data-less feature: the host guarantees that the block
-    /// size is always exactly `nominalBlockLength` (PipeWire default).
-    pub fn make_fixed_block_length_feature(&self) -> lv2_raw::core::LV2Feature {
-        lv2_raw::core::LV2Feature {
-            uri: LV2_BUF_SIZE__FIXED_BLOCK_LENGTH.as_ptr(),
-            data: std::ptr::null_mut(),
-        }
-    }
-
-    pub fn make_power_of2_block_length_feature(&self) -> lv2_raw::core::LV2Feature {
-        lv2_raw::core::LV2Feature {
-            uri: LV2_BUF_SIZE__POWER_OF2_BLOCK_LENGTH.as_ptr(),
-            data: std::ptr::null_mut(),
-        }
-    }
-
     /// Convenience: return all buf-size features as a Vec.
     /// These are data-less features that plugins check for host capability.
     pub fn make_buf_size_features(&self) -> Vec<lv2_raw::core::LV2Feature> {
-        vec![
-            self.make_bounded_block_length_feature(),
-            self.make_fixed_block_length_feature(),
-            self.make_power_of2_block_length_feature(),
-        ]
+        vec![self.make_bounded_block_length_feature()]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn int_option(setup: &Lv2OptionsSetup, mapper: &UridMapper, uri: &str) -> i32 {
+        let key = mapper.map(uri);
+        let opt = setup
+            .options
+            .iter()
+            .find(|o| o.key == key)
+            .expect("option present");
+        unsafe { *(opt.value as *const i32) }
+    }
+
+    #[test]
+    fn block_length_bounds() {
+        let mapper = Arc::new(UridMapper::new());
+        let setup = Lv2OptionsSetup::new(&mapper, 48000.0, 256);
+        assert_eq!(
+            int_option(&setup, &mapper, "http://lv2plug.in/ns/ext/buf-size#nominalBlockLength"),
+            256
+        );
+        assert_eq!(
+            int_option(&setup, &mapper, "http://lv2plug.in/ns/ext/buf-size#minBlockLength"),
+            1
+        );
+        assert_eq!(
+            int_option(&setup, &mapper, "http://lv2plug.in/ns/ext/buf-size#maxBlockLength"),
+            8192
+        );
+        assert_eq!(setup.options.last().unwrap().key, 0);
+    }
+
+    #[test]
+    fn no_fixed_or_power_of_two_feature() {
+        let mapper = Arc::new(UridMapper::new());
+        let setup = Lv2OptionsSetup::new(&mapper, 48000.0, 1024);
+        let features = setup.make_buf_size_features();
+        assert_eq!(features.len(), 1);
+        let uri = unsafe { CStr::from_ptr(features[0].uri) };
+        assert_eq!(uri, LV2_BUF_SIZE__BOUNDED_BLOCK_LENGTH);
     }
 }

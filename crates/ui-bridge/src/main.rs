@@ -5,16 +5,19 @@
 //! no GTK), matching the approach used by Carla. This avoids GLX/EGL conflicts
 //! that occur when Qt6/Wayland and X11/GLX coexist in the same process.
 //!
-//! Communication with the host is via stdin/stdout JSON messages.
+//! Communication with the host is via stdin/stdout newline-delimited JSON.
+//! When stdin reaches EOF (host exited or crashed) all windows are closed
+//! and the bridge exits.
 
 mod protocol;
 
 use protocol::{BridgeMessage, HostMessage};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_void};
-use std::io::{BufRead, Write};
-use std::os::raw::{c_char, c_int, c_uint, c_ulong};
+use std::io::Write;
+use std::os::raw::{c_char, c_int, c_long, c_uint, c_ulong};
 use std::ptr;
+use std::sync::Mutex;
 
 // ---------------------------------------------------------------------------
 // X11 FFI
@@ -87,8 +90,15 @@ struct XSetWindowAttributes {
     override_redirect: c_int, colormap: c_ulong, cursor: c_ulong,
 }
 
+/// XEvent is a 24-long union; only `type_` and casts to specific events are used.
 #[repr(C)]
-struct XEvent { type_: c_int, _pad: [u8; 188] }
+struct XEvent { pad: [c_long; 24] }
+
+impl XEvent {
+    fn type_(&self) -> c_int {
+        unsafe { *(self as *const XEvent as *const c_int) }
+    }
+}
 
 #[repr(C)]
 struct XConfigureEvent {
@@ -172,8 +182,12 @@ struct LV2Option {
 }
 
 // ---------------------------------------------------------------------------
-// Bridge state
+// URID mapping
 // ---------------------------------------------------------------------------
+
+/// URIDs minted by the bridge itself start here so they never collide with
+/// the host's (which are small and dense).
+const LOCAL_URID_BASE: u32 = 1 << 30;
 
 struct UridMapper {
     map: HashMap<String, u32>,
@@ -181,14 +195,15 @@ struct UridMapper {
 }
 
 impl UridMapper {
-    fn new(initial: Vec<(String, u32)>) -> Self {
-        let mut map = HashMap::new();
-        let mut max_id = 1u32;
-        for (uri, id) in initial {
-            if id > max_id { max_id = id; }
-            map.insert(uri, id);
+    fn new() -> Self {
+        Self { map: HashMap::new(), next_id: LOCAL_URID_BASE }
+    }
+
+    /// Merge the host's mappings (authoritative).
+    fn merge(&mut self, entries: Vec<(String, u32)>) {
+        for (uri, id) in entries {
+            self.map.insert(uri, id);
         }
-        Self { map, next_id: max_id + 1 }
     }
 
     fn map_uri(&mut self, uri: &str) -> u32 {
@@ -202,19 +217,70 @@ impl UridMapper {
     }
 }
 
-static mut URID_MAPPER: *mut UridMapper = ptr::null_mut();
+/// One process-wide mapper shared by all UIs.
+static URID_MAPPER: Mutex<Option<UridMapper>> = Mutex::new(None);
 
-unsafe extern "C" fn urid_map_callback(handle: *mut c_void, uri: *const c_char) -> u32 {
-    unsafe {
-        if uri.is_null() { return 0; }
-        let mapper = &mut *URID_MAPPER;
-        let uri_str = CStr::from_ptr(uri).to_str().unwrap_or("");
-        mapper.map_uri(uri_str)
+fn map_uri(uri: &str) -> u32 {
+    let mut guard = URID_MAPPER.lock().unwrap_or_else(|e| e.into_inner());
+    guard.get_or_insert_with(UridMapper::new).map_uri(uri)
+}
+
+unsafe extern "C" fn urid_map_callback(_handle: *mut c_void, uri: *const c_char) -> u32 {
+    if uri.is_null() {
+        return 0;
+    }
+    let uri_str = unsafe { CStr::from_ptr(uri) }.to_str().unwrap_or("");
+    map_uri(uri_str)
+}
+
+// ---------------------------------------------------------------------------
+// Host communication
+// ---------------------------------------------------------------------------
+
+fn send_message(msg: &BridgeMessage) {
+    if let Ok(mut line) = serde_json::to_vec(msg) {
+        line.push(b'\n');
+        let mut stdout = std::io::stdout().lock();
+        let _ = stdout.write_all(&line);
+        let _ = stdout.flush();
     }
 }
 
-struct PluginUiWindow {
+fn base64_encode(data: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        out.push(TABLE[(n >> 18) as usize & 63] as char);
+        out.push(TABLE[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
+/// Remove and return the next complete line (without '\n') from `buf`.
+fn take_line(buf: &mut Vec<u8>) -> Option<Vec<u8>> {
+    let pos = buf.iter().position(|&b| b == b'\n')?;
+    let mut line: Vec<u8> = buf.drain(..=pos).collect();
+    line.pop();
+    Some(line)
+}
+
+// ---------------------------------------------------------------------------
+// Plugin UI windows
+// ---------------------------------------------------------------------------
+
+/// The `LV2UI_Controller` handed to each UI: identifies which instance a
+/// port write belongs to.
+struct UiController {
     instance_id: u64,
+}
+
+/// Everything one UI references.  Always boxed and never moved while the
+/// UI lives: the UI holds pointers to the controller and feature data.
+struct PluginUiWindow {
     display: *mut c_void,
     host_window: c_ulong,
     child_window: c_ulong,
@@ -224,33 +290,40 @@ struct PluginUiWindow {
     idle_iface: Option<*const LV2UiIdleInterface>,
     closed: bool,
     _lib: *mut c_void,
+    controller: UiController,
+    urid_map: LV2UridMap,
+    resize: LV2UIResize,
+    sample_rate: f32,
+    options: [LV2Option; 2],
+    features: Vec<LV2Feature>,
+    feature_ptrs: Vec<*const LV2Feature>,
 }
 
-// Global for the port write callback to find
-static mut BRIDGE_STDOUT: *mut std::io::Stdout = ptr::null_mut();
-static mut CURRENT_INSTANCE_ID: u64 = 0;
-
 unsafe extern "C" fn port_write_callback(
-    _controller: *mut c_void,
+    controller: *mut c_void,
     port_index: c_uint,
     buffer_size: c_uint,
     protocol: c_uint,
     buffer: *const c_void,
 ) {
-    unsafe {
-        if protocol == 0 && buffer_size == 4 && !buffer.is_null() {
-            let value = *(buffer as *const f32);
-            let msg = BridgeMessage::PortWrite {
-                instance_id: CURRENT_INSTANCE_ID,
-                port_index: port_index as usize,
-                value,
-            };
-            if let Ok(json) = serde_json::to_string(&msg) {
-                let stdout = &mut *BRIDGE_STDOUT;
-                let _ = writeln!(stdout, "{}", json);
-                let _ = stdout.flush();
-            }
-        }
+    if controller.is_null() || buffer.is_null() {
+        return;
+    }
+    let ctrl = unsafe { &*(controller as *const UiController) };
+    if protocol == 0 && buffer_size == 4 {
+        let value = unsafe { *(buffer as *const f32) };
+        send_message(&BridgeMessage::PortWrite {
+            instance_id: ctrl.instance_id,
+            port_index: port_index as usize,
+            value,
+        });
+    } else if protocol != 0 && buffer_size > 0 {
+        let data = unsafe { std::slice::from_raw_parts(buffer as *const u8, buffer_size as usize) };
+        send_message(&BridgeMessage::AtomWrite {
+            instance_id: ctrl.instance_id,
+            port_index: port_index as usize,
+            data_b64: base64_encode(data),
+        });
     }
 }
 
@@ -260,7 +333,7 @@ unsafe extern "C" fn ui_resize_callback(
     height: c_int,
 ) -> c_int {
     unsafe {
-        if !handle.is_null() {
+        if !handle.is_null() && width > 0 && height > 0 {
             let win = handle as *mut PluginUiWindow;
             XResizeWindow((*win).display, (*win).host_window, width as c_uint, height as c_uint);
             if (*win).child_window != 0 {
@@ -272,33 +345,41 @@ unsafe extern "C" fn ui_resize_callback(
     0
 }
 
-// ---------------------------------------------------------------------------
-// Window management
-// ---------------------------------------------------------------------------
+fn open_ui(msg: HostMessage, windows: &mut HashMap<u64, Box<PluginUiWindow>>) -> BridgeMessage {
+    let HostMessage::Open {
+        instance_id, plugin_uri, ui_uri, bundle_path, binary_path,
+        title, control_values, urid_map, sample_rate, ..
+    } = msg else {
+        unreachable!()
+    };
 
-fn open_ui(msg: HostMessage, windows: &mut HashMap<u64, PluginUiWindow>) -> BridgeMessage {
-    let (instance_id, plugin_uri, ui_uri, bundle_path, binary_path, title,
-         control_values, urid_map_initial, sample_rate) = match msg {
-        HostMessage::Open {
-            instance_id, plugin_uri, ui_uri, bundle_path, binary_path,
-            title, control_values, urid_map, sample_rate, ..
-        } => (instance_id, plugin_uri, ui_uri, bundle_path, binary_path,
-              title, control_values, urid_map, sample_rate),
-        _ => unreachable!(),
+    // A re-open replaces the old window.
+    if let Some(mut old) = windows.remove(&instance_id) {
+        close_window(&mut old);
+    }
+
+    URID_MAPPER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(UridMapper::new)
+        .merge(urid_map);
+
+    let failed = |error: String| BridgeMessage::OpenFailed { instance_id, error };
+
+    let (Ok(c_binary), Ok(c_ui_uri), Ok(c_plugin_uri), Ok(c_bundle)) = (
+        CString::new(binary_path.as_str()),
+        CString::new(ui_uri.as_str()),
+        CString::new(plugin_uri.as_str()),
+        CString::new(bundle_path.as_str()),
+    ) else {
+        return failed("invalid path or URI".into());
     };
 
     unsafe {
-        // Initialize URID mapper with host's mappings
-        let mapper = Box::new(UridMapper::new(urid_map_initial));
-        URID_MAPPER = Box::into_raw(mapper);
-
         // Open our own X11 display (clean, no GTK/Qt/Wayland interference)
         let display = XOpenDisplay(ptr::null());
         if display.is_null() {
-            return BridgeMessage::OpenFailed {
-                instance_id,
-                error: "XOpenDisplay failed".into(),
-            };
+            return failed("XOpenDisplay failed".into());
         }
 
         let screen = XDefaultScreen(display);
@@ -319,10 +400,7 @@ fn open_ui(msg: HostMessage, windows: &mut HashMap<u64, PluginUiWindow>) -> Brid
 
         if host_window == 0 {
             XCloseDisplay(display);
-            return BridgeMessage::OpenFailed {
-                instance_id,
-                error: "XCreateWindow failed".into(),
-            };
+            return failed("XCreateWindow failed".into());
         }
 
         // Window properties
@@ -345,24 +423,16 @@ fn open_ui(msg: HostMessage, windows: &mut HashMap<u64, PluginUiWindow>) -> Brid
         XChangeProperty(display, host_window, nwp, XA_CARDINAL, 32, PROP_MODE_REPLACE,
                         &pid as *const c_ulong as *const u8, 1);
 
-        // Build LV2 features
-        let mut urid_map_struct = LV2UridMap {
-            handle: ptr::null_mut(),
-            map: urid_map_callback,
-        };
-        let urid_feature = LV2Feature {
-            uri: LV2_URID_MAP_URI.as_ptr(),
-            data: &mut urid_map_struct as *mut _ as *mut c_void,
+        let destroy_display = || {
+            XDestroyWindow(display, host_window);
+            XCloseDisplay(display);
         };
 
-        let parent_feature = LV2Feature {
-            uri: LV2_UI_PARENT_URI.as_ptr(),
-            data: host_window as *mut c_void,
-        };
-
-        // Allocate PluginUiWindow early so resize callback can reference it
-        let mut plugin_win = Box::new(PluginUiWindow {
-            instance_id,
+        // All UI-visible state lives in this box; pointers into it stay
+        // valid because the box itself is stored in `windows`.
+        let sr_urid = map_uri("http://lv2plug.in/ns/ext/parameters#sampleRate");
+        let float_urid = map_uri("http://lv2plug.in/ns/ext/atom#Float");
+        let mut win = Box::new(PluginUiWindow {
             display,
             host_window,
             child_window: 0,
@@ -372,65 +442,51 @@ fn open_ui(msg: HostMessage, windows: &mut HashMap<u64, PluginUiWindow>) -> Brid
             idle_iface: None,
             closed: false,
             _lib: ptr::null_mut(),
+            controller: UiController { instance_id },
+            urid_map: LV2UridMap { handle: ptr::null_mut(), map: urid_map_callback },
+            resize: LV2UIResize { handle: ptr::null_mut(), ui_resize: ui_resize_callback },
+            sample_rate,
+            options: [
+                LV2Option { context: 0, subject: 0, key: sr_urid, size: 4, type_: float_urid,
+                            value: ptr::null() },
+                LV2Option { context: 0, subject: 0, key: 0, size: 0, type_: 0, value: ptr::null() },
+            ],
+            features: Vec::new(),
+            feature_ptrs: Vec::new(),
         });
-
-        let mut resize_data = LV2UIResize {
-            handle: &mut *plugin_win as *mut _ as *mut c_void,
-            ui_resize: ui_resize_callback,
-        };
-        let resize_feature = LV2Feature {
-            uri: LV2_UI_RESIZE_URI.as_ptr(),
-            data: &mut resize_data as *mut _ as *mut c_void,
-        };
-
-        // Options with sample rate
-        let sr_urid = (*URID_MAPPER).map_uri("http://lv2plug.in/ns/ext/parameters#sampleRate");
-        let float_urid = (*URID_MAPPER).map_uri("http://lv2plug.in/ns/ext/atom#Float");
-        let options = [
-            LV2Option { context: 0, subject: 0, key: sr_urid, size: 4, type_: float_urid,
-                         value: &sample_rate as *const f32 as *const c_void },
-            LV2Option { context: 0, subject: 0, key: 0, size: 0, type_: 0, value: ptr::null() },
+        let win_ptr: *mut PluginUiWindow = &mut *win;
+        win.resize.handle = win_ptr as *mut c_void;
+        win.options[0].value = &win.sample_rate as *const f32 as *const c_void;
+        win.features = vec![
+            LV2Feature { uri: LV2_URID_MAP_URI.as_ptr(), data: &mut win.urid_map as *mut _ as *mut c_void },
+            LV2Feature { uri: LV2_UI_PARENT_URI.as_ptr(), data: host_window as *mut c_void },
+            LV2Feature { uri: LV2_UI_RESIZE_URI.as_ptr(), data: &mut win.resize as *mut _ as *mut c_void },
+            LV2Feature { uri: LV2_OPTIONS_URI.as_ptr(), data: win.options.as_ptr() as *mut c_void },
         ];
-        let options_feature = LV2Feature {
-            uri: LV2_OPTIONS_URI.as_ptr(),
-            data: options.as_ptr() as *mut c_void,
-        };
-
-        let features: Vec<*const LV2Feature> = vec![
-            &urid_feature as *const _,
-            &parent_feature as *const _,
-            &resize_feature as *const _,
-            &options_feature as *const _,
-            ptr::null(),
-        ];
+        win.feature_ptrs = win
+            .features
+            .iter()
+            .map(|f| f as *const LV2Feature)
+            .chain(std::iter::once(ptr::null()))
+            .collect();
 
         // Load UI binary
-        let c_binary = CString::new(binary_path.as_str()).unwrap();
         let lib = libc::dlopen(c_binary.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
         if lib.is_null() {
-            XDestroyWindow(display, host_window);
-            XCloseDisplay(display);
-            return BridgeMessage::OpenFailed {
-                instance_id,
-                error: format!("dlopen failed: {:?}", c_binary),
-            };
+            destroy_display();
+            return failed(format!("dlopen failed: {:?}", c_binary));
         }
 
         let desc_sym = libc::dlsym(lib, c"lv2ui_descriptor".as_ptr());
         if desc_sym.is_null() {
             libc::dlclose(lib);
-            XDestroyWindow(display, host_window);
-            XCloseDisplay(display);
-            return BridgeMessage::OpenFailed {
-                instance_id,
-                error: "No lv2ui_descriptor symbol".into(),
-            };
+            destroy_display();
+            return failed("No lv2ui_descriptor symbol".into());
         }
 
         let lv2ui_descriptor_fn: unsafe extern "C" fn(c_uint) -> *const LV2UI_Descriptor =
             std::mem::transmute(desc_sym);
 
-        let c_ui_uri = CString::new(ui_uri.as_str()).unwrap();
         let mut ui_descriptor: *const LV2UI_Descriptor = ptr::null();
         for idx in 0..100u32 {
             let desc = lv2ui_descriptor_fn(idx);
@@ -443,24 +499,13 @@ fn open_ui(msg: HostMessage, windows: &mut HashMap<u64, PluginUiWindow>) -> Brid
 
         if ui_descriptor.is_null() {
             libc::dlclose(lib);
-            XDestroyWindow(display, host_window);
-            XCloseDisplay(display);
-            return BridgeMessage::OpenFailed {
-                instance_id,
-                error: "UI descriptor not found".into(),
-            };
+            destroy_display();
+            return failed("UI descriptor not found".into());
         }
 
         // Instantiate
-        CURRENT_INSTANCE_ID = instance_id;
-        let c_plugin_uri = CString::new(plugin_uri.as_str()).unwrap();
-        let c_bundle = CString::new(bundle_path.as_str()).unwrap();
         let mut widget: *mut c_void = ptr::null_mut();
-
-        // Use a non-null dummy controller (some plugins check for null)
-        let controller_dummy: u64 = 1;
-        let controller_ptr = &controller_dummy as *const u64 as *mut c_void;
-
+        let controller_ptr = &mut win.controller as *mut UiController as *mut c_void;
         let ui_handle = if let Some(instantiate_fn) = (*ui_descriptor).instantiate {
             instantiate_fn(
                 ui_descriptor,
@@ -469,7 +514,7 @@ fn open_ui(msg: HostMessage, windows: &mut HashMap<u64, PluginUiWindow>) -> Brid
                 port_write_callback,
                 controller_ptr,
                 &mut widget,
-                features.as_ptr(),
+                win.feature_ptrs.as_ptr(),
             )
         } else {
             ptr::null_mut()
@@ -477,12 +522,8 @@ fn open_ui(msg: HostMessage, windows: &mut HashMap<u64, PluginUiWindow>) -> Brid
 
         if ui_handle.is_null() {
             libc::dlclose(lib);
-            XDestroyWindow(display, host_window);
-            XCloseDisplay(display);
-            return BridgeMessage::OpenFailed {
-                instance_id,
-                error: "UI instantiate returned null".into(),
-            };
+            destroy_display();
+            return failed("UI instantiate returned null".into());
         }
 
         // Check for idle interface
@@ -517,13 +558,13 @@ fn open_ui(msg: HostMessage, windows: &mut HashMap<u64, PluginUiWindow>) -> Brid
         XMapRaised(display, host_window);
         XSync(display, 0);
 
-        plugin_win.ui_handle = ui_handle;
-        plugin_win.descriptor = ui_descriptor;
-        plugin_win.idle_iface = idle_iface;
-        plugin_win.child_window = child;
-        plugin_win._lib = lib;
+        win.ui_handle = ui_handle;
+        win.descriptor = ui_descriptor;
+        win.idle_iface = idle_iface;
+        win.child_window = child;
+        win._lib = lib;
 
-        windows.insert(instance_id, *plugin_win);
+        windows.insert(instance_id, win);
 
         BridgeMessage::Opened { instance_id }
     }
@@ -555,7 +596,7 @@ fn idle_window(win: &mut PluginUiWindow) {
             let mut event: XEvent = std::mem::zeroed();
             XNextEvent(win.display, &mut event);
 
-            match event.type_ {
+            match event.type_() {
                 CONFIGURE_NOTIFY => {
                     let cfg = &*(&event as *const XEvent as *const XConfigureEvent);
                     if cfg.window != win.host_window && cfg.width > 0 && cfg.height > 0 {
@@ -588,29 +629,44 @@ fn idle_window(win: &mut PluginUiWindow) {
         }
 
         // Call idle interface
-        if let Some(iface) = win.idle_iface {
-            if let Some(idle_fn) = (*iface).idle {
-                if idle_fn(win.ui_handle) != 0 {
-                    win.closed = true;
-                }
-            }
+        if let Some(iface) = win.idle_iface
+            && let Some(idle_fn) = (*iface).idle
+            && idle_fn(win.ui_handle) != 0
+        {
+            win.closed = true;
         }
     }
 }
 
 fn close_window(win: &mut PluginUiWindow) {
     unsafe {
-        if let Some(cleanup) = (*win.descriptor).cleanup {
+        if !win.ui_handle.is_null()
+            && !win.descriptor.is_null()
+            && let Some(cleanup) = (*win.descriptor).cleanup
+        {
             cleanup(win.ui_handle);
         }
         win.ui_handle = ptr::null_mut();
-        XDestroyWindow(win.display, win.host_window);
-        win.host_window = 0;
-        if !win._lib.is_null() {
+        if !win.display.is_null() {
+            XDestroyWindow(win.display, win.host_window);
+            win.host_window = 0;
             // Don't dlclose — plugin may have statics
+            XCloseDisplay(win.display);
+            win.display = ptr::null_mut();
         }
-        XCloseDisplay(win.display);
-        win.display = ptr::null_mut();
+    }
+}
+
+fn port_event(win: &PluginUiWindow, port_index: usize, value: f32) {
+    unsafe {
+        if win.ui_handle.is_null() || win.descriptor.is_null() {
+            return;
+        }
+        if let Some(pe) = (*win.descriptor).port_event {
+            pe(win.ui_handle, port_index as c_uint,
+               std::mem::size_of::<f32>() as c_uint,
+               0, &value as *const f32 as *const c_void);
+        }
     }
 }
 
@@ -618,20 +674,60 @@ fn close_window(win: &mut PluginUiWindow) {
 // Main loop
 // ---------------------------------------------------------------------------
 
-fn send_message(stdout: &mut std::io::Stdout, msg: &BridgeMessage) {
-    if let Ok(json) = serde_json::to_string(msg) {
-        let _ = writeln!(stdout, "{}", json);
-        let _ = stdout.flush();
+enum Flow {
+    Continue,
+    Quit,
+}
+
+fn handle_message(msg: HostMessage, windows: &mut HashMap<u64, Box<PluginUiWindow>>) -> Flow {
+    match msg {
+        HostMessage::Quit => return Flow::Quit,
+        HostMessage::Open { .. } => {
+            let result = open_ui(msg, windows);
+            send_message(&result);
+        }
+        HostMessage::PortEvent { instance_id, port_index, value } => {
+            if let Some(win) = windows.get(&instance_id) {
+                port_event(win, port_index, value);
+            }
+        }
+        HostMessage::Close { instance_id } => {
+            if let Some(mut win) = windows.remove(&instance_id) {
+                close_window(&mut win);
+                send_message(&BridgeMessage::Closed { instance_id });
+            }
+        }
+    }
+    Flow::Continue
+}
+
+/// Read whatever is available on (non-blocking) stdin into `buf`.
+/// Returns false on EOF or a fatal read error.
+fn read_stdin(buf: &mut Vec<u8>) -> bool {
+    let mut chunk = [0u8; 4096];
+    loop {
+        let n = unsafe { libc::read(libc::STDIN_FILENO, chunk.as_mut_ptr() as *mut c_void, chunk.len()) };
+        if n > 0 {
+            buf.extend_from_slice(&chunk[..n as usize]);
+            continue;
+        }
+        if n == 0 {
+            return false;
+        }
+        let err = std::io::Error::last_os_error();
+        match err.kind() {
+            std::io::ErrorKind::WouldBlock => return true,
+            std::io::ErrorKind::Interrupted => continue,
+            _ => {
+                eprintln!("zestbay-ui-bridge: stdin read error: {}", err);
+                return false;
+            }
+        }
     }
 }
 
 fn main() {
-    let mut stdout = std::io::stdout();
-    unsafe { BRIDGE_STDOUT = &mut stdout as *mut _; }
-
-    let stdin = std::io::stdin();
-    let mut stdin_lines = stdin.lock().lines();
-    let mut windows: HashMap<u64, PluginUiWindow> = HashMap::new();
+    let mut windows: HashMap<u64, Box<PluginUiWindow>> = HashMap::new();
 
     // Set stdin to non-blocking so we can interleave with X11 events
     unsafe {
@@ -640,47 +736,31 @@ fn main() {
         libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
     }
 
-    send_message(&mut stdout, &BridgeMessage::Ready);
+    send_message(&BridgeMessage::Ready);
 
+    let mut inbuf: Vec<u8> = Vec::new();
     loop {
-        // Read pending messages from host (non-blocking)
-        let mut got_quit = false;
-        loop {
-            match stdin_lines.next() {
-                Some(Ok(line)) if !line.is_empty() => {
-                    if let Ok(msg) = serde_json::from_str::<HostMessage>(&line) {
-                        match msg {
-                            HostMessage::Quit => { got_quit = true; break; }
-                            HostMessage::Open { .. } => {
-                                let result = open_ui(msg, &mut windows);
-                                send_message(&mut stdout, &result);
-                            }
-                            HostMessage::PortEvent { instance_id, port_index, value } => {
-                                if let Some(win) = windows.get(&instance_id) {
-                                    unsafe {
-                                        if let Some(pe) = (*win.descriptor).port_event {
-                                            let val = value;
-                                            pe(win.ui_handle, port_index as c_uint,
-                                               std::mem::size_of::<f32>() as c_uint,
-                                               0, &val as *const f32 as *const c_void);
-                                        }
-                                    }
-                                }
-                            }
-                            HostMessage::Close { instance_id } => {
-                                if let Some(mut win) = windows.remove(&instance_id) {
-                                    close_window(&mut win);
-                                    send_message(&mut stdout, &BridgeMessage::Closed { instance_id });
-                                }
-                            }
-                        }
+        let stdin_open = read_stdin(&mut inbuf);
+
+        let mut quit = false;
+        while let Some(line) = take_line(&mut inbuf) {
+            if line.is_empty() {
+                continue;
+            }
+            match serde_json::from_slice::<HostMessage>(&line) {
+                Ok(msg) => {
+                    if let Flow::Quit = handle_message(msg, &mut windows) {
+                        quit = true;
+                        break;
                     }
                 }
-                _ => break, // No more data or would block
+                Err(e) => eprintln!("zestbay-ui-bridge: invalid message: {}", e),
             }
         }
 
-        if got_quit { break; }
+        if quit || !stdin_open {
+            break;
+        }
 
         // Idle all windows
         let mut closed_ids = Vec::new();
@@ -694,20 +774,54 @@ fn main() {
         for id in closed_ids {
             if let Some(mut win) = windows.remove(&id) {
                 close_window(&mut win);
-                send_message(&mut stdout, &BridgeMessage::Closed { instance_id: id });
+                send_message(&BridgeMessage::Closed { instance_id: id });
             }
         }
 
-        if windows.is_empty() && got_quit {
-            break;
-        }
-
-        // Sleep briefly to avoid busy-waiting (30fps UI refresh)
+        // Sleep briefly to avoid busy-waiting (~60 fps UI refresh)
         std::thread::sleep(std::time::Duration::from_millis(16));
     }
 
-    // Cleanup remaining windows
+    // Host quit or went away: close everything.
     for (_, mut win) in windows.drain() {
         close_window(&mut win);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn take_line_handles_partial_input() {
+        let mut buf = b"{\"a\":1}\n{\"b\"".to_vec();
+        assert_eq!(take_line(&mut buf), Some(b"{\"a\":1}".to_vec()));
+        assert_eq!(take_line(&mut buf), None);
+        buf.extend_from_slice(b":2}\n");
+        assert_eq!(take_line(&mut buf), Some(b"{\"b\":2}".to_vec()));
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn base64_matches_rfc4648_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+        assert_eq!(base64_encode(&[0xff, 0xfe, 0x00]), "//4A");
+    }
+
+    #[test]
+    fn local_urids_do_not_collide_with_host() {
+        let mut m = UridMapper::new();
+        m.merge(vec![("urn:a".into(), 1), ("urn:b".into(), 2)]);
+        assert_eq!(m.map_uri("urn:a"), 1);
+        assert!(m.map_uri("urn:new") >= LOCAL_URID_BASE);
+    }
+
+    #[test]
+    fn xevent_is_xlib_sized() {
+        assert_eq!(std::mem::size_of::<XEvent>(), 24 * std::mem::size_of::<c_long>());
     }
 }
