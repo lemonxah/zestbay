@@ -191,21 +191,6 @@ pub struct SavedMidiMappings {
     pub mappings: Vec<MidiCcMapping>,
 }
 
-// ---------------------------------------------------------------------------
-// MIDI learn state (held by the manager, not shared with RT)
-// ---------------------------------------------------------------------------
-
-/// When the user clicks "Learn" on a parameter, the manager enters this state
-/// and waits for the next CC event from any device.
-#[derive(Debug, Clone)]
-pub struct MidiLearnState {
-    pub target: MidiCcTarget,
-    /// Human-readable label for the target (e.g. "LSP Compressor > Threshold").
-    pub label: String,
-    /// Preferred mapping mode (set by the UI based on parameter type).
-    pub mode: MappingMode,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

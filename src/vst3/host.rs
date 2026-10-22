@@ -770,6 +770,9 @@ pub struct Vst3PluginInstance {
     active: bool,
     processing: bool,
     needs_restart: bool,
+    /// A restart left the plugin inactive or with a different bus layout:
+    /// the RT gate stays suspended until the instance is dropped.
+    parked: bool,
 
     gate: RtGate,
     rt: RtState,
@@ -788,7 +791,9 @@ unsafe impl Send for Vst3PluginInstance {}
 impl Vst3PluginInstance {
     /// Load a VST3 plugin from a `.vst3` bundle and instantiate it.
     ///
-    /// `plugin_id` is the hex-encoded TUID (from the scanner).
+    /// `plugin_id` is the hex-encoded TUID (from the scanner).  `state`
+    /// (from `get_state`) is restored before the buses are queried and the
+    /// processor is set up, so state-dependent layouts come up right.
     ///
     /// # Safety
     /// Calls into C plugin code via dlopen / COM vtable pointers.  Must be
@@ -798,6 +803,7 @@ impl Vst3PluginInstance {
         plugin_id: &str,
         plugin_info: &PluginInfo,
         sample_rate: f64,
+        state: Option<&[u8]>,
     ) -> Option<Self> {
         unsafe {
             threading::set_main_thread();
@@ -931,8 +937,20 @@ impl Vst3PluginInstance {
                 }
             }
 
-            // Pass component state to controller
-            if let Some(ctrl) = &controller {
+            // Saved state (component, then controller) while inactive.
+            let restored = match state {
+                Some(blob) => {
+                    let ok = restore_state(&component, controller.as_ref(), blob);
+                    if !ok {
+                        log::warn!("VST3: restoring saved state failed for {}", plugin_info.name);
+                    }
+                    decode_state_blob(blob).is_some_and(|(comp, _)| !comp.is_empty())
+                }
+                None => false,
+            };
+
+            // Otherwise pass the component's default state to the controller.
+            if let Some(ctrl) = controller.as_ref().filter(|_| !restored) {
                 let comp_stream = super::com_host::new_memory_stream();
                 if component.getState(comp_stream as *mut IBStream) == kResultOk
                     && !(*comp_stream).data.is_empty()
@@ -1068,6 +1086,7 @@ impl Vst3PluginInstance {
                 active: false,
                 processing: false,
                 needs_restart: false,
+                parked: false,
                 gate: RtGate::new(),
                 rt,
                 host_app,
@@ -1338,7 +1357,13 @@ impl Vst3PluginInstance {
     /// audio bus layout; the caller must then reload the instance (K3
     /// path).  If the audio thread could not be excluded in time nothing is
     /// changed, the request stays pending and true is returned.
+    /// On failure the instance is parked: the audio thread stays excluded
+    /// (process() passes audio through without touching the plugin) until
+    /// it is dropped.
     pub fn restart(&mut self) -> bool {
+        if self.parked {
+            return false;
+        }
         if !self.gate.suspend(Duration::from_secs(1)) {
             return true;
         }
@@ -1347,11 +1372,24 @@ impl Vst3PluginInstance {
             self.deactivate();
             let same_layout = bus_channels(&self.component, K_INPUT) == self.input_bus_channels
                 && bus_channels(&self.component, K_OUTPUT) == self.output_bus_channels;
-            self.activate() && same_layout
+            if !same_layout {
+                log::info!("VST3: {} changed its audio bus layout", self.display_name);
+            }
+            same_layout && self.activate()
         };
-        self.gate.resume();
+        if ok {
+            self.gate.resume();
+        } else {
+            self.parked = true;
+        }
         log::info!("VST3: {} restarted (ok={})", self.display_name, ok);
         ok
+    }
+
+    /// True once a failed restart excluded the audio thread for good; the
+    /// instance must be reloaded.
+    pub fn is_parked(&self) -> bool {
+        self.parked
     }
 
     /// Return a raw pointer to the IEditController (for GUI access).
@@ -1433,38 +1471,49 @@ impl Vst3PluginInstance {
     ///
     /// # Safety
     /// Calls into plugin code via COM vtable pointers (main thread).
+    #[allow(dead_code)]
     pub unsafe fn set_state(&mut self, blob: &[u8]) -> bool {
-        unsafe {
-            let Some((comp_data, ctrl_data)) = decode_state_blob(blob) else {
-                log::warn!("VST3: malformed state blob for {}", self.display_name);
-                return false;
-            };
-            let mut ok = true;
+        let ok = unsafe { restore_state(&self.component, self.controller.as_ref(), blob) };
+        self.refresh_param_values();
+        ok
+    }
+}
 
-            if !comp_data.is_empty() {
-                let result = write_state(comp_data, |s| self.component.setState(s));
+/// `IComponent::setState`, `IEditController::setComponentState` with the
+/// same data, then `IEditController::setState` (main thread).
+unsafe fn restore_state(
+    component: &vst3::ComPtr<IComponent>,
+    controller: Option<&vst3::ComPtr<IEditController>>,
+    blob: &[u8],
+) -> bool {
+    unsafe {
+        let Some((comp_data, ctrl_data)) = decode_state_blob(blob) else {
+            log::warn!("VST3: malformed state blob");
+            return false;
+        };
+        let mut ok = true;
+
+        if !comp_data.is_empty() {
+            let result = write_state(comp_data, |s| component.setState(s));
+            if result != kResultOk {
+                log::warn!("VST3: IComponent::setState failed ({})", result);
+                ok = false;
+            }
+            if let Some(ctrl) = controller {
+                let _ = write_state(comp_data, |s| ctrl.setComponentState(s));
+            }
+        }
+
+        if !ctrl_data.is_empty() {
+            if let Some(ctrl) = controller {
+                let result = write_state(ctrl_data, |s| ctrl.setState(s));
                 if result != kResultOk {
-                    log::warn!("VST3: IComponent::setState failed ({})", result);
+                    log::warn!("VST3: IEditController::setState failed ({})", result);
                     ok = false;
                 }
-                if let Some(ctrl) = &self.controller {
-                    let _ = write_state(comp_data, |s| ctrl.setComponentState(s));
-                }
             }
-
-            if !ctrl_data.is_empty() {
-                if let Some(ctrl) = &self.controller {
-                    let result = write_state(ctrl_data, |s| ctrl.setState(s));
-                    if result != kResultOk {
-                        log::warn!("VST3: IEditController::setState failed ({})", result);
-                        ok = false;
-                    }
-                }
-            }
-
-            self.refresh_param_values();
-            ok
         }
+        ok
     }
 }
 

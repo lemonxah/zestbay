@@ -516,7 +516,7 @@ pub fn run_probe_main(args: &[String]) -> ! {
                 std::sync::Arc::new(crate::lv2::urid::UridMapper::new());
             let _inst = unsafe {
                 crate::lv2::host::Lv2PluginInstance::new(
-                    world,
+                    &world,
                     &lp,
                     &info,
                     sample_rate,
@@ -538,6 +538,7 @@ pub fn run_probe_main(args: &[String]) -> ! {
                         uri,
                         &info,
                         sample_rate,
+                        None,
                     )
                 };
             }
@@ -554,6 +555,7 @@ pub fn run_probe_main(args: &[String]) -> ! {
                         uri,
                         &info,
                         sample_rate,
+                        None,
                     )
                 };
             }

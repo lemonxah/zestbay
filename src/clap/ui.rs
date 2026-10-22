@@ -383,14 +383,15 @@ pub unsafe fn open_clap_gui(
     }
 }
 
-/// Remove callbacks, then hide/destroy the plugin GUI.
+/// Hide/destroy the plugin GUI.  Timers and fds the plugin registered stay:
+/// it may use them for non-GUI work and must unregister GUI ones itself.
+/// They are force-removed when the instance is dropped.
 unsafe fn destroy_plugin_gui(
     plugin: *const ClapPlugin,
     gui: &clap_sys::ext::gui::clap_plugin_gui,
     hide: bool,
 ) {
     unsafe {
-        remove_plugin_callbacks(plugin);
         if hide {
             if let Some(hide_fn) = gui.hide {
                 hide_fn(plugin);
@@ -399,8 +400,6 @@ unsafe fn destroy_plugin_gui(
         if let Some(destroy_fn) = gui.destroy {
             destroy_fn(plugin);
         }
-        // Anything (re)registered during destroy is dropped too.
-        remove_plugin_callbacks(plugin);
     }
 }
 
@@ -416,7 +415,8 @@ unsafe fn teardown(state: ClapGuiState) {
 /// Close a CLAP plugin GUI if it is open.
 ///
 /// Must be called from the main (PW) thread.  When this returns the GUI is
-/// destroyed and no GUI/timer/fd callback for the plugin can still run.
+/// destroyed and no GUI callback for the plugin can still run.  Timers/fds
+/// the plugin still has registered stay until the instance is dropped.
 pub fn close_clap_gui(
     instance_id: PluginInstanceId,
     event_tx: &std::sync::mpsc::Sender<crate::pipewire::PwEvent>,

@@ -112,6 +112,9 @@ pub struct ClapPluginInstance {
     /// Fixed at instantiation; a graph rate change requires a reload (K3).
     pub sample_rate: f64,
     activated: bool,
+    /// A restart left the plugin deactivated or with a different port
+    /// layout: the RT gate stays suspended until the instance is dropped.
+    parked: bool,
 
     gate: RtGate,
     process_count: AtomicU64,
@@ -213,6 +216,10 @@ impl ClapPluginInstance {
 
     /// Load a CLAP plugin from a `.clap` file and instantiate it.
     ///
+    /// `state` (from `get_state`) is loaded after `init` and before the
+    /// ports are queried and the plugin is activated, so state-dependent
+    /// port layouts come up right the first time.
+    ///
     /// # Safety
     /// Calls into C plugin code via dlopen/function pointers.  Must be called
     /// on the PipeWire thread, which becomes the CLAP main thread.
@@ -221,6 +228,7 @@ impl ClapPluginInstance {
         plugin_id: &str,
         plugin_info: &PluginInfo,
         sample_rate: f64,
+        state: Option<&[u8]>,
     ) -> Option<Self> {
         unsafe {
             threading::set_main_thread();
@@ -312,6 +320,14 @@ impl ClapPluginInstance {
                     destroy();
                     return None;
                 }
+            }
+
+            let state_ext =
+                get_plugin_ext::<clap_plugin_state>(plugin_ptr, clap_sys::ext::state::CLAP_EXT_STATE);
+            if let Some(blob) = state
+                && !load_state(plugin_ptr, state_ext, blob)
+            {
+                log::warn!("CLAP: restoring saved state failed for {}", plugin_id);
             }
 
             let (input_port_channels, output_port_channels) = query_audio_ports(plugin_ptr);
@@ -422,9 +438,6 @@ impl ClapPluginInstance {
             // Compare against exactly what the slots hold.
             let last_applied: Vec<f64> = initial_values.iter().map(|&v| v as f32 as f64).collect();
 
-            let state_ext =
-                get_plugin_ext::<clap_plugin_state>(plugin_ptr, clap_sys::ext::state::CLAP_EXT_STATE);
-
             // Activate (K4: any block size from 1 to MAX_BLOCK).
             let activated = match plugin_ref.activate {
                 Some(activate) => activate(plugin_ptr, sample_rate, 1, MAX_BLOCK as u32),
@@ -460,6 +473,7 @@ impl ClapPluginInstance {
                 bypassed: AtomicBool::new(false),
                 sample_rate,
                 activated,
+                parked: false,
                 gate: RtGate::new(),
                 process_count: AtomicU64::new(0),
                 host_param_dirty: AtomicBool::new(false),
@@ -650,26 +664,17 @@ impl ClapPluginInstance {
     ///
     /// # Safety
     /// Calls into plugin code.
+    #[allow(dead_code)]
     pub unsafe fn set_state(&mut self, blob: &[u8]) -> bool {
         if self.state_ext.is_null() {
             return false;
         }
-        unsafe {
-            let Some(load) = (*self.state_ext).load else {
-                return false;
-            };
-            let mut reader = StreamReader { data: blob, pos: 0 };
-            let stream = clap_istream {
-                ctx: &mut reader as *mut StreamReader as *mut c_void,
-                read: Some(istream_read),
-            };
-            let ok = load(self.plugin, &stream);
-            if !ok {
-                log::warn!("CLAP: state.load failed for {}", self.display_name);
-            }
-            self.refresh_param_values();
-            ok
+        let ok = unsafe { load_state(self.plugin, self.state_ext, blob) };
+        if !ok {
+            log::warn!("CLAP: state.load failed for {}", self.display_name);
         }
+        self.refresh_param_values();
+        ok
     }
 
     /// Re-read parameter values from the plugin into the slots (main thread).
@@ -813,10 +818,15 @@ impl ClapPluginInstance {
     /// Deactivate and reactivate the plugin in place (main thread).
     ///
     /// Returns false if the plugin could not be brought back with the same
-    /// audio port layout; the caller must then reload the instance (K3
+    /// audio port layout.  The instance is then parked: the audio thread
+    /// stays excluded (process() passes audio through without touching the
+    /// plugin) until it is dropped, and the caller must reload it (K3
     /// path).  If the audio thread could not be excluded in time nothing is
     /// changed, the request stays pending and true is returned.
     pub fn restart(&mut self) -> bool {
+        if self.parked {
+            return false;
+        }
         if !self.host_data.restart_requested.swap(false, Ordering::AcqRel) && self.activated {
             return true;
         }
@@ -827,19 +837,31 @@ impl ClapPluginInstance {
         unsafe {
             self.stop_and_deactivate();
             let (ins, outs) = query_audio_ports(self.plugin);
-            let same_layout = ins == self.input_port_channels && outs == self.output_port_channels;
+            if ins != self.input_port_channels || outs != self.output_port_channels {
+                log::info!("CLAP: {} changed its audio port layout", self.display_name);
+                self.parked = true;
+                return false;
+            }
             let plugin_ref = &*self.plugin;
             self.activated = match plugin_ref.activate {
                 Some(activate) => activate(self.plugin, self.sample_rate, 1, MAX_BLOCK as u32),
                 None => true,
             };
-            self.gate.resume();
             if !self.activated {
                 log::error!("CLAP: re-activate failed for {}", self.display_name);
+                self.parked = true;
+                return false;
             }
+            self.gate.resume();
             log::info!("CLAP: {} restarted", self.display_name);
-            self.activated && same_layout
+            true
         }
+    }
+
+    /// True once a failed restart excluded the audio thread for good; the
+    /// instance must be reloaded.
+    pub fn is_parked(&self) -> bool {
+        self.parked
     }
 
     /// stop_processing (as the audio thread) + deactivate.  The gate must be
@@ -878,6 +900,28 @@ impl Drop for ClapPluginInstance {
             }
         }
         super::ui::remove_plugin_callbacks(self.plugin);
+    }
+}
+
+/// `clap_plugin_state.load` from an in-memory blob (main thread).
+unsafe fn load_state(
+    plugin: *const clap_plugin,
+    state_ext: *const clap_plugin_state,
+    blob: &[u8],
+) -> bool {
+    if state_ext.is_null() {
+        return false;
+    }
+    unsafe {
+        let Some(load) = (*state_ext).load else {
+            return false;
+        };
+        let mut reader = StreamReader { data: blob, pos: 0 };
+        let stream = clap_istream {
+            ctx: &mut reader as *mut StreamReader as *mut c_void,
+            read: Some(istream_read),
+        };
+        load(plugin, &stream)
     }
 }
 
