@@ -27,6 +27,18 @@ pub static PLUGINS_FROZEN: AtomicBool = AtomicBool::new(false);
 /// Dangerous — a crashing plugin will take down the entire process.
 pub static NO_PROBE: AtomicBool = AtomicBool::new(false);
 
+/// End the process once everything is saved, without running atexit handlers
+/// or the static destructors of loaded libraries. Hosted plugins (Pianoteq,
+/// for one) can hit internal errors and hang in their own destructors while
+/// PipeWire and Qt threads are still running, which froze ZestBay on quit.
+pub fn exit_now(code: i32) -> ! {
+    use std::io::Write;
+    log::logger().flush();
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    unsafe { libc::_exit(code) }
+}
+
 #[link(name = "X11")]
 unsafe extern "C" {
     fn XInitThreads() -> std::os::raw::c_int;
@@ -127,4 +139,5 @@ fn main() {
     log::info!("Qt event loop exited");
 
     lv2::ui::shutdown_gtk_thread();
+    exit_now(0);
 }

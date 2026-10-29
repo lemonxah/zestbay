@@ -129,6 +129,7 @@ ZestBay provides a comprehensive set of LV2 host features, allowing it to load t
 ### Patchbay Rules
 - Auto-learn: connect ports manually and rules are created automatically
 - Auto-unlearn: disconnect ports and the rule is updated
+- Block rules: right-click a wire (or right-drag between ports) to make sure a source never connects to a target, even over other rules and the default node
 - Glob pattern matching for source and target node names
 - Per-port-pair mappings with heuristic fallback (channel name, position)
 - Snapshot current connections as a complete rule set

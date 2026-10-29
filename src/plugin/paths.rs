@@ -78,6 +78,13 @@ pub fn flatpak_lv2_path() -> Option<String> {
         "/app/lib/lv2".to_string(),
     ];
     dirs.extend(host_lib_dirs().map(|lib| format!("{lib}/lv2")));
+    // Drop directories that resolve to one already listed (e.g. lib64 -> lib
+    // on Arch), or lilv loads every plugin twice and warns about each.
+    let mut seen = HashSet::new();
+    dirs.retain(|d| {
+        let path = PathBuf::from(d);
+        seen.insert(std::fs::canonicalize(&path).unwrap_or(path))
+    });
     Some(dirs.join(":"))
 }
 

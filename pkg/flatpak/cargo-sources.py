@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Write pkg/flatpak/cargo-sources.json from Cargo.lock for the offline
-Flatpak build: every crates.io package as a .crate archive vendored under
-cargo/vendor, plus the Cargo config that points crates.io at that directory.
+"""Write cargo-sources.json (repo root, next to the Flatpak manifest) from
+Cargo.lock for the offline Flatpak build: every crates.io package as a .crate
+archive vendored under cargo/vendor, plus the Cargo config that points
+crates.io at that directory.
 
 Self-contained (standard library only, no network): Cargo.lock already has
 each crate's checksum. Only crates.io dependencies are supported; ZestBay
@@ -33,7 +34,7 @@ replace-with = "vendored-sources"
 
 def main() -> None:
     lock_path = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "Cargo.lock"
-    out_path = Path(sys.argv[2]) if len(sys.argv) > 2 else ROOT / "pkg/flatpak/cargo-sources.json"
+    out_path = Path(sys.argv[2]) if len(sys.argv) > 2 else ROOT / "cargo-sources.json"
     lock = tomllib.loads(lock_path.read_text())
 
     sources = []

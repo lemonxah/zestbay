@@ -34,6 +34,8 @@ QtObject {
         "trash":      { vb: 14, sw: 1.4, d: "M2 3.5h10M5.5 3.5V2h3v1.5M3.5 3.5l.6 8h5.8l.6-8" },
         "reset":      { vb: 14, sw: 1.5, d: "M2.5 7a4.5 4.5 0 1 0 1.3-3.2M2.5 2.5v2.5H5" },
         "arrow":      { vb: 14, sw: 1.5, d: "M1 7h11M9 3.5L12.5 7 9 10.5" },
+        // Block rule (⊘): "never connect", in place of the arrow.
+        "block":      { vb: 14, sw: 1.5, d: _circle(7, 7, 5) + "M3.5 10.5L10.5 3.5" },
         // Gear (Preferences). The design source drew a sun here, which read
         // as a theme toggle.
         "settings":   { vb: 16, sw: 1.3, d: "M6.69 3.28 L7.00 1.68 L9.00 1.68 L9.31 3.28 L10.41 3.74 L11.76 2.82 L13.18 4.24 L12.26 5.59 L12.72 6.69 L14.32 7.00 L14.32 9.00 L12.72 9.31 L12.26 10.41 L13.18 11.76 L11.76 13.18 L10.41 12.26 L9.31 12.72 L9.00 14.32 L7.00 14.32 L6.69 12.72 L5.59 12.26 L4.24 13.18 L2.82 11.76 L3.74 10.41 L3.28 9.31 L1.68 9.00 L1.68 7.00 L3.28 6.69 L3.74 5.59 L2.82 4.24 L4.24 2.82 L5.59 3.74Z" + _circle(8, 8, 2.1) },
