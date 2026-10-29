@@ -9,6 +9,7 @@ pub mod qobject {
         #[qobject]
         #[qml_element]
         #[qproperty(bool, patchbay_enabled)]
+        #[qproperty(bool, patchbay_exclusive)]
         #[qproperty(i32, active_plugin_count)]
         #[qproperty(i32, node_count)]
         #[qproperty(i32, link_count)]
@@ -118,6 +119,9 @@ pub mod qobject {
 
         #[qinvokable]
         fn toggle_patchbay(self: Pin<&mut Self>, enabled: bool);
+
+        #[qinvokable]
+        fn toggle_patchbay_exclusive(self: Pin<&mut Self>, exclusive: bool);
 
         #[qinvokable]
         fn get_node_names_json(self: Pin<&mut Self>) -> QString;
@@ -357,6 +361,7 @@ impl BridgeSplitState {
 
 pub struct AppControllerRust {
     patchbay_enabled: bool,
+    patchbay_exclusive: bool,
     active_plugin_count: i32,
     node_count: i32,
     link_count: i32,
@@ -436,6 +441,7 @@ impl Default for AppControllerRust {
     fn default() -> Self {
         Self {
             patchbay_enabled: true,
+            patchbay_exclusive: true,
             active_plugin_count: 0,
             node_count: 0,
             link_count: 0,
@@ -522,7 +528,10 @@ impl qobject::AppController {
             self.rust().prefs.pw_operation_cooldown_ms,
         );
 
-        let patchbay = PatchbayManager::new(graph.clone());
+        let mut patchbay = PatchbayManager::new(graph.clone());
+        patchbay.exclusive = self.rust().prefs.patchbay_exclusive;
+        let exclusive = patchbay.exclusive;
+        self.as_mut().set_patchbay_exclusive(exclusive);
 
         self.as_mut().rust_mut().graph = Some(graph);
         self.as_mut().rust_mut().event_rx = Some(event_rx);
@@ -2961,6 +2970,20 @@ impl qobject::AppController {
         self.as_mut().set_patchbay_enabled(enabled);
     }
 
+    pub fn toggle_patchbay_exclusive(mut self: Pin<&mut Self>, exclusive: bool) {
+        if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
+            patchbay.exclusive = exclusive;
+        }
+        self.as_mut().rust_mut().prefs.patchbay_exclusive = exclusive;
+        save_preferences(&self.rust().prefs);
+        self.as_mut().set_patchbay_exclusive(exclusive);
+        log::info!("Patchbay exclusive mode: {}", exclusive);
+        // Turning it on should enforce the rules now, not on the next change.
+        if exclusive && self.rust().patchbay_enabled {
+            self.as_mut().apply_rules();
+        }
+    }
+
     pub fn get_node_names_json(self: Pin<&mut Self>) -> QString {
         if let Some(ref graph) = self.rust().graph {
             let nodes = graph.get_all_nodes();
@@ -3114,6 +3137,11 @@ impl qobject::AppController {
     pub fn reset_preferences(mut self: Pin<&mut Self>) {
         self.as_mut().rust_mut().prefs = Preferences::default();
         save_preferences(&self.rust().prefs);
+        let exclusive = self.rust().prefs.patchbay_exclusive;
+        if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
+            patchbay.exclusive = exclusive;
+        }
+        self.as_mut().set_patchbay_exclusive(exclusive);
         log::info!("Preferences reset to defaults");
     }
 
@@ -4399,6 +4427,10 @@ struct Preferences {
 
     #[serde(default = "Preferences::default_pw_operation_cooldown_ms")]
     pub pw_operation_cooldown_ms: u64,
+
+    /// Disconnect links that no rule allows (see `PatchbayManager::exclusive`).
+    #[serde(default = "Preferences::default_patchbay_exclusive")]
+    pub patchbay_exclusive: bool,
 }
 
 impl Preferences {
@@ -4429,6 +4461,9 @@ impl Preferences {
     fn default_pw_operation_cooldown_ms() -> u64 {
         50
     }
+    fn default_patchbay_exclusive() -> bool {
+        true
+    }
 }
 
 impl Default for Preferences {
@@ -4443,6 +4478,7 @@ impl Default for Preferences {
             close_to_tray: Self::default_close_to_tray(),
             pw_tick_interval_ms: Self::default_pw_tick_interval_ms(),
             pw_operation_cooldown_ms: Self::default_pw_operation_cooldown_ms(),
+            patchbay_exclusive: Self::default_patchbay_exclusive(),
         }
     }
 }

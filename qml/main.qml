@@ -217,6 +217,14 @@ ApplicationWindow {
                 checked: controller.patchbay_enabled
                 onToggled: controller.toggle_patchbay(checked)
             }
+            Action {
+                // Off: rules only add links; nothing they don't cover is removed.
+                text: "Exclusive Mode"
+                checkable: true
+                enabled: controller.patchbay_enabled
+                checked: controller.patchbay_exclusive
+                onToggled: controller.toggle_patchbay_exclusive(checked)
+            }
             MenuSeparator {}
             Action {
                 text: "Edit Rules..."
