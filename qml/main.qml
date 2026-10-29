@@ -97,6 +97,9 @@ ZbWindow {
             graphView.refreshData();
             mainWindow.refreshRuleCount();
         }
+        function onRules_changed() {
+            mainWindow.refreshRuleCount();
+        }
         function onError_occurred(message) {
             // Errors can arrive in bursts (e.g. while PipeWire reconnects):
             // add to the open dialog instead of replacing it.

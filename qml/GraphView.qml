@@ -62,6 +62,15 @@ Item {
 
     property var nodes: []
     property var links: []
+    // Node pairs under an enabled block rule: [{source, target, ruleId, label}],
+    // drawn as red ⊘ lines. blockGeom holds their last drawn curves for
+    // hit-testing.
+    property var blockedPairs: []
+    property var blockGeom: []
+    property var contextBlock: null
+    // Left-drag over a port that a block rule forbids: the wire turns red.
+    property int connectHoverPortId: -1
+    property bool connectTargetBlocked: false
     property var portsByNode: ({})
     property var portPositions: ({})
     property var portMediaTypes: ({})
@@ -164,6 +173,44 @@ Item {
     property string hoveredButton: ""   // "<nodeId>:<key>" for footer buttons / toggle row
 
     // Redraw graph when system theme changes
+    Connections {
+        target: controller
+        function onRules_changed() { refreshBlocked() }
+    }
+
+    function refreshBlocked() {
+        try {
+            blockedPairs = JSON.parse(controller.get_blocked_pairs_json())
+        } catch (e) {
+            blockedPairs = []
+        }
+        canvas.requestPaint()
+    }
+
+    function findBlockAt(sx, sy) {
+        var c = toCanvas(sx, sy)
+        var threshold = 5 / zoom
+        var best = null
+        var bestDist = threshold + 1
+        for (var i = 0; i < blockGeom.length; i++) {
+            var g = blockGeom[i]
+            // The ⊘ marker is a bigger target than the thin line.
+            var dm = Math.sqrt((c.x - g.mx) * (c.x - g.mx) + (c.y - g.my) * (c.y - g.my))
+            var d = dm <= 9 / zoom ? 0 : distToBezier(c.x, c.y, g.x1, g.y1, g.x2, g.y2)
+            if (d < bestDist) {
+                bestDist = d
+                best = g
+            }
+        }
+        return bestDist <= threshold ? best : null
+    }
+
+    function showToast(message) {
+        toastText.text = message
+        toast.opacity = 1
+        toastTimer.restart()
+    }
+
     Connections {
         target: Theme
         function onDarkChanged() {
@@ -277,6 +324,11 @@ Item {
         } catch(e) {
             nodes = []
             links = []
+        }
+        try {
+            blockedPairs = JSON.parse(controller.get_blocked_pairs_json())
+        } catch(e) {
+            blockedPairs = []
         }
 
         var newPorts = {}
@@ -883,6 +935,29 @@ Item {
             onTriggered: {
                 if (contextNodeId >= 0)
                     controller.remove_plugin(contextNodeId)
+            }
+        }
+    }
+
+    // Right-clicked block line: the rule · Remove block
+    ZbMenu {
+        id: blockContextMenu
+        onClosed: {
+            contextBlock = null
+            canvas.requestPaint()
+        }
+
+        ZbMenuItem {
+            text: contextBlock ? "Blocked: " + contextBlock.label : ""
+            enabled: false
+        }
+
+        ZbMenuSeparator {}
+
+        ZbMenuItem {
+            text: "Remove block"
+            onTriggered: {
+                if (contextBlock) controller.remove_rule(contextBlock.ruleId)
             }
         }
     }
@@ -1786,6 +1861,51 @@ Item {
             }
             ctx.globalAlpha = 1
 
+            // ---- Block lines: red dashed, header to header, ⊘ midway ------
+            var newBlockGeom = []
+            for (var bi = 0; bi < blockedPairs.length; bi++) {
+                var bp = blockedPairs[bi]
+                var bsPos = nodePositions[bp.source]
+                var btPos = nodePositions[bp.target]
+                if (!bsPos || !btPos) continue
+                var bsNode = findNodeData(bp.source)
+                var btNode = findNodeData(bp.target)
+                if (!bsNode || !btNode) continue
+                if ((bsNode.layoutKey && hiddenNodes[bsNode.layoutKey])
+                        || (btNode.layoutKey && hiddenNodes[btNode.layoutKey])) continue
+                var bx1 = bsPos.x + (getNodeWidth(bp.source) || minNodeWidth)
+                var by1 = bsPos.y + 17
+                var bx2 = btPos.x
+                var by2 = btPos.y + 17
+                var bmx = (bx1 + bx2) / 2
+                var bmy = (by1 + by2) / 2
+                var bHot = contextBlock && contextBlock.ruleId === bp.ruleId
+                        && contextBlock.source === bp.source && contextBlock.target === bp.target
+                ctx.save()
+                ctx.globalAlpha = bHot ? 1 : 0.8
+                ctx.setLineDash([6, 4])
+                drawBezier(ctx, bx1, by1, bx2, by2, Theme.textDestructive,
+                           bHot ? Theme.wireWidthActive : Theme.wireWidth)
+                ctx.setLineDash([])
+                ctx.globalAlpha = 1
+                ctx.beginPath()
+                ctx.arc(bmx, bmy, 7, 0, Math.PI * 2)
+                ctx.fillStyle = "" + Theme.bgCanvas
+                ctx.fill()
+                ctx.strokeStyle = "" + Theme.textDestructive
+                ctx.lineWidth = 1.5
+                ctx.stroke()
+                ctx.beginPath()
+                ctx.moveTo(bmx - 4.5, bmy + 4.5)
+                ctx.lineTo(bmx + 4.5, bmy - 4.5)
+                ctx.stroke()
+                ctx.restore()
+                newBlockGeom.push({ x1: bx1, y1: by1, x2: bx2, y2: by2, mx: bmx, my: bmy,
+                                    ruleId: bp.ruleId, label: bp.label,
+                                    source: bp.source, target: bp.target })
+            }
+            blockGeom = newBlockGeom
+
             // ---- Pass 3: node cards ---------------------------------------
             for (var ni2 = 0; ni2 < nodes.length; ni2++) {
                 var n2 = nodes[ni2]
@@ -1800,15 +1920,16 @@ Item {
                 var dragFrom = newPortPositions[connectFromPortId] || portPositions[connectFromPortId]
                 if (dragFrom) {
                     var dragToC = graphView.toCanvas(connectMouseX, connectMouseY)
-                    var dragColor = connectBlocking ? Theme.textDestructive
-                                                    : signalColor(portMediaTypes[connectFromPortId])
+                    var dragColor = connectBlocking || connectTargetBlocked
+                                    ? Theme.textDestructive
+                                    : signalColor(portMediaTypes[connectFromPortId])
                     ctx.save()
                     ctx.setLineDash([4, 4])
                     if (connectFromDir === "Input")
                         drawBezier(ctx, dragToC.x, dragToC.y, dragFrom.cx, dragFrom.cy, dragColor, Theme.wireWidthActive)
                     else
                         drawBezier(ctx, dragFrom.cx, dragFrom.cy, dragToC.x, dragToC.y, dragColor, Theme.wireWidthActive)
-                    if (connectBlocking) {
+                    if (connectBlocking || connectTargetBlocked) {
                         // A small ⊘ at the cursor end.
                         ctx.setLineDash([])
                         ctx.strokeStyle = "" + Theme.textDestructive
@@ -2104,6 +2225,8 @@ Item {
                 connectFromPortId = -1
                 connectFromDir = ""
                 connectBlocking = false
+                connectHoverPortId = -1
+                connectTargetBlocked = false
                 canvas.requestPaint()
             } else {
                 clearSelection()
@@ -2170,6 +2293,10 @@ Item {
                         canvas.requestPaint()
                     }
                     linkContextMenu.popup()
+                } else if (nodeId < 0 && findBlockAt(mouse.x, mouse.y)) {
+                    contextBlock = findBlockAt(mouse.x, mouse.y)
+                    canvas.requestPaint()
+                    blockContextMenu.popup()
                 } else if (nodeId >= 0) {
                     contextNodeId = nodeId
                     contextNode = findNodeData(nodeId)
@@ -2374,6 +2501,15 @@ Item {
             if (connectFromPortId >= 0) {
                 connectMouseX = mouse.x
                 connectMouseY = mouse.y
+                if (!connectBlocking) {
+                    var hoverPort = findPortAt(mouse.x, mouse.y)
+                    if (hoverPort !== connectHoverPortId) {
+                        connectHoverPortId = hoverPort
+                        connectTargetBlocked = hoverPort >= 0
+                                && getPortDirection(hoverPort) !== connectFromDir
+                                && blockedReasonFor(connectFromPortId, connectFromDir, hoverPort) !== ""
+                    }
+                }
                 canvas.requestPaint()
                 return
             }
@@ -2428,7 +2564,10 @@ Item {
                         var fromNodeId = getPortNodeId(connectFromPortId)
                         var toNodeId = getPortNodeId(targetId)
                         if (targetDir !== connectFromDir && fromNodeId !== toNodeId) {
-                            if (connectFromDir === "Output") {
+                            var why = blockedReasonFor(connectFromPortId, connectFromDir, targetId)
+                            if (why !== "") {
+                                showToast("Blocked by rule " + why + ". Remove the block to connect.")
+                            } else if (connectFromDir === "Output") {
                                 controller.connect_ports(connectFromPortId, targetId)
                             } else {
                                 controller.connect_ports(targetId, connectFromPortId)
@@ -2437,6 +2576,8 @@ Item {
                     }
                     connectFromPortId = -1
                     connectFromDir = ""
+                    connectHoverPortId = -1
+                    connectTargetBlocked = false
                     canvas.requestPaint()
                 }
 
@@ -2493,6 +2634,39 @@ Item {
             if (wheel.angleDelta.y === 0) return
             var factor = wheel.angleDelta.y > 0 ? 1.1 : 0.9
             zoomAt(wheel.x, wheel.y, zoom * factor)
+        }
+    }
+
+    // Short notice at the bottom of the canvas (e.g. a refused connection).
+    Rectangle {
+        id: toast
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 28
+        width: Math.min(toastText.implicitWidth + 32, parent.width - 32)
+        height: toastText.implicitHeight + 16
+        radius: Theme.radiusControl
+        color: Theme.bgTooltip
+        border.width: 1
+        border.color: Theme.borderStrong
+        opacity: 0
+        visible: opacity > 0
+        Behavior on opacity { NumberAnimation { duration: 150 } }
+
+        Text {
+            id: toastText
+            anchors.centerIn: parent
+            width: Math.min(implicitWidth, toast.parent.width - 64)
+            font.family: Theme.fontSans
+            font.pixelSize: Theme.sizeBody
+            color: Theme.textPrimary
+            wrapMode: Text.WordWrap
+        }
+
+        Timer {
+            id: toastTimer
+            interval: 3500
+            onTriggered: toast.opacity = 0
         }
     }
 
@@ -2792,6 +2966,13 @@ Item {
             selectedLinks = {}
             canvas.requestPaint()
         }
+    }
+
+    // Block rule label ("A → B") forbidding a drag from `fromPort` (direction
+    // `fromDir`) to `toPort`, or "".
+    function blockedReasonFor(fromPort, fromDir, toPort) {
+        return fromDir === "Output" ? controller.blocked_reason(fromPort, toPort)
+                                    : controller.blocked_reason(toPort, fromPort)
     }
 
     // Block the node pairs of `linkIds` (each pair once: block_link removes

@@ -376,14 +376,26 @@ button holds the old File / Help items.
   `textDestructive` with a small ⊘ at the cursor; dropping it on a pin adds a
   block rule for the node pair and removes its links. A right-click on a pin
   without dragging opens the node menu; Escape cancels either drag.
-- **Blocking (behaviour):** a block rule means the source is never connected
-  to the target. It is enforced whenever rules are on, in exclusive and
-  non-exclusive mode, and wins over connect rules and the default node, so a
-  blocked app with nothing else routing it stays unconnected. Blocking a pair
-  replaces connect rules for exactly that pair; connecting the pair by hand
-  lifts its block (wildcard blocks stay and are edited in the rules dialog).
-  The rule-enforcement loop guard applies, so ZestBay stops removing a link the
-  session manager keeps re-creating after 3 tries in 30 s.
+- **Block line:** every node pair under an enabled block rule (rules on) is
+  joined by a red (`textDestructive`) dashed 6/4 curve from the source's
+  header (right edge, header centre) to the target's header (left edge), 80 %
+  opacity, behind the nodes, with a 14 px ⊘ marker (`bgCanvas` fill, red ring
+  and slash) at its midpoint. Right-click the line or marker: a menu with the
+  rule ("Blocked: A → B", disabled) · — · **Remove block**. Hidden nodes hide
+  their block lines.
+- **Blocking (behaviour):** a block rule means the source can never be
+  connected to the target. It is enforced whenever rules are on, in exclusive
+  and non-exclusive mode, and wins over connect rules, the default node and
+  manual connections: a drag onto a blocked port turns the wire red with a ⊘,
+  and dropping it is refused with a toast ("Blocked by rule A → B. Remove the
+  block to connect."). Blocked pairs are never auto-learned. A blocked app
+  with nothing else routing it stays unconnected. Blocking a pair replaces
+  connect rules for exactly that pair. Remove the block (block line menu or
+  rules dialog) to connect the pair again. The rule-enforcement loop guard
+  applies, so ZestBay stops removing a link the session manager keeps
+  re-creating after 3 tries in 30 s.
+- **Toast:** a `bgTooltip` pill with a strong border, 13 px text, centred 28 px
+  above the canvas bottom; fades out after 3.5 s.
 - **Selection:** accent border + 3 px `accentRing` halo; the node's wires and
   pins turn accent.
 - **Search:** non-matching nodes at 35 % opacity; matching ports get a 2 px

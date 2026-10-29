@@ -98,6 +98,11 @@ ZbWindow {
                 ruleEditor.loadRules();
             }
         }
+        function onRules_changed() {
+            if (ruleEditor.visible) {
+                ruleEditor.loadRules();
+            }
+        }
     }
 
     // Escape closes the window (open sub-dialogs handle Escape themselves).
@@ -267,7 +272,7 @@ ZbWindow {
             }
             CaptionText {
                 text: actionSeg.currentIndex === 1
-                      ? "Block: the source is never connected to the target, in any mode. Blocks win over connect rules and the default node. Patterns match node names; * is a wildcard."
+                      ? "Block: the source can never be connected to the target, by rules, the default node or by hand. Patterns match node names; * is a wildcard."
                       : "Connect: the source is connected to the target whenever both exist. Patterns match node names; * is a wildcard."
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
