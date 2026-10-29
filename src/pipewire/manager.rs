@@ -35,6 +35,10 @@ const RESTART_LOOP_WINDOW: Duration = Duration::from_secs(10);
 const MAX_RAPID_RESTART_RELOADS: u32 = 2;
 /// How often parameter changes made inside plugins are reported.
 const PARAM_REPORT_INTERVAL: Duration = Duration::from_millis(100);
+/// A link requested this recently is assumed to be on its way: a second
+/// request for the same ports (e.g. patchbay rules and saved-link restore
+/// both connecting at startup) is dropped instead of failing with EEXIST.
+const LINK_REQUEST_GRACE: Duration = Duration::from_secs(1);
 
 enum InternalOp {
     Connect {
@@ -335,6 +339,7 @@ fn run_pipewire_thread(
         meta: RefCell::new(HashMap::new()),
         midi_mapping_table: RefCell::new(std::mem::take(&mut carry.midi_mappings)),
         pending_ops: RefCell::new(VecDeque::new()),
+        requested_links: RefCell::new(HashMap::new()),
         relinks: RefCell::new(Vec::new()),
         last_reload: RefCell::new(HashMap::new()),
         restart_guards: RefCell::new(HashMap::new()),
@@ -484,6 +489,8 @@ struct Host {
     midi_mapping_table: RefCell<crate::midi::MidiMappingTable>,
 
     pending_ops: RefCell<VecDeque<InternalOp>>,
+    /// (output port, input port) → when a link between them was requested.
+    requested_links: RefCell<HashMap<(ObjectId, ObjectId), Instant>>,
     relinks: RefCell<Vec<PendingRelink>>,
     last_reload: RefCell<HashMap<u64, Instant>>,
     restart_guards: RefCell<HashMap<u64, RestartLoopGuard>>,
@@ -786,21 +793,45 @@ impl Host {
             InternalOp::Connect {
                 output_port_id,
                 input_port_id,
-            } => create_link(&self.graph, &self.core, output_port_id, input_port_id),
+            } => {
+                let now = Instant::now();
+                let mut requested = self.requested_links.borrow_mut();
+                requested.retain(|_, at| now.duration_since(*at) < LINK_REQUEST_GRACE);
+                let ports = (output_port_id, input_port_id);
+                if requested.contains_key(&ports)
+                    || self.graph.find_link(output_port_id, input_port_id).is_some()
+                {
+                    log::debug!(
+                        "Link {} -> {} already exists or is pending; not creating it again",
+                        output_port_id,
+                        input_port_id
+                    );
+                    return;
+                }
+                requested.insert(ports, now);
+                drop(requested);
+                create_link(&self.graph, &self.core, output_port_id, input_port_id);
+            }
             InternalOp::Disconnect {
                 link_id,
                 output_port_id,
                 input_port_id,
-            } => match self.graph.get_link(link_id) {
-                Some(l) if l.output_port_id == output_port_id && l.input_port_id == input_port_id => {
-                    self.registry.destroy_global(link_id);
+            } => {
+                // A reconnect right after this must not be taken for a duplicate.
+                self.requested_links
+                    .borrow_mut()
+                    .remove(&(output_port_id, input_port_id));
+                match self.graph.get_link(link_id) {
+                    Some(l) if l.output_port_id == output_port_id && l.input_port_id == input_port_id => {
+                        self.registry.destroy_global(link_id);
+                    }
+                    Some(_) => log::warn!(
+                        "Not destroying link {}: the ID now refers to a different link",
+                        link_id
+                    ),
+                    None => log::debug!("Link {} already gone", link_id),
                 }
-                Some(_) => log::warn!(
-                    "Not destroying link {}: the ID now refers to a different link",
-                    link_id
-                ),
-                None => log::debug!("Link {} already gone", link_id),
-            },
+            }
             InternalOp::AddPlugin(req) => {
                 if let ProbeStatus::Done(outcome) = &req.probe
                     && !outcome.is_safe()

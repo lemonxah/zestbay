@@ -44,6 +44,12 @@ Item {
     // a user drag removes the node from this set. Map of nodeId -> true.
     property var autoPlaced: ({})
 
+    // Layout key each node's position was assigned under (saved, added or
+    // auto-placed); dropped once the user moves the node. A node can change
+    // key while keeping its id (a plugin's filter node first appears untyped
+    // as "Unknown:<name>"), and then its saved position must still be applied.
+    property var placedKeyById: ({})
+
     property int connectFromPortId: -1
     property string connectFromDir: ""
     property real connectMouseX: 0
@@ -308,6 +314,9 @@ Item {
         for (var staleP in autoPlaced) {
             if (!liveIds[staleP]) delete autoPlaced[staleP]
         }
+        for (var staleK in placedKeyById) {
+            if (!liveIds[staleK]) delete placedKeyById[staleK]
+        }
 
         // Selections must refer to the same objects they did when made: drop
         // entries whose id vanished or now belongs to something else.
@@ -351,8 +360,22 @@ Item {
 
         for (var ni = 0; ni < nodes.length; ni++) {
             var n = nodes[ni]
-            if (n.id in nodePositions) continue
             var key = uniqueKeyById[n.id] || ""
+            if (n.id in nodePositions) {
+                // Same node, new key, and the user hasn't moved it since it was
+                // placed: apply the position saved for the new key, or the
+                // next persistLayout() would overwrite it with this one.
+                var placedKey = placedKeyById[n.id]
+                if (placedKey !== undefined && placedKey !== key && key && savedLayout[key]) {
+                    var resaved = savedLayout[key]
+                    nodePositions[n.id] = { x: resaved[0], y: resaved[1] }
+                    placedKeyById[n.id] = key
+                    delete autoPlaced[n.id]
+                    delete awaitingLinkPlacement[n.id]
+                }
+                continue
+            }
+            placedKeyById[n.id] = key
 
             if (key && savedLayout[key]) {
                 // Known position from a previous session/placement. Restore it
@@ -1034,6 +1057,7 @@ Item {
                     nodePositions[n.id] = { x: pos[0], y: pos[1] }
                     delete autoPlaced[n.id]
                     delete awaitingLinkPlacement[n.id]
+                    delete placedKeyById[n.id]
                 }
             }
             canvas.requestPaint()
@@ -1138,6 +1162,7 @@ Item {
     function finishPlacing() {
         if (placingNodeId < 0) return
         delete autoPlaced[placingNodeId]
+        delete placedKeyById[placingNodeId]
         placingNodeId = -1
         persistLayout()
         canvas.requestPaint()
@@ -1912,7 +1937,10 @@ Item {
                     if (nodeIsSelected) {
                         groupDragging = true
                         for (var agid in selectedNodes) {
-                            if (selectedNodes[agid]) delete autoPlaced[agid]
+                            if (selectedNodes[agid]) {
+                                delete autoPlaced[agid]
+                                delete placedKeyById[agid]
+                            }
                         }
                         var cg = toCanvas(mouse.x, mouse.y)
                         groupDragLastX = cg.x
@@ -1922,6 +1950,7 @@ Item {
                         selectedLinks = {}
                         dragNodeId = nodeIdDrag
                         delete autoPlaced[nodeIdDrag]
+                        delete placedKeyById[nodeIdDrag]
                         var c = toCanvas(mouse.x, mouse.y)
                         var pos = nodePositions[nodeIdDrag]
                         dragOffsetX = c.x - pos.x
