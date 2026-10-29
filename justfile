@@ -6,7 +6,7 @@ current:
     @echo "{{version}}"
 
 # Bump version: just bump 0.3.0
-bump new_version:
+bump new_version msg="":
     # Cargo.toml + Cargo.lock
     sed -i '0,/^version = ".*"/s//version = "{{new_version}}"/' Cargo.toml
     cargo update --workspace
@@ -14,7 +14,35 @@ bump new_version:
     sed -i 's/^pkgver=.*/pkgver={{new_version}}/' pkg/zestbay/PKGBUILD
     # RPM spec
     sed -i 's/^Version:.*/Version:        {{new_version}}/' pkg/rpm/zestbay.spec
+    # Flatpak/AppStream metainfo: what Flathub and software centres show
+    just metainfo-release {{new_version}} {{quote(msg)}}
     @echo "Bumped to {{new_version}}"
+
+# Add a dated <release> to the Flatpak metainfo (skips a version already listed)
+metainfo-release version msg="":
+    #!/usr/bin/env python3
+    import datetime, html, re, sys
+    from pathlib import Path
+    path = Path("pkg/flatpak/io.github.lemonxah.ZestBay.metainfo.xml")
+    text = path.read_text()
+    version, msg = {{quote(version)}}, {{quote(msg)}}
+    if re.search(r'<release\s+version="' + re.escape(version) + '"', text):
+        print(f"metainfo: {version} already listed")
+        sys.exit(0)
+    m = re.search(r"^([ \t]*)<releases>[ \t]*$", text, re.M)
+    if not m:
+        sys.exit("metainfo: no <releases> element")
+    pad = m.group(1) + "  "
+    date = datetime.date.today().isoformat()
+    if msg:
+        entry = (f'{pad}<release version="{version}" date="{date}">\n'
+                 f'{pad}  <description>\n{pad}    <p>{html.escape(msg)}</p>\n{pad}  </description>\n'
+                 f'{pad}</release>\n')
+    else:
+        entry = f'{pad}<release version="{version}" date="{date}"/>\n'
+    at = text.index("\n", m.end()) + 1
+    path.write_text(text[:at] + entry + text[at:])
+    print(f"metainfo: added release {version} ({date})")
 
 # Run all tests
 test:
@@ -39,8 +67,8 @@ install: build
 
 # Bump, commit, tag, and push. Optional message: just release 0.5.0 "fix remapping"
 release new_version msg="":
-    just bump {{new_version}}
-    git add Cargo.toml Cargo.lock pkg/zestbay/PKGBUILD pkg/rpm/zestbay.spec
+    just bump {{new_version}} {{quote(msg)}}
+    git add Cargo.toml Cargo.lock pkg/zestbay/PKGBUILD pkg/rpm/zestbay.spec pkg/flatpak/io.github.lemonxah.ZestBay.metainfo.xml
     git commit -m "v{{new_version}}{{ if msg != "" { ": " + msg } else { "" } }}"
     git tag -a "v{{new_version}}" -m "v{{new_version}}{{ if msg != "" { ": " + msg } else { "" } }}"
     git push && git push --tags
