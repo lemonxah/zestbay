@@ -90,6 +90,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.1.2" date="2026-10-29">
+      <description>
+        <p>exclusive mode fix</p>
+      </description>
+    </release>
     <release version="1.1.1" date="2026-10-29"/>
     <release version="1.0.0" date="2026-10-29">
       <description>
