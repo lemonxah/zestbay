@@ -12,7 +12,7 @@ Outputs:
   images/zesticon.png                 launcher, 256 px (native packages)
   images/zesttray.png                 tray mark, 256 px (native packages)
   images/zesttray-{22,32,64}.argb     tray mark as raw ARGB32 for src/tray.rs
-  pkg/flatpak/icons/NxN/...           Flatpak app + tray icons, named by app id
+  pkg/flatpak/icons/NxN/...           Flatpak app icons, named by app id
 """
 
 import re
@@ -85,8 +85,6 @@ def main() -> None:
         icons = ROOT / "pkg/flatpak/icons"
         for size in (16, 22, 32, 48, 128, 256, 512):
             render(launcher, size, icons / f"{size}x{size}/{APP_ID}.png")
-        for size in (16, 22, 32, 48, 256):
-            render(tray, size, icons / f"{size}x{size}/{APP_ID}-tray.png")
 
 
 if __name__ == "__main__":

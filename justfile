@@ -42,10 +42,41 @@ release new_version msg="":
     git push && git push --tags
     gh release create "v{{new_version}}" --generate-notes
 
-# Regenerate pkg/flatpak/cargo-sources.json from Cargo.lock (see pkg/flatpak/README.md)
-flatpak-sources:
-    flatpak-cargo-generator.py Cargo.lock -o pkg/flatpak/cargo-sources.json
+# ---- Flatpak (local builds; follows docs.flathub.org "Submission") ----------
 
-# Build the Flatpak and install it for the current user
+flatpak_manifest := "pkg/flatpak/io.github.lemonxah.ZestBay.yml"
+flatpak_id := "io.github.lemonxah.ZestBay"
+
+# One-time: Flathub's builder (flatpak-builder + linter) and the user Flathub remote
+flatpak-setup:
+    flatpak install --user -y flathub org.flatpak.Builder
+    flatpak remote-add --if-not-exists --user flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+
+# Regenerate the offline crate list pkg/flatpak/cargo-sources.json from Cargo.lock
+flatpak-sources:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tools=.flatpak-tools
+    mkdir -p "$tools"
+    if [ ! -x "$tools/venv/bin/python" ]; then
+        python3 -m venv "$tools/venv"
+        "$tools/venv/bin/pip" install -q aiohttp tomlkit
+    fi
+    if [ ! -f "$tools/flatpak-cargo-generator.py" ]; then
+        curl -fsSL -o "$tools/flatpak-cargo-generator.py" \
+            https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py
+    fi
+    "$tools/venv/bin/python" -I "$tools/flatpak-cargo-generator.py" Cargo.lock -o pkg/flatpak/cargo-sources.json
+
+# Build like Flathub does (flathub-build) and install it for this user
 flatpak: flatpak-sources
-    flatpak-builder --user --install --force-clean --install-deps-from=flathub build-dir pkg/flatpak/io.github.lemonxah.ZestBay.yml
+    flatpak run --command=flathub-build org.flatpak.Builder --install {{flatpak_manifest}}
+
+# Run the installed Flatpak
+flatpak-run:
+    flatpak run {{flatpak_id}}
+
+# Flathub's linter on the manifest and on the built repo (run `just flatpak` first)
+flatpak-lint:
+    flatpak run --command=flatpak-builder-lint org.flatpak.Builder manifest {{flatpak_manifest}}
+    flatpak run --command=flatpak-builder-lint org.flatpak.Builder repo repo

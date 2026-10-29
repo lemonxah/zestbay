@@ -148,19 +148,19 @@ modules:
       - mkdir -p /app/extensions/Plugins
       - install -Dm644 pkg/flatpak/io.github.lemonxah.ZestBay.desktop -t /app/share/applications
       - install -Dm644 pkg/flatpak/io.github.lemonxah.ZestBay.metainfo.xml -t /app/share/metainfo
+      - install -Dm644 images/logo/zestbay-launcher.svg
+        /app/share/icons/hicolor/scalable/apps/io.github.lemonxah.ZestBay.svg
       - |
-        for size in 128 256 512; do
+        for size in 16 22 32 48 128 256 512; do
           install -Dm644 pkg/flatpak/icons/${size}x${size}/io.github.lemonxah.ZestBay.png \
             /app/share/icons/hicolor/${size}x${size}/apps/io.github.lemonxah.ZestBay.png
         done
-      - install -Dm644 pkg/flatpak/icons/256x256/io.github.lemonxah.ZestBay-tray.png
-        /app/share/icons/hicolor/256x256/apps/io.github.lemonxah.ZestBay-tray.png
       - install -Dm644 LICENSE /app/share/licenses/io.github.lemonxah.ZestBay/LICENSE
     sources:
       # Local builds use the working tree. For Flathub, replace this with the
       # release tarball, e.g.:
       #   - type: archive
-      #     url: https://github.com/lemonxah/zestbay/archive/refs/tags/v0.8.8.tar.gz
+      #     url: https://github.com/lemonxah/zestbay/archive/refs/tags/v1.0.0.tar.gz
       #     sha256: <sha256 of that tarball>
       - type: dir
         path: ../..

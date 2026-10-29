@@ -167,7 +167,7 @@ QtObject {
                                { id: 30, name: "LSP Mixer x4 Stereo", dspPercent: 0.09, avgUs: 12, lastUs: 11, calls: 100 },
                                { id: 11, name: "LSP Gate Mono", dspPercent: 0.03, avgUs: 4, lastUs: 4, calls: 100 }])
     }
-    function get_app_version() { return "0.8.8" }
+    function get_app_version() { return "1.0.0" }
     function get_qt_version() { return "6.12.0" }
     function auto_layout(a, b, c) { return "{}" }
     function save_layout(j) {}
