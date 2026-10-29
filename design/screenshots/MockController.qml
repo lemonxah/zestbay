@@ -24,6 +24,11 @@ QtObject {
     signal midi_mapping_conflict(string source_json, string existing_label)
     signal crash_recovery_available(string crashed_uris)
     signal plugin_parameter_changed(var instance_id, var port_index, real value)
+    signal subgraphs_changed()
+
+    // The subgraph the view is inside ("" = main graph; "sub" on the command
+    // line starts inside "Mic Chain").
+    property string view: Qt.application.arguments.indexOf("sub") >= 0 ? "sg-1" : ""
 
     // ---- Graph ----------------------------------------------------------
     function stereoIn(base) {
@@ -40,15 +45,22 @@ QtObject {
         { id: 3, name: "Headset Microphone", type: "Source", layoutKey: "Source:Headset", ready: true },
         { id: 4, name: "C270 HD Webcam", type: "Source", mediaType: "Video", layoutKey: "Source:Webcam", ready: true },
         { id: 10, name: "Pianoteq 9", type: "Plugin", layoutKey: "LV2:Pianoteq 9", pluginFormat: "LV2", pluginHasUi: true, ready: true },
-        { id: 11, name: "LSP Gate Mono", type: "Plugin", layoutKey: "LV2:LSP Gate Mono", pluginFormat: "LV2", pluginHasUi: true, ready: true },
         { id: 12, name: "Firefox", type: "StreamOutput", layoutKey: "StreamOut:Firefox", ready: true },
         { id: 13, name: "Spotify", type: "StreamOutput", layoutKey: "StreamOut:Spotify", ready: true },
         { id: 20, name: "Daw Sink", type: "Sink", isVirtual: true, layoutKey: "Sink:Daw Sink", ready: true },
         { id: 21, name: "Media Sink", type: "Sink", isVirtual: true, layoutKey: "Sink:Media Sink", ready: true },
-        { id: 22, name: "Comms Sink", type: "Sink", isVirtual: true, layoutKey: "Sink:Comms Sink", ready: true },
+        { id: 22, name: "Comms Sink", type: "Sink", isVirtual: true, vdevId: "vd-1", layoutKey: "Sink:Comms Sink", ready: true },
         { id: 30, name: "LSP Mixer x4 Stereo", type: "Plugin", layoutKey: "LV2:LSP Mixer", pluginFormat: "LV2", pluginHasUi: true, ready: true },
         { id: 40, name: "Speakers", type: "Sink", layoutKey: "Sink:Speakers", ready: true },
-        { id: 41, name: "Headphones", type: "Sink", layoutKey: "Sink:Headphones", ready: true }
+        { id: 41, name: "Headphones", type: "Sink", layoutKey: "Sink:Headphones", ready: true },
+        { id: 50, name: "Mic Chain", type: "Subgraph", subgraphId: "sg-1", layoutKey: "Subgraph:sg-1", ready: true,
+          memberCount: 1, missing: 0, inputs: 1, outputs: 2, asSink: false, asSource: true }
+    ]
+    // Inside "Mic Chain": its plugin between the Input and Output nodes.
+    property var subNodes: [
+        { id: 11, name: "LSP Gate Mono", type: "Plugin", layoutKey: "LV2:LSP Gate Mono", pluginFormat: "LV2", pluginHasUi: true, ready: true },
+        { id: 51, name: "Input", type: "SubgraphInput", subgraphId: "sg-1", layoutKey: "SubgraphIn:sg-1", ready: true },
+        { id: 52, name: "Output", type: "SubgraphOutput", subgraphId: "sg-1", layoutKey: "SubgraphOut:sg-1", ready: true }
     ]
     property var ports: ({
         1: [{ id: 101, name: "MIDI 1", direction: "Output", mediaType: "Midi" }],
@@ -76,18 +88,28 @@ QtObject {
             for (var i = 0; i < 8; i++) a.push({ id: 3010 + i, name: "input_" + i, direction: "Input", mediaType: "Audio" })
             return a })(),
         40: stereoIn(4000),
-        41: stereoIn(4100)
+        41: stereoIn(4100),
+        50: [{ id: 5001, name: "MONO", direction: "Input", mediaType: "Audio" },
+             { id: 5003, name: "FL", direction: "Output", mediaType: "Audio" },
+             { id: 5004, name: "FR", direction: "Output", mediaType: "Audio" }],
+        51: [{ id: 5101, name: "MONO", direction: "Output", mediaType: "Audio" }],
+        52: [{ id: 5201, name: "FL", direction: "Input", mediaType: "Audio" },
+             { id: 5202, name: "FR", direction: "Input", mediaType: "Audio" }]
     })
     property var links: (function() {
         var l = [[101, 1001], [1010, 2001], [1011, 2002], [1203, 2101], [1204, 2102], [1303, 2101], [1304, 2102],
-                 [201, 1101], [1102, 2201], [1102, 2202], [2003, 3010], [2004, 3011], [2103, 3012], [2104, 3013],
+                 [201, 5001], [5003, 2201], [5004, 2202], [2003, 3010], [2004, 3011], [2103, 3012], [2104, 3013],
                  [2203, 3014], [2204, 3015], [3003, 4001], [3004, 4002], [301, 3016]]
         var out = []
         for (var i = 0; i < l.length; i++) out.push({ id: 9000 + i, outputPortId: l[i][0], inputPortId: l[i][1], active: true })
         return out })()
+    property var subLinks: [{ id: 9101, outputPortId: 5101, inputPortId: 1101, active: true },
+                            { id: 9102, outputPortId: 1102, inputPortId: 5201, active: true },
+                            { id: 9103, outputPortId: 1102, inputPortId: 5202, active: true }]
     property var layout: ({
+        "Subgraph:sg-1": [312, 264], "SubgraphIn:sg-1": [48, 96], "SubgraphOut:sg-1": [600, 96],
         "MidiBridge:Roland": [48, 48], "Source:Microphone": [48, 168], "Source:Headset": [48, 288], "Source:Webcam": [48, 408],
-        "LV2:Pianoteq 9": [312, 48], "LV2:LSP Gate Mono": [312, 264], "StreamOut:Firefox": [312, 408], "StreamOut:Spotify": [312, 528],
+        "LV2:Pianoteq 9": [312, 48], "LV2:LSP Gate Mono": [312, 96], "StreamOut:Firefox": [312, 408], "StreamOut:Spotify": [312, 528],
         "Sink:Daw Sink": [576, 48], "Sink:Media Sink": [576, 192], "Sink:Comms Sink": [576, 336],
         "LV2:LSP Mixer": [840, 96], "Sink:Speakers": [1104, 120], "Sink:Headphones": [1104, 264]
     })
@@ -147,8 +169,8 @@ QtObject {
     function get_default_node() { return "Sink:Speakers" }
     function get_hidden_json() { return "[]" }
     function get_pinned_json() { return JSON.stringify(["LV2:Pianoteq 9", "LV2:LSP Mixer", "Sink:Speakers"]) }
-    function get_nodes_json() { return JSON.stringify(nodes) }
-    function get_links_json() { return JSON.stringify(links) }
+    function get_nodes_json() { return JSON.stringify(view === "" ? nodes : subNodes) }
+    function get_links_json() { return JSON.stringify(view === "" ? links : subLinks) }
     function get_ports_json(id) { return JSON.stringify(ports[id] || []) }
     function get_rules_json() { return JSON.stringify(rules) }
     function get_node_names_json() { return JSON.stringify(nodes.map(function(n) { return { name: n.name, type: n.type, mediaType: n.mediaType || "Audio" } })) }
@@ -170,6 +192,8 @@ QtObject {
     }
     function get_app_version() { return "1.0.0" }
     function get_qt_version() { return "6.12.0" }
+    function get_install_kind() { return "Native" }
+    function get_app_plugin_folder() { return "" }
     function auto_layout(a, b, c) { return "{}" }
     function save_layout(j) {}
     function save_viewport(j) {}
@@ -189,6 +213,32 @@ QtObject {
     function blocked_reason(o, i) { return "" }
     function get_blocked_pairs_json() { return JSON.stringify([{ source: 13, target: 41, ruleId: "r8", label: "Spotify \u2192 Headphones" }]) }
     signal rules_changed()
+    // ---- Subgraphs and virtual devices ----
+    function get_subgraphs_json() {
+        return JSON.stringify({ current: view, subgraphs: [{ id: "sg-1", name: "Mic Chain", inputs: 1, outputs: 2, midiIn: false, midiOut: false,
+                                                            asSink: false, asSource: true, memberCount: 1, missing: 0,
+                                                            plugins: ["LSP Gate Mono"], view: null }] })
+    }
+    function get_subgraph_view() { return view }
+    function set_subgraph_view(id) { view = id; graph_changed() }
+    function save_subgraph_view_state(id, j) {}
+    function infer_subgraph_io(ids) { return JSON.stringify({ plugins: 2, name: "Chain", inputs: 1, outputs: 2, midiIn: false, midiOut: false }) }
+    function create_subgraph(ids, cfg) { return "" }
+    function update_subgraph(id, cfg) {}
+    function ungroup_subgraph(id) {}
+    function delete_subgraph(id) {}
+    function duplicate_subgraph(id, x, y) { return "" }
+    function save_subgraph_template(id, name) { return "" }
+    function list_subgraph_templates_json() {
+        return JSON.stringify([{ file: "Mic Chain.json", name: "Mic Chain", inputs: 1, outputs: 2, asSink: false, asSource: true,
+                                 plugins: ["LSP Gate Mono", "LSP Compressor Mono"] }])
+    }
+    function insert_subgraph_template(file, x, y) { return "" }
+    function delete_subgraph_template(file) {}
+    function get_virtual_devices_json() { return JSON.stringify([{ id: "vd-1", name: "Comms Sink", kind: "sink", channels: 2 }]) }
+    function add_virtual_device(n, k, c) { return "" }
+    function update_virtual_device(id, n, c) {}
+    function remove_virtual_device(id) {}
     function backup_rules() {}
     function set_window_visible(v) {}
     function set_default_node(k) {}

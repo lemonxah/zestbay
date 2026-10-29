@@ -226,6 +226,7 @@ ZbWindow {
     function addPluginAtCenter() {
         var center = graphView.toCanvas(graphView.width / 2, graphView.height / 2)
         graphView.pendingPluginPosition = { x: center.x, y: center.y }
+        pluginBrowser.allowSubgraphs = graphView.currentSubgraph === ""
         pluginBrowser.open()
     }
 
@@ -705,7 +706,10 @@ ZbWindow {
         id: graphView
         anchors.fill: parent
         controller: controller
-        onOpenPluginBrowser: pluginBrowser.open()
+        onOpenPluginBrowser: {
+            pluginBrowser.allowSubgraphs = graphView.currentSubgraph === ""
+            pluginBrowser.open()
+        }
         Component.onCompleted: mainWindow.refreshRuleCount()
         onOpenPluginParams: nodeId => pluginParamsDialog.openForNode(nodeId)
     }
@@ -720,6 +724,7 @@ ZbWindow {
             graphView.pendingPluginPosition = null
             graphView.pendingPluginName = ""
         }
+        onTemplateChosen: file => graphView.insertTemplate(file)
     }
 
     PluginParams {

@@ -155,6 +155,63 @@ pub mod qobject {
             action: QString,
         );
 
+        // ---- Subgraphs (issue #17) and virtual devices ----
+        #[qinvokable]
+        fn get_subgraphs_json(self: Pin<&mut Self>) -> QString;
+        /// Id of the subgraph the graph view is inside, or "" (main graph).
+        #[qinvokable]
+        fn get_subgraph_view(self: Pin<&mut Self>) -> QString;
+        #[qinvokable]
+        fn set_subgraph_view(self: Pin<&mut Self>, subgraph_id: QString);
+        /// Suggested name and I/O for grouping these node ids (JSON array).
+        #[qinvokable]
+        fn infer_subgraph_io(self: Pin<&mut Self>, node_ids_json: QString) -> QString;
+        /// Group plugin nodes into a new subgraph; returns its id ("" on failure).
+        #[qinvokable]
+        fn create_subgraph(self: Pin<&mut Self>, node_ids_json: QString, config_json: QString) -> QString;
+        /// Change name, I/O, MIDI or device options.
+        #[qinvokable]
+        fn update_subgraph(self: Pin<&mut Self>, subgraph_id: QString, config_json: QString);
+        #[qinvokable]
+        fn ungroup_subgraph(self: Pin<&mut Self>, subgraph_id: QString);
+        /// Remove a subgraph and its plugins.
+        #[qinvokable]
+        fn delete_subgraph(self: Pin<&mut Self>, subgraph_id: QString);
+        #[qinvokable]
+        fn save_subgraph_view_state(self: Pin<&mut Self>, subgraph_id: QString, json: QString);
+        /// Copy a subgraph (plugins, settings, wiring) next to it. Returns
+        /// `{subgraphId, layout}` like `insert_subgraph_template`.
+        #[qinvokable]
+        fn duplicate_subgraph(self: Pin<&mut Self>, subgraph_id: QString, x: f64, y: f64) -> QString;
+        #[qinvokable]
+        fn save_subgraph_template(self: Pin<&mut Self>, subgraph_id: QString, name: QString) -> QString;
+        #[qinvokable]
+        fn list_subgraph_templates_json(self: Pin<&mut Self>) -> QString;
+        /// Insert a saved template at (x, y); returns `{subgraphId, layout}`
+        /// where `layout` maps layout keys to positions.
+        #[qinvokable]
+        fn insert_subgraph_template(self: Pin<&mut Self>, file: QString, x: f64, y: f64) -> QString;
+        #[qinvokable]
+        fn delete_subgraph_template(self: Pin<&mut Self>, file: QString);
+        #[qinvokable]
+        fn get_virtual_devices_json(self: Pin<&mut Self>) -> QString;
+        /// kind: "sink" | "source". Returns the new id.
+        #[qinvokable]
+        fn add_virtual_device(self: Pin<&mut Self>, name: QString, kind: QString, channels: u32) -> QString;
+        #[qinvokable]
+        fn update_virtual_device(self: Pin<&mut Self>, id: QString, name: QString, channels: u32);
+        #[qinvokable]
+        fn remove_virtual_device(self: Pin<&mut Self>, id: QString);
+
+        /// Inside a Flatpak, the folder (holding lv2/, vst3/, clap/) where
+        /// users put their own plugins; "" otherwise.
+        #[qinvokable]
+        fn get_app_plugin_folder(self: Pin<&mut Self>) -> QString;
+
+        /// "Flatpak" (with the app id) or "Native".
+        #[qinvokable]
+        fn get_install_kind(self: Pin<&mut Self>) -> QString;
+
         #[qinvokable]
         fn get_window_geometry_json(self: Pin<&mut Self>) -> QString;
 
@@ -281,6 +338,10 @@ pub mod qobject {
         #[qsignal]
         fn hide_window_requested(self: Pin<&mut AppController>);
 
+        /// Subgraphs or virtual devices changed (created, edited, removed).
+        #[qsignal]
+        fn subgraphs_changed(self: Pin<&mut AppController>);
+
         #[qsignal]
         fn midi_mapping_added(self: Pin<&mut AppController>, mapping_json: QString);
 
@@ -323,6 +384,8 @@ use crate::plugin::PluginManager;
 use crate::patchbay::{PatchbayManager, rules};
 use crate::pipewire::{GraphState, PluginEvent, Node, NodeType, Port, PortDirection, PwCommand, PwEvent};
 use crate::tray::TrayState;
+use crate::subgraph::{self as sg, NamedLink, PlanEnd, SubgraphDef, VirtualDevice, VirtualDeviceKind};
+use crate::ui::subgraphs::{self as sgui, Subgraphs, ViewNodeKind};
 
 /// Tracks the mapping between virtual sub-node IDs (used in the UI for split
 /// bridge nodes) and the real PipeWire node ID + port group.
@@ -461,6 +524,7 @@ pub struct AppControllerRust {
     cpu_history: Vec<f64>,
 
     bridge_split: BridgeSplitState,
+    subgraphs: Subgraphs,
 
     midi_mappings: Vec<crate::midi::MidiCcMapping>,
     midi_learn_target: Option<(u64, usize, String, crate::midi::MappingMode)>,
@@ -516,6 +580,7 @@ impl Default for AppControllerRust {
             cpu_avg: 0.0,
             cpu_history: vec![0.0; 120],
             bridge_split: BridgeSplitState::new(),
+            subgraphs: Subgraphs::default(),
             midi_mappings: Vec::new(),
             midi_learn_target: None,
             plugins_frozen: false,
@@ -632,102 +697,10 @@ impl qobject::AppController {
             self.as_mut().rust_mut().restore_started_at = Some(Instant::now());
             self.as_mut().rust_mut().restore_batch_size = saved.len();
             for sp in saved {
-                let instance_id = self.rust().next_instance_id;
-                self.as_mut().rust_mut().next_instance_id += 1;
+                let (instance_id, sid) = self.as_mut().spawn_saved_plugin(sp);
                 self.as_mut().rust_mut().restore_instance_ids.insert(instance_id);
                 restore_order.push(instance_id);
-
-                let restored_params: Vec<crate::lv2::Lv2ParameterValue> = if let Some(ref mgr) =
-                    self.rust().plugin_manager
-                {
-                    if let Some(plugin_info) = mgr.find_plugin(&sp.uri) {
-                        plugin_info
-                            .ports
-                            .iter()
-                            .filter(|port| port.port_type == crate::lv2::Lv2PortType::ControlInput)
-                            .map(|port| {
-                                let saved_value = sp.parameters.iter().find(|s| {
-                                    s.port_index == port.index
-                                        || (!s.symbol.is_empty() && s.symbol == port.symbol)
-                                });
-                                crate::lv2::Lv2ParameterValue {
-                                    port_index: port.index,
-                                    symbol: port.symbol.clone(),
-                                    name: port.name.clone(),
-                                    value: saved_value
-                                        .map(|s| s.value)
-                                        .unwrap_or(port.default_value),
-                                    min: port.min_value,
-                                    max: port.max_value,
-                                    default: port.default_value,
-                                    is_toggle: port.is_toggle,
-                                }
-                            })
-                            .collect()
-                    } else {
-                        sp.parameters
-                            .iter()
-                            .map(|p| crate::lv2::Lv2ParameterValue {
-                                port_index: p.port_index,
-                                symbol: p.symbol.clone(),
-                                name: String::new(),
-                                value: p.value,
-                                min: 0.0,
-                                max: 1.0,
-                                default: 0.0,
-                                is_toggle: false,
-                            })
-                            .collect()
-                    }
-                } else {
-                    Vec::new()
-                };
-
-                let sid = if sp.stable_id.is_empty() {
-                    uuid::Uuid::new_v4().to_string()
-                } else {
-                    sp.stable_id.clone()
-                };
-                stable_to_instance.insert(sid.clone(), instance_id);
-
-                let plugin_format = match sp.format.as_str() {
-                    "CLAP" => crate::plugin::PluginFormat::Clap,
-                    "VST3" => crate::plugin::PluginFormat::Vst3,
-                    _ => crate::plugin::PluginFormat::Lv2,
-                };
-
-                let plugin_state = sp.decode_plugin_state();
-
-                if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager {
-                    let info = crate::lv2::Lv2InstanceInfo {
-                        id: instance_id,
-                        stable_id: sid.clone(),
-                        plugin_uri: sp.uri.clone(),
-                        format: plugin_format,
-                        display_name: sp.display_name.clone(),
-                        pw_node_id: None,
-                        parameters: restored_params,
-                        active: true,
-                        bypassed: sp.bypassed,
-                        lv2_state: sp.lv2_state.clone(),
-                        plugin_state: plugin_state.clone(),
-                    };
-                    mgr.register_instance(info);
-                }
-
-                let format_str = sp.format.clone();
-                if let Some(ref tx) = self.rust().cmd_tx {
-                    log::info!("Restoring plugin: {} ({}) [{}]", sp.display_name, sp.uri, format_str);
-                    let _ = tx.send(PwCommand::AddPlugin {
-                        plugin_uri: sp.uri,
-                        instance_id,
-                        display_name: sp.display_name,
-                        format: format_str,
-                        lv2_state: sp.lv2_state,
-                        plugin_state,
-                        stable_id: sid,
-                    });
-                }
+                stable_to_instance.insert(sid, instance_id);
             }
         }
 
@@ -747,6 +720,8 @@ impl qobject::AppController {
                 self.as_mut().rust_mut().midi_mappings = resolved;
             }
         }
+        self.as_mut().load_subgraphs();
+
         let tray_state = crate::tray::spawn_tray();
         if self.rust().prefs.start_minimized {
             tray_state
@@ -771,6 +746,105 @@ impl qobject::AppController {
         }
 
         log::info!("AppController initialized successfully");
+    }
+
+    /// Register and start a plugin from its saved form (plugins.json entry
+    /// or subgraph template). Returns (instance id, stable id).
+    fn spawn_saved_plugin(mut self: Pin<&mut Self>, sp: SavedPlugin) -> (u64, String) {
+        let instance_id = self.rust().next_instance_id;
+        self.as_mut().rust_mut().next_instance_id += 1;
+
+        let restored_params: Vec<crate::lv2::Lv2ParameterValue> = if let Some(ref mgr) =
+            self.rust().plugin_manager
+        {
+            if let Some(plugin_info) = mgr.find_plugin(&sp.uri) {
+                plugin_info
+                    .ports
+                    .iter()
+                    .filter(|port| port.port_type == crate::lv2::Lv2PortType::ControlInput)
+                    .map(|port| {
+                        let saved_value = sp.parameters.iter().find(|s| {
+                            s.port_index == port.index
+                                || (!s.symbol.is_empty() && s.symbol == port.symbol)
+                        });
+                        crate::lv2::Lv2ParameterValue {
+                            port_index: port.index,
+                            symbol: port.symbol.clone(),
+                            name: port.name.clone(),
+                            value: saved_value
+                                .map(|s| s.value)
+                                .unwrap_or(port.default_value),
+                            min: port.min_value,
+                            max: port.max_value,
+                            default: port.default_value,
+                            is_toggle: port.is_toggle,
+                        }
+                    })
+                    .collect()
+            } else {
+                sp.parameters
+                    .iter()
+                    .map(|p| crate::lv2::Lv2ParameterValue {
+                        port_index: p.port_index,
+                        symbol: p.symbol.clone(),
+                        name: String::new(),
+                        value: p.value,
+                        min: 0.0,
+                        max: 1.0,
+                        default: 0.0,
+                        is_toggle: false,
+                    })
+                    .collect()
+            }
+        } else {
+            Vec::new()
+        };
+
+        let sid = if sp.stable_id.is_empty() {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            sp.stable_id.clone()
+        };
+
+        let plugin_format = match sp.format.as_str() {
+            "CLAP" => crate::plugin::PluginFormat::Clap,
+            "VST3" => crate::plugin::PluginFormat::Vst3,
+            _ => crate::plugin::PluginFormat::Lv2,
+        };
+
+        let plugin_state = sp.decode_plugin_state();
+
+        if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager {
+            let info = crate::lv2::Lv2InstanceInfo {
+                id: instance_id,
+                stable_id: sid.clone(),
+                plugin_uri: sp.uri.clone(),
+                format: plugin_format,
+                display_name: sp.display_name.clone(),
+                pw_node_id: None,
+                parameters: restored_params,
+                active: true,
+                bypassed: sp.bypassed,
+                lv2_state: sp.lv2_state.clone(),
+                plugin_state: plugin_state.clone(),
+            };
+            mgr.register_instance(info);
+        }
+
+        let format_str = sp.format.clone();
+        if let Some(ref tx) = self.rust().cmd_tx {
+            log::info!("Restoring plugin: {} ({}) [{}]", sp.display_name, sp.uri, format_str);
+            let _ = tx.send(PwCommand::AddPlugin {
+                plugin_uri: sp.uri,
+                instance_id,
+                display_name: sp.display_name,
+                format: format_str,
+                lv2_state: sp.lv2_state,
+                plugin_state,
+                stable_id: sid.clone(),
+            });
+        }
+        (instance_id, sid)
     }
 
     pub fn poll_events(mut self: Pin<&mut Self>) {
@@ -933,6 +1007,21 @@ impl qobject::AppController {
                 PluginEvent::PluginRemoved { instance_id } => {
                     changed = true;
                     log::info!("LV2 plugin removed: instance={}", instance_id);
+                    let removed_sid = self
+                        .rust()
+                        .plugin_manager
+                        .as_ref()
+                        .and_then(|mgr| mgr.get_instance(instance_id))
+                        .map(|info| info.stable_id.clone());
+                    if let Some(sid) = removed_sid
+                        && self.rust().subgraphs.owner_of(&sid).is_some()
+                    {
+                        for def in self.as_mut().rust_mut().subgraphs.defs.iter_mut() {
+                            def.members.retain(|m| m != &sid);
+                        }
+                        self.as_mut().persist_subgraphs();
+                        self.as_mut().subgraphs_changed();
+                    }
                     let name = self
                         .rust()
                         .plugin_manager
@@ -1261,6 +1350,17 @@ impl qobject::AppController {
         if should_retry_links {
             self.as_mut().rust_mut().links_retry_due = false;
             self.as_mut().retry_pending_links();
+        }
+        if !self.rust().subgraphs.jobs.is_empty() {
+            self.as_mut().process_subgraph_jobs();
+        }
+        if self
+            .rust()
+            .subgraphs
+            .vdev_start_at
+            .is_some_and(|t| Instant::now() >= t)
+        {
+            self.as_mut().start_virtual_devices();
         }
 
         let links_persist_ms = self.rust().prefs.links_persist_ms;
@@ -1714,9 +1814,19 @@ impl qobject::AppController {
             // Rebuild port mappings each refresh; virtual node ids stay stable
             self.as_mut().rust_mut().bridge_split.clear_ports();
 
+            // What the current view (main graph or one subgraph) shows.
+            let members = self.member_nodes();
+            self.as_mut()
+                .rust_mut()
+                .subgraphs
+                .build_view(&graph, &nodes, &|s| members.get(s).copied());
+
             let mut json_nodes: Vec<serde_json::Value> = Vec::new();
 
             for n in nodes.iter().filter(|n| n.ready) {
+                if !self.rust().subgraphs.vm.visible_real.contains(&n.id) {
+                    continue;
+                }
                 let media_str = match n.media_type {
                     Some(crate::pipewire::MediaType::Audio) => "Audio",
                     Some(crate::pipewire::MediaType::Video) => "Video",
@@ -1773,6 +1883,7 @@ impl qobject::AppController {
                     json_nodes.push(node_to_json(n, mgr));
                 }
             }
+            json_nodes.extend(self.view_nodes_json());
 
             let json = serde_json::to_string(&json_nodes).unwrap_or_default();
             QString::from(&json)
@@ -1786,22 +1897,19 @@ impl qobject::AppController {
             let links = graph.get_all_links();
             let json_links: Vec<serde_json::Value> = links
                 .iter()
-                .map(|l| {
-                    // Rewrite node IDs for ports belonging to bridge sub-nodes
-                    let out_node = self.rust().bridge_split
-                        .resolve_port_virtual_node(l.output_port_id)
-                        .unwrap_or(l.output_node_id);
-                    let in_node = self.rust().bridge_split
-                        .resolve_port_virtual_node(l.input_port_id)
-                        .unwrap_or(l.input_node_id);
-                    serde_json::json!({
+                .filter_map(|l| {
+                    // Rewrite node IDs for ports shown on subgraph view nodes
+                    // or bridge sub-nodes; drop links the view doesn't show.
+                    let out_node = self.view_node_for(l.output_port_id, l.output_node_id)?;
+                    let in_node = self.view_node_for(l.input_port_id, l.input_node_id)?;
+                    Some(serde_json::json!({
                         "id": l.id,
                         "outputNodeId": out_node,
                         "outputPortId": l.output_port_id,
                         "inputNodeId": in_node,
                         "inputPortId": l.input_port_id,
                         "active": l.active,
-                    })
+                    }))
                 })
                 .collect();
             let json = serde_json::to_string(&json_links).unwrap_or_default();
@@ -1814,8 +1922,10 @@ impl qobject::AppController {
     pub fn get_ports_json(self: Pin<&mut Self>, node_id: u32) -> QString {
         log::debug!("get_ports_json: node_id={}", node_id);
         if let Some(ref graph) = self.rust().graph {
-            // Check if this is a virtual bridge sub-node ID
-            let ports = if let Some((real_node_id, group)) =
+            // Subgraph view nodes, then virtual bridge sub-node IDs
+            let ports = if let Some(vn) = self.rust().subgraphs.vm.nodes.get(&node_id) {
+                vn.ports.clone()
+            } else if let Some((real_node_id, group)) =
                 self.rust().bridge_split.resolve_virtual_node(node_id).cloned()
             {
                 graph.get_ports_for_bridge_group(real_node_id, &group)
@@ -1834,8 +1944,12 @@ impl qobject::AppController {
                     };
                     // For bridge sub-node ports, use a cleaner display name
                     // from port.alias (the part after the colon) or fall back to default
-                    let display_name =
-                        port_ui_name(p, self.rust().bridge_split.is_virtual_id(node_id));
+                    // Subgraph edges show their channel (FL, MONO…) or midi_in/out.
+                    let display_name = if self.rust().subgraphs.vm.nodes.contains_key(&node_id) {
+                        p.display_name().to_string()
+                    } else {
+                        port_ui_name(p, self.rust().bridge_split.is_virtual_id(node_id))
+                    };
                     serde_json::json!({
                         "id": p.id,
                         "name": display_name,
@@ -2063,9 +2177,11 @@ impl qobject::AppController {
                     .find(|r| r.id == rule_id)
                     .map(|r| format!("{} \u{2192} {}", r.source_pattern, r.target_pattern))
                     .unwrap_or_default();
+                // Subgraph edges are drawn as their card in the main graph.
+                let owner = &self.rust().subgraphs.vm.real_owner;
                 serde_json::json!({
-                    "source": source,
-                    "target": target,
+                    "source": owner.get(&source).copied().unwrap_or(source),
+                    "target": owner.get(&target).copied().unwrap_or(target),
                     "ruleId": rule_id,
                     "label": label,
                 })
@@ -2479,12 +2595,36 @@ impl qobject::AppController {
             }
         }
 
+        // Subgraph cards and Input/Output nodes of the current view.
+        let mut view_nodes: Vec<(u32, sgui::ViewNode)> = self
+            .rust()
+            .subgraphs
+            .vm
+            .nodes
+            .iter()
+            .map(|(id, vn)| (*id, vn.clone()))
+            .collect();
+        view_nodes.sort_by_key(|(id, _)| *id);
+        for (vid, vn) in &view_nodes {
+            let Some((w, h)) = size_of(*vid) else { continue };
+            let type_str = match vn.kind {
+                ViewNodeKind::Card => "Duplex",
+                ViewNodeKind::Input => "Source",
+                ViewNodeKind::Output => "Sink",
+            };
+            layout_nodes.push((*vid, vn.subgraph.clone(), type_str, w, h));
+            included.insert(*vid);
+            let mut ports = vn.ports.clone();
+            sort_ports_for_layout(&mut ports, false);
+            add_ports_to_layout(&ports, *vid, &mut layout_ports);
+        }
+
         for l in &all_links {
-            let out_node = self.rust().bridge_split
-                .resolve_port_virtual_node(l.output_port_id)
+            let out_node = self.rust().subgraphs.vm.port_owner.get(&l.output_port_id).copied()
+                .or_else(|| self.rust().bridge_split.resolve_port_virtual_node(l.output_port_id))
                 .unwrap_or(l.output_node_id);
-            let in_node = self.rust().bridge_split
-                .resolve_port_virtual_node(l.input_port_id)
+            let in_node = self.rust().subgraphs.vm.port_owner.get(&l.input_port_id).copied()
+                .or_else(|| self.rust().bridge_split.resolve_port_virtual_node(l.input_port_id))
                 .unwrap_or(l.input_node_id);
 
             if included.contains(&out_node) && included.contains(&in_node) {
@@ -2615,6 +2755,7 @@ impl qobject::AppController {
         let format_str = plugin_format.as_str().to_string();
 
         let stable_id = uuid::Uuid::new_v4().to_string();
+        let stable_id_for_group = stable_id.clone();
         if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager {
             let info = crate::lv2::Lv2InstanceInfo {
                 id: instance_id,
@@ -2652,6 +2793,15 @@ impl qobject::AppController {
         }
 
         persist_active_plugins(self.rust().plugin_manager.as_ref());
+
+        // Added while inside a subgraph: it belongs to that subgraph.
+        if let Some(view) = self.rust().subgraphs.view.clone() {
+            if let Some(def) = self.as_mut().rust_mut().subgraphs.find_mut(&view) {
+                def.members.push(stable_id_for_group.clone());
+            }
+            self.as_mut().persist_subgraphs();
+            self.as_mut().subgraphs_changed();
+        }
 
         QString::from(&display_name)
     }
@@ -3068,6 +3218,26 @@ impl qobject::AppController {
         }
     }
 
+    pub fn get_app_plugin_folder(self: Pin<&mut Self>) -> QString {
+        crate::plugin::paths::app_plugin_dir("lv2")
+            .and_then(|d| d.parent().map(|p| p.to_string_lossy().into_owned()))
+            .map(|s| QString::from(&s))
+            .unwrap_or_default()
+    }
+
+    pub fn get_install_kind(self: Pin<&mut Self>) -> QString {
+        use crate::plugin::paths::{flatpak_app_id, in_flatpak};
+        let kind = if in_flatpak() {
+            match flatpak_app_id() {
+                Some(id) => format!("Flatpak ({id})"),
+                None => "Flatpak".to_string(),
+            }
+        } else {
+            "Native".to_string()
+        };
+        QString::from(&kind)
+    }
+
     pub fn get_window_geometry_json(self: Pin<&mut Self>) -> QString {
         QString::from(&read_config_json_text("window.json", "{}"))
     }
@@ -3190,7 +3360,13 @@ impl qobject::AppController {
             let nodes = graph.get_all_nodes();
             let mut entries: Vec<serde_json::Value> = Vec::new();
 
-            for n in nodes.iter().filter(|n| n.ready) {
+            // The inside half of a subgraph device edge is never a rule end.
+            let internal = |n: &&Node| {
+                n.subgraph
+                    .as_ref()
+                    .is_some_and(|t| t.side == crate::pipewire::SubgraphSide::Internal)
+            };
+            for n in nodes.iter().filter(|n| n.ready).filter(|n| !internal(n)) {
                 let media_str = match n.media_type {
                     Some(crate::pipewire::MediaType::Audio) => "Audio",
                     Some(crate::pipewire::MediaType::Video) => "Video",
@@ -4280,14 +4456,14 @@ fn build_persistable_links(graph: &GraphState) -> Vec<SavedPluginLink> {
         let out_port = graph.get_port(link.output_port_id);
         let in_port = graph.get_port(link.input_port_id);
 
-        let involves_lv2 = out_node
-            .as_ref()
-            .map(|n| n.node_type == Some(NodeType::Plugin))
-            .unwrap_or(false)
-            || in_node
-                .as_ref()
-                .map(|n| n.node_type == Some(NodeType::Plugin))
-                .unwrap_or(false);
+        // Links of nodes ZestBay owns (plugins, subgraph edges, virtual
+        // devices) are remembered here; everything else is left to rules.
+        let owned = |n: &Option<Node>| {
+            n.as_ref().is_some_and(|n| {
+                n.node_type == Some(NodeType::Plugin) || n.subgraph.is_some() || n.vdev_id.is_some()
+            })
+        };
+        let involves_lv2 = owned(&out_node) || owned(&in_node);
 
         let involves_midi = out_port
             .as_ref()
@@ -4569,6 +4745,10 @@ fn node_to_json(
         "layoutKey": layout_key(n, plugin_manager),
         "ready": n.ready,
     });
+
+    if let Some(ref vdev) = n.vdev_id {
+        val["vdevId"] = serde_json::json!(vdev);
+    }
 
     // Enrich plugin nodes with format and hasUi info
     if n.node_type == Some(NodeType::Plugin) {
@@ -5018,3 +5198,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+// Subgraph and virtual device invokables (src/ui/subgraphs_bridge.rs).
+#[path = "subgraphs_bridge.rs"]
+mod subgraphs_bridge;

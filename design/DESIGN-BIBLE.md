@@ -114,6 +114,7 @@ All clear 4.5:1 on the surfaces they're used on. Don't put `textMuted` on
 | `catApp` (wave) | application streams |
 | `catPlugin` (plug) | plugins |
 | `catMidi` (din) | MIDI devices |
+| `catSubgraph` (subgraph, arrow) | subgraph cards and their Input/Output nodes |
 | `chipAlpha` / `badgeAlpha` | category chip / badge background alpha |
 | `badgeTextTeal/Blue/Violet/Orange` | badge text |
 
@@ -224,7 +225,7 @@ joins at their native stroke width. `ZbIcon` and `ZbLogo` antialias with the
 Qt 6.6+ curve renderer (no layer; crisp at any scale factor) and fall back to
 a multisampled layer on older Qt — don't put vector shapes in multisampled
 layers elsewhere: those vanish on some HiDPI/software renderers. Available: `speaker mic headphones camera
-wave plug din pin pinFill search plus minus fit trash reset arrow block settings
+wave plug din pin pinFill search plus minus fit trash reset arrow block subgraph enter settings
 menu close check grid chevronDown chevronRight` (`pinFill` is the filled head drawn
 under `pin` for the pinned state). Sizes: 12 in node chips, 14–16 in toolbars and
 buttons. To add one, take the path from the design source (convert
@@ -308,13 +309,21 @@ current choice, and choosing closes the menu.
 Order for the context menus:
 
 - Canvas: Delete selected links · Block selected links (destructive) · — ·
-  Add plugin… · — · Unhide all · Fit to view `Home` · Reset zoom · Auto layout
+  Add plugin… · Group into subgraph… (the selected plugins) · Add virtual device… · — ·
+  Unhide all · Fit to view `Home` · Reset zoom · Auto layout (the group and
+  virtual device items only on the main graph)
 - Wire (right-click a wire): Disconnect `Del` · Block this connection
   (destructive). When the wire is part of the selection both act on the whole
   selection ("Disconnect 3 links", "Block 3 connections").
 - Device / sink node: Hide · Pin/Unpin · — · Set as default
-- Plugin node: Hide · Pin/Unpin · — · Set as default · — · Rename… · Open
-  UI… · — · Remove plugin (destructive)
+- Plugin node: Hide · Pin/Unpin · — · Set as default · — · Group into
+  subgraph… (main graph only) · Rename… · Open UI… · — · Remove plugin
+  (destructive)
+- Subgraph card: Open subgraph · Edit subgraph… · Duplicate · Save as
+  template… · — · Hide · Pin/Unpin · — · Ungroup · Delete subgraph
+  (destructive, confirms)
+- Virtual device (either half): … · — · Edit virtual device… · Remove
+  virtual device (destructive)
 
 ### 6.3.1 Tray menu
 
@@ -396,6 +405,24 @@ button holds the old File / Help items.
   re-creating after 3 tries in 30 s.
 - **Toast:** a `bgTooltip` pill with a strong border, 13 px text, centred 28 px
   above the canvas bottom; fades out after 3.5 s.
+- **Subgraph card** (design/GROUPS.md): plugin width (208), `catSubgraph`
+  chip with the `subgraph` glyph, a second card edge 4 px behind (bottom
+  right, `bgSurface` + strong border) so it reads as a stack, header tags for
+  the member count (`2/3` when plugins are missing) and `DEV` when an edge is
+  a device. Ports are the subgraph's external ports. Footer: one full-width
+  **Open subgraph** button (`enter` glyph); double-click opens too.
+- **Inside a subgraph:** only its plugins plus **Input** and **Output** nodes
+  (`catSubgraph`, `arrow` glyph). Breadcrumb at the canvas's top-left, 12 px
+  in: a `bgPanel` pill (strong border, radius 8, 34 tall) with a subtle
+  compact **Graph** button, `chevronRight`, the `subgraph` glyph and the name
+  13/DemiBold. Graph or Escape (when nothing is selected) goes back. Each view
+  keeps its own pan/zoom; a subgraph opened for the first time is fitted.
+- **Subgraph dialog:** Name; Channels (Inputs/Outputs steppers 0–16, MIDI in /
+  MIDI out switches); Show to apps as a device (Output device / Input device
+  switches with captions). A device edge disables MIDI on that side.
+- **Virtual device dialog:** Name; Type (Output device / Input device
+  segmented, fixed after creation); Channels stepper 1–16; caption: they
+  exist while ZestBay runs.
 - **Selection:** accent border + 3 px `accentRing` halo; the node's wires and
   pins turn accent.
 - **Search:** non-matching nodes at 35 % opacity; matching ports get a 2 px

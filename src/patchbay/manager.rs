@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::rules::{pattern_matches, AutoConnectRule, RuleAction};
+use super::rules::{pattern_matches, AutoConnectRule, PortMapping, RuleAction};
 use crate::pipewire::{GraphState, Link, MediaType, Node, NodeType, ObjectId, Port, PwCommand};
 
 /// How many times the same (output port, input port) pair may be destroyed by
@@ -84,6 +84,9 @@ impl PatchbayManager {
             return false;
         }
         if !Self::is_routable_node(source_node) || !Self::is_routable_node(target_node) {
+            return false;
+        }
+        if Self::is_subgraph_internal(source_node, target_node) {
             return false;
         }
         if let (Some(a), Some(b)) = (output_port.media_type, input_port.media_type)
@@ -352,6 +355,104 @@ impl PatchbayManager {
         rules.extend(rule_map.into_values());
         self.rules = rules;
         self.rules_dirty = true;
+    }
+
+    /// Point rules at new endpoints after plugins were grouped into (or
+    /// ungrouped from) a subgraph. Rules whose target (`targets == true`) or
+    /// source is a node in `map.nodes` are rewritten: explicit port mappings
+    /// through `map.ports`, heuristic rules to each node in `map.nodes`.
+    /// Rules whose other end is in `skip` (both ends inside the subgraph)
+    /// are left alone. Returns whether anything changed.
+    pub fn remap_rules(&mut self, map: &EndpointMap, targets: bool, skip: &HashSet<String>) -> bool {
+        let mut out: Vec<AutoConnectRule> = Vec::with_capacity(self.rules.len());
+        let mut changed = false;
+        for rule in std::mem::take(&mut self.rules) {
+            let (node, other) = if targets {
+                (rule.target_pattern.clone(), rule.source_pattern.clone())
+            } else {
+                (rule.source_pattern.clone(), rule.target_pattern.clone())
+            };
+            let Some(new_nodes) = map.nodes.get(&node) else {
+                out.push(rule);
+                continue;
+            };
+            if skip.contains(&other) {
+                out.push(rule);
+                continue;
+            }
+            let retarget = |rule: &AutoConnectRule, new_node: &str, mappings: Vec<PortMapping>| {
+                let mut r = AutoConnectRule::new(
+                    rule.source_pattern.clone(),
+                    rule.source_node_type,
+                    rule.target_pattern.clone(),
+                    rule.target_node_type,
+                    rule.target_node_id,
+                )
+                .with_action(rule.action);
+                r.enabled = rule.enabled;
+                if targets {
+                    r.target_pattern = new_node.to_string();
+                    r.target_node_type = None;
+                    r.target_node_id = None;
+                } else {
+                    r.source_pattern = new_node.to_string();
+                    r.source_node_type = None;
+                }
+                r.port_mappings = mappings;
+                r
+            };
+
+            if rule.port_mappings.is_empty() {
+                for n in new_nodes {
+                    let r = retarget(&rule, n, Vec::new());
+                    if !out.iter().any(|o| same_rule(o, &r)) {
+                        out.push(r);
+                    }
+                }
+                changed = true;
+                continue;
+            }
+
+            let mut by_node: BTreeMap<String, Vec<PortMapping>> = BTreeMap::new();
+            let mut keep: Vec<PortMapping> = Vec::new();
+            for m in &rule.port_mappings {
+                let port = if targets { &m.input_port_name } else { &m.output_port_name };
+                match map.ports.get(&(node.clone(), port.clone())) {
+                    Some(dests) => {
+                        for (n, p) in dests {
+                            let pm = if targets {
+                                PortMapping { output_port_name: m.output_port_name.clone(), input_port_name: p.clone() }
+                            } else {
+                                PortMapping { output_port_name: p.clone(), input_port_name: m.input_port_name.clone() }
+                            };
+                            let list = by_node.entry(n.clone()).or_default();
+                            if !list.contains(&pm) {
+                                list.push(pm);
+                            }
+                        }
+                    }
+                    None => keep.push(m.clone()),
+                }
+            }
+            if by_node.is_empty() {
+                out.push(rule);
+                continue;
+            }
+            changed = true;
+            for (n, mappings) in by_node {
+                out.push(retarget(&rule, &n, mappings));
+            }
+            if !keep.is_empty() {
+                let mut r = rule;
+                r.port_mappings = keep;
+                out.push(r);
+            }
+        }
+        self.rules = out;
+        if changed {
+            self.rules_dirty = true;
+        }
+        changed
     }
 
     pub fn refresh_target_ids(&mut self) {
@@ -691,7 +792,25 @@ impl PatchbayManager {
         }
     }
 
+    /// Wiring inside a subgraph: out of its In edge or into its Out edge.
+    /// ZestBay keeps those links itself (links.json); rules neither learn
+    /// them nor remove them.
+    fn is_subgraph_internal(source: &Node, target: &Node) -> bool {
+        use crate::pipewire::SubgraphRole;
+        source.subgraph.as_ref().is_some_and(|t| t.role == SubgraphRole::In)
+            || target.subgraph.as_ref().is_some_and(|t| t.role == SubgraphRole::Out)
+    }
+
     fn is_routable_node(node: &Node) -> bool {
+        // The inside half of a subgraph shown as a device is wired by
+        // ZestBay as part of the subgraph, never by rules.
+        if node
+            .subgraph
+            .as_ref()
+            .is_some_and(|t| t.side == crate::pipewire::SubgraphSide::Internal)
+        {
+            return false;
+        }
         match node.media_type {
             Some(MediaType::Video) => false,
             _ => true,
@@ -716,6 +835,9 @@ impl PatchbayManager {
         };
 
         if !Self::is_routable_node(&source_node) || !Self::is_routable_node(&target_node) {
+            return false;
+        }
+        if Self::is_subgraph_internal(&source_node, &target_node) {
             return false;
         }
 
@@ -783,6 +905,36 @@ impl PatchbayManager {
     }
 }
 
+/// Old endpoint → new endpoints, for `PatchbayManager::remap_rules`.
+#[derive(Debug, Default, Clone)]
+pub struct EndpointMap {
+    /// (node, port) → [(node, port)]
+    pub ports: HashMap<(String, String), Vec<(String, String)>>,
+    /// node → nodes that stand for it (for heuristic rules)
+    pub nodes: HashMap<String, Vec<String>>,
+}
+
+impl EndpointMap {
+    pub fn add(&mut self, from: (&str, &str), to: (&str, &str)) {
+        let list = self.ports.entry((from.0.to_string(), from.1.to_string())).or_default();
+        let to_owned = (to.0.to_string(), to.1.to_string());
+        if !list.contains(&to_owned) {
+            list.push(to_owned);
+        }
+        let nodes = self.nodes.entry(from.0.to_string()).or_default();
+        if !nodes.iter().any(|n| n == to.0) {
+            nodes.push(to.0.to_string());
+        }
+    }
+}
+
+fn same_rule(a: &AutoConnectRule, b: &AutoConnectRule) -> bool {
+    a.source_pattern == b.source_pattern
+        && a.target_pattern == b.target_pattern
+        && a.action == b.action
+        && a.port_mappings == b.port_mappings
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -799,6 +951,8 @@ mod tests {
             is_jack: false,
             is_bridge: false,
             ready: true,
+            subgraph: None,
+            vdev_id: None,
         }
     }
 
@@ -1134,6 +1288,92 @@ mod tests {
             "port_mappings":[],"enabled":true}"#;
         let rule: AutoConnectRule = serde_json::from_str(json).unwrap();
         assert_eq!(rule.action, RuleAction::Connect);
+    }
+
+    fn endpoint_map(entries: &[(&str, &str, &str, &str)]) -> EndpointMap {
+        let mut m = EndpointMap::default();
+        for (on, op, nn, np) in entries {
+            m.add((on, op), (nn, np));
+        }
+        m
+    }
+
+    #[test]
+    fn remap_targets_moves_mapped_rules_to_subgraph_edge() {
+        let (graph, _, _, _) = setup();
+        let mut pb = PatchbayManager::new(graph);
+        let mut learned = AutoConnectRule::new("Firefox", None, "EQ", Some(NodeType::Plugin), Some(7));
+        learned.add_port_mapping("output_FL".into(), "in_l".into());
+        learned.add_port_mapping("output_FR".into(), "in_r".into());
+        pb.add_rule(learned);
+        pb.add_rule(AutoConnectRule::new("Gate", None, "EQ", None, None)); // inside the subgraph
+        pb.add_rule(AutoConnectRule::new("Spotify", None, "EQ", None, None)); // heuristic
+        let map = endpoint_map(&[("EQ", "in_l", "Chain In", "in_FL"), ("EQ", "in_r", "Chain In", "in_FR")]);
+        let skip: HashSet<String> = ["Gate".to_string(), "EQ".to_string()].into();
+        assert!(pb.remap_rules(&map, true, &skip));
+        let rules = pb.rules();
+        assert_eq!(rules.len(), 3);
+        let ff = rules.iter().find(|r| r.source_pattern == "Firefox").unwrap();
+        assert_eq!(ff.target_pattern, "Chain In");
+        assert_eq!(ff.target_node_id, None);
+        assert_eq!(ff.port_mappings.iter().map(|m| m.input_port_name.as_str()).collect::<Vec<_>>(), ["in_FL", "in_FR"]);
+        assert!(rules.iter().any(|r| r.source_pattern == "Gate" && r.target_pattern == "EQ"));
+        assert!(rules.iter().any(|r| r.source_pattern == "Spotify" && r.target_pattern == "Chain In"));
+    }
+
+    #[test]
+    fn remap_sources_fans_out_on_ungroup() {
+        let (graph, _, _, _) = setup();
+        let mut pb = PatchbayManager::new(graph);
+        let mut r = AutoConnectRule::new("Chain Out", None, "Headset", None, None);
+        r.add_port_mapping("out_MONO".into(), "playback_FL".into());
+        pb.add_rule(r);
+        let map = endpoint_map(&[("Chain Out", "out_MONO", "Comp", "output_0")]);
+        assert!(pb.remap_rules(&map, false, &HashSet::new()));
+        let r = &pb.rules()[0];
+        assert_eq!((r.source_pattern.as_str(), r.port_mappings[0].output_port_name.as_str()), ("Comp", "output_0"));
+    }
+
+    fn edge(id: ObjectId, name: &str, role: crate::pipewire::SubgraphRole) -> Node {
+        let mut n = node(id, name, NodeType::Duplex);
+        n.subgraph = Some(crate::pipewire::SubgraphTag {
+            id: "sg".into(),
+            role,
+            side: crate::pipewire::SubgraphSide::Both,
+        });
+        n
+    }
+
+    #[test]
+    fn subgraph_internal_wiring_is_neither_learned_nor_removed() {
+        let (graph, out, _, _) = setup();
+        graph.insert_node(edge(5, "Chain In", crate::pipewire::SubgraphRole::In));
+        let in_out = port(50, 5, "out_FL", PortDirection::Output, MediaType::Audio);
+        graph.insert_port(in_out.clone());
+        graph.insert_node(node(6, "Gate", NodeType::Plugin));
+        let gate_in = port(60, 6, "input_0", PortDirection::Input, MediaType::Audio);
+        graph.insert_port(gate_in.clone());
+        graph.insert_link(link(100, &in_out, &gate_in));
+        let mut pb = PatchbayManager::new(graph.clone());
+        // A rule on the edge node that doesn't mention Gate.
+        pb.add_rule(AutoConnectRule::new("Chain In", None, "Speakers", None, None));
+        assert!(!disconnects(&pb.scan()).contains(&100));
+        let (e, g) = (graph.get_node(5).unwrap(), graph.get_node(6).unwrap());
+        assert!(!pb.learn_from_link(&e, &g, &in_out, &gate_in));
+        let _ = out;
+    }
+
+    #[test]
+    fn internal_side_of_device_subgraph_is_not_routable() {
+        let mut n = node(9, "Chain In (internal)", NodeType::StreamOutput);
+        n.subgraph = Some(crate::pipewire::SubgraphTag {
+            id: "sg".into(),
+            role: crate::pipewire::SubgraphRole::In,
+            side: crate::pipewire::SubgraphSide::Internal,
+        });
+        assert!(!PatchbayManager::is_routable_node(&n));
+        n.subgraph.as_mut().unwrap().side = crate::pipewire::SubgraphSide::External;
+        assert!(PatchbayManager::is_routable_node(&n));
     }
 
     #[test]

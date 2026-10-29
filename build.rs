@@ -35,6 +35,8 @@ fn main() {
             .qml_file("qml/Preferences.qml")
             .qml_file("qml/CpuOverlay.qml")
             .qml_file("qml/About.qml")
+            .qml_file("qml/SubgraphDialog.qml")
+            .qml_file("qml/VirtualDeviceDialog.qml")
             .qml_file("qml/ZbBadge.qml")
             .qml_file("qml/ZbButton.qml")
             .qml_file("qml/ZbCard.qml")

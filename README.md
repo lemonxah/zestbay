@@ -130,6 +130,13 @@ ZestBay provides a comprehensive set of LV2 host features, allowing it to load t
 - Auto-learn: connect ports manually and rules are created automatically
 - Auto-unlearn: disconnect ports and the rule is updated
 - Block rules: right-click a wire (or right-drag between ports) so a source can never connect to a target, not by rules, the default node or by hand; blocked pairs show as red ⊘ lines
+
+### Subgraphs and Virtual Devices
+- Group plugins into a subgraph with its own inputs and outputs (right-click → Group into subgraph…); wires from outside are rerouted through it
+- Open a subgraph to edit what's inside; ungroup it again any time
+- Offer a subgraph to apps as a device: e.g. a "Mic Chain" microphone you can pick in Discord
+- Save subgraphs as templates and insert them again (Add plugin › Subgraphs), or duplicate them
+- Create virtual sinks and sources (like "Comms Sink") from the UI instead of PipeWire config
 - Glob pattern matching for source and target node names
 - Per-port-pair mappings with heuristic fallback (channel name, position)
 - Snapshot current connections as a complete rule set

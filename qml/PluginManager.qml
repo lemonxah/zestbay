@@ -75,6 +75,7 @@ ZbWindow {
 
     Shortcut {
         sequence: "Escape"
+        enabled: pluginManager.visible
         onActivated: pluginManager.visible = false
     }
 

@@ -1,10 +1,11 @@
 //! Plugin search paths, shared by the format scanners.
 //!
 //! Order: the format's environment variable (`CLAP_PATH`, `VST3_PATH`), the
-//! standard directories, then — inside a Flatpak — the plugin extension
-//! point and the host's system directories (mounted under `/run/host` when
-//! the app has `--filesystem=host-os`).  Missing directories are kept; the
-//! scanners skip them.
+//! standard directories, then — inside a Flatpak — the app's own plugin
+//! folders (`app_plugin_dir`), the plugin extension point and the host's
+//! system directories (mounted under `/run/host` only when the user grants
+//! `--filesystem=host-os`).  Missing directories are kept; the scanners skip
+//! them.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -19,6 +20,28 @@ const FLATPAK_HOST_USR: &str = "/run/host/usr";
 /// True when running inside a Flatpak sandbox.
 pub fn in_flatpak() -> bool {
     std::path::Path::new("/.flatpak-info").exists()
+}
+
+/// Inside a Flatpak, the app's own folder for one plugin format
+/// (`~/.var/app/<app id>/data/<lv2|vst3|clap>` on the host). The app can
+/// always read and write it, no permission needed, so users drop their own
+/// plugins (e.g. Pianoteq) there. `None` outside a Flatpak.
+pub fn app_plugin_dir(format: &str) -> Option<PathBuf> {
+    if !in_flatpak() {
+        return None;
+    }
+    dirs::data_dir().map(|d| d.join(format))
+}
+
+/// Create the app's plugin folders (Flatpak only) so they're easy to find.
+pub fn ensure_app_plugin_dirs() {
+    for format in ["lv2", "vst3", "clap"] {
+        if let Some(dir) = app_plugin_dir(format)
+            && let Err(e) = std::fs::create_dir_all(&dir)
+        {
+            log::warn!("Could not create {}: {}", dir.display(), e);
+        }
+    }
 }
 
 /// The Flatpak application ID, when running inside one.
@@ -46,6 +69,7 @@ pub fn search_dirs(env_var: &str, defaults: &[&str], subdir: &str, label: &str) 
         .unwrap_or_default();
     candidates.extend(defaults.iter().map(|d| expand(d)));
     if in_flatpak() {
+        candidates.extend(app_plugin_dir(subdir));
         candidates.push(PathBuf::from(format!("{FLATPAK_EXTENSION_DIR}/{subdir}")));
         candidates.extend(host_lib_dirs().map(|lib| PathBuf::from(format!("{lib}/{subdir}"))));
     }
@@ -72,11 +96,12 @@ pub fn flatpak_lv2_path() -> Option<String> {
         return None;
     }
     let home = std::env::var("HOME").unwrap_or_default();
-    let mut dirs = vec![
-        format!("{home}/.lv2"),
+    let mut dirs = vec![format!("{home}/.lv2")];
+    dirs.extend(app_plugin_dir("lv2").map(|d| d.to_string_lossy().into_owned()));
+    dirs.extend([
         format!("{FLATPAK_EXTENSION_DIR}/lv2"),
         "/app/lib/lv2".to_string(),
-    ];
+    ]);
     dirs.extend(host_lib_dirs().map(|lib| format!("{lib}/lv2")));
     // Drop directories that resolve to one already listed (e.g. lib64 -> lib
     // on Arch), or lilv loads every plugin twice and warns about each.

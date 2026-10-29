@@ -47,6 +47,7 @@ ZbWindow {
 
     Shortcut {
         sequence: "Escape"
+        enabled: cpuOverlay.visible
         onActivated: cpuOverlay.visible = false
     }
 

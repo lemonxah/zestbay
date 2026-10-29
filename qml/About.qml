@@ -26,6 +26,7 @@ ZbWindow {
 
     Shortcut {
         sequence: "Escape"
+        enabled: aboutWindow.visible
         onActivated: aboutWindow.visible = false
     }
 
@@ -127,6 +128,10 @@ ZbWindow {
                     label: "Version"
                     value: aboutWindow.controller.get_app_version()
                     mono: true
+                }
+                InfoRow {
+                    label: "Install"
+                    value: aboutWindow.controller.get_install_kind()
                 }
                 InfoRow {
                     label: "Qt"

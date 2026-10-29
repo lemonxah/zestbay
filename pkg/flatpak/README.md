@@ -57,13 +57,25 @@ manifest's directory, which is why the manifest sits at the repo root.
 - **Plugin editors** are X11 windows, so the app has the full X11 socket next
   to Wayland. The linter warns `finish-args-contains-both-x11-and-wayland`;
   that is intentional and needs explaining in the submission.
-- **Plugins** are searched in `~/.lv2`, `~/.clap`, `~/.vst3`,
-  `$LV2_PATH`/`$CLAP_PATH`/`$VST3_PATH`, `/app/extensions/Plugins/{lv2,clap,vst3}`
-  (Flatpak plugin extensions) and the host's `/usr/lib*/{lv2,clap,vst3}` via
-  `/run/host/usr` (`--filesystem=host-os:ro`). Host plugins built against
-  distro libraries may fail to load in the runtime; the sandbox probe keeps
-  that from crashing ZestBay. Flathub reviewers may ask about `host-os` and
-  `home`; both exist so plugins and their data can be found.
+- **Plugins** (no home or host filesystem access is requested):
+  - Flathub plugin packages, mounted at `/app/extensions/Plugins`; install
+    with e.g. `flatpak install flathub org.freedesktop.LinuxAudio.Plugins.LSP//25.08`
+    (the branch must match the manifest's extension version).
+  - The app's own folders `~/.var/app/io.github.lemonxah.ZestBay/data/{lv2,vst3,clap}`,
+    created at startup and shown in Add plugin (with an Open folder button).
+    Copy paid or vendor plugins (e.g. Pianoteq's `.lv2`/`.vst3` bundles) there;
+    a symlink into `/usr` won't work, the sandbox can't see `/usr`.
+  - `$LV2_PATH`/`$CLAP_PATH`/`$VST3_PATH`.
+  - Optional, per user: `flatpak override --user --filesystem=host-os:ro io.github.lemonxah.ZestBay`
+    adds the host's `/usr/lib*/{lv2,clap,vst3}` (seen under `/run/host/usr`)
+    and `--filesystem=~/.lv2` (etc.) the classic home folders. Host plugins
+    built against distro libraries may not load in the runtime; the sandbox
+    probe keeps that from crashing ZestBay.
+- **Plugin settings and licences** live in the app's XDG folders
+  (`~/.var/app/io.github.lemonxah.ZestBay/{config,data}`), e.g. Pianoteq's
+  activation in `…/data/Modartt`.
+- **Native or Flatpak:** ZestBay detects the sandbox (`/.flatpak-info`) and
+  shows it in About (Install: Flatpak / Native).
 - **LV2 UIs**: suil is built with the GTK 3 and X11 wrappers only, so Qt5,
   GTK2 and GTK4 LV2 UIs are not available in the Flatpak.
 - **Config** lives in `~/.var/app/io.github.lemonxah.ZestBay/config/zestbay`,

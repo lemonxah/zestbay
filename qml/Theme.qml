@@ -99,6 +99,7 @@ QtObject {
     readonly property color catApp:      dark ? "#f0a040" : "#d95926"
     readonly property color catPlugin:   dark ? "#a78bfa" : "#6250d6"
     readonly property color catMidi:     dark ? "#e879b5" : "#c2459a"
+    readonly property color catSubgraph: dark ? "#96dc2e" : "#5f9a10"
     readonly property real chipAlpha:  dark ? 0.16 : 0.12   // glyph chip background
     readonly property real badgeAlpha: dark ? 0.14 : 0.12   // badge background
 

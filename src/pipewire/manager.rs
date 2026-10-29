@@ -11,6 +11,7 @@ use pipewire::{
     registry::GlobalObject, registry::RegistryRc, types::ObjectType,
 };
 
+use super::owned::OwnedNode;
 use super::state::GraphState;
 use super::types::*;
 
@@ -173,6 +174,8 @@ struct Carryover {
     plugins: Vec<AddRequest>,
     relinks: Vec<PendingRelink>,
     lv2_zombies: Vec<Lv2Zombie>,
+    /// Owned nodes (subgraph boundaries, virtual devices) to re-create.
+    owned: Vec<(String, OwnedNodeSpec)>,
 }
 
 /// Routes UI commands to the currently running PipeWire loop. While the
@@ -320,6 +323,7 @@ fn run_pipewire_thread(
 
     let host = Rc::new(Host {
         graph: graph.clone(),
+        context: context.clone(),
         core: core.clone(),
         registry: registry.clone(),
         event_tx: event_tx.clone(),
@@ -349,6 +353,7 @@ fn run_pipewire_thread(
         last_param_report: Cell::new(Instant::now()),
         last_op_time: Cell::new(Instant::now() - Duration::from_secs(1)),
         changes_pending: Cell::new(false),
+        owned: RefCell::new(HashMap::new()),
     });
 
     let lost: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
@@ -421,6 +426,9 @@ fn run_pipewire_thread(
             ops.push_back(InternalOp::AddPlugin(Box::new(req)));
         }
     }
+    for (key, spec) in carry.owned.drain(..) {
+        host.set_owned_node(key, Some(spec));
+    }
     {
         let deadline = Instant::now() + RELINK_TIMEOUT_RECONNECT;
         let mut relinks = host.relinks.borrow_mut();
@@ -455,6 +463,12 @@ fn run_pipewire_thread(
     carry.relinks = relinks;
     carry.midi_mappings = host.midi_mapping_table.take();
     carry.lv2_zombies = host.lv2_zombies.take();
+    carry.owned = host
+        .owned
+        .take()
+        .into_iter()
+        .map(|(key, (spec, _node))| (key, spec))
+        .collect();
 
     Err(lost
         .borrow_mut()
@@ -465,6 +479,7 @@ fn run_pipewire_thread(
 /// All state owned by the PipeWire thread for one connection.
 struct Host {
     graph: Arc<GraphState>,
+    context: ContextRc,
     core: CoreRc,
     registry: RegistryRc,
     event_tx: Sender<PwEvent>,
@@ -502,6 +517,8 @@ struct Host {
     last_param_report: Cell<Instant>,
     last_op_time: Cell<Instant>,
     changes_pending: Cell<bool>,
+    /// Owned nodes by key, with the spec they were created from.
+    owned: RefCell<HashMap<String, (OwnedNodeSpec, OwnedNode)>>,
 }
 
 impl Host {
@@ -689,6 +706,7 @@ impl Host {
                 log::info!("Removed {} MIDI mapping(s) for device '{}'", n, device_name);
             }
             PwCommand::RequestPluginStates => self.send_plugin_states(),
+            PwCommand::SetOwnedNode { key, spec } => self.set_owned_node(key, spec),
             PwCommand::Connect {
                 output_port_id,
                 input_port_id,
@@ -737,6 +755,30 @@ impl Host {
             }
             PwCommand::ClosePluginUI { instance_id } => {
                 self.queue_op(InternalOp::ClosePluginUI { instance_id })
+            }
+        }
+    }
+
+    /// Create, re-create or remove an owned node. An unchanged spec is a
+    /// no-op, so replayed commands don't churn the node.
+    fn set_owned_node(&self, key: String, spec: Option<OwnedNodeSpec>) {
+        let mut owned = self.owned.borrow_mut();
+        if let (Some(new), Some((old, _))) = (&spec, owned.get(&key))
+            && new == old
+        {
+            return;
+        }
+        if owned.remove(&key).is_some() {
+            log::info!("Owned node removed: {}", key);
+        }
+        let Some(spec) = spec else { return };
+        match OwnedNode::create(&self.context, &self.core, &spec) {
+            Ok(node) => {
+                owned.insert(key, (spec, node));
+            }
+            Err(e) => {
+                log::error!("Owned node {}: {}", key, e);
+                let _ = self.event_tx.send(PwEvent::Error(e));
             }
         }
     }
@@ -2013,6 +2055,34 @@ impl Host {
     }
 }
 
+/// Subgraph tag and virtual device id of a node ZestBay created, from its
+/// `node.name` (`zestbay.subgraph.<id>.in[.int]`, `zestbay.subgraph.<id>.out[.int]`,
+/// `zestbay.vdev.<id>[.in|.out]`). A device edge has a device media class.
+pub(crate) fn owned_node_tags(node_name: &str, media_class: &str) -> (Option<SubgraphTag>, Option<String>) {
+    if let Some(rest) = node_name.strip_prefix("zestbay.subgraph.") {
+        let (id, suffix) = rest.split_once('.').unwrap_or((rest, ""));
+        let device = media_class == "Audio/Sink" || media_class == "Audio/Source";
+        let (role, side) = match suffix {
+            "in" => (SubgraphRole::In, if device { SubgraphSide::External } else { SubgraphSide::Both }),
+            "in.int" => (SubgraphRole::In, SubgraphSide::Internal),
+            "out" => (SubgraphRole::Out, if device { SubgraphSide::External } else { SubgraphSide::Both }),
+            "out.int" => (SubgraphRole::Out, SubgraphSide::Internal),
+            _ => return (None, None),
+        };
+        if id.is_empty() {
+            return (None, None);
+        }
+        return (Some(SubgraphTag { id: id.to_string(), role, side }), None);
+    }
+    if let Some(rest) = node_name.strip_prefix("zestbay.vdev.") {
+        let id = rest.split('.').next().unwrap_or("");
+        if !id.is_empty() {
+            return (None, Some(id.to_string()));
+        }
+    }
+    (None, None)
+}
+
 fn parse_node(global: &GlobalObject<&DictRef>) -> Option<Node> {
     let props = global.props.as_ref()?;
 
@@ -2081,6 +2151,15 @@ fn parse_node(global: &GlobalObject<&DictRef>) -> Option<Node> {
             && !is_jack
             && !is_bridge);
 
+    // ZestBay's own nodes are recognised by node.name: the registry only
+    // forwards a fixed set of properties, not the zestbay.* tags.
+    let (subgraph, vdev_id) = owned_node_tags(&name, &media_class);
+    // A pass-through boundary has inputs and outputs whatever its class.
+    let node_type = match &subgraph {
+        Some(tag) if tag.side == SubgraphSide::Both => Some(NodeType::Duplex),
+        _ => node_type,
+    };
+
     Some(Node {
         id: global.id,
         name,
@@ -2091,6 +2170,8 @@ fn parse_node(global: &GlobalObject<&DictRef>) -> Option<Node> {
         is_jack,
         is_bridge,
         ready: true,
+        subgraph,
+        vdev_id,
     })
 }
 
@@ -2377,6 +2458,27 @@ fn create_link(
 
     if let Err(e) = core.create_object::<PwLink>("link-factory", &props) {
         log::error!("Failed to create link: {}", e);
+    }
+}
+
+#[cfg(test)]
+mod owned_tag_tests {
+    use super::*;
+
+    #[test]
+    fn owned_tags_from_node_names() {
+        let (t, v) = owned_node_tags("zestbay.subgraph.sg-1a.in", "");
+        assert_eq!(t, Some(SubgraphTag { id: "sg-1a".into(), role: SubgraphRole::In, side: SubgraphSide::Both }));
+        assert!(v.is_none());
+        let (t, _) = owned_node_tags("zestbay.subgraph.sg-1a.in", "Audio/Sink");
+        assert_eq!(t.unwrap().side, SubgraphSide::External);
+        let (t, _) = owned_node_tags("zestbay.subgraph.sg-1a.out.int", "Stream/Input/Audio");
+        let t = t.unwrap();
+        assert_eq!((t.role, t.side), (SubgraphRole::Out, SubgraphSide::Internal));
+        assert_eq!(owned_node_tags("zestbay.vdev.vd-9.out", "Stream/Output/Audio").1.as_deref(), Some("vd-9"));
+        assert_eq!(owned_node_tags("zestbay.vdev.vd-9", "Audio/Sink").1.as_deref(), Some("vd-9"));
+        assert_eq!(owned_node_tags("alsa_output.pci", "Audio/Sink"), (None, None));
+        assert_eq!(owned_node_tags("zestbay.subgraph.sg-1.weird", ""), (None, None));
     }
 }
 

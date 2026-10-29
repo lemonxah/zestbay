@@ -98,6 +98,16 @@ Item {
     property var contextNode: null
     // Canvas point of the last right-click on empty canvas (for "Add Plugin...").
     property var contextCanvasPos: null
+
+    // Subgraphs (design/GROUPS.md): the subgraph this view is inside ("" =
+    // main graph), the main graph's pan/zoom to return to, and a fit to run
+    // once a freshly opened subgraph has been laid out.
+    property string currentSubgraph: ""
+    property string currentSubgraphName: ""
+    property var mainViewport: null
+    property bool fitAfterRefresh: false
+    readonly property bool contextIsSubgraph: contextNode !== null && contextNode.type === "Subgraph"
+    readonly property bool contextIsVdev: contextNode !== null && !!contextNode.vdevId
     // Links the wire context menu acts on: the right-clicked link, or the
     // whole selection when the right-clicked link is part of it.
     property var contextLinkIds: []
@@ -267,6 +277,19 @@ Item {
     }
 
     function refreshData() {
+        // Follow the controller's view (it leaves a subgraph by itself when
+        // the subgraph is ungrouped or deleted).
+        var sgView = controller.get_subgraph_view ? controller.get_subgraph_view() : ""
+        if (sgView !== currentSubgraph) {
+            if (sgView === "" && mainViewport) {
+                zoom = mainViewport.zoom
+                panX = mainViewport.panX
+                panY = mainViewport.panY
+            }
+            currentSubgraph = sgView
+            var sgInfo = sgView !== "" ? subgraphInfo(sgView) : null
+            currentSubgraphName = sgInfo ? sgInfo.name : ""
+        }
         if (!viewportLoaded) {
             try {
                 var vp = JSON.parse(controller.get_viewport_json())
@@ -543,6 +566,12 @@ Item {
             if (b && (b.right * zoom + panX < 0 || b.left * zoom + panX > width
                       || b.bottom * zoom + panY < 0 || b.top * zoom + panY > height))
                 fitToView()
+        }
+
+        // A subgraph opened for the first time: frame its nodes.
+        if (fitAfterRefresh && nodes.length > 0 && width > 0 && height > 0) {
+            fitAfterRefresh = false
+            Qt.callLater(fitToView)
         }
 
         canvas.requestPaint()
@@ -836,7 +865,8 @@ Item {
         repeat: false
         onTriggered: {
             var vp = JSON.stringify({ panX: panX, panY: panY, zoom: zoom })
-            controller.save_viewport(vp)
+            if (currentSubgraph !== "") controller.save_subgraph_view_state(currentSubgraph, vp)
+            else controller.save_viewport(vp)
         }
     }
 
@@ -849,9 +879,44 @@ Item {
         && (contextNode.type === "Sink" || contextNode.type === "Duplex" || contextNode.type === "Plugin")
 
     // Device / sink: Hide · Pin · — · Set as default.
-    // Plugin: Hide · Pin · — · Set as default · — · Rename… · Open UI… · — · Remove plugin.
+    // Plugin: Hide · Pin · — · Set as default · — · Group into subgraph… · Rename… · Open UI… · — · Remove plugin.
+    // Subgraph: Open · Rename / edit… · Duplicate · Save as template… · — · Hide · Pin · — · Ungroup · Delete subgraph.
+    // Virtual device: … · — · Edit virtual device… · Remove virtual device.
     ZbMenu {
         id: nodeContextMenu
+
+        ZbMenuItem {
+            text: "Open subgraph"
+            visible: contextIsSubgraph
+            height: visible ? implicitHeight : 0
+            onTriggered: enterSubgraph(contextNode.subgraphId)
+        }
+        ZbMenuItem {
+            text: "Edit subgraph\u2026"
+            visible: contextIsSubgraph
+            height: visible ? implicitHeight : 0
+            onTriggered: openSubgraphEditor(contextNode.subgraphId)
+        }
+        ZbMenuItem {
+            text: "Duplicate"
+            visible: contextIsSubgraph
+            height: visible ? implicitHeight : 0
+            onTriggered: duplicateSubgraph(contextNode)
+        }
+        ZbMenuItem {
+            text: "Save as template\u2026"
+            visible: contextIsSubgraph
+            height: visible ? implicitHeight : 0
+            onTriggered: {
+                templateSubgraphId = contextNode.subgraphId
+                templateNameField.text = contextNode.name
+                templateNameDialog.open()
+            }
+        }
+        ZbMenuSeparator {
+            visible: contextIsSubgraph
+            height: visible ? implicitHeight : 0
+        }
 
         ZbMenuItem {
             text: "Hide"
@@ -902,6 +967,13 @@ Item {
         }
 
         ZbMenuItem {
+            text: "Group into subgraph\u2026"
+            visible: contextIsPlugin && currentSubgraph === ""
+            height: visible ? implicitHeight : 0
+            onTriggered: groupIntoSubgraph(contextNodeId)
+        }
+
+        ZbMenuItem {
             text: "Rename\u2026"
             visible: contextIsPlugin
             height: visible ? implicitHeight : 0
@@ -936,6 +1008,41 @@ Item {
                 if (contextNodeId >= 0)
                     controller.remove_plugin(contextNodeId)
             }
+        }
+
+        ZbMenuSeparator {
+            visible: contextIsSubgraph || contextIsVdev
+            height: visible ? implicitHeight : 0
+        }
+        ZbMenuItem {
+            text: "Ungroup"
+            visible: contextIsSubgraph
+            height: visible ? implicitHeight : 0
+            onTriggered: controller.ungroup_subgraph(contextNode.subgraphId)
+        }
+        ZbMenuItem {
+            text: "Delete subgraph"
+            destructive: true
+            visible: contextIsSubgraph
+            height: visible ? implicitHeight : 0
+            onTriggered: {
+                deleteSubgraphDialog.subgraphId = contextNode.subgraphId
+                deleteSubgraphDialog.subgraphName = contextNode.name
+                deleteSubgraphDialog.open()
+            }
+        }
+        ZbMenuItem {
+            text: "Edit virtual device\u2026"
+            visible: contextIsVdev
+            height: visible ? implicitHeight : 0
+            onTriggered: openVdevEditor(contextNode.vdevId)
+        }
+        ZbMenuItem {
+            text: "Remove virtual device"
+            destructive: true
+            visible: contextIsVdev
+            height: visible ? implicitHeight : 0
+            onTriggered: controller.remove_virtual_device(contextNode.vdevId)
         }
     }
 
@@ -1020,6 +1127,21 @@ Item {
             }
         }
 
+        ZbMenuItem {
+            text: "Group into subgraph\u2026"
+            visible: currentSubgraph === ""
+            height: visible ? implicitHeight : 0
+            enabled: selectedPluginIds().length > 0
+            onTriggered: groupIntoSubgraph(-1)
+        }
+
+        ZbMenuItem {
+            text: "Add virtual device\u2026"
+            visible: currentSubgraph === ""
+            height: visible ? implicitHeight : 0
+            onTriggered: openVdevEditor("")
+        }
+
         ZbMenuSeparator {}
 
         ZbMenuItem {
@@ -1050,6 +1172,81 @@ Item {
             text: "Auto layout"
             onTriggered: runAutoLayout()
         }
+    }
+
+    SubgraphDialog {
+        id: subgraphDialog
+        onSubmitted: (cfg) => {
+            if (mode === "create") {
+                var newId = controller.create_subgraph(JSON.stringify(nodeIds), JSON.stringify(cfg))
+                if (newId && groupAnchor) {
+                    // The card takes the place of the plugins it replaces.
+                    savedLayout["Subgraph:" + newId] = [groupAnchor.x, groupAnchor.y]
+                    controller.save_layout(JSON.stringify(savedLayout))
+                }
+                clearSelection()
+            } else {
+                controller.update_subgraph(subgraphId, JSON.stringify(cfg))
+            }
+        }
+    }
+
+    VirtualDeviceDialog {
+        id: vdevDialog
+        onSubmitted: (name, kind, channels) => {
+            if (vdevId === "") controller.add_virtual_device(name, kind, channels)
+            else controller.update_virtual_device(vdevId, name, channels)
+        }
+    }
+
+    property string templateSubgraphId: ""
+    ZbDialog {
+        id: templateNameDialog
+        title: "Save as template"
+        primaryText: "Save template"
+        secondaryText: "Cancel"
+        width: 380
+        primaryEnabled: templateNameField.text.trim().length > 0
+
+        Column {
+            width: parent ? parent.width : 320
+            spacing: 8
+            ZbTextField {
+                id: templateNameField
+                width: parent.width
+                placeholderText: "Template name"
+                onAccepted: if (templateNameDialog.primaryEnabled) templateNameDialog.accept()
+            }
+            Text {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.sizeCaption
+                color: Theme.textMuted
+                text: "Saves the plugins with their settings and wiring. Insert it again from Add plugin \u203a Subgraphs."
+            }
+        }
+        onOpened: { templateNameField.forceActiveFocus(); templateNameField.selectAll() }
+        onAccepted: controller.save_subgraph_template(templateSubgraphId, templateNameField.text.trim())
+    }
+
+    ZbDialog {
+        id: deleteSubgraphDialog
+        property string subgraphId: ""
+        property string subgraphName: ""
+        title: "Delete subgraph?"
+        primaryText: "Delete"
+        secondaryText: "Cancel"
+        width: 400
+        Text {
+            width: parent ? parent.width : 340
+            wrapMode: Text.WordWrap
+            font.family: Theme.fontSans
+            font.pixelSize: Theme.sizeBody
+            color: Theme.textPrimary
+            text: "\u201c" + deleteSubgraphDialog.subgraphName + "\u201d and the plugins inside it will be removed. To keep the plugins, use Ungroup instead."
+        }
+        onAccepted: controller.delete_subgraph(subgraphId)
     }
 
     ZbDialog {
@@ -1327,6 +1524,8 @@ Item {
         if (node.mediaType === "Midi" || (node.layoutKey || "").indexOf("MidiBridge:") === 0)
             return { color: Theme.catMidi, glyph: "din" }
         if (type === "Plugin") return { color: Theme.catPlugin, glyph: "plug" }
+        if (type === "Subgraph") return { color: Theme.catSubgraph, glyph: "subgraph" }
+        if (type === "SubgraphInput" || type === "SubgraphOutput") return { color: Theme.catSubgraph, glyph: "arrow" }
         if (type === "StreamOutput" || type === "StreamInput") return { color: Theme.catApp, glyph: "wave" }
         if (node.mediaType === "Video") return { color: Theme.catHardware, glyph: "camera" }
         if (node.isVirtual) return { color: Theme.catVirtual, glyph: type === "Source" ? "mic" : "speaker" }
@@ -1372,7 +1571,7 @@ Item {
         var h = Theme.nodeHeader + Theme.nodePortsTop
               + Theme.nodePortRow * (rows + (expandable ? 1 : 0))
               + Theme.nodePortsBottom + 2
-        if (node.type === "Plugin") h += Theme.nodeFooter
+        if (node.type === "Plugin" || node.type === "Subgraph") h += Theme.nodeFooter
         return { inputs: visIn, outputs: visOut, rows: rows, expandable: expandable,
                  expanded: expanded, hiddenIn: hiddenIn, hiddenOut: hiddenOut, height: h }
     }
@@ -1392,7 +1591,8 @@ Item {
         var newWidths = {}
         for (var ni = 0; ni < nodes.length; ni++) {
             var node = nodes[ni]
-            newWidths[node.id] = node.type === "Plugin" ? Theme.nodeWidthPlugin : Theme.nodeWidth
+            newWidths[node.id] = node.type === "Plugin" || node.type === "Subgraph"
+                                 ? Theme.nodeWidthPlugin : Theme.nodeWidth
         }
         nodeWidths = newWidths
     }
@@ -1602,7 +1802,8 @@ Item {
     // in proportion to their content so "Params" stays the widest.
     function footerButtons(n, nx, ny, nh) {
         var y = ny + nh - Theme.nodeFooter + (Theme.nodeFooter - Theme.nodeFooterButton) / 2
-        var base = [{ key: "onoff", w: 48 }, { key: "ui", w: 32 }, { key: "params", w: 56 }]
+        var base = n.type === "Subgraph" ? [{ key: "open", w: 1 }]
+                 : [{ key: "onoff", w: 48 }, { key: "ui", w: 32 }, { key: "params", w: 56 }]
         var margin = 10
         var gap = 6
         var avail = getNodeWidth(n.id) - 2 * margin - gap * (base.length - 1)
@@ -1658,11 +1859,12 @@ Item {
         var tr = toggleRowRect(n, lay, pos.x, pos.y)
         if (tr && c.x >= tr.x && c.x <= tr.x + tr.w && c.y >= tr.y && c.y <= tr.y + tr.h)
             return { button: "toggle", nodeId: n.id }
-        if (n.type !== "Plugin") return null
+        if (n.type !== "Plugin" && n.type !== "Subgraph") return null
         var btns = footerButtons(n, pos.x, pos.y, calculateNodeHeight(n))
         for (var i = 0; i < btns.length; i++) {
             var b = btns[i]
             if (c.x >= b.x && c.x <= b.x + b.w && c.y >= b.y && c.y <= b.y + b.h) {
+                if (b.key === "open") return { button: "open", nodeId: n.id, subgraphId: n.subgraphId }
                 if (b.key === "onoff") return { button: "onoff", nodeId: n.id, bypassed: isNodeBypassed(n) }
                 if (b.key === "ui") return { button: "ui", nodeId: n.id, hasUi: n.pluginHasUi !== false }
                 return { button: "params", nodeId: n.id }
@@ -1990,6 +2192,7 @@ Item {
         var nw = getNodeWidth(node.id)
         var nh = calculateNodeHeight(node)
         var isPlugin = node.type === "Plugin"
+        var isSubgraph = node.type === "Subgraph"
         var selected = !!selectedNodes[node.id]
         var isDefault = defaultNodeKey !== "" && node.layoutKey === defaultNodeKey
         var cat = nodeCategory(node)
@@ -2013,6 +2216,16 @@ Item {
             roundRectPath(ctx, nx - 2.5, ny - 2.5, nw + 5, nh + 5, Theme.radiusCard + 2.5)
             ctx.strokeStyle = "" + Theme.accentRing
             ctx.lineWidth = 3
+            ctx.stroke()
+        }
+
+        // Subgraph: a second card edge behind, offset 4 px (a stack).
+        if (isSubgraph) {
+            roundRectPath(ctx, nx + 4, ny + 4, nw, nh, Theme.radiusCard)
+            ctx.fillStyle = "" + Theme.bgSurface
+            ctx.fill()
+            ctx.strokeStyle = "" + Theme.borderStrong
+            ctx.lineWidth = 1
             ctx.stroke()
         }
 
@@ -2056,6 +2269,13 @@ Item {
         var tagRight = pr.x - 4
         if (isPlugin && node.pluginFormat)
             tagRight = drawTag(ctx, node.pluginFormat, tagRight, ny + hdr / 2) - 6
+        if (isSubgraph) {
+            var present = (node.memberCount || 0) - (node.missing || 0)
+            tagRight = drawTag(ctx, node.missing > 0 ? present + "/" + node.memberCount : "" + (node.memberCount || 0),
+                               tagRight, ny + hdr / 2) - 6
+            if (node.asSink || node.asSource)
+                tagRight = drawTag(ctx, "DEV", tagRight, ny + hdr / 2) - 6
+        }
         if (isDefault)
             tagRight = drawDefaultChip(ctx, tagRight, ny + hdr / 2) - 6
 
@@ -2121,6 +2341,26 @@ Item {
             ctx.textAlign = "left"
             ctx.textBaseline = "middle"
             ctx.fillText(label, lx + 12, cy)
+        }
+
+        // Subgraph footer: one Open button; hairline above.
+        if (isSubgraph) {
+            ctx.fillStyle = "" + Theme.borderHairline
+            ctx.fillRect(nx + 1, ny + nh - Theme.nodeFooter, nw - 2, 1)
+            var ob = footerButtons(node, nx, ny, nh)[0]
+            var hoverO = hoveredButton === node.id + ":open"
+            roundRectPath(ctx, ob.x, ob.y, ob.w, ob.h, Theme.radiusSmall)
+            ctx.fillStyle = "" + (hoverO ? Theme.borderStrong : Theme.bgSubtle)
+            ctx.fill()
+            ctx.font = fontSpec(500, 11, false)
+            var openTxt = "Open subgraph"
+            var openW = 12 + 6 + ctx.measureText(openTxt).width
+            var ox = ob.x + (ob.w - openW) / 2
+            drawGlyph(ctx, "enter", ox, ob.y + (ob.h - 12) / 2, 12, Theme.textIcon)
+            ctx.fillStyle = "" + Theme.textIcon
+            ctx.textAlign = "left"
+            ctx.textBaseline = "middle"
+            ctx.fillText(openTxt, ox + 18, ob.y + ob.h / 2 + 0.5)
         }
 
         // Plugin footer: On / UI / Params; hairline above.
@@ -2209,6 +2449,14 @@ Item {
 
     focus: true
 
+    // Escape belongs to the graph whenever it has something to cancel, even
+    // if a window-level Shortcut elsewhere also listens for it.
+    Keys.onShortcutOverride: (event) => {
+        if (event.key === Qt.Key_Escape
+                && (placingNodeId >= 0 || connectFromPortId >= 0 || hasSelection() || currentSubgraph !== ""))
+            event.accepted = true
+    }
+
     Keys.onPressed: (event) => {
         if (event.key === Qt.Key_Delete || event.key === Qt.Key_Backspace) {
             deleteSelectedLinks()
@@ -2228,8 +2476,10 @@ Item {
                 connectHoverPortId = -1
                 connectTargetBlocked = false
                 canvas.requestPaint()
-            } else {
+            } else if (hasSelection()) {
                 clearSelection()
+            } else if (currentSubgraph !== "") {
+                exitSubgraph()
             }
             event.accepted = true
         }
@@ -2240,6 +2490,12 @@ Item {
         anchors.fill: parent
         acceptedButtons: Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
         hoverEnabled: true
+
+        onDoubleClicked: (mouse) => {
+            if (mouse.button !== Qt.LeftButton) return
+            var dn = findNodeData(findNodeAt(mouse.x, mouse.y))
+            if (dn && dn.type === "Subgraph") enterSubgraph(dn.subgraphId)
+        }
 
         property real lastX: 0
         property real lastY: 0
@@ -2330,6 +2586,8 @@ Item {
                         controller.open_plugin_ui(btnHit.nodeId)
                     } else if (btnHit.button === "params") {
                         graphView.openPluginParams(btnHit.nodeId)
+                    } else if (btnHit.button === "open") {
+                        enterSubgraph(btnHit.subgraphId)
                     }
                     return
                 }
@@ -2634,6 +2892,60 @@ Item {
             if (wheel.angleDelta.y === 0) return
             var factor = wheel.angleDelta.y > 0 ? 1.1 : 0.9
             zoomAt(wheel.x, wheel.y, zoom * factor)
+        }
+    }
+
+    // Inside a subgraph: "Graph › Mic Chain" at the top-left; "Graph" (or
+    // Escape) goes back to the main graph.
+    Rectangle {
+        id: breadcrumb
+        visible: currentSubgraph !== ""
+        anchors.left: parent.left
+        anchors.top: parent.top
+        anchors.margins: 12
+        height: 34
+        width: crumbRow.implicitWidth + 12
+        radius: Theme.radiusControl
+        color: Theme.bgPanel
+        border.width: 1
+        border.color: Theme.borderStrong
+
+        Row {
+            id: crumbRow
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.left: parent.left
+            anchors.leftMargin: 4
+            spacing: 4
+            ZbButton {
+                id: crumbHome
+                kind: "subtle"
+                compact: true
+                text: "Graph"
+                anchors.verticalCenter: parent.verticalCenter
+                onClicked: exitSubgraph()
+                ZbTooltip { visible: crumbHome.hovered; text: "Back to the main graph (Esc)" }
+            }
+            ZbIcon {
+                name: "chevronRight"
+                size: 10
+                color: Theme.textMuted
+                anchors.verticalCenter: parent.verticalCenter
+            }
+            ZbIcon {
+                name: "subgraph"
+                size: 14
+                color: Theme.catSubgraph
+                anchors.verticalCenter: parent.verticalCenter
+            }
+            Text {
+                text: currentSubgraphName
+                anchors.verticalCenter: parent.verticalCenter
+                rightPadding: 6
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.sizeBody
+                font.weight: Font.DemiBold
+                color: Theme.textPrimary
+            }
         }
     }
 
@@ -2998,6 +3310,154 @@ Item {
             if (linkMatchesSig(findLinkData(lid), selectedLinks[linkId])) ids.push(lid)
         }
         if (ids.length > 0) blockLinks(ids)
+    }
+
+    // ---- Subgraphs ------------------------------------------------------
+
+    function hasSelection() {
+        for (var k in selectedLinks) return true
+        for (var k2 in selectedNodes) return true
+        return false
+    }
+
+    function selectedPluginIds() {
+        var ids = []
+        for (var k in selectedNodes) {
+            var n = findNodeData(parseInt(k))
+            if (n && n.type === "Plugin") ids.push(n.id)
+        }
+        return ids
+    }
+
+    function subgraphInfo(id) {
+        try {
+            var list = JSON.parse(controller.get_subgraphs_json()).subgraphs
+            for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i]
+        } catch (e) {}
+        return null
+    }
+
+    // Group the selected plugins (or `nodeId` when it isn't selected).
+    property var groupAnchor: null
+    function groupIntoSubgraph(nodeId) {
+        var ids = selectedPluginIds()
+        if (nodeId >= 0 && ids.indexOf(nodeId) < 0) ids = [nodeId]
+        if (ids.length === 0) return
+        var minX = Infinity, minY = Infinity
+        for (var i = 0; i < ids.length; i++) {
+            var p = nodePositions[ids[i]]
+            if (p) { minX = Math.min(minX, p.x); minY = Math.min(minY, p.y) }
+        }
+        groupAnchor = isFinite(minX) ? gridPos({ x: minX, y: minY }) : null
+        var io = {}
+        try { io = JSON.parse(controller.infer_subgraph_io(JSON.stringify(ids))) } catch (e) {}
+        subgraphDialog.mode = "create"
+        subgraphDialog.nodeIds = ids
+        subgraphDialog.pluginCount = io.plugins || ids.length
+        subgraphDialog.load(io)
+        subgraphDialog.open()
+    }
+
+    function openSubgraphEditor(id) {
+        var info = subgraphInfo(id)
+        if (!info) return
+        subgraphDialog.mode = "edit"
+        subgraphDialog.subgraphId = id
+        subgraphDialog.load(info)
+        subgraphDialog.open()
+    }
+
+    function openVdevEditor(id) {
+        vdevDialog.vdevId = id
+        vdevDialog.deviceName = "Virtual Sink"
+        vdevDialog.channels = 2
+        vdevDialog.kindIndex = 0
+        if (id !== "") {
+            try {
+                var list = JSON.parse(controller.get_virtual_devices_json())
+                for (var i = 0; i < list.length; i++) {
+                    if (list[i].id === id) {
+                        vdevDialog.deviceName = list[i].name
+                        vdevDialog.channels = list[i].channels
+                        vdevDialog.kindIndex = list[i].kind === "source" ? 1 : 0
+                    }
+                }
+            } catch (e) {}
+        }
+        vdevDialog.open()
+    }
+
+    // Put the nodes of an inserted/duplicated subgraph where the result says.
+    function applyInsertedLayout(resultJson) {
+        try {
+            var r = JSON.parse(resultJson)
+            for (var key in r.layout) savedLayout[key] = r.layout[key]
+            controller.save_layout(JSON.stringify(savedLayout))
+            return r.subgraphId
+        } catch (e) {
+            return ""
+        }
+    }
+
+    function duplicateSubgraph(node) {
+        var p = nodePositions[node.id] || { x: 0, y: 0 }
+        var at = gridPos({ x: p.x + getNodeWidth(node.id) + 40, y: p.y })
+        applyInsertedLayout(controller.duplicate_subgraph(node.subgraphId, at.x, at.y))
+    }
+
+    // Insert a saved template at the pending add position (or the view centre).
+    function insertTemplate(file) {
+        var at = pendingPluginPosition || toCanvas(width / 2, height / 2)
+        pendingPluginPosition = null
+        pendingPluginName = ""
+        at = gridPos({ x: at.x, y: at.y })
+        applyInsertedLayout(controller.insert_subgraph_template(file, at.x, at.y))
+    }
+
+    function enterSubgraph(id) {
+        if (!id || id === currentSubgraph) return
+        var info = subgraphInfo(id)
+        if (!info) return
+        if (currentSubgraph === "")
+            mainViewport = { panX: panX, panY: panY, zoom: zoom }
+        clearSelection()
+        currentSubgraph = id
+        currentSubgraphName = info.name
+        fitAfterRefresh = !(info.view && info.view.zoom)
+        if (!fitAfterRefresh) {
+            zoom = info.view.zoom
+            panX = info.view.panX
+            panY = info.view.panY
+        }
+        controller.set_subgraph_view(id)
+    }
+
+    function exitSubgraph() {
+        if (currentSubgraph === "") return
+        controller.save_subgraph_view_state(currentSubgraph, JSON.stringify({ panX: panX, panY: panY, zoom: zoom }))
+        clearSelection()
+        currentSubgraph = ""
+        currentSubgraphName = ""
+        fitAfterRefresh = false
+        if (mainViewport) {
+            zoom = mainViewport.zoom
+            panX = mainViewport.panX
+            panY = mainViewport.panY
+        }
+        controller.set_subgraph_view("")
+    }
+
+    Connections {
+        target: controller
+        function onSubgraphs_changed() {
+            if (currentSubgraph === "") return
+            var info = subgraphInfo(currentSubgraph)
+            if (info) currentSubgraphName = info.name
+            else {
+                currentSubgraph = ""
+                currentSubgraphName = ""
+            }
+        }
     }
 
     function clearSelection() {
