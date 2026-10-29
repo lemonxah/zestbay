@@ -1,6 +1,6 @@
 [package]
 name = "zestbay"
-version = "0.8.8"
+version = "1.0.0"
 edition = "2024"
 description = "A PipeWire patchbay application"
 authors = ["Ryno Kotze <lemon.xah@gmail.com>"]
