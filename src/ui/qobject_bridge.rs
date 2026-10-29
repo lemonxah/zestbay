@@ -49,6 +49,16 @@ pub mod qobject {
         #[qinvokable]
         fn block_ports(self: Pin<&mut Self>, output_port_id: u32, input_port_id: u32);
 
+        /// "Source → Target" when an enabled block rule forbids connecting
+        /// these ports (rules on), otherwise "".
+        #[qinvokable]
+        fn blocked_reason(self: Pin<&mut Self>, output_port_id: u32, input_port_id: u32) -> QString;
+
+        /// Node pairs under an enabled block rule, for the red lines:
+        /// `[{source, target, ruleId, label}]` (empty while rules are off).
+        #[qinvokable]
+        fn get_blocked_pairs_json(self: Pin<&mut Self>) -> QString;
+
         #[qinvokable]
         fn insert_node_on_link(self: Pin<&mut Self>, link_id: u32, node_id: u32);
 
@@ -255,6 +265,10 @@ pub mod qobject {
 
         #[qsignal]
         fn error_occurred(self: Pin<&mut AppController>, message: QString);
+
+        /// The rule set changed (added, removed, toggled, learned, blocked).
+        #[qsignal]
+        fn rules_changed(self: Pin<&mut AppController>);
 
         #[qsignal]
         fn show_window_requested(self: Pin<&mut AppController>);
@@ -1862,6 +1876,13 @@ impl qobject::AppController {
             }
         }
 
+        // A block rule forbids this pair: refuse (the UI says why).
+        let reason = self.as_mut().blocked_reason(output_port_id, input_port_id);
+        if !reason.is_empty() {
+            log::info!("Connect refused, blocked by rule: {}", reason);
+            return;
+        }
+
         if let Some(ref tx) = self.rust().cmd_tx {
             log::info!("Connect request: {} -> {}", output_port_id, input_port_id);
             let _ = tx.send(PwCommand::Connect {
@@ -1869,31 +1890,6 @@ impl qobject::AppController {
                 input_port_id,
             });
         }
-
-        // Connecting a blocked pair by hand lifts the block, or the patchbay
-        // would remove the new link straight away.
-        let lifted = {
-            let graph = self.rust().graph.clone();
-            let nodes = graph.as_ref().and_then(|g| {
-                let out = g.get_port(output_port_id)?;
-                let inp = g.get_port(input_port_id)?;
-                Some((g.get_node(out.node_id)?, g.get_node(inp.node_id)?))
-            });
-            match (nodes, self.as_mut().rust_mut().patchbay.as_mut()) {
-                (Some((source, target)), Some(patchbay)) => {
-                    let lifted = patchbay.lift_block(&source, &target);
-                    if lifted {
-                        log::info!(
-                            "Lifted block rule: {} -> {}",
-                            source.display_name(),
-                            target.display_name()
-                        );
-                    }
-                    lifted
-                }
-                _ => false,
-            }
-        };
 
         let learned = if !self.rust().prefs.auto_learn_rules {
             false
@@ -1939,8 +1935,9 @@ impl qobject::AppController {
             }
         };
 
-        if learned || lifted {
+        if learned {
             save_rules(self.rust().patchbay.as_ref());
+            self.as_mut().rules_changed();
         }
 
         self.as_mut().rust_mut().links_dirty = true;
@@ -2002,6 +1999,7 @@ impl qobject::AppController {
 
             if unlearned {
                 save_rules(self.rust().patchbay.as_ref());
+                self.as_mut().rules_changed();
             }
         }
 
@@ -2028,6 +2026,52 @@ impl qobject::AppController {
         if let Some((source_id, target_id)) = nodes {
             self.block_nodes(source_id, target_id);
         }
+    }
+
+    pub fn blocked_reason(self: Pin<&mut Self>, output_port_id: u32, input_port_id: u32) -> QString {
+        let Some(patchbay) = self.rust().patchbay.as_ref().filter(|pb| pb.enabled) else {
+            return QString::default();
+        };
+        let Some(graph) = self.rust().graph.as_ref() else {
+            return QString::default();
+        };
+        let (Some(out), Some(inp)) = (graph.get_port(output_port_id), graph.get_port(input_port_id))
+        else {
+            return QString::default();
+        };
+        let (Some(source), Some(target)) = (graph.get_node(out.node_id), graph.get_node(inp.node_id))
+        else {
+            return QString::default();
+        };
+        match patchbay.blocking_rule(&source, &target, &out, &inp) {
+            Some(rule) => QString::from(&format!("{} \u{2192} {}", rule.source_pattern, rule.target_pattern)),
+            None => QString::default(),
+        }
+    }
+
+    pub fn get_blocked_pairs_json(self: Pin<&mut Self>) -> QString {
+        let Some(patchbay) = self.rust().patchbay.as_ref().filter(|pb| pb.enabled) else {
+            return QString::from("[]");
+        };
+        let pairs: Vec<serde_json::Value> = patchbay
+            .blocked_pairs()
+            .into_iter()
+            .map(|(source, target, rule_id)| {
+                let label = patchbay
+                    .rules()
+                    .iter()
+                    .find(|r| r.id == rule_id)
+                    .map(|r| format!("{} \u{2192} {}", r.source_pattern, r.target_pattern))
+                    .unwrap_or_default();
+                serde_json::json!({
+                    "source": source,
+                    "target": target,
+                    "ruleId": rule_id,
+                    "label": label,
+                })
+            })
+            .collect();
+        QString::from(&serde_json::to_string(&pairs).unwrap_or_else(|_| "[]".into()))
     }
 
     /// Add a block rule for `source_id` → `target_id` and remove the links
@@ -2058,6 +2102,7 @@ impl qobject::AppController {
             );
             save_rules(self.rust().patchbay.as_ref());
         }
+        self.as_mut().rules_changed();
 
         if let Some(ref tx) = self.rust().cmd_tx {
             for link in graph
@@ -3082,6 +3127,7 @@ impl qobject::AppController {
             patchbay.toggle_rule(&id);
         }
         save_rules(self.rust().patchbay.as_ref());
+        self.as_mut().rules_changed();
     }
 
     pub fn remove_rule(mut self: Pin<&mut Self>, rule_id: QString) {
@@ -3090,6 +3136,7 @@ impl qobject::AppController {
             patchbay.remove_rule(&id);
         }
         save_rules(self.rust().patchbay.as_ref());
+        self.as_mut().rules_changed();
     }
 
     pub fn apply_rules(mut self: Pin<&mut Self>) {
@@ -3110,6 +3157,7 @@ impl qobject::AppController {
             patchbay.snapshot_current_connections();
         }
         save_rules(self.rust().patchbay.as_ref());
+        self.as_mut().rules_changed();
         log::info!("Snapshot: replaced rules with current connections");
     }
 
@@ -3119,6 +3167,7 @@ impl qobject::AppController {
         }
         self.as_mut().set_patchbay_enabled(enabled);
         self.as_mut().sync_tray_flags();
+        self.as_mut().rules_changed();
     }
 
     pub fn toggle_patchbay_exclusive(mut self: Pin<&mut Self>, exclusive: bool) {
@@ -3225,6 +3274,7 @@ impl qobject::AppController {
             patchbay.add_rule(rule);
         }
         save_rules(self.rust().patchbay.as_ref());
+        self.as_mut().rules_changed();
     }
 
     pub fn get_preferences_json(self: Pin<&mut Self>) -> QString {
@@ -3546,6 +3596,7 @@ impl qobject::AppController {
                             patchbay.set_rules(rules.clone());
                         }
                         log::info!("Restored {} rules from backup {:?}", rules.len(), filename_str);
+                        self.as_mut().rules_changed();
                     }
                     Err(e) => {
                         log::error!("Backup file {:?} contains invalid rules: {}", filename_str, e);

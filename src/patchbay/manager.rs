@@ -91,6 +91,9 @@ impl PatchbayManager {
         {
             return false;
         }
+        if self.is_blocked(source_node, target_node, output_port, input_port) {
+            return false;
+        }
 
         let source_name = source_node.display_name().to_string();
 
@@ -227,35 +230,60 @@ impl PatchbayManager {
         changed
     }
 
-    /// Remove the block rules that name exactly this node pair, so a link the
-    /// user makes by hand stays. Wildcard block rules are left alone: they
-    /// cover more than this pair and are edited in the rules dialog.
-    pub fn lift_block(&mut self, source: &Node, target: &Node) -> bool {
-        let is_literal = |p: &str| !p.contains('*') && !p.contains('?');
-        let before = self.rules.len();
-        self.rules.retain(|r| {
-            !(r.is_block()
-                && is_literal(&r.source_pattern)
-                && is_literal(&r.target_pattern)
-                && r.matches_source(source.display_name(), source.node_type)
-                && r.matches_target(target.display_name(), target.node_type, target.id))
-        });
-        let changed = self.rules.len() != before;
-        if changed {
-            self.rules_dirty = true;
-        }
-        changed
-    }
-
-    /// Whether an enabled block rule forbids `out` → `inp`.
-    fn is_blocked(&self, source: &Node, target: &Node, out: &Port, inp: &Port) -> bool {
-        self.rules.iter().any(|r| {
+    /// The enabled block rule that forbids `out` → `inp`, if any.
+    pub fn blocking_rule(
+        &self,
+        source: &Node,
+        target: &Node,
+        out: &Port,
+        inp: &Port,
+    ) -> Option<&AutoConnectRule> {
+        self.rules.iter().find(|r| {
             r.enabled
                 && r.is_block()
                 && r.matches_source(source.display_name(), source.node_type)
                 && r.matches_target(target.display_name(), target.node_type, target.id)
                 && r.covers_ports(&out.name, &inp.name)
         })
+    }
+
+    pub fn is_blocked(&self, source: &Node, target: &Node, out: &Port, inp: &Port) -> bool {
+        self.blocking_rule(source, target, out, inp).is_some()
+    }
+
+    /// Node pairs (source id, target id, rule id) currently covered by an
+    /// enabled block rule, for drawing. Only ready nodes that have outputs
+    /// (source) and inputs (target) are listed.
+    pub fn blocked_pairs(&self) -> Vec<(ObjectId, ObjectId, String)> {
+        let blocks: Vec<&AutoConnectRule> =
+            self.rules.iter().filter(|r| r.enabled && r.is_block()).collect();
+        if blocks.is_empty() {
+            return Vec::new();
+        }
+        let nodes = self.graph.get_all_nodes();
+        let mut pairs = Vec::new();
+        for rule in blocks {
+            for source in nodes.iter().filter(|n| {
+                n.ready && rule.matches_source(n.display_name(), n.node_type)
+            }) {
+                if self.graph.get_output_ports(source.id).is_empty() {
+                    continue;
+                }
+                for target in nodes.iter().filter(|n| {
+                    n.ready
+                        && n.id != source.id
+                        && rule.matches_target(n.display_name(), n.node_type, n.id)
+                }) {
+                    if self.graph.get_input_ports(target.id).is_empty() {
+                        continue;
+                    }
+                    if !pairs.iter().any(|(s, t, _)| *s == source.id && *t == target.id) {
+                        pairs.push((source.id, target.id, rule.id.clone()));
+                    }
+                }
+            }
+        }
+        pairs
     }
 
     /// `is_blocked` for a port pair given by id.
@@ -1033,7 +1061,7 @@ mod tests {
     }
 
     #[test]
-    fn block_pair_replaces_connect_rules_and_lift_removes_it() {
+    fn block_pair_replaces_connect_rules_and_stays() {
         let (graph, out, _, sp_in) = setup();
         let mut pb = PatchbayManager::new(graph.clone());
         let app = graph.get_node(1).unwrap();
@@ -1044,23 +1072,37 @@ mod tests {
         assert!(pb.rules()[0].is_block());
         // Blocking twice changes nothing.
         assert!(!pb.block_pair(&app, &sp));
-        // Learning never adds mappings to the block rule.
-        assert!(pb.learn_from_link(&app, &sp, &out, &sp_in));
-        assert!(pb.rules().iter().filter(|r| r.is_block()).all(|r| r.port_mappings.is_empty()));
-        // Connecting by hand lifts the block.
-        assert!(pb.lift_block(&app, &sp));
-        assert!(pb.rules().iter().all(|r| !r.is_block()));
+        // A blocked pair is never learned, so the block stays the only rule.
+        assert!(!pb.learn_from_link(&app, &sp, &out, &sp_in));
+        assert_eq!(pb.rules().len(), 1);
+        assert!(pb.is_blocked(&app, &sp, &out, &sp_in));
     }
 
     #[test]
-    fn lift_block_keeps_wildcard_blocks() {
-        let (graph, _, _, _) = setup();
+    fn wildcard_block_blocks_every_target() {
+        let (graph, out, hp_in, sp_in) = setup();
         let mut pb = PatchbayManager::new(graph.clone());
         pb.add_rule(block("App", "*"));
         let app = graph.get_node(1).unwrap();
+        let hp = graph.get_node(2).unwrap();
         let sp = graph.get_node(3).unwrap();
-        assert!(!pb.lift_block(&app, &sp));
-        assert_eq!(pb.rules().len(), 1);
+        assert!(pb.is_blocked(&app, &hp, &out, &hp_in));
+        assert!(pb.is_blocked(&app, &sp, &out, &sp_in));
+        assert!(!pb.learn_from_link(&app, &sp, &out, &sp_in));
+    }
+
+    #[test]
+    fn blocked_pairs_lists_present_node_pairs() {
+        let (graph, _, _, _) = setup();
+        let mut pb = PatchbayManager::new(graph.clone());
+        let rule = block("App", "Speakers");
+        let id = rule.id.clone();
+        pb.add_rule(rule);
+        pb.add_rule(block("Missing", "Speakers"));
+        assert_eq!(pb.blocked_pairs(), vec![(1, 3, id.clone())]);
+        // Disabled blocks aren't drawn.
+        pb.toggle_rule(&id);
+        assert!(pb.blocked_pairs().is_empty());
     }
 
     #[test]

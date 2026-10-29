@@ -101,7 +101,7 @@ QtObject {
         { id: "r5", sourcePattern: "Daw Sink", sourceType: "Sink", targetPattern: "LSP Mixer x4 Stereo", targetType: "Plugin", sourceLabel: "Daw Sink", targetLabel: "LSP Mixer x4 Stereo", enabled: true, portMappings: [{ outputPort: "monitor_FL", inputPort: "input_0" }, { outputPort: "monitor_FR", inputPort: "input_1" }] },
         { id: "r6", sourcePattern: "LSP Mixer x4 Stereo", sourceType: "Plugin", targetPattern: "Speakers", targetType: "Sink", sourceLabel: "LSP Mixer x4 Stereo", targetLabel: "Speakers", enabled: true, portMappings: [] },
         { id: "r7", sourcePattern: "Headset Microphone", sourceType: "Source", targetPattern: "Comms Sink", targetType: "Sink", sourceLabel: "Headset Microphone", targetLabel: "Comms Sink", enabled: false, portMappings: [] },
-        { id: "r8", sourcePattern: "Discord", sourceType: "App Out", targetPattern: "Speakers", targetType: "Sink", sourceLabel: "Discord", targetLabel: "Speakers", enabled: true, action: "block", portMappings: [] }
+        { id: "r8", sourcePattern: "Spotify", sourceType: "App Out", targetPattern: "Headphones", targetType: "Sink", sourceLabel: "Spotify", targetLabel: "Headphones", enabled: true, action: "block", portMappings: [] }
     ]
     property var plugins: [
         { uri: "http://lsp-plug.in/plugins/lv2/mixer_x4_stereo", name: "LSP Mixer x4 Stereo", category: "Mixer", author: "LSP", audioIn: 8, audioOut: 2, controlIn: 34, controlOut: 12, compatible: true, requiredFeatures: [], hasUi: true, format: "LV2" },
@@ -186,6 +186,9 @@ QtObject {
     function add_rule() {}
     function block_link(id) {}
     function block_ports(o, i) {}
+    function blocked_reason(o, i) { return "" }
+    function get_blocked_pairs_json() { return JSON.stringify([{ source: 13, target: 41, ruleId: "r8", label: "Spotify \u2192 Headphones" }]) }
+    signal rules_changed()
     function backup_rules() {}
     function set_window_visible(v) {}
     function set_default_node(k) {}
