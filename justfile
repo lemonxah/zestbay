@@ -54,19 +54,7 @@ flatpak-setup:
 
 # Regenerate the offline crate list pkg/flatpak/cargo-sources.json from Cargo.lock
 flatpak-sources:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    tools=.flatpak-tools
-    mkdir -p "$tools"
-    if [ ! -x "$tools/venv/bin/python" ]; then
-        python3 -m venv "$tools/venv"
-        "$tools/venv/bin/pip" install -q aiohttp tomlkit
-    fi
-    if [ ! -f "$tools/flatpak-cargo-generator.py" ]; then
-        curl -fsSL -o "$tools/flatpak-cargo-generator.py" \
-            https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py
-    fi
-    "$tools/venv/bin/python" -I "$tools/flatpak-cargo-generator.py" Cargo.lock -o pkg/flatpak/cargo-sources.json
+    python3 pkg/flatpak/cargo-sources.py
 
 # Build like Flathub does (flathub-build) and install it for this user
 flatpak: flatpak-sources
