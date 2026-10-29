@@ -90,14 +90,18 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
-    <release version="0.8.8" date="2026-10-29">
+    <release version="1.0.0" date="2026-10-29">
       <description>
+        <p>A complete redesign and the first stable release.</p>
         <ul>
-          <li>Exclusive Mode setting: with it off, patchbay rules only add links and never disconnect anything</li>
-          <li>Fixed a black window on Qt versions before 6.5</li>
-          <li>Moved and pinned plugin nodes keep their saved positions</li>
-          <li>Scroll bars, Fit to View (Home) and pan limits in the graph view</li>
-          <li>No more duplicate link errors when rules and saved links restore together</li>
+          <li>New interface with dark and light themes that follow the desktop, a toolbar, a status bar and a new logo</li>
+          <li>Redesigned graph: quiet node cards, signal-coloured wires, collapsible unused ports, live search, pin and default markers</li>
+          <li>Snap to grid with a configurable grid size; Auto layout follows the grid</li>
+          <li>Redesigned dialogs, including format filters in Add plugin, parameter filtering and Reset all, and a log-scale CPU chart</li>
+          <li>Exclusive Mode: with it off, patchbay rules only add links and never disconnect anything</li>
+          <li>Richer tray menu with plugin UIs, rules toggles and quick actions</li>
+          <li>Effect plugins keep chains such as microphone, effect, headset running on their own</li>
+          <li>Many fixes: saved positions, theme detection under qt6ct, Qt 6.4 support, scrolling, CPU chart smoothness</li>
         </ul>
       </description>
     </release>
