@@ -52,6 +52,11 @@ Item {
 
     property int connectFromPortId: -1
     property string connectFromDir: ""
+    // Right-drag from a port: the drag wire is red and dropping it on a port
+    // blocks that node pair instead of connecting it.
+    property bool connectBlocking: false
+    property real connectPressX: 0
+    property real connectPressY: 0
     property real connectMouseX: 0
     property real connectMouseY: 0
 
@@ -84,6 +89,9 @@ Item {
     property var contextNode: null
     // Canvas point of the last right-click on empty canvas (for "Add Plugin...").
     property var contextCanvasPos: null
+    // Links the wire context menu acts on: the right-clicked link, or the
+    // whole selection when the right-clicked link is part of it.
+    property var contextLinkIds: []
     // Where the next user-added plugin should appear; consumed by the plugin
     // node named pendingPluginName (or any new plugin when the name is empty).
     property var pendingPluginPosition: null
@@ -879,7 +887,29 @@ Item {
         }
     }
 
-    // Delete selected links · — · Add plugin… · — · Unhide all · Fit to view · Reset zoom · Auto layout
+    // Right-clicked wire: Disconnect · Block this connection
+    ZbMenu {
+        id: linkContextMenu
+
+        ZbMenuItem {
+            text: contextLinkIds.length > 1 ? "Disconnect " + contextLinkIds.length + " links" : "Disconnect"
+            shortcutHint: "Del"
+            onTriggered: {
+                for (var i = 0; i < contextLinkIds.length; i++)
+                    controller.disconnect_link(contextLinkIds[i])
+                selectedLinks = {}
+                canvas.requestPaint()
+            }
+        }
+
+        ZbMenuItem {
+            text: contextLinkIds.length > 1 ? "Block " + contextLinkIds.length + " connections" : "Block this connection"
+            destructive: true
+            onTriggered: blockLinks(contextLinkIds)
+        }
+    }
+
+    // Delete selected links · Block selected links · — · Add plugin… · — · Unhide all · Fit to view · Reset zoom · Auto layout
     ZbMenu {
         id: canvasContextMenu
 
@@ -890,6 +920,16 @@ Item {
                 return false
             }
             onTriggered: deleteSelectedLinks()
+        }
+
+        ZbMenuItem {
+            text: "Block selected links"
+            destructive: true
+            enabled: {
+                for (var k in selectedLinks) return true
+                return false
+            }
+            onTriggered: blockSelectedLinks()
         }
 
         ZbMenuSeparator {}
@@ -1755,17 +1795,31 @@ Item {
                 drawNode(ctx, n2, p2.x, p2.y)
             }
 
-            // ---- Drag wire: dashed, signal colour ------------------------
+            // ---- Drag wire: dashed, signal colour (red when blocking) ----
             if (connectFromPortId >= 0) {
                 var dragFrom = newPortPositions[connectFromPortId] || portPositions[connectFromPortId]
                 if (dragFrom) {
                     var dragToC = graphView.toCanvas(connectMouseX, connectMouseY)
+                    var dragColor = connectBlocking ? Theme.textDestructive
+                                                    : signalColor(portMediaTypes[connectFromPortId])
                     ctx.save()
                     ctx.setLineDash([4, 4])
                     if (connectFromDir === "Input")
-                        drawBezier(ctx, dragToC.x, dragToC.y, dragFrom.cx, dragFrom.cy, signalColor(portMediaTypes[connectFromPortId]), Theme.wireWidthActive)
+                        drawBezier(ctx, dragToC.x, dragToC.y, dragFrom.cx, dragFrom.cy, dragColor, Theme.wireWidthActive)
                     else
-                        drawBezier(ctx, dragFrom.cx, dragFrom.cy, dragToC.x, dragToC.y, signalColor(portMediaTypes[connectFromPortId]), Theme.wireWidthActive)
+                        drawBezier(ctx, dragFrom.cx, dragFrom.cy, dragToC.x, dragToC.y, dragColor, Theme.wireWidthActive)
+                    if (connectBlocking) {
+                        // A small ⊘ at the cursor end.
+                        ctx.setLineDash([])
+                        ctx.strokeStyle = "" + Theme.textDestructive
+                        ctx.lineWidth = 1.5 / zoom
+                        var br = 6 / zoom
+                        ctx.beginPath()
+                        ctx.arc(dragToC.x, dragToC.y, br, 0, Math.PI * 2)
+                        ctx.moveTo(dragToC.x - br * 0.7, dragToC.y + br * 0.7)
+                        ctx.lineTo(dragToC.x + br * 0.7, dragToC.y - br * 0.7)
+                        ctx.stroke()
+                    }
                     ctx.restore()
                 }
             }
@@ -2046,6 +2100,11 @@ Item {
         if (event.key === Qt.Key_Escape) {
             if (placingNodeId >= 0) {
                 finishPlacing()
+            } else if (connectFromPortId >= 0) {
+                connectFromPortId = -1
+                connectFromDir = ""
+                connectBlocking = false
+                canvas.requestPaint()
             } else {
                 clearSelection()
             }
@@ -2078,8 +2137,40 @@ Item {
             }
 
             if (mouse.button === Qt.RightButton) {
+                // Right-drag from a port draws a block wire; a right-click on
+                // a port without dragging opens the node menu on release.
+                var blockPort = findPortAt(mouse.x, mouse.y)
+                if (blockPort >= 0) {
+                    connectFromPortId = blockPort
+                    connectFromDir = getPortDirection(blockPort)
+                    connectBlocking = true
+                    connectPressX = mouse.x
+                    connectPressY = mouse.y
+                    connectMouseX = mouse.x
+                    connectMouseY = mouse.y
+                    return
+                }
                 var nodeId = findNodeAt(mouse.x, mouse.y)
-                if (nodeId >= 0) {
+                var menuLinkId = nodeId < 0 ? findLinkAt(mouse.x, mouse.y) : -1
+                if (menuLinkId >= 0) {
+                    var menuLink = findLinkData(menuLinkId)
+                    if (selectedLinks[menuLinkId]) {
+                        var ids = []
+                        for (var sk in selectedLinks) {
+                            var sid = parseInt(sk)
+                            if (linkMatchesSig(findLinkData(sid), selectedLinks[sk])) ids.push(sid)
+                        }
+                        contextLinkIds = ids
+                    } else {
+                        var one = {}
+                        if (menuLink) one[menuLinkId] = linkSig(menuLink)
+                        selectedLinks = one
+                        selectedNodes = {}
+                        contextLinkIds = [menuLinkId]
+                        canvas.requestPaint()
+                    }
+                    linkContextMenu.popup()
+                } else if (nodeId >= 0) {
                     contextNodeId = nodeId
                     contextNode = findNodeData(nodeId)
                     nodeContextMenu.popup()
@@ -2301,6 +2392,34 @@ Item {
 
         onReleased: (mouse) => {
             activeSnapLines = []
+            if (mouse.button === Qt.RightButton && connectBlocking) {
+                var moved = Math.abs(mouse.x - connectPressX) > 4 || Math.abs(mouse.y - connectPressY) > 4
+                var blockFrom = connectFromPortId
+                var blockDir = connectFromDir
+                connectFromPortId = -1
+                connectFromDir = ""
+                connectBlocking = false
+                canvas.requestPaint()
+                if (!moved) {
+                    var portNode = getPortNodeId(blockFrom)
+                    if (portNode >= 0) {
+                        contextNodeId = portNode
+                        contextNode = findNodeData(portNode)
+                        nodeContextMenu.popup()
+                    }
+                    return
+                }
+                var blockTo = findPortAt(mouse.x, mouse.y)
+                if (blockTo >= 0 && blockTo !== blockFrom
+                        && getPortDirection(blockTo) !== blockDir
+                        && getPortNodeId(blockTo) !== getPortNodeId(blockFrom)) {
+                    if (blockDir === "Output")
+                        controller.block_ports(blockFrom, blockTo)
+                    else
+                        controller.block_ports(blockTo, blockFrom)
+                }
+                return
+            }
             if (mouse.button === Qt.LeftButton) {
                 if (connectFromPortId >= 0) {
                     var targetId = findPortAt(mouse.x, mouse.y)
@@ -2673,6 +2792,31 @@ Item {
             selectedLinks = {}
             canvas.requestPaint()
         }
+    }
+
+    // Block the node pairs of `linkIds` (each pair once: block_link removes
+    // every link between the pair).
+    function blockLinks(linkIds) {
+        var pairs = {}
+        for (var i = 0; i < linkIds.length; i++) {
+            var l = findLinkData(linkIds[i])
+            if (!l) continue
+            var key = l.outputNodeId + ">" + l.inputNodeId
+            if (pairs[key]) continue
+            pairs[key] = true
+            controller.block_link(l.id)
+        }
+        selectedLinks = {}
+        canvas.requestPaint()
+    }
+
+    function blockSelectedLinks() {
+        var ids = []
+        for (var linkId in selectedLinks) {
+            var lid = parseInt(linkId)
+            if (linkMatchesSig(findLinkData(lid), selectedLinks[linkId])) ids.push(lid)
+        }
+        if (ids.length > 0) blockLinks(ids)
     }
 
     function clearSelection() {

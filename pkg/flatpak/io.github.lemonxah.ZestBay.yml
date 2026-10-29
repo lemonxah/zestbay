@@ -4,18 +4,26 @@ runtime-version: '6.11'
 sdk: org.kde.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
+  # libclang for bindgen (pipewire/libspa-sys generate bindings at build time).
+  - org.freedesktop.Sdk.Extension.llvm21
 command: zestbay
 
 finish-args:
   - --share=ipc
+  # Hosted plugins need the network: licensed plugins (e.g. Pianoteq) bind
+  # activation to the machine's network hardware, which is invisible in a
+  # private network namespace, and many activate or refresh licences online.
+  - --share=network
   - --socket=wayland
   # Full X11, not fallback-x11: CLAP/VST3/LV2 plugin editors are X11 windows.
   - --socket=x11
   - --device=dri
   # The whole PipeWire graph (nodes, ports, links), not just our own streams.
   - --filesystem=xdg-run/pipewire-0
-  # System tray (StatusNotifierItem).
+  # System tray (StatusNotifierItem): talk to the watcher and own the item's
+  # name, which is org.kde.StatusNotifierItem-<pid>-1 (pid 2 in the sandbox).
   - --talk-name=org.kde.StatusNotifierWatcher
+  - --own-name=org.kde.StatusNotifierItem-2-1
   # Plugins in ~/.lv2, ~/.clap, ~/.vst3, and the data/licence/sample files
   # they read from the home directory.
   - --filesystem=home
@@ -137,9 +145,10 @@ modules:
   - name: zestbay
     buildsystem: simple
     build-options:
-      append-path: /usr/lib/sdk/rust-stable/bin
+      append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm21/bin
       env:
         CARGO_HOME: /run/build/zestbay/cargo
+        LIBCLANG_PATH: /usr/lib/sdk/llvm21/lib
         CARGO_NET_OFFLINE: 'true'
     build-commands:
       - cargo --offline build --release --workspace
@@ -162,13 +171,17 @@ modules:
       #   - type: archive
       #     url: https://github.com/lemonxah/zestbay/archive/refs/tags/v1.0.0.tar.gz
       #     sha256: <sha256 of that tarball>
+      # The manifest lives at the repo root (Flathub convention), so the
+      # sandboxed builder (flathub-build) accepts this directory source.
       - type: dir
-        path: ../..
+        path: .
         skip:
+          - .git
           - target
           - .flatpak-builder
           - build-dir
           - builddir
           - repo
-      # Generated from Cargo.lock; see pkg/flatpak/README.md.
+      # Generated from Cargo.lock by `just flatpak-sources` (next to this
+      # manifest, as in the Flathub submission); see pkg/flatpak/README.md.
       - cargo-sources.json

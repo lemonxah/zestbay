@@ -58,6 +58,7 @@ rustPlatform.buildRustPackage rec {
     # Install UI bridge binary to lib directory
     install -Dm755 target/release/zestbay-ui-bridge $out/lib/zestbay/zestbay-ui-bridge
 
+    install -Dm644 images/logo/zestbay-launcher.svg $out/share/icons/hicolor/scalable/apps/zestbay.svg
     install -Dm644 images/zesticon.png $out/share/icons/hicolor/256x256/apps/zestbay.png
     install -Dm644 images/zesttray.png $out/share/icons/hicolor/256x256/apps/zestbay-tray.png
   '';

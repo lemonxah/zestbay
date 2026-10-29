@@ -8,6 +8,17 @@ pub struct PortMapping {
     pub input_port_name: String,
 }
 
+/// What a rule does with the links it matches.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RuleAction {
+    /// Create the links (and, in exclusive mode, keep the source to them).
+    #[default]
+    Connect,
+    /// Never allow the links: they are removed whenever they appear, in any
+    /// mode, and win over connect rules and the default node.
+    Block,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutoConnectRule {
     pub id: String,
@@ -19,6 +30,8 @@ pub struct AutoConnectRule {
     #[serde(default)]
     pub port_mappings: Vec<PortMapping>,
     pub enabled: bool,
+    #[serde(default)]
+    pub action: RuleAction,
 }
 
 impl AutoConnectRule {
@@ -38,7 +51,27 @@ impl AutoConnectRule {
             target_node_id,
             port_mappings: Vec::new(),
             enabled: true,
+            action: RuleAction::Connect,
         }
+    }
+
+    pub fn with_action(mut self, action: RuleAction) -> Self {
+        self.action = action;
+        self
+    }
+
+    pub fn is_block(&self) -> bool {
+        self.action == RuleAction::Block
+    }
+
+    /// Whether the rule covers this port pair: every pair when it has no
+    /// explicit mappings.
+    pub fn covers_ports(&self, output_port_name: &str, input_port_name: &str) -> bool {
+        self.port_mappings.is_empty()
+            || self
+                .port_mappings
+                .iter()
+                .any(|m| m.output_port_name == output_port_name && m.input_port_name == input_port_name)
     }
 
     pub fn add_port_mapping(&mut self, output_port_name: String, input_port_name: String) -> bool {

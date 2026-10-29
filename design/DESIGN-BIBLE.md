@@ -224,7 +224,7 @@ joins at their native stroke width. `ZbIcon` and `ZbLogo` antialias with the
 Qt 6.6+ curve renderer (no layer; crisp at any scale factor) and fall back to
 a multisampled layer on older Qt — don't put vector shapes in multisampled
 layers elsewhere: those vanish on some HiDPI/software renderers. Available: `speaker mic headphones camera
-wave plug din pin pinFill search plus minus fit trash reset arrow settings
+wave plug din pin pinFill search plus minus fit trash reset arrow block settings
 menu close check grid chevronDown chevronRight` (`pinFill` is the filled head drawn
 under `pin` for the pinned state). Sizes: 12 in node chips, 14–16 in toolbars and
 buttons. To add one, take the path from the design source (convert
@@ -281,6 +281,10 @@ Escape closes a dialog. Fixed sizes from the spec: Rules 760×780, Add Plugin
 - **Rule row (52):** line 1 = source 13/Medium + badge + `arrow` glyph
   (`textMuted`) + target + badge, one line, elided; line 2 = "n port mappings"
   mono 11 muted. Right: compact switch, 28×28 trash icon button.
+  **Block rules** use the `block` glyph (⊘, `textDestructive`) instead of the
+  arrow, and line 2 starts with a `danger` **Blocked** badge ("never
+  connected" when it has no port mappings). The Add rule dialog opens with a
+  Connect / Block segmented control whose caption explains the choice.
 - **Plugin row (64):** name 14/DemiBold + format badge; meta = "Category ·
   Author" 12 muted, a 1×10 divider, "a in · b out · c controls" mono 11. Right:
   "no UI" tag if applicable, then **Add** (ghost; becomes primary on row hover,
@@ -301,10 +305,13 @@ a dot or tick — so on/off reads the same as everywhere else. Toggling one keep
 the menu open (handle `onToggled`, not `onTriggered`); plain actions close it.
 Pick-one lists (filters) use `selected: true` instead: a `check` glyph on the
 current choice, and choosing closes the menu.
-Order for the three context menus:
+Order for the context menus:
 
-- Canvas: Delete selected links · — · Add plugin… · — · Unhide all · Fit to
-  view `Home` · Reset zoom · Auto layout
+- Canvas: Delete selected links · Block selected links (destructive) · — ·
+  Add plugin… · — · Unhide all · Fit to view `Home` · Reset zoom · Auto layout
+- Wire (right-click a wire): Disconnect `Del` · Block this connection
+  (destructive). When the wire is part of the selection both act on the whole
+  selection ("Disconnect 3 links", "Block 3 connections").
 - Device / sink node: Hide · Pin/Unpin · — · Set as default
 - Plugin node: Hide · Pin/Unpin · — · Set as default · — · Rename… · Open
   UI… · — · Remove plugin (destructive)
@@ -364,7 +371,19 @@ button holds the old File / Help items.
   horizontally by `clamp(0.5·|dx|, 32, 200)`, round caps. Hit-test with an
   8 px band, not the visible stroke.
 - **Dragging a wire:** same curve to the cursor, dashed 4/4 in the signal
-  colour; valid target pins get an `accentRing` halo.
+  colour; valid target pins get an `accentRing` halo. Left-drag connects.
+- **Block wire (right-drag from a pin):** the same dashed curve in
+  `textDestructive` with a small ⊘ at the cursor; dropping it on a pin adds a
+  block rule for the node pair and removes its links. A right-click on a pin
+  without dragging opens the node menu; Escape cancels either drag.
+- **Blocking (behaviour):** a block rule means the source is never connected
+  to the target. It is enforced whenever rules are on, in exclusive and
+  non-exclusive mode, and wins over connect rules and the default node, so a
+  blocked app with nothing else routing it stays unconnected. Blocking a pair
+  replaces connect rules for exactly that pair; connecting the pair by hand
+  lifts its block (wildcard blocks stay and are edited in the rules dialog).
+  The rule-enforcement loop guard applies, so ZestBay stops removing a link the
+  session manager keeps re-creating after 3 tries in 30 s.
 - **Selection:** accent border + 3 px `accentRing` halo; the node's wires and
   pins turn accent.
 - **Search:** non-matching nodes at 35 % opacity; matching ports get a 2 px

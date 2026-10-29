@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::rules::{pattern_matches, AutoConnectRule};
+use super::rules::{pattern_matches, AutoConnectRule, RuleAction};
 use crate::pipewire::{GraphState, Link, MediaType, Node, NodeType, ObjectId, Port, PwCommand};
 
 /// How many times the same (output port, input port) pair may be destroyed by
@@ -95,7 +95,8 @@ impl PatchbayManager {
         let source_name = source_node.display_name().to_string();
 
         let existing = self.rules.iter_mut().find(|r| {
-            r.source_pattern == source_name
+            !r.is_block()
+                && r.source_pattern == source_name
                 && r.matches_target(
                     target_node.display_name(),
                     target_node.node_type,
@@ -142,7 +143,7 @@ impl PatchbayManager {
         let mut emptied: Vec<String> = Vec::new();
 
         for rule in &mut self.rules {
-            if !rule.matches_source(source_name, source_node.node_type) {
+            if rule.is_block() || !rule.matches_source(source_name, source_node.node_type) {
                 continue;
             }
             if !rule.matches_target(
@@ -173,6 +174,104 @@ impl PatchbayManager {
             self.rules_dirty = true;
         }
         changed
+    }
+
+    /// Add a block rule for `source` → `target` (the whole node pair), or
+    /// re-enable an existing one. Connect rules for exactly this pair are
+    /// removed, since the block would override them anyway. Returns whether
+    /// the rules changed.
+    pub fn block_pair(&mut self, source: &Node, target: &Node) -> bool {
+        if source.id == target.id {
+            return false;
+        }
+        let source_name = source.display_name().to_string();
+        let target_name = target.display_name().to_string();
+        let mut changed = false;
+
+        let before = self.rules.len();
+        self.rules.retain(|r| {
+            r.is_block() || r.source_pattern != source_name || r.target_pattern != target_name
+        });
+        changed |= self.rules.len() != before;
+
+        let existing = self.rules.iter_mut().find(|r| {
+            r.is_block()
+                && r.port_mappings.is_empty()
+                && r.matches_source(&source_name, source.node_type)
+                && r.matches_target(&target_name, target.node_type, target.id)
+        });
+        match existing {
+            Some(rule) if rule.enabled => {}
+            Some(rule) => {
+                rule.enabled = true;
+                changed = true;
+            }
+            None => {
+                self.rules.push(
+                    AutoConnectRule::new(
+                        source_name,
+                        source.node_type,
+                        target_name,
+                        target.node_type,
+                        Some(target.id),
+                    )
+                    .with_action(RuleAction::Block),
+                );
+                changed = true;
+            }
+        }
+
+        if changed {
+            self.rules_dirty = true;
+        }
+        changed
+    }
+
+    /// Remove the block rules that name exactly this node pair, so a link the
+    /// user makes by hand stays. Wildcard block rules are left alone: they
+    /// cover more than this pair and are edited in the rules dialog.
+    pub fn lift_block(&mut self, source: &Node, target: &Node) -> bool {
+        let is_literal = |p: &str| !p.contains('*') && !p.contains('?');
+        let before = self.rules.len();
+        self.rules.retain(|r| {
+            !(r.is_block()
+                && is_literal(&r.source_pattern)
+                && is_literal(&r.target_pattern)
+                && r.matches_source(source.display_name(), source.node_type)
+                && r.matches_target(target.display_name(), target.node_type, target.id))
+        });
+        let changed = self.rules.len() != before;
+        if changed {
+            self.rules_dirty = true;
+        }
+        changed
+    }
+
+    /// Whether an enabled block rule forbids `out` → `inp`.
+    fn is_blocked(&self, source: &Node, target: &Node, out: &Port, inp: &Port) -> bool {
+        self.rules.iter().any(|r| {
+            r.enabled
+                && r.is_block()
+                && r.matches_source(source.display_name(), source.node_type)
+                && r.matches_target(target.display_name(), target.node_type, target.id)
+                && r.covers_ports(&out.name, &inp.name)
+        })
+    }
+
+    /// `is_blocked` for a port pair given by id.
+    fn ports_blocked(&self, output_port_id: ObjectId, input_port_id: ObjectId) -> bool {
+        let (Some(out), Some(inp)) = (
+            self.graph.get_port(output_port_id),
+            self.graph.get_port(input_port_id),
+        ) else {
+            return false;
+        };
+        let (Some(source), Some(target)) =
+            (self.graph.get_node(out.node_id), self.graph.get_node(inp.node_id))
+        else {
+            return false;
+        };
+        self.is_blocked(&source, &target, &out, &inp)
     }
 
     pub fn snapshot_current_connections(&mut self) {
@@ -219,7 +318,11 @@ impl PatchbayManager {
             }
         }
 
-        self.rules = rule_map.into_values().collect();
+        // Block rules aren't connections; keep them.
+        let mut rules: Vec<AutoConnectRule> =
+            self.rules.iter().filter(|r| r.is_block()).cloned().collect();
+        rules.extend(rule_map.into_values());
+        self.rules = rules;
         self.rules_dirty = true;
     }
 
@@ -293,7 +396,9 @@ impl PatchbayManager {
             let matching_rules: Vec<&AutoConnectRule> = self
                 .rules
                 .iter()
-                .filter(|r| r.enabled && r.matches_source(node.display_name(), node.node_type))
+                .filter(|r| {
+                    r.enabled && !r.is_block() && r.matches_source(node.display_name(), node.node_type)
+                })
                 .collect();
 
             if matching_rules.is_empty() {
@@ -339,9 +444,14 @@ impl PatchbayManager {
             }
         }
 
-        if !self.exclusive {
-            return commands;
-        }
+        // Block rules win over connect rules and the default node.
+        commands.retain(|c| match c {
+            PwCommand::Connect {
+                output_port_id,
+                input_port_id,
+            } => !self.ports_blocked(*output_port_id, *input_port_id),
+            _ => true,
+        });
 
         let now = Instant::now();
         self.recent_destroys.retain(|_, times| {
@@ -351,7 +461,11 @@ impl PatchbayManager {
 
         let links = self.graph.get_all_links();
         for link in &links {
-            if !self.should_remove_link(link, &nodes) {
+            // Blocked links go in any mode; unauthorized ones only in
+            // exclusive mode.
+            let remove = self.link_blocked(link)
+                || (self.exclusive && self.should_remove_link(link, &nodes));
+            if !remove {
                 continue;
             }
             let key = (link.output_port_id, link.input_port_id);
@@ -592,7 +706,9 @@ impl PatchbayManager {
             .rules
             .iter()
             .filter(|r| {
-                r.enabled && r.matches_source(source_node.display_name(), source_node.node_type)
+                r.enabled
+                    && !r.is_block()
+                    && r.matches_source(source_node.display_name(), source_node.node_type)
             })
             .collect();
         if source_rules.is_empty() {
@@ -614,14 +730,28 @@ impl PatchbayManager {
             ) {
                 return false;
             }
-            rule.port_mappings.is_empty()
-                || rule
-                    .port_mappings
-                    .iter()
-                    .any(|m| m.output_port_name == out_p.name && m.input_port_name == in_p.name)
+            rule.covers_ports(&out_p.name, &in_p.name)
         });
 
         !authorized
+    }
+
+    /// Whether a block rule forbids `link`. Like `should_remove_link`, links
+    /// whose ports are already gone are left to PipeWire.
+    fn link_blocked(&self, link: &Link) -> bool {
+        let (Some(out_p), Some(in_p)) = (
+            self.graph.get_port(link.output_port_id),
+            self.graph.get_port(link.input_port_id),
+        ) else {
+            return false;
+        };
+        let (Some(source), Some(target)) = (
+            self.graph.get_node(link.output_node_id),
+            self.graph.get_node(link.input_node_id),
+        ) else {
+            return false;
+        };
+        self.is_blocked(&source, &target, &out_p, &in_p)
     }
 }
 
@@ -821,6 +951,147 @@ mod tests {
         let cmds = pb.scan();
         assert!(disconnects(&cmds).is_empty());
         assert_eq!(connects(&cmds), vec![(out.id, hp_in.id)]);
+    }
+
+    fn block(source: &str, target: &str) -> AutoConnectRule {
+        AutoConnectRule::new(source, None, target, None, None).with_action(RuleAction::Block)
+    }
+
+    #[test]
+    fn blocked_link_removed_even_when_not_exclusive() {
+        let (graph, out, _, sp_in) = setup();
+        graph.insert_link(link(100, &out, &sp_in));
+        let mut pb = PatchbayManager::new(graph.clone());
+        pb.exclusive = false;
+        pb.add_rule(block("App", "Speakers"));
+        assert_eq!(disconnects(&pb.scan()), vec![100]);
+    }
+
+    #[test]
+    fn blocked_link_removed_with_loop_guard() {
+        let (graph, out, _, sp_in) = setup();
+        graph.insert_link(link(100, &out, &sp_in));
+        let mut pb = PatchbayManager::new(graph.clone());
+        pb.add_rule(block("App", "Speakers"));
+        for _ in 0..MAX_DESTROYS_PER_WINDOW {
+            assert_eq!(disconnects(&pb.scan()), vec![100]);
+        }
+        assert!(disconnects(&pb.scan()).is_empty());
+    }
+
+    #[test]
+    fn block_beats_connect_rule() {
+        let (graph, _, _, _) = setup();
+        let mut pb = PatchbayManager::new(graph.clone());
+        pb.add_rule(AutoConnectRule::new("App", None, "Speakers", None, None));
+        pb.add_rule(block("App", "Speakers"));
+        assert!(connects(&pb.scan()).is_empty());
+    }
+
+    #[test]
+    fn block_beats_default_target() {
+        let (graph, _, _, _) = setup();
+        let mut pb = PatchbayManager::new(graph.clone());
+        pb.set_default_target(Some("Speakers".into()));
+        pb.add_rule(block("App", "Speakers"));
+        assert!(connects(&pb.scan()).is_empty());
+    }
+
+    #[test]
+    fn block_rule_alone_does_not_govern_other_links() {
+        // A block rule is not a connect rule: in exclusive mode, App's link to
+        // Headphones must stay (no connect rule makes App "ruled").
+        let (graph, out, hp_in, _) = setup();
+        graph.insert_link(link(100, &out, &hp_in));
+        let mut pb = PatchbayManager::new(graph.clone());
+        pb.add_rule(block("App", "Speakers"));
+        assert!(disconnects(&pb.scan()).is_empty());
+    }
+
+    #[test]
+    fn wildcard_block() {
+        let (graph, out, hp_in, sp_in) = setup();
+        graph.insert_link(link(100, &out, &hp_in));
+        graph.insert_link(link(101, &out, &sp_in));
+        let mut pb = PatchbayManager::new(graph.clone());
+        pb.add_rule(block("App", "*"));
+        let mut d = disconnects(&pb.scan());
+        d.sort();
+        assert_eq!(d, vec![100, 101]);
+    }
+
+    #[test]
+    fn disabled_block_is_ignored() {
+        let (graph, out, _, sp_in) = setup();
+        graph.insert_link(link(100, &out, &sp_in));
+        let mut pb = PatchbayManager::new(graph.clone());
+        let rule = block("App", "Speakers");
+        let id = rule.id.clone();
+        pb.add_rule(rule);
+        pb.toggle_rule(&id);
+        assert!(disconnects(&pb.scan()).is_empty());
+    }
+
+    #[test]
+    fn block_pair_replaces_connect_rules_and_lift_removes_it() {
+        let (graph, out, _, sp_in) = setup();
+        let mut pb = PatchbayManager::new(graph.clone());
+        let app = graph.get_node(1).unwrap();
+        let sp = graph.get_node(3).unwrap();
+        assert!(pb.learn_from_link(&app, &sp, &out, &sp_in));
+        assert!(pb.block_pair(&app, &sp));
+        assert_eq!(pb.rules().len(), 1);
+        assert!(pb.rules()[0].is_block());
+        // Blocking twice changes nothing.
+        assert!(!pb.block_pair(&app, &sp));
+        // Learning never adds mappings to the block rule.
+        assert!(pb.learn_from_link(&app, &sp, &out, &sp_in));
+        assert!(pb.rules().iter().filter(|r| r.is_block()).all(|r| r.port_mappings.is_empty()));
+        // Connecting by hand lifts the block.
+        assert!(pb.lift_block(&app, &sp));
+        assert!(pb.rules().iter().all(|r| !r.is_block()));
+    }
+
+    #[test]
+    fn lift_block_keeps_wildcard_blocks() {
+        let (graph, _, _, _) = setup();
+        let mut pb = PatchbayManager::new(graph.clone());
+        pb.add_rule(block("App", "*"));
+        let app = graph.get_node(1).unwrap();
+        let sp = graph.get_node(3).unwrap();
+        assert!(!pb.lift_block(&app, &sp));
+        assert_eq!(pb.rules().len(), 1);
+    }
+
+    #[test]
+    fn unlearn_leaves_block_rules() {
+        let (graph, out, _, sp_in) = setup();
+        let mut pb = PatchbayManager::new(graph.clone());
+        let app = graph.get_node(1).unwrap();
+        let sp = graph.get_node(3).unwrap();
+        pb.block_pair(&app, &sp);
+        assert!(!pb.unlearn_from_link(&app, &sp, &out, &sp_in));
+        assert_eq!(pb.rules().len(), 1);
+    }
+
+    #[test]
+    fn snapshot_keeps_block_rules() {
+        let (graph, out, hp_in, _) = setup();
+        graph.insert_link(link(100, &out, &hp_in));
+        let mut pb = PatchbayManager::new(graph.clone());
+        pb.add_rule(block("App", "Speakers"));
+        pb.snapshot_current_connections();
+        assert_eq!(pb.rules().iter().filter(|r| r.is_block()).count(), 1);
+        assert_eq!(pb.rules().len(), 2);
+    }
+
+    #[test]
+    fn old_rules_json_defaults_to_connect() {
+        let json = r#"{"id":"x","source_pattern":"App","source_node_type":null,
+            "target_pattern":"Speakers","target_node_type":null,"target_node_id":null,
+            "port_mappings":[],"enabled":true}"#;
+        let rule: AutoConnectRule = serde_json::from_str(json).unwrap();
+        assert_eq!(rule.action, RuleAction::Connect);
     }
 
     #[test]

@@ -59,6 +59,7 @@ package() {
   install -Dm755 "target/release/zestbay" "$pkgdir/usr/bin/zestbay"
   install -Dm755 "target/release/zestbay-ui-bridge" "$pkgdir/usr/lib/zestbay/zestbay-ui-bridge"
   install -Dm644 "zestbay.desktop" "$pkgdir/usr/share/applications/zestbay.desktop"
+  install -Dm644 "images/logo/zestbay-launcher.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/zestbay.svg"
   install -Dm644 "images/zesticon.png" "$pkgdir/usr/share/icons/hicolor/256x256/apps/zestbay.png"
   install -Dm644 "images/zesttray.png" "$pkgdir/usr/share/icons/hicolor/256x256/apps/zestbay-tray.png"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

@@ -46,6 +46,7 @@ cargo build --workspace --release
 install -Dm755 target/release/%{name} %{buildroot}%{_bindir}/%{name}
 install -Dm755 target/release/zestbay-ui-bridge %{buildroot}%{_libdir}/%{name}/zestbay-ui-bridge
 install -Dm644 zestbay.desktop %{buildroot}%{_datadir}/applications/zestbay.desktop
+install -Dm644 images/logo/zestbay-launcher.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/zestbay.svg
 install -Dm644 images/zesticon.png %{buildroot}%{_datadir}/icons/hicolor/256x256/apps/zestbay.png
 install -Dm644 images/zesttray.png %{buildroot}%{_datadir}/icons/hicolor/256x256/apps/zestbay-tray.png
 install -Dm644 LICENSE %{buildroot}%{_datadir}/licenses/%{name}/LICENSE
@@ -55,6 +56,7 @@ install -Dm644 LICENSE %{buildroot}%{_datadir}/licenses/%{name}/LICENSE
 %{_bindir}/%{name}
 %{_libdir}/%{name}/zestbay-ui-bridge
 %{_datadir}/applications/zestbay.desktop
+%{_datadir}/icons/hicolor/scalable/apps/zestbay.svg
 %{_datadir}/icons/hicolor/256x256/apps/zestbay.png
 %{_datadir}/icons/hicolor/256x256/apps/zestbay-tray.png
 

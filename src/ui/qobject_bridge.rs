@@ -40,6 +40,15 @@ pub mod qobject {
         #[qinvokable]
         fn disconnect_link(self: Pin<&mut Self>, link_id: u32);
 
+        /// Disconnect `link_id` and add a block rule for its node pair.
+        #[qinvokable]
+        fn block_link(self: Pin<&mut Self>, link_id: u32);
+
+        /// Add a block rule for the node pair of two ports (right-drag) and
+        /// disconnect any links between those nodes.
+        #[qinvokable]
+        fn block_ports(self: Pin<&mut Self>, output_port_id: u32, input_port_id: u32);
+
         #[qinvokable]
         fn insert_node_on_link(self: Pin<&mut Self>, link_id: u32, node_id: u32);
 
@@ -133,6 +142,7 @@ pub mod qobject {
             source_type: QString,
             target_pattern: QString,
             target_type: QString,
+            action: QString,
         );
 
         #[qinvokable]
@@ -1860,6 +1870,31 @@ impl qobject::AppController {
             });
         }
 
+        // Connecting a blocked pair by hand lifts the block, or the patchbay
+        // would remove the new link straight away.
+        let lifted = {
+            let graph = self.rust().graph.clone();
+            let nodes = graph.as_ref().and_then(|g| {
+                let out = g.get_port(output_port_id)?;
+                let inp = g.get_port(input_port_id)?;
+                Some((g.get_node(out.node_id)?, g.get_node(inp.node_id)?))
+            });
+            match (nodes, self.as_mut().rust_mut().patchbay.as_mut()) {
+                (Some((source, target)), Some(patchbay)) => {
+                    let lifted = patchbay.lift_block(&source, &target);
+                    if lifted {
+                        log::info!(
+                            "Lifted block rule: {} -> {}",
+                            source.display_name(),
+                            target.display_name()
+                        );
+                    }
+                    lifted
+                }
+                _ => false,
+            }
+        };
+
         let learned = if !self.rust().prefs.auto_learn_rules {
             false
         } else {
@@ -1904,7 +1939,7 @@ impl qobject::AppController {
             }
         };
 
-        if learned {
+        if learned || lifted {
             save_rules(self.rust().patchbay.as_ref());
         }
 
@@ -1967,6 +2002,70 @@ impl qobject::AppController {
 
             if unlearned {
                 save_rules(self.rust().patchbay.as_ref());
+            }
+        }
+
+        self.as_mut().rust_mut().links_dirty = true;
+        if self.rust().links_dirty_since.is_none() {
+            self.as_mut().rust_mut().links_dirty_since = Some(Instant::now());
+        }
+    }
+
+    pub fn block_link(self: Pin<&mut Self>, link_id: u32) {
+        let link = self.rust().graph.as_ref().and_then(|g| g.get_link(link_id));
+        if let Some(link) = link {
+            self.block_nodes(link.output_node_id, link.input_node_id);
+        }
+    }
+
+    pub fn block_ports(self: Pin<&mut Self>, output_port_id: u32, input_port_id: u32) {
+        let nodes = self.rust().graph.as_ref().and_then(|g| {
+            Some((
+                g.get_port(output_port_id)?.node_id,
+                g.get_port(input_port_id)?.node_id,
+            ))
+        });
+        if let Some((source_id, target_id)) = nodes {
+            self.block_nodes(source_id, target_id);
+        }
+    }
+
+    /// Add a block rule for `source_id` → `target_id` and remove the links
+    /// between them now (the patchbay keeps them removed once rules are on).
+    fn block_nodes(mut self: Pin<&mut Self>, source_id: u32, target_id: u32) {
+        let Some(graph) = self.rust().graph.clone() else {
+            return;
+        };
+        let (Some(source), Some(target)) = (graph.get_node(source_id), graph.get_node(target_id))
+        else {
+            return;
+        };
+        if source.id == target.id {
+            return;
+        }
+
+        let changed = self
+            .as_mut()
+            .rust_mut()
+            .patchbay
+            .as_mut()
+            .is_some_and(|pb| pb.block_pair(&source, &target));
+        if changed {
+            log::info!(
+                "Blocked: {} -> {}",
+                source.display_name(),
+                target.display_name()
+            );
+            save_rules(self.rust().patchbay.as_ref());
+        }
+
+        if let Some(ref tx) = self.rust().cmd_tx {
+            for link in graph
+                .get_all_links()
+                .iter()
+                .filter(|l| l.output_node_id == source.id && l.input_node_id == target.id)
+            {
+                let _ = tx.send(PwCommand::Disconnect { link_id: link.id });
             }
         }
 
@@ -2198,7 +2297,7 @@ impl qobject::AppController {
             save_known_good_plugins();
         }
         crate::lv2::ui::shutdown_gtk_thread();
-        std::process::exit(0);
+        crate::exit_now(0);
     }
 
     pub fn restore_known_good(self: Pin<&mut Self>) -> bool {
@@ -2965,6 +3064,7 @@ impl qobject::AppController {
                         "sourceLabel": r.source_label(),
                         "targetLabel": r.target_label(),
                         "enabled": r.enabled,
+                        "action": if r.is_block() { "block" } else { "connect" },
                         "portMappings": mappings,
                     })
                 })
@@ -3098,6 +3198,7 @@ impl qobject::AppController {
         source_type: QString,
         target_pattern: QString,
         target_type: QString,
+        action: QString,
     ) {
         let src_pat: String = source_pattern.to_string();
         let src_type: String = source_type.to_string();
@@ -3113,7 +3214,12 @@ impl qobject::AppController {
             tgt_pat,
             tgt_node_type,
             None,
-        );
+        )
+        .with_action(if action.to_string() == "block" {
+            rules::RuleAction::Block
+        } else {
+            rules::RuleAction::Connect
+        });
 
         if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
             patchbay.add_rule(rule);

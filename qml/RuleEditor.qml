@@ -45,7 +45,8 @@ ZbWindow {
                 continue;
             }
             var hay = ((r.sourcePattern || "") + " " + (r.sourceLabel || "") + " "
-                       + (r.targetPattern || "") + " " + (r.targetLabel || "")).toLowerCase();
+                       + (r.targetPattern || "") + " " + (r.targetLabel || "")
+                       + (r.action === "block" ? " blocked" : "")).toLowerCase();
             if (hay.indexOf(q) >= 0)
                 out.push(i);
         }
@@ -233,6 +234,7 @@ ZbWindow {
         primaryEnabled: acceptEnabled
 
         function resetFields() {
+            actionSeg.currentIndex = 0;
             sourcePatternField.text = "";
             targetPatternField.text = "";
             sourceTypeSeg.currentIndex = 0;
@@ -246,7 +248,8 @@ ZbWindow {
             var tgtType = ruleEditor.nodeTypes[targetTypeSeg.currentIndex];
             srcType = srcType === "Any" ? "" : srcType;
             tgtType = tgtType === "Any" ? "" : tgtType;
-            ruleEditor.controller.add_rule(sourcePatternField.text, srcType, targetPatternField.text, tgtType);
+            ruleEditor.controller.add_rule(sourcePatternField.text, srcType, targetPatternField.text, tgtType,
+                                           actionSeg.currentIndex === 1 ? "block" : "connect");
             resetFields();
             ruleEditor.loadRules();
         }
@@ -258,8 +261,15 @@ ZbWindow {
             width: parent.width
             spacing: 8
 
+            ZbSegmented {
+                id: actionSeg
+                model: ["Connect", "Block"]
+            }
             CaptionText {
-                text: "Patterns match node names; * is a wildcard."
+                text: actionSeg.currentIndex === 1
+                      ? "Block: the source is never connected to the target, in any mode. Blocks win over connect rules and the default node. Patterns match node names; * is a wildcard."
+                      : "Connect: the source is connected to the target whenever both exist. Patterns match node names; * is a wildcard."
+                wrapMode: Text.WordWrap
                 Layout.fillWidth: true
             }
 
@@ -488,7 +498,7 @@ ZbWindow {
 
         ZbDialogHeader {
             title: "Auto-connect rules"
-            subtitle: "Learned automatically when you connect ports by hand. Disabled rules are kept but not applied."
+            subtitle: "Learned automatically when you connect ports by hand. Block a connection by right-clicking a wire, or right-dragging between ports. Disabled rules are kept but not applied."
 
             ZbSwitch {
                 id: patchbaySwitch
@@ -546,6 +556,7 @@ ZbWindow {
                     required property int index
                     property var rule: ruleEditor.rules[ruleEditor.filteredIdx[index]] || {}
                     readonly property int mappingCount: rule.portMappings ? rule.portMappings.length : 0
+                    readonly property bool isBlock: rule.action === "block"
                     width: ListView.view.width
                     height: Theme.rowRule
 
@@ -600,9 +611,9 @@ ZbWindow {
                                     ZbIcon {
                                         id: arrowIcon
                                         anchors.verticalCenter: parent.verticalCenter
-                                        name: "arrow"
+                                        name: ruleDelegate.isBlock ? "block" : "arrow"
                                         size: 14
-                                        color: Theme.textMuted
+                                        color: ruleDelegate.isBlock ? Theme.textDestructive : Theme.textMuted
                                     }
                                     Text {
                                         id: tgtName
@@ -625,13 +636,23 @@ ZbWindow {
                                 }
                             }
 
-                            Text {
-                                text: ruleDelegate.mappingCount > 0
-                                      ? ruleDelegate.mappingCount + " port mapping" + (ruleDelegate.mappingCount !== 1 ? "s" : "")
-                                      : "heuristic matching"
-                                font.family: Theme.fontMono
-                                font.pixelSize: Theme.sizeMono
-                                color: Theme.textMuted
+                            Row {
+                                spacing: 6
+                                ZbBadge {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    visible: ruleDelegate.isBlock
+                                    text: "Blocked"
+                                    tone: "danger"
+                                }
+                                Text {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: ruleDelegate.mappingCount > 0
+                                          ? ruleDelegate.mappingCount + " port mapping" + (ruleDelegate.mappingCount !== 1 ? "s" : "")
+                                          : ruleDelegate.isBlock ? "never connected" : "heuristic matching"
+                                    font.family: Theme.fontMono
+                                    font.pixelSize: Theme.sizeMono
+                                    color: Theme.textMuted
+                                }
                             }
                         }
 
