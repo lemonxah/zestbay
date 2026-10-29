@@ -59,12 +59,17 @@ impl UiBridgeClient {
         event_tx: Sender<PwEvent>,
         cmd_tx: Sender<PwCommand>,
     ) -> Result<Self, String> {
-        // Find the bridge binary: check next to our executable first,
+        // Find the bridge binary: check next to our executable first, then
+        // <prefix>/lib/zestbay of our own prefix (e.g. /app in a Flatpak),
         // then the system install location.
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
         let candidates = [
-            std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|d| d.join("zestbay-ui-bridge"))),
+            exe_dir.as_ref().map(|d| d.join("zestbay-ui-bridge")),
+            exe_dir
+                .as_ref()
+                .map(|d| d.join("../lib/zestbay/zestbay-ui-bridge")),
             Some(std::path::PathBuf::from("/usr/lib/zestbay/zestbay-ui-bridge")),
             Some(std::path::PathBuf::from("/usr/local/lib/zestbay/zestbay-ui-bridge")),
         ];

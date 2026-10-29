@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Context menus</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+body{margin:0;background:#121418}
+a{color:#c9e265}a:hover{color:#e3f29a}
+button{cursor:pointer}
+button:disabled{cursor:default}
+</style>
+</helmet>
+<div style="width: 820px; height: 770px; box-sizing: border-box; display: flex; flex-direction: column; font-family: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif; font-size: 13px; line-height: 1.3; border-radius: 12px; overflow: hidden">
+
+  <div style="flex: 1; box-sizing: border-box; padding: 40px 48px 32px; background: #121418; color: #e8eaee; display: flex; flex-direction: column; gap: 16px">
+    <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #8b93a0">Dark</span>
+    <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 32px; align-items: start">
+
+      <div style="display: flex; flex-direction: column; gap: 10px">
+        <span style="font-size: 12px; color: #8b93a0">Canvas</span>
+        <div style="width: 220px; box-sizing: border-box; padding: 6px; background: #22262e; border: 1px solid #2f353f; border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,0.45); display: flex; flex-direction: column">
+          <button type="button" disabled style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #6f7784; font: inherit; text-align: left; display: flex; align-items: center">Delete selected links</button>
+          <div style="height: 1px; margin: 6px 4px; background: #2f353f"></div>
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: #2f353f; color: #e8eaee; font: inherit; text-align: left; display: flex; align-items: center">Add plugin…</button>
+          <div style="height: 1px; margin: 6px 4px; background: #2f353f"></div>
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #e8eaee; font: inherit; text-align: left; display: flex; align-items: center">Unhide all</button>
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #e8eaee; font: inherit; text-align: left; display: flex; align-items: center; gap: 8px"><span style="flex: 1">Fit to view</span><span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; color: #8b93a0">Home</span></button>
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #e8eaee; font: inherit; text-align: left; display: flex; align-items: center">Reset zoom</button>
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #e8eaee; font: inherit; text-align: left; display: flex; align-items: center">Auto layout</button>
+        </div>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 10px">
+        <span style="font-size: 12px; color: #8b93a0">Device or sink node</span>
+        <div style="width: 220px; box-sizing: border-box; padding: 6px; background: #22262e; border: 1px solid #2f353f; border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,0.45); display: flex; flex-direction: column">
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #e8eaee; font: inherit; text-align: left; display: flex; align-items: center">Hide</button>
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #e8eaee; font: inherit; text-align: left; display: flex; align-items: center">Unpin</button>
+          <div style="height: 1px; margin: 6px 4px; background: #2f353f"></div>
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #e8eaee; font: inherit; text-align: left; display: flex; align-items: center">Set as default</button>
+        </div>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 10px">
+        <span style="font-size: 12px; color: #8b93a0">Plugin node</span>
+        <div style="width: 220px; box-sizing: border-box; padding: 6px; background: #22262e; border: 1px solid #2f353f; border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,0.45); display: flex; flex-direction: column">
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #e8eaee; font: inherit; text-align: left; display: flex; align-items: center">Hide</button>
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #e8eaee; font: inherit; text-align: left; display: flex; align-items: center">Unpin</button>
+          <div style="height: 1px; margin: 6px 4px; background: #2f353f"></div>
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #e8eaee; font: inherit; text-align: left; display: flex; align-items: center">Set as default</button>
+          <div style="height: 1px; margin: 6px 4px; background: #2f353f"></div>
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #e8eaee; font: inherit; text-align: left; display: flex; align-items: center">Rename…</button>
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #e8eaee; font: inherit; text-align: left; display: flex; align-items: center">Open UI…</button>
+          <div style="height: 1px; margin: 6px 4px; background: #2f353f"></div>
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #e66767; font: inherit; text-align: left; display: flex; align-items: center">Remove plugin</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div style="flex: 1; box-sizing: border-box; padding: 32px 48px 40px; background: #e8eaed; color: #1a1d23; display: flex; flex-direction: column; gap: 16px">
+    <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #646c78">Light</span>
+    <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 32px; align-items: start">
+
+      <div style="display: flex; flex-direction: column; gap: 10px">
+        <span style="font-size: 12px; color: #646c78">Canvas</span>
+        <div style="width: 220px; box-sizing: border-box; padding: 6px; background: #ffffff; border: 1px solid #d4d8de; border-radius: 10px; box-shadow: 0 12px 32px rgba(20,24,32,0.18); display: flex; flex-direction: column">
+          <button type="button" disabled style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #9aa1ad; font: inherit; text-align: left; display: flex; align-items: center">Delete selected links</button>
+          <div style="height: 1px; margin: 6px 4px; background: #e3e6ea"></div>
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: #eef0f2; color: #1a1d23; font: inherit; text-align: left; display: flex; align-items: center">Add plugin…</button>
+          <div style="height: 1px; margin: 6px 4px; background: #e3e6ea"></div>
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #1a1d23; font: inherit; text-align: left; display: flex; align-items: center">Unhide all</button>
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #1a1d23; font: inherit; text-align: left; display: flex; align-items: center; gap: 8px"><span style="flex: 1">Fit to view</span><span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; color: #646c78">Home</span></button>
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #1a1d23; font: inherit; text-align: left; display: flex; align-items: center">Reset zoom</button>
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #1a1d23; font: inherit; text-align: left; display: flex; align-items: center">Auto layout</button>
+        </div>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 10px">
+        <span style="font-size: 12px; color: #646c78">Device or sink node</span>
+        <div style="width: 220px; box-sizing: border-box; padding: 6px; background: #ffffff; border: 1px solid #d4d8de; border-radius: 10px; box-shadow: 0 12px 32px rgba(20,24,32,0.18); display: flex; flex-direction: column">
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #1a1d23; font: inherit; text-align: left; display: flex; align-items: center">Hide</button>
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #1a1d23; font: inherit; text-align: left; display: flex; align-items: center">Unpin</button>
+          <div style="height: 1px; margin: 6px 4px; background: #e3e6ea"></div>
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #1a1d23; font: inherit; text-align: left; display: flex; align-items: center">Set as default</button>
+        </div>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 10px">
+        <span style="font-size: 12px; color: #646c78">Plugin node</span>
+        <div style="width: 220px; box-sizing: border-box; padding: 6px; background: #ffffff; border: 1px solid #d4d8de; border-radius: 10px; box-shadow: 0 12px 32px rgba(20,24,32,0.18); display: flex; flex-direction: column">
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #1a1d23; font: inherit; text-align: left; display: flex; align-items: center">Hide</button>
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #1a1d23; font: inherit; text-align: left; display: flex; align-items: center">Unpin</button>
+          <div style="height: 1px; margin: 6px 4px; background: #e3e6ea"></div>
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #1a1d23; font: inherit; text-align: left; display: flex; align-items: center">Set as default</button>
+          <div style="height: 1px; margin: 6px 4px; background: #e3e6ea"></div>
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #1a1d23; font: inherit; text-align: left; display: flex; align-items: center">Rename…</button>
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #1a1d23; font: inherit; text-align: left; display: flex; align-items: center">Open UI…</button>
+          <div style="height: 1px; margin: 6px 4px; background: #e3e6ea"></div>
+          <button type="button" style="height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #c23434; font: inherit; text-align: left; display: flex; align-items: center">Remove plugin</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":820,"height":770}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

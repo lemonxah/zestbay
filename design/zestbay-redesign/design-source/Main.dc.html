@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ZestBay patchbay</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+body{margin:0;background:#121418}
+a{color:#c9e265}a:hover{color:#e3f29a}
+input::placeholder{color:#7b8390}
+button{cursor:pointer}
+</style>
+</helmet>
+<div style="display: flex; flex-direction: column; min-height: 100vh; background: #121418; color: #e8eaee; font-family: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif; font-size: 13px; line-height: 1.3">
+
+<header style="height: 52px; box-sizing: border-box; display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 0 16px; background: #1a1d23; border-bottom: 1px solid #262b33">
+  <div style="display: flex; align-items: center; gap: 10px; margin-right: 8px">
+    <svg width="22" height="22" viewBox="0 0 22 22" role="img" aria-label="ZestBay"><circle cx="11" cy="11" r="9" fill="{{accent}}"></circle><path d="M11 11V2A9 9 0 0 1 20 11Z" fill="#121418" opacity="0.6"></path><circle cx="11" cy="11" r="2.2" fill="#121418"></circle></svg>
+    <span style="font-size: 14px; font-weight: 600; letter-spacing: -0.01em; color: #f2f3f5">ZestBay</span>
+  </div>
+  <label style="display: flex; align-items: center; gap: 8px; height: 32px; width: 280px; box-sizing: border-box; padding: 0 10px; background: #121418; border: 1px solid #2a2f38; border-radius: 8px; color: #8b93a0">
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="6" cy="6" r="4.2"></circle><path d="M9.2 9.2L12.5 12.5"></path></svg>
+    <input type="search" placeholder="Search nodes and ports" aria-label="Search nodes and ports" style="flex: 1; min-width: 0; background: transparent; border: 0; outline: 0; color: #e8eaee; font: inherit; font-size: 12px">
+  </label>
+  <div style="flex: 1"></div>
+  <div style="display: flex; align-items: center; gap: 8px">
+    <button type="button" style="height: 32px; padding: 0 12px 0 10px; border-radius: 8px; border: 0; background: {{accent}}; color: #141413; font: inherit; font-size: 12px; font-weight: 600; display: flex; align-items: center; gap: 6px"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><path d="M7 2.5v9M2.5 7h9"></path></svg>Add plugin</button>
+    <button type="button" style="height: 32px; padding: 0 10px 0 10px; border-radius: 8px; border: 1px solid #2f353f; background: #22262e; color: #e8eaee; font: inherit; font-size: 12px; font-weight: 500; display: flex; align-items: center; gap: 8px"><span style="width: 7px; height: 7px; border-radius: 50%; background: {{accent}}"></span>Rules<span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; font-weight: 500; color: #aab1bc; background: #2f353f; border-radius: 4px; padding: 1px 5px">89</span></button>
+    <div style="width: 1px; height: 20px; background: #2f353f; margin: 0 4px"></div>
+    <div style="display: flex; align-items: center; height: 32px; border: 1px solid #2f353f; border-radius: 8px; background: #22262e; overflow: hidden">
+      <button type="button" aria-label="Zoom out" style="width: 30px; height: 30px; border: 0; background: transparent; color: #c9cfd8; display: flex; align-items: center; justify-content: center"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><path d="M3 7h8"></path></svg></button>
+      <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #c9cfd8; width: 44px; text-align: center; border-left: 1px solid #2f353f; border-right: 1px solid #2f353f; height: 30px; line-height: 30px">100%</span>
+      <button type="button" aria-label="Zoom in" style="width: 30px; height: 30px; border: 0; background: transparent; color: #c9cfd8; display: flex; align-items: center; justify-content: center"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><path d="M7 3v8M3 7h8"></path></svg></button>
+      <button type="button" aria-label="Fit graph to window" style="width: 30px; height: 30px; border: 0; border-left: 1px solid #2f353f; background: transparent; color: #c9cfd8; display: flex; align-items: center; justify-content: center"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 5.5V2h3.5M8.5 2H12v3.5M12 8.5V12H8.5M5.5 12H2V8.5"></path></svg></button>
+    </div>
+    <div style="width: 1px; height: 20px; background: #2f353f; margin: 0 4px"></div>
+    <button type="button" aria-label="Preferences" style="width: 32px; height: 32px; border-radius: 8px; border: 1px solid #2f353f; background: #22262e; color: #c9cfd8; display: flex; align-items: center; justify-content: center"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="2.2"></circle><path d="M8 1.8v1.7M8 12.5v1.7M1.8 8h1.7M12.5 8h1.7M3.6 3.6l1.2 1.2M11.2 11.2l1.2 1.2M3.6 12.4l1.2-1.2M11.2 4.8l1.2-1.2"></path></svg></button>
+    <button type="button" aria-label="Menu" style="width: 32px; height: 32px; border-radius: 8px; border: 1px solid #2f353f; background: #22262e; color: #c9cfd8; display: flex; align-items: center; justify-content: center"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M3 4.5h10M3 8h10M3 11.5h10"></path></svg></button>
+  </div>
+</header>
+
+<main style="flex: 1; position: relative; overflow: hidden; min-height: 876px; background-color: #121418; background-image: radial-gradient(#262b33 1px, transparent 1.2px); background-size: 24px 24px; background-position: 12px 12px">
+
+<svg aria-hidden="true" width="64" height="8" viewBox="0 0 64 8" preserveAspectRatio="none" style="position: absolute; left: 224px; top: 86px; width: 64px; height: 8px; overflow: visible; fill: none; stroke: #e879b5; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 4 C 32 4, 32 4, 64 4"></path></svg>
+<svg aria-hidden="true" width="64" height="12" viewBox="0 0 64 12" preserveAspectRatio="none" style="position: absolute; left: 744px; top: 304px; width: 64px; height: 12px; overflow: visible; fill: none; stroke: #63b3ff; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 4 C 32 4, 32 8, 64 8"></path></svg>
+<svg aria-hidden="true" width="64" height="78" viewBox="0 0 64 78" preserveAspectRatio="none" style="position: absolute; left: 224px; top: 304px; width: 64px; height: 78px; overflow: visible; fill: none; stroke: #63b3ff; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 74 C 32 74, 32 4, 64 4"></path></svg>
+<svg aria-hidden="true" width="64" height="16" viewBox="0 0 64 16" preserveAspectRatio="none" style="position: absolute; left: 496px; top: 108px; width: 64px; height: 16px; overflow: visible; fill: none; stroke: #63b3ff; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 4 C 32 4, 32 12, 64 12"></path></svg>
+<svg aria-hidden="true" width="64" height="16" viewBox="0 0 64 16" preserveAspectRatio="none" style="position: absolute; left: 496px; top: 130px; width: 64px; height: 16px; overflow: visible; fill: none; stroke: #63b3ff; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 4 C 32 4, 32 12, 64 12"></path></svg>
+<svg aria-hidden="true" width="64" height="8" viewBox="0 0 64 8" preserveAspectRatio="none" style="position: absolute; left: 496px; top: 304px; width: 64px; height: 8px; overflow: visible; fill: none; stroke: #63b3ff; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 4 C 32 4, 32 4, 64 4"></path></svg>
+<svg aria-hidden="true" width="64" height="42" viewBox="0 0 64 42" preserveAspectRatio="none" style="position: absolute; left: 496px; top: 400px; width: 64px; height: 42px; overflow: visible; fill: none; stroke: #63b3ff; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 38 C 32 38, 32 4, 64 4"></path></svg>
+<svg aria-hidden="true" width="64" height="42" viewBox="0 0 64 42" preserveAspectRatio="none" style="position: absolute; left: 496px; top: 422px; width: 64px; height: 42px; overflow: visible; fill: none; stroke: #63b3ff; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 38 C 32 38, 32 4, 64 4"></path></svg>
+<svg aria-hidden="true" width="64" height="160" viewBox="0 0 64 160" preserveAspectRatio="none" style="position: absolute; left: 496px; top: 400px; width: 64px; height: 160px; overflow: visible; fill: none; stroke: #63b3ff; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 156 C 32 156, 32 4, 64 4"></path></svg>
+<svg aria-hidden="true" width="64" height="160" viewBox="0 0 64 160" preserveAspectRatio="none" style="position: absolute; left: 496px; top: 422px; width: 64px; height: 160px; overflow: visible; fill: none; stroke: #63b3ff; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 156 C 32 156, 32 4, 64 4"></path></svg>
+<svg aria-hidden="true" width="64" height="278" viewBox="0 0 64 278" preserveAspectRatio="none" style="position: absolute; left: 496px; top: 400px; width: 64px; height: 278px; overflow: visible; fill: none; stroke: #63b3ff; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 274 C 32 274, 32 4, 64 4"></path></svg>
+<svg aria-hidden="true" width="64" height="278" viewBox="0 0 64 278" preserveAspectRatio="none" style="position: absolute; left: 496px; top: 422px; width: 64px; height: 278px; overflow: visible; fill: none; stroke: #63b3ff; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 274 C 32 274, 32 4, 64 4"></path></svg>
+<svg aria-hidden="true" width="64" height="222" viewBox="0 0 64 222" preserveAspectRatio="none" style="position: absolute; left: 744px; top: 116px; width: 64px; height: 222px; overflow: visible; fill: none; stroke: #63b3ff; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 4 C 32 4, 32 218, 64 218"></path></svg>
+<svg aria-hidden="true" width="64" height="222" viewBox="0 0 64 222" preserveAspectRatio="none" style="position: absolute; left: 744px; top: 138px; width: 64px; height: 222px; overflow: visible; fill: none; stroke: #63b3ff; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 4 C 32 4, 32 218, 64 218"></path></svg>
+<svg aria-hidden="true" width="64" height="34" viewBox="0 0 64 34" preserveAspectRatio="none" style="position: absolute; left: 744px; top: 374px; width: 64px; height: 34px; overflow: visible; fill: none; stroke: #63b3ff; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 30 C 32 30, 32 4, 64 4"></path></svg>
+<svg aria-hidden="true" width="64" height="34" viewBox="0 0 64 34" preserveAspectRatio="none" style="position: absolute; left: 744px; top: 396px; width: 64px; height: 34px; overflow: visible; fill: none; stroke: #63b3ff; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 30 C 32 30, 32 4, 64 4"></path></svg>
+<svg aria-hidden="true" width="64" height="108" viewBox="0 0 64 108" preserveAspectRatio="none" style="position: absolute; left: 744px; top: 418px; width: 64px; height: 108px; overflow: visible; fill: none; stroke: #63b3ff; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 104 C 32 104, 32 4, 64 4"></path></svg>
+<svg aria-hidden="true" width="64" height="108" viewBox="0 0 64 108" preserveAspectRatio="none" style="position: absolute; left: 744px; top: 440px; width: 64px; height: 108px; overflow: visible; fill: none; stroke: #63b3ff; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 104 C 32 104, 32 4, 64 4"></path></svg>
+<svg aria-hidden="true" width="64" height="300" viewBox="0 0 64 300" preserveAspectRatio="none" style="position: absolute; left: 744px; top: 462px; width: 64px; height: 300px; overflow: visible; fill: none; stroke: {{accent}}; stroke-width: 2.25; stroke-linecap: round; opacity: 1"><path d="M 0 296 C 32 296, 32 4, 64 4"></path></svg>
+<svg aria-hidden="true" width="64" height="300" viewBox="0 0 64 300" preserveAspectRatio="none" style="position: absolute; left: 744px; top: 484px; width: 64px; height: 300px; overflow: visible; fill: none; stroke: {{accent}}; stroke-width: 2.25; stroke-linecap: round; opacity: 1"><path d="M 0 296 C 32 296, 32 4, 64 4"></path></svg>
+<svg aria-hidden="true" width="336" height="8" viewBox="0 0 336 8" preserveAspectRatio="none" style="position: absolute; left: 744px; top: 636px; width: 336px; height: 8px; overflow: visible; fill: none; stroke: #63b3ff; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 4 C 168 4, 168 4, 336 4"></path></svg>
+<svg aria-hidden="true" width="336" height="8" viewBox="0 0 336 8" preserveAspectRatio="none" style="position: absolute; left: 744px; top: 658px; width: 336px; height: 8px; overflow: visible; fill: none; stroke: #63b3ff; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 4 C 168 4, 168 4, 336 4"></path></svg>
+<svg aria-hidden="true" width="64" height="8" viewBox="0 0 64 8" preserveAspectRatio="none" style="position: absolute; left: 1016px; top: 308px; width: 64px; height: 8px; overflow: visible; fill: none; stroke: #63b3ff; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 4 C 32 4, 32 4, 64 4"></path></svg>
+<svg aria-hidden="true" width="64" height="8" viewBox="0 0 64 8" preserveAspectRatio="none" style="position: absolute; left: 1016px; top: 330px; width: 64px; height: 8px; overflow: visible; fill: none; stroke: #63b3ff; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 4 C 32 4, 32 4, 64 4"></path></svg>
+<svg aria-hidden="true" width="64" height="8" viewBox="0 0 64 8" preserveAspectRatio="none" style="position: absolute; left: 1264px; top: 308px; width: 64px; height: 8px; overflow: visible; fill: none; stroke: #63b3ff; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 4 C 32 4, 32 4, 64 4"></path></svg>
+<svg aria-hidden="true" width="64" height="8" viewBox="0 0 64 8" preserveAspectRatio="none" style="position: absolute; left: 1264px; top: 330px; width: 64px; height: 8px; overflow: visible; fill: none; stroke: #63b3ff; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 4 C 32 4, 32 4, 64 4"></path></svg>
+<svg aria-hidden="true" width="64" height="8" viewBox="0 0 64 8" preserveAspectRatio="none" style="position: absolute; left: 1264px; top: 636px; width: 64px; height: 8px; overflow: visible; fill: none; stroke: #63b3ff; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 4 C 32 4, 32 4, 64 4"></path></svg>
+<svg aria-hidden="true" width="64" height="8" viewBox="0 0 64 8" preserveAspectRatio="none" style="position: absolute; left: 1264px; top: 658px; width: 64px; height: 8px; overflow: visible; fill: none; stroke: #63b3ff; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 4 C 32 4, 32 4, 64 4"></path></svg>
+<svg aria-hidden="true" width="64" height="336" viewBox="0 0 64 336" preserveAspectRatio="none" style="position: absolute; left: 1264px; top: 308px; width: 64px; height: 336px; overflow: visible; fill: none; stroke: #63b3ff; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 332 C 32 332, 32 4, 64 4"></path></svg>
+<svg aria-hidden="true" width="64" height="336" viewBox="0 0 64 336" preserveAspectRatio="none" style="position: absolute; left: 1264px; top: 330px; width: 64px; height: 336px; overflow: visible; fill: none; stroke: #63b3ff; stroke-width: 1.75; stroke-linecap: round; opacity: 0.8"><path d="M 0 332 C 32 332, 32 4, 64 4"></path></svg>
+
+<div style="position: absolute; left: 40px; top: 40px; width: 184px; box-sizing: border-box; background: #1f232a; border: 1px solid #2f353f; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.35)">
+  <div style="height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid #2a2f38">
+    <span style="width: 18px; height: 18px; border-radius: 5px; background: rgba(232,121,181,0.16); color: #e879b5; display: flex; align-items: center; justify-content: center; flex: none"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="6" cy="6" r="4.5"></circle><path d="M3.6 6h0M6 3.8h0M8.4 6h0M6 8.2h0"></path></svg></span>
+    <span style="font-size: 12px; font-weight: 600; color: #e8eaee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Roland Digital Piano</span>
+  </div>
+  <div style="padding: 4px 0 8px; display: flex; flex-direction: column">
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>MIDI 1</span><span>MIDI 1</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #1f232a; border: 2px solid #e879b5"></span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #e879b5"></span></div>
+  </div>
+</div>
+
+<div style="position: absolute; left: 40px; top: 136px; width: 184px; box-sizing: border-box; background: #1f232a; border: 1px solid #2f353f; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.35)">
+  <div style="height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid #2a2f38">
+    <span style="width: 18px; height: 18px; border-radius: 5px; background: rgba(232,121,181,0.16); color: #e879b5; display: flex; align-items: center; justify-content: center; flex: none"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="6" cy="6" r="4.5"></circle><path d="M3.6 6h0M6 3.8h0M8.4 6h0M6 8.2h0"></path></svg></span>
+    <span style="font-size: 12px; font-weight: 600; color: #e8eaee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Midi Through</span>
+  </div>
+  <div style="padding: 4px 0 8px; display: flex; flex-direction: column">
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>Port-0</span><span>Port-0</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #1f232a; border: 2px solid #e879b5"></span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #1f232a; border: 2px solid #e879b5"></span></div>
+  </div>
+</div>
+
+<div style="position: absolute; left: 40px; top: 232px; width: 184px; box-sizing: border-box; background: #1f232a; border: 1px solid #2f353f; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.35)">
+  <div style="height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid #2a2f38">
+    <span style="width: 18px; height: 18px; border-radius: 5px; background: rgba(57,198,176,0.16); color: #39c6b0; display: flex; align-items: center; justify-content: center; flex: none"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><rect x="4" y="1" width="4" height="6" rx="2"></rect><path d="M2 6a4 4 0 0 0 8 0M6 10v1"></path></svg></span>
+    <span style="font-size: 12px; font-weight: 600; color: #e8eaee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Microphone</span>
+  </div>
+  <div style="padding: 4px 0 8px; display: flex; flex-direction: column">
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: flex-end; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>MONO</span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #1f232a; border: 2px solid #63b3ff"></span></div>
+  </div>
+</div>
+
+<div style="position: absolute; left: 40px; top: 328px; width: 184px; box-sizing: border-box; background: #1f232a; border: 1px solid #2f353f; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.35)">
+  <div style="height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid #2a2f38">
+    <span style="width: 18px; height: 18px; border-radius: 5px; background: rgba(57,198,176,0.16); color: #39c6b0; display: flex; align-items: center; justify-content: center; flex: none"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><rect x="4" y="1" width="4" height="6" rx="2"></rect><path d="M2 6a4 4 0 0 0 8 0M6 10v1"></path></svg></span>
+    <span style="font-size: 12px; font-weight: 600; color: #e8eaee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Audeze Maxwell XBOX Dongle Pro</span>
+  </div>
+  <div style="padding: 4px 0 8px; display: flex; flex-direction: column">
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: flex-end; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>AUX0</span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+  </div>
+</div>
+
+<div style="position: absolute; left: 40px; top: 424px; width: 184px; box-sizing: border-box; background: #1f232a; border: 1px solid #2f353f; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.35)">
+  <div style="height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid #2a2f38">
+    <span style="width: 18px; height: 18px; border-radius: 5px; background: rgba(57,198,176,0.16); color: #39c6b0; display: flex; align-items: center; justify-content: center; flex: none"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><rect x="4" y="1" width="4" height="6" rx="2"></rect><path d="M2 6a4 4 0 0 0 8 0M6 10v1"></path></svg></span>
+    <span style="font-size: 12px; font-weight: 600; color: #e8eaee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Razer Hammerhead V3 X HyperSpeed</span>
+  </div>
+  <div style="padding: 4px 0 8px; display: flex; flex-direction: column">
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: flex-end; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>AUX0</span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #1f232a; border: 2px solid #63b3ff"></span></div>
+  </div>
+</div>
+
+<div style="position: absolute; left: 40px; top: 520px; width: 184px; box-sizing: border-box; background: #1f232a; border: 1px solid #2f353f; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.35)">
+  <div style="height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid #2a2f38">
+    <span style="width: 18px; height: 18px; border-radius: 5px; background: rgba(57,198,176,0.16); color: #39c6b0; display: flex; align-items: center; justify-content: center; flex: none"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1" y="3" width="6.5" height="6" rx="1"></rect><path d="M7.5 5.5L11 3.5v5L7.5 6.5"></path></svg></span>
+    <span style="font-size: 12px; font-weight: 600; color: #e8eaee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">C270 HD WEBCAM (V4L2)</span>
+  </div>
+  <div style="padding: 4px 0 8px; display: flex; flex-direction: column">
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: flex-end; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>capture_1</span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #1f232a; border: 2px solid #f0a040"></span></div>
+  </div>
+</div>
+
+<div style="position: absolute; left: 40px; top: 616px; width: 184px; box-sizing: border-box; background: #1f232a; border: 1px solid #2f353f; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.35)">
+  <div style="height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid #2a2f38">
+    <span style="width: 18px; height: 18px; border-radius: 5px; background: rgba(57,198,176,0.16); color: #39c6b0; display: flex; align-items: center; justify-content: center; flex: none"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><rect x="4" y="1" width="4" height="6" rx="2"></rect><path d="M2 6a4 4 0 0 0 8 0M6 10v1"></path></svg></span>
+    <span style="font-size: 12px; font-weight: 600; color: #e8eaee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Webcam C270 Mono</span>
+  </div>
+  <div style="padding: 4px 0 8px; display: flex; flex-direction: column">
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: flex-end; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>MONO</span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #1f232a; border: 2px solid #63b3ff"></span></div>
+  </div>
+</div>
+
+<div style="position: absolute; left: 288px; top: 40px; width: 208px; box-sizing: border-box; background: #1f232a; border: 1px solid #2f353f; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.35)">
+  <div style="height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid #2a2f38">
+    <span style="width: 18px; height: 18px; border-radius: 5px; background: rgba(167,139,250,0.16); color: #a78bfa; display: flex; align-items: center; justify-content: center; flex: none"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 1v3M8 1v3M2.5 4h7v1.5a3.5 3.5 0 0 1-7 0zM6 9v2"></path></svg></span>
+    <span style="font-size: 12px; font-weight: 600; color: #e8eaee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Pianoteq 9</span>
+    <span style="margin-left: auto; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 9px; font-weight: 500; color: #8b93a0; border: 1px solid #2f353f; border-radius: 4px; padding: 1px 4px">LV2</span>
+  </div>
+  <div style="padding: 4px 0 8px; display: flex; flex-direction: column">
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>midi_in</span><span>midi_out</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #e879b5"></span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #1f232a; border: 2px solid #e879b5"></span></div>
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>input_0</span><span>output_0</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #1f232a; border: 2px solid #63b3ff"></span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: flex-end; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>output_1</span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: flex-end; padding: 0 10px"><button type="button" style="height: 18px; padding: 0 6px; border: 0; border-radius: 4px; background: transparent; color: #8b93a0; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; display: flex; align-items: center; gap: 4px"><svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3l2 2 2-2"></path></svg>14 more outputs</button></div>
+  </div>
+  <div style="height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 6px; padding: 0 10px; border-top: 1px solid #2a2f38">
+    <button type="button" aria-pressed="true" style="height: 22px; padding: 0 8px; border-radius: 6px; border: 0; background: {{accentFaint}}; color: {{accent}}; font: inherit; font-size: 11px; font-weight: 600; display: flex; align-items: center; gap: 5px"><span style="width: 6px; height: 6px; border-radius: 50%; background: {{accent}}"></span>On</button>
+    <button type="button" style="height: 22px; padding: 0 8px; border-radius: 6px; border: 0; background: #2a2f38; color: #c9cfd8; font: inherit; font-size: 11px; font-weight: 500">UI</button>
+    <button type="button" style="height: 22px; padding: 0 8px; border-radius: 6px; border: 0; background: #2a2f38; color: #c9cfd8; font: inherit; font-size: 11px; font-weight: 500">Params</button>
+  </div>
+</div>
+
+<div style="position: absolute; left: 288px; top: 236px; width: 208px; box-sizing: border-box; background: #1f232a; border: 1px solid #2f353f; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.35)">
+  <div style="height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid #2a2f38">
+    <span style="width: 18px; height: 18px; border-radius: 5px; background: rgba(167,139,250,0.16); color: #a78bfa; display: flex; align-items: center; justify-content: center; flex: none"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 1v3M8 1v3M2.5 4h7v1.5a3.5 3.5 0 0 1-7 0zM6 9v2"></path></svg></span>
+    <span style="font-size: 12px; font-weight: 600; color: #e8eaee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">LSP Gate Mono</span>
+    <span style="margin-left: auto; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 9px; font-weight: 500; color: #8b93a0; border: 1px solid #2f353f; border-radius: 4px; padding: 1px 4px">LV2</span>
+  </div>
+  <div style="padding: 4px 0 8px; display: flex; flex-direction: column">
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>midi_in</span><span>midi_out</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #1f232a; border: 2px solid #e879b5"></span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #1f232a; border: 2px solid #e879b5"></span></div>
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>input_0</span><span>output_0</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+  </div>
+  <div style="height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 6px; padding: 0 10px; border-top: 1px solid #2a2f38">
+    <button type="button" aria-pressed="true" style="height: 22px; padding: 0 8px; border-radius: 6px; border: 0; background: {{accentFaint}}; color: {{accent}}; font: inherit; font-size: 11px; font-weight: 600; display: flex; align-items: center; gap: 5px"><span style="width: 6px; height: 6px; border-radius: 50%; background: {{accent}}"></span>On</button>
+    <button type="button" style="height: 22px; padding: 0 8px; border-radius: 6px; border: 0; background: #2a2f38; color: #c9cfd8; font: inherit; font-size: 11px; font-weight: 500">UI</button>
+    <button type="button" style="height: 22px; padding: 0 8px; border-radius: 6px; border: 0; background: #2a2f38; color: #c9cfd8; font: inherit; font-size: 11px; font-weight: 500">Params</button>
+  </div>
+</div>
+
+<div style="position: absolute; left: 288px; top: 388px; width: 208px; box-sizing: border-box; background: #1f232a; border: 1px solid #2f353f; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.35)">
+  <div style="height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid #2a2f38">
+    <span style="width: 18px; height: 18px; border-radius: 5px; background: rgba(240,160,64,0.16); color: #f0a040; display: flex; align-items: center; justify-content: center; flex: none"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 6h1.5l1.5-4 2 8 2-6 1.5 2H11"></path></svg></span>
+    <span style="font-size: 12px; font-weight: 600; color: #e8eaee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Firefox</span>
+  </div>
+  <div style="padding: 4px 0 8px; display: flex; flex-direction: column">
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: flex-end; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>FL</span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: flex-end; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>FR</span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+  </div>
+</div>
+
+<div style="position: absolute; left: 288px; top: 506px; width: 208px; box-sizing: border-box; background: #1f232a; border: 1px solid #2f353f; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.35)">
+  <div style="height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid #2a2f38">
+    <span style="width: 18px; height: 18px; border-radius: 5px; background: rgba(240,160,64,0.16); color: #f0a040; display: flex; align-items: center; justify-content: center; flex: none"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 6h1.5l1.5-4 2 8 2-6 1.5 2H11"></path></svg></span>
+    <span style="font-size: 12px; font-weight: 600; color: #e8eaee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Firefox</span>
+  </div>
+  <div style="padding: 4px 0 8px; display: flex; flex-direction: column">
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: flex-end; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>FL</span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: flex-end; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>FR</span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+  </div>
+</div>
+
+<div style="position: absolute; left: 288px; top: 624px; width: 208px; box-sizing: border-box; background: #1f232a; border: 1px solid #2f353f; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.35)">
+  <div style="height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid #2a2f38">
+    <span style="width: 18px; height: 18px; border-radius: 5px; background: rgba(240,160,64,0.16); color: #f0a040; display: flex; align-items: center; justify-content: center; flex: none"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 6h1.5l1.5-4 2 8 2-6 1.5 2H11"></path></svg></span>
+    <span style="font-size: 12px; font-weight: 600; color: #e8eaee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Firefox</span>
+  </div>
+  <div style="padding: 4px 0 8px; display: flex; flex-direction: column">
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: flex-end; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>FL</span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: flex-end; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>FR</span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+  </div>
+</div>
+
+<div style="position: absolute; left: 560px; top: 70px; width: 184px; box-sizing: border-box; background: #1f232a; border: 1px solid #2f353f; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.35)">
+  <div style="height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid #2a2f38">
+    <span style="width: 18px; height: 18px; border-radius: 5px; background: rgba(90,169,255,0.16); color: #5aa9ff; display: flex; align-items: center; justify-content: center; flex: none"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 4.5h2L7 1.5v9L3.5 7.5h-2z"></path><path d="M9 4a3 3 0 0 1 0 4"></path></svg></span>
+    <span style="font-size: 12px; font-weight: 600; color: #e8eaee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Daw Sink</span>
+  </div>
+  <div style="padding: 4px 0 8px; display: flex; flex-direction: column">
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>FL</span><span>FL</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>FR</span><span>FR</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+  </div>
+</div>
+
+<div style="position: absolute; left: 560px; top: 258px; width: 184px; box-sizing: border-box; background: #1f232a; border: 1px solid #2f353f; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.35)">
+  <div style="height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid #2a2f38">
+    <span style="width: 18px; height: 18px; border-radius: 5px; background: rgba(90,169,255,0.16); color: #5aa9ff; display: flex; align-items: center; justify-content: center; flex: none"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><rect x="4" y="1" width="4" height="6" rx="2"></rect><path d="M2 6a4 4 0 0 0 8 0M6 10v1"></path></svg></span>
+    <span style="font-size: 12px; font-weight: 600; color: #e8eaee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Microphone</span>
+  </div>
+  <div style="padding: 4px 0 8px; display: flex; flex-direction: column">
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>FL</span><span>FL</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+  </div>
+</div>
+
+<div style="position: absolute; left: 560px; top: 354px; width: 184px; box-sizing: border-box; background: #1f232a; border: 1px solid #2f353f; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.35)">
+  <div style="height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid #2a2f38">
+    <span style="width: 18px; height: 18px; border-radius: 5px; background: rgba(90,169,255,0.16); color: #5aa9ff; display: flex; align-items: center; justify-content: center; flex: none"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 4.5h2L7 1.5v9L3.5 7.5h-2z"></path><path d="M9 4a3 3 0 0 1 0 4"></path></svg></span>
+    <span style="font-size: 12px; font-weight: 600; color: #e8eaee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Media Sink</span>
+  </div>
+  <div style="padding: 4px 0 8px; display: flex; flex-direction: column">
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>FL</span><span>FL</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>FR</span><span>FR</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+  </div>
+</div>
+
+<div style="position: absolute; left: 560px; top: 472px; width: 184px; box-sizing: border-box; background: #1f232a; border: 1px solid #2f353f; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.35)">
+  <div style="height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid #2a2f38">
+    <span style="width: 18px; height: 18px; border-radius: 5px; background: rgba(90,169,255,0.16); color: #5aa9ff; display: flex; align-items: center; justify-content: center; flex: none"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 4.5h2L7 1.5v9L3.5 7.5h-2z"></path><path d="M9 4a3 3 0 0 1 0 4"></path></svg></span>
+    <span style="font-size: 12px; font-weight: 600; color: #e8eaee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Falkon Sink</span>
+  </div>
+  <div style="padding: 4px 0 8px; display: flex; flex-direction: column">
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>FL</span><span>FL</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #1f232a; border: 2px solid #63b3ff"></span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>FR</span><span>FR</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #1f232a; border: 2px solid #63b3ff"></span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+  </div>
+</div>
+
+<div style="position: absolute; left: 560px; top: 590px; width: 184px; box-sizing: border-box; background: #1f232a; border: 1px solid #2f353f; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.35)">
+  <div style="height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid #2a2f38">
+    <span style="width: 18px; height: 18px; border-radius: 5px; background: rgba(90,169,255,0.16); color: #5aa9ff; display: flex; align-items: center; justify-content: center; flex: none"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 4.5h2L7 1.5v9L3.5 7.5h-2z"></path><path d="M9 4a3 3 0 0 1 0 4"></path></svg></span>
+    <span style="font-size: 12px; font-weight: 600; color: #e8eaee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Comms Sink</span>
+  </div>
+  <div style="padding: 4px 0 8px; display: flex; flex-direction: column">
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>FL</span><span>FL</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #1f232a; border: 2px solid #63b3ff"></span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>FR</span><span>FR</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #1f232a; border: 2px solid #63b3ff"></span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+  </div>
+</div>
+
+<div style="position: absolute; left: 560px; top: 708px; width: 184px; box-sizing: border-box; background: #1f232a; border: 1px solid {{accent}}; border-radius: 10px; box-shadow: 0 0 0 3px {{accentSoft}}, 0 8px 24px rgba(0,0,0,0.35)">
+  <div style="height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid #2a2f38">
+    <span style="width: 18px; height: 18px; border-radius: 5px; background: rgba(90,169,255,0.16); color: #5aa9ff; display: flex; align-items: center; justify-content: center; flex: none"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 4.5h2L7 1.5v9L3.5 7.5h-2z"></path><path d="M9 4a3 3 0 0 1 0 4"></path></svg></span>
+    <span style="font-size: 12px; font-weight: 600; color: #e8eaee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Game Sink</span>
+  </div>
+  <div style="padding: 4px 0 8px; display: flex; flex-direction: column">
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>FL</span><span>FL</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #1f232a; border: 2px solid #63b3ff"></span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: {{accent}}"></span></div>
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>FR</span><span>FR</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #1f232a; border: 2px solid #63b3ff"></span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: {{accent}}"></span></div>
+  </div>
+</div>
+
+<div style="position: absolute; left: 808px; top: 240px; width: 208px; box-sizing: border-box; background: #1f232a; border: 1px solid #2f353f; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.35)">
+  <div style="height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid #2a2f38">
+    <span style="width: 18px; height: 18px; border-radius: 5px; background: rgba(167,139,250,0.16); color: #a78bfa; display: flex; align-items: center; justify-content: center; flex: none"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 1v3M8 1v3M2.5 4h7v1.5a3.5 3.5 0 0 1-7 0zM6 9v2"></path></svg></span>
+    <span style="font-size: 12px; font-weight: 600; color: #e8eaee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">LSP Mixer x4 Stereo</span>
+    <span style="margin-left: auto; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 9px; font-weight: 500; color: #8b93a0; border: 1px solid #2f353f; border-radius: 4px; padding: 1px 4px">LV2</span>
+  </div>
+  <div style="padding: 4px 0 8px; display: flex; flex-direction: column">
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>midi_in</span><span>midi_out</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #1f232a; border: 2px solid #e879b5"></span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #1f232a; border: 2px solid #e879b5"></span></div>
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>input_0</span><span>output_0</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>input_1</span><span>output_1</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: flex-start; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>input_2</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: flex-start; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>input_3</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: flex-start; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>input_4</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: flex-start; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>input_5</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: flex-start; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>input_6</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: flex-start; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>input_7</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: {{accent}}"></span></div>
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: flex-start; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>input_8</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: {{accent}}"></span></div>
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: flex-start; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>input_9</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #1f232a; border: 2px solid #63b3ff"></span></div>
+  </div>
+  <div style="height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 6px; padding: 0 10px; border-top: 1px solid #2a2f38">
+    <button type="button" aria-pressed="true" style="height: 22px; padding: 0 8px; border-radius: 6px; border: 0; background: {{accentFaint}}; color: {{accent}}; font: inherit; font-size: 11px; font-weight: 600; display: flex; align-items: center; gap: 5px"><span style="width: 6px; height: 6px; border-radius: 50%; background: {{accent}}"></span>On</button>
+    <button type="button" style="height: 22px; padding: 0 8px; border-radius: 6px; border: 0; background: #2a2f38; color: #c9cfd8; font: inherit; font-size: 11px; font-weight: 500">UI</button>
+    <button type="button" style="height: 22px; padding: 0 8px; border-radius: 6px; border: 0; background: #2a2f38; color: #c9cfd8; font: inherit; font-size: 11px; font-weight: 500">Params</button>
+  </div>
+</div>
+
+<div style="position: absolute; left: 1080px; top: 262px; width: 184px; box-sizing: border-box; background: #1f232a; border: 1px solid #2f353f; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.35)">
+  <div style="height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid #2a2f38">
+    <span style="width: 18px; height: 18px; border-radius: 5px; background: rgba(90,169,255,0.16); color: #5aa9ff; display: flex; align-items: center; justify-content: center; flex: none"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 4.5h2L7 1.5v9L3.5 7.5h-2z"></path><path d="M9 4a3 3 0 0 1 0 4"></path></svg></span>
+    <span style="font-size: 12px; font-weight: 600; color: #e8eaee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Speakers</span>
+  </div>
+  <div style="padding: 4px 0 8px; display: flex; flex-direction: column">
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>FL</span><span>FL</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>FR</span><span>FR</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+  </div>
+</div>
+
+<div style="position: absolute; left: 1080px; top: 590px; width: 184px; box-sizing: border-box; background: #1f232a; border: 1px solid #2f353f; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.35)">
+  <div style="height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid #2a2f38">
+    <span style="width: 18px; height: 18px; border-radius: 5px; background: rgba(90,169,255,0.16); color: #5aa9ff; display: flex; align-items: center; justify-content: center; flex: none"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 4.5h2L7 1.5v9L3.5 7.5h-2z"></path><path d="M9 4a3 3 0 0 1 0 4"></path></svg></span>
+    <span style="font-size: 12px; font-weight: 600; color: #e8eaee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Headphones</span>
+  </div>
+  <div style="padding: 4px 0 8px; display: flex; flex-direction: column">
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>FL</span><span>FL</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>FR</span><span>FR</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span><span style="position: absolute; right: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+  </div>
+</div>
+
+<div style="position: absolute; left: 1328px; top: 262px; width: 208px; box-sizing: border-box; background: #1f232a; border: 1px solid #2f353f; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.35)">
+  <div style="height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid #2a2f38">
+    <span style="width: 18px; height: 18px; border-radius: 5px; background: rgba(57,198,176,0.16); color: #39c6b0; display: flex; align-items: center; justify-content: center; flex: none"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 8.5V6a4.5 4.5 0 0 1 9 0v2.5"></path><path d="M1.5 7.5h1.5v3H1.5zM9 7.5h1.5v3H9z"></path></svg></span>
+    <span style="font-size: 12px; font-weight: 600; color: #e8eaee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Audeze Maxwell XBOX Dongle Pro</span>
+  </div>
+  <div style="padding: 4px 0 8px; display: flex; flex-direction: column">
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: flex-start; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>AUX0</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: flex-start; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>AUX1</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+  </div>
+</div>
+
+<div style="position: absolute; left: 1328px; top: 590px; width: 208px; box-sizing: border-box; background: #1f232a; border: 1px solid #2f353f; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.35)">
+  <div style="height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid #2a2f38">
+    <span style="width: 18px; height: 18px; border-radius: 5px; background: rgba(57,198,176,0.16); color: #39c6b0; display: flex; align-items: center; justify-content: center; flex: none"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 8.5V6a4.5 4.5 0 0 1 9 0v2.5"></path><path d="M1.5 7.5h1.5v3H1.5zM9 7.5h1.5v3H9z"></path></svg></span>
+    <span style="font-size: 12px; font-weight: 600; color: #e8eaee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Razer Hammerhead V3 X HyperSpeed</span>
+  </div>
+  <div style="padding: 4px 0 8px; display: flex; flex-direction: column">
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: flex-start; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>AUX0</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+    <div style="position: relative; height: 22px; display: flex; align-items: center; justify-content: flex-start; padding: 0 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #aab1bc"><span>AUX1</span><span style="position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; background: #63b3ff"></span></div>
+  </div>
+</div>
+
+</main>
+
+<footer style="height: 32px; box-sizing: border-box; display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 0 16px; background: #1a1d23; border-top: 1px solid #262b33; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #8b93a0">
+  <span>24 nodes · 30 links</span>
+  <div style="display: flex; align-items: center; gap: 14px; margin-left: 8px">
+    <span style="display: flex; align-items: center; gap: 6px"><span style="width: 8px; height: 8px; border-radius: 50%; background: #63b3ff"></span>Audio</span>
+    <span style="display: flex; align-items: center; gap: 6px"><span style="width: 8px; height: 8px; border-radius: 50%; background: #e879b5"></span>MIDI</span>
+    <span style="display: flex; align-items: center; gap: 6px"><span style="width: 8px; height: 8px; border-radius: 50%; background: #f0a040"></span>Video</span>
+    <span style="display: flex; align-items: center; gap: 6px"><span style="width: 8px; height: 8px; border-radius: 50%; box-sizing: border-box; border: 2px solid #8b93a0"></span>Unconnected</span>
+  </div>
+  <div style="flex: 1"></div>
+  <span style="display: flex; align-items: center; gap: 8px"><svg width="64" height="14" viewBox="0 0 64 14" fill="none" stroke="#39c6b0" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M0 11 L8 10 L16 11 L24 9 L32 11 L40 10 L48 11 L56 8 L64 11"></path></svg>CPU 0.0%</span>
+  <span style="display: flex; align-items: center; gap: 6px; height: 20px; padding: 0 8px; border-radius: 6px; background: {{accentFaint}}; color: {{accent}}"><span style="width: 6px; height: 6px; border-radius: 50%; background: {{accent}}"></span>Rules active</span>
+</footer>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#c9e265","options":["#c9e265","#63b3ff","#f0a040","#e879b5"]},"$preview":{"width":1600,"height":960}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const accent = this.props.accent ?? '#c9e265';
+    const m = /^#?([0-9a-f]{6})$/i.exec(accent);
+    const n = m ? parseInt(m[1], 16) : 0xc9e265;
+    const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+    return {
+      accent,
+      accentFaint: 'rgba(' + r + ',' + g + ',' + b + ',0.14)',
+      accentSoft: 'rgba(' + r + ',' + g + ',' + b + ',0.26)'
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -3,19 +3,49 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import ZestBay
 
-ApplicationWindow {
+// MIDI mappings: the dialog shell (bible §6.1) with a filterable card list
+// of CC/note → parameter mappings. Mono for CC numbers, channels and modes.
+ZbWindow {
     id: midiMappings
     title: "MIDI Mappings"
-    color: Theme.windowBg
-    width: 650
-    height: 450
-    minimumWidth: 450
-    minimumHeight: 300
+    width: 680
+    height: 560
+    minimumWidth: 480
+    minimumHeight: 340
     visible: false
 
     required property var controller
 
     property var mappings: []
+
+    // Indices into `mappings` matching the filter; the list model is the
+    // count so reloads keep the scroll position.
+    readonly property var filteredIdx: computeFilter(mappings, filterField.text)
+
+    function computeFilter(list, text) {
+        var q = (text || "").trim().toLowerCase()
+        var out = []
+        for (var i = 0; i < list.length; i++) {
+            if (q.length === 0) {
+                out.push(i)
+                continue
+            }
+            var m = list[i] || {}
+            var src = m.source || {}
+            var hay = ((m.label || "") + " " + (src.device_name || "") + " " + sourceText(src)).toLowerCase()
+            if (hay.indexOf(q) >= 0)
+                out.push(i)
+        }
+        return out
+    }
+
+    // "CC 7 · ch 1" / "Note 60 · any ch"
+    function sourceText(src) {
+        var kind = src.message_type === "Note" ? "Note " : "CC "
+        var num = src.cc !== undefined && src.cc !== null ? src.cc : "?"
+        var ch = src.channel !== null && src.channel !== undefined ? "ch " + (src.channel + 1) : "any ch"
+        return kind + num + " · " + ch
+    }
 
     function loadMappings() {
         try {
@@ -33,7 +63,7 @@ ApplicationWindow {
     }
 
     Connections {
-        target: controller
+        target: midiMappings.controller
         function onMidi_mapping_added(mapping_json) {
             midiMappings.loadMappings()
         }
@@ -42,134 +72,178 @@ ApplicationWindow {
         }
     }
 
+    Shortcut {
+        sequence: "Escape"
+        enabled: midiMappings.active
+        onActivated: midiMappings.close()
+    }
+
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: 16
-        spacing: 8
+        anchors.margins: Theme.dialogPadding
+        spacing: 16
 
-        Label {
-            text: mappings.length + " MIDI mapping" + (mappings.length !== 1 ? "s" : "")
-            font.bold: true
-            font.pointSize: 11
-        }
-
-        Label {
-            text: "Connect your MIDI controller to \"ZestBay MIDI In\" in the graph view,\nthen use the \"M\" button in Plugin Parameters to learn a mapping."
-            opacity: 0.5
-            visible: mappings.length === 0
-            Layout.alignment: Qt.AlignHCenter
-            horizontalAlignment: Text.AlignHCenter
-            wrapMode: Text.WordWrap
-            Layout.fillWidth: true
-        }
-
-        ListView {
-            id: mappingList
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            clip: true
-            model: mappings.length
-            spacing: 2
-            visible: mappings.length > 0
-
-            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-
-            delegate: Rectangle {
-                id: mappingDelegate
-                required property int index
-                width: mappingList.width - 12
-                height: 52
-                color: index % 2 === 0 ? Theme.rowEven : Theme.rowOdd
-                radius: 3
-
-                property var mapping: mappings[index] || {}
-                property var source: mapping.source || {}
-                property var target: mapping.target || {}
-
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.margins: 8
-                    spacing: 8
-
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 2
-
-                        Label {
-                            text: mapping.label || ("Instance " + (target.instance_id || "?") + " port " + (target.port_index || "?"))
-                            font.pointSize: 9
-                            font.bold: true
-                            elide: Text.ElideRight
-                            Layout.fillWidth: true
-                        }
-
-                        RowLayout {
-                            spacing: 8
-
-                            Label {
-                                text: {
-                                    var ch = source.channel !== null && source.channel !== undefined ? (source.channel + 1) : "*"
-                                    return "CC " + (source.cc !== undefined ? source.cc : "?") + "  ch" + ch
-                                }
-                                font.pointSize: 8
-                                font.family: "monospace"
-                                color: Theme.colMidi
-                            }
-
-                            Label {
-                                text: source.device_name || "Unknown device"
-                                font.pointSize: 8
-                                opacity: 0.5
-                                elide: Text.ElideRight
-                                Layout.fillWidth: true
-                            }
-
-                            Label {
-                                text: {
-                                    var m = mapping.mode
-                                    if (m === "Toggle") return "Toggle"
-                                    if (m === "Momentary") return "Momentary"
-                                    return "Continuous"
-                                }
-                                font.pointSize: 7
-                                font.italic: true
-                                opacity: 0.6
-                            }
-                        }
-                    }
-
-                    Button {
-                        text: "\u00d7"
-                        flat: true
-                        implicitWidth: 28
-                        implicitHeight: 28
-                        font.pointSize: 12
-                        ToolTip.visible: hovered
-                        ToolTip.text: "Remove this mapping"
-                        onClicked: {
-                            if (target.instance_id !== undefined && target.port_index !== undefined) {
-                                controller.remove_midi_mapping_for_param(target.instance_id, target.port_index)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Rectangle {
-            Layout.fillWidth: true
-            height: 1
-            color: Theme.separator
+        ZbDialogHeader {
+            title: "MIDI mappings"
+            subtitle: "Connect your MIDI controller to “ZestBay MIDI In” in the graph, then use the MIDI button in Plugin Parameters to learn a mapping."
         }
 
         RowLayout {
             Layout.fillWidth: true
+            spacing: 12
 
-            Item { Layout.fillWidth: true }
+            ZbSearchField {
+                id: filterField
+                Layout.fillWidth: true
+                placeholderText: "Filter mappings"
+            }
 
-            Button {
-                text: "Close"
-                onClicked: midiMappings.visible = false
+            Text {
+                text: {
+                    var total = midiMappings.mappings.length
+                    var noun = total + " mapping" + (total !== 1 ? "s" : "")
+                    return filterField.text.trim().length > 0
+                           ? midiMappings.filteredIdx.length + " of " + noun
+                           : noun
+                }
+                font.family: Theme.fontMono
+                font.pixelSize: Theme.sizeMono
+                color: Theme.textMuted
+            }
+        }
+
+        ZbCard {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+
+            ListView {
+                id: mappingList
+                ZbWheelScroll { flickable: mappingList }
+                anchors.left: parent.left
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                anchors.right: mappingBar.visible ? mappingBar.left : parent.right
+                anchors.margins: 1
+                anchors.rightMargin: mappingBar.visible ? Theme.scrollGap : 1
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                model: midiMappings.filteredIdx.length
+                ScrollBar.vertical: mappingBar
+
+                delegate: Item {
+                    id: mappingDelegate
+                    required property int index
+                    property var mapping: midiMappings.mappings[midiMappings.filteredIdx[index]] || {}
+                    property var source: mapping.source || {}
+                    property var target: mapping.target || {}
+                    width: ListView.view.width
+                    height: Theme.rowRule
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: Theme.cardPadding
+                        anchors.rightMargin: Theme.cardPadding
+                        spacing: 12
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 3
+
+                            Text {
+                                text: mappingDelegate.mapping.label
+                                      || ("Instance " + (mappingDelegate.target.instance_id !== undefined ? mappingDelegate.target.instance_id : "?")
+                                          + " port " + (mappingDelegate.target.port_index !== undefined ? mappingDelegate.target.port_index : "?"))
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.sizeBody
+                                font.weight: Font.Medium
+                                color: Theme.textPrimary
+                                elide: Text.ElideRight
+                                Layout.fillWidth: true
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+
+                                Text {
+                                    text: midiMappings.sourceText(mappingDelegate.source)
+                                    font.family: Theme.fontMono
+                                    font.pixelSize: Theme.sizeMono
+                                    color: Theme.textSecondary
+                                }
+                                Text {
+                                    text: "·"
+                                    font.family: Theme.fontMono
+                                    font.pixelSize: Theme.sizeMono
+                                    color: Theme.textMuted
+                                }
+                                Text {
+                                    text: mappingDelegate.source.device_name || "Unknown device"
+                                    font.family: Theme.fontMono
+                                    font.pixelSize: Theme.sizeMono
+                                    color: Theme.textMuted
+                                    elide: Text.ElideRight
+                                    Layout.fillWidth: true
+                                }
+                            }
+                        }
+
+                        ZbBadge {
+                            text: {
+                                var m = mappingDelegate.mapping.mode
+                                if (m === "Toggle") return "Toggle"
+                                if (m === "Momentary") return "Momentary"
+                                return "Continuous"
+                            }
+                        }
+
+                        ZbButton {
+                            id: mappingTrashButton
+                            iconName: "trash"
+                            compact: true
+                            implicitWidth: 28
+                            implicitHeight: 28
+                            onClicked: {
+                                if (mappingDelegate.target.instance_id !== undefined && mappingDelegate.target.port_index !== undefined) {
+                                    midiMappings.controller.remove_midi_mapping_for_param(mappingDelegate.target.instance_id, mappingDelegate.target.port_index)
+                                }
+                            }
+                            ZbTooltip {
+                                visible: mappingTrashButton.hovered
+                                text: "Remove this mapping"
+                            }
+                        }
+                    }
+
+                    ZbDivider {
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                        visible: mappingDelegate.index < mappingList.count - 1
+                    }
+                }
+            }
+
+            ZbScrollBar {
+                id: mappingBar
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                anchors.right: parent.right
+                anchors.margins: 4
+            }
+
+            Text {
+                anchors.centerIn: parent
+                width: parent.width - 2 * Theme.dialogPadding
+                visible: mappingList.count === 0
+                text: midiMappings.mappings.length === 0
+                      ? "No MIDI mappings yet."
+                      : "No mappings match “" + filterField.text.trim() + "”."
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.WordWrap
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.sizeBody
+                color: Theme.textMuted
             }
         }
     }

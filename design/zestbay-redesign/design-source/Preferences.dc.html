@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Preferences</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+body{margin:0;background:#121418}
+a{color:#c9e265}a:hover{color:#e3f29a}
+button{cursor:pointer}
+input[type=range]{cursor:pointer}
+</style>
+</helmet>
+<div style="width: 720px; height: 760px; box-sizing: border-box; display: flex; flex-direction: column; background: #1a1d23; color: #e8eaee; border: 1px solid #2a2f38; border-radius: 12px; overflow: hidden; font-family: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif; font-size: 13px; line-height: 1.3">
+
+  <div style="display: flex; align-items: center; gap: 16px; padding: 20px 24px 8px">
+    <h1 style="margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -0.01em; flex: 1">Preferences</h1>
+    <button type="button" aria-label="Close" style="width: 32px; height: 32px; border-radius: 8px; border: 0; background: transparent; color: #8b93a0; display: flex; align-items: center; justify-content: center"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"></path></svg></button>
+  </div>
+
+  <div style="flex: 1; min-height: 0; overflow: hidden; padding: 8px 24px 0; display: flex; flex-direction: column; gap: 24px">
+
+    <section style="display: flex; flex-direction: column; gap: 10px">
+      <h2 style="margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #8b93a0">General</h2>
+      <div style="background: #1f232a; border: 1px solid #2a2f38; border-radius: 10px; overflow: hidden; display: flex; flex-direction: column">
+        <div style="display: flex; align-items: center; gap: 16px; padding: 12px 16px; border-bottom: 1px solid #262b33">
+          <div style="flex: 1; display: flex; flex-direction: column; gap: 3px">
+            <span style="font-weight: 500">Start minimized to tray</span>
+            <span style="font-size: 12px; color: #8b93a0">Launch with the window hidden; show it from the tray icon.</span>
+          </div>
+          <button type="button" role="switch" aria-checked="true" aria-label="Start minimized to tray" style="width: 40px; height: 22px; border-radius: 11px; border: 0; padding: 0; position: relative; background: {{accent}}; flex: none"><span style="position: absolute; top: 2px; left: 20px; width: 18px; height: 18px; border-radius: 50%; background: #141413"></span></button>
+        </div>
+        <div style="display: flex; align-items: center; gap: 16px; padding: 12px 16px; border-bottom: 1px solid #262b33">
+          <div style="flex: 1; display: flex; flex-direction: column; gap: 3px">
+            <span style="font-weight: 500">Close to tray</span>
+            <span style="font-size: 12px; color: #8b93a0">The window close button hides ZestBay instead of quitting.</span>
+          </div>
+          <button type="button" role="switch" aria-checked="true" aria-label="Close to tray" style="width: 40px; height: 22px; border-radius: 11px; border: 0; padding: 0; position: relative; background: {{accent}}; flex: none"><span style="position: absolute; top: 2px; left: 20px; width: 18px; height: 18px; border-radius: 50%; background: #141413"></span></button>
+        </div>
+        <div style="display: flex; align-items: center; gap: 16px; padding: 12px 16px">
+          <div style="flex: 1; display: flex; flex-direction: column; gap: 3px">
+            <span style="font-weight: 500">Auto-learn patchbay rules</span>
+            <span style="font-size: 12px; color: #8b93a0">Create or update a rule whenever you connect ports by hand.</span>
+          </div>
+          <button type="button" role="switch" aria-checked="true" aria-label="Auto-learn patchbay rules" style="width: 40px; height: 22px; border-radius: 11px; border: 0; padding: 0; position: relative; background: {{accent}}; flex: none"><span style="position: absolute; top: 2px; left: 20px; width: 18px; height: 18px; border-radius: 50%; background: #141413"></span></button>
+        </div>
+      </div>
+    </section>
+
+    <section style="display: flex; flex-direction: column; gap: 10px">
+      <div style="display: flex; align-items: baseline; gap: 10px">
+        <h2 style="margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #8b93a0">Timing</h2>
+        <span style="font-size: 12px; color: #8b93a0">Trade responsiveness against reliability.</span>
+      </div>
+      <div style="background: #1f232a; border: 1px solid #2a2f38; border-radius: 10px; overflow: hidden; display: flex; flex-direction: column">
+
+        <div style="display: flex; flex-direction: column; gap: 8px; padding: 14px 16px 12px; border-bottom: 1px solid #262b33">
+          <div style="display: flex; align-items: center; gap: 16px">
+            <label for="settle" style="flex: 1; display: flex; flex-direction: column; gap: 3px">
+              <span style="font-weight: 500">Rule settle time</span>
+              <span style="font-size: 12px; color: #8b93a0">Wait this long after the graph stops changing before applying rules. Higher is safer on slow hardware.</span>
+            </label>
+            <span style="display: flex; align-items: baseline; gap: 4px; height: 28px; box-sizing: border-box; padding: 0 10px; border: 1px solid #2f353f; border-radius: 6px; background: #121418; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; color: #e8eaee; line-height: 26px; flex: none">50<span style="color: #8b93a0">ms</span></span>
+          </div>
+          <input id="settle" type="range" min="0" max="100" value="50" style="width: 100%; margin: 0; accent-color: {{accent}}">
+          <div style="display: flex; justify-content: space-between; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; color: #8b93a0"><span>0 ms</span><span>100 ms</span></div>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 8px; padding: 14px 16px 12px; border-bottom: 1px solid #262b33">
+          <div style="display: flex; align-items: center; gap: 16px">
+            <label for="poll" style="flex: 1; display: flex; flex-direction: column; gap: 3px">
+              <span style="font-weight: 500">Poll interval</span>
+              <span style="font-size: 12px; color: #8b93a0">How often the UI checks for PipeWire events. Lower is smoother but uses more CPU.</span>
+            </label>
+            <span style="display: flex; align-items: baseline; gap: 4px; height: 28px; box-sizing: border-box; padding: 0 10px; border: 1px solid #2f353f; border-radius: 6px; background: #121418; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; color: #e8eaee; line-height: 26px; flex: none">100<span style="color: #8b93a0">ms</span></span>
+          </div>
+          <input id="poll" type="range" min="16" max="500" value="100" style="width: 100%; margin: 0; accent-color: {{accent}}">
+          <div style="display: flex; justify-content: space-between; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; color: #8b93a0"><span>16 ms</span><span>500 ms</span></div>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 8px; padding: 14px 16px 12px">
+          <div style="display: flex; align-items: center; gap: 16px">
+            <label for="debounce" style="flex: 1; display: flex; flex-direction: column; gap: 3px">
+              <span style="font-weight: 500">Parameter save debounce</span>
+              <span style="font-size: 12px; color: #8b93a0">Wait this long after the last parameter change before writing to disk.</span>
+            </label>
+            <span style="display: flex; align-items: baseline; gap: 4px; height: 28px; box-sizing: border-box; padding: 0 10px; border: 1px solid #2f353f; border-radius: 6px; background: #121418; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; color: #e8eaee; line-height: 26px; flex: none">1000<span style="color: #8b93a0">ms</span></span>
+          </div>
+          <input id="debounce" type="range" min="100" max="10000" value="1000" style="width: 100%; margin: 0; accent-color: {{accent}}">
+          <div style="display: flex; justify-content: space-between; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; color: #8b93a0"><span>100 ms</span><span>10 000 ms</span></div>
+        </div>
+
+      </div>
+    </section>
+
+  </div>
+
+  <div style="display: flex; align-items: center; gap: 8px; padding: 16px 24px 20px; border-top: 1px solid #262b33; margin-top: 16px">
+    <button type="button" style="height: 32px; padding: 0 12px; border-radius: 8px; border: 1px solid #2f353f; background: #22262e; color: #e8eaee; font: inherit; font-size: 12px; font-weight: 500">Reset to defaults</button>
+    <div style="flex: 1"></div>
+    <span style="font-size: 12px; color: #8b93a0">Changes apply immediately.</span>
+  </div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#c9e265","options":["#c9e265","#63b3ff","#f0a040","#e879b5"]},"$preview":{"width":720,"height":760}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { accent: this.props.accent ?? '#c9e265' };
+  }
+}
+</script>
+</body>
+</html>

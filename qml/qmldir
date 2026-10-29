@@ -1,5 +1,7 @@
 # Implicit-import qmldir for this directory (see build.rs). Before Qt 6.5,
 # files here resolve sibling types through the directory rather than the
-# ZestBay module, so without this Theme is not a singleton and every
-# Theme.* lookup is undefined. Other types are still found as plain files.
+# ZestBay module, so without this the singletons (Theme, Glyphs) are plain
+# types and every lookup on them is undefined. Other types are still found
+# as plain files.
 singleton Theme 1.0 Theme.qml
+singleton Glyphs 1.0 Glyphs.qml

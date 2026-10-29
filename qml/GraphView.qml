@@ -79,8 +79,6 @@ Item {
     property var selectedLinks: ({})
     property var selectedNodes: ({})
     property bool groupDragging: false
-    property real groupDragLastX: 0
-    property real groupDragLastY: 0
 
     property int contextNodeId: -1
     property var contextNode: null
@@ -108,39 +106,54 @@ Item {
 
     // Snap guides: drawn while dragging
     readonly property real snapThreshold: 5  // pixels in canvas space
+    // Gap between nodes when snapping beside/above/below one, and when a
+    // dropped node is pushed off another (graph units = px at 100 % zoom).
+    // Set from preferences (snap_gap_px).
+    property real snapGap: 10
+
+    // Snap to grid (preferences snap_to_grid / grid_size_px): node positions
+    // land on multiples of gridSize (graph units); the dot grid uses the
+    // same pitch. Auto layout follows it too.
+    property bool snapToGrid: true
+    property real gridSize: 24
+    onSnapToGridChanged: if (snapToGrid) alignAllToGrid()
+    onGridSizeChanged: {
+        if (snapToGrid) alignAllToGrid()
+        canvas.requestPaint()
+    }
+
+    // Group drag: positions of the dragged nodes and the cursor at the start,
+    // so snapping never accumulates across mouse moves.
+    property var groupDragStart: ({})
+    property real groupDragStartX: 0
+    property real groupDragStartY: 0
     property var activeSnapLines: []  // [{axis:"x"|"y", pos: number}]
 
-    readonly property real minNodeWidth: 180
-    readonly property real maxNodeWidth: 400
+    // Node card geometry comes from the Theme (design bible §6.5).
+    readonly property real minNodeWidth: Theme.nodeWidth
+    readonly property real maxNodeWidth: Theme.nodeWidthPlugin
+    readonly property real portRadius: Theme.nodePin / 2
     property var nodeWidths: ({})
-    readonly property real headerHeight: 26
-    readonly property real portHeight: 18
-    readonly property real portSpacing: 3
-    readonly property real portRadius: 5
-    readonly property real nodePadding: 8
-    readonly property real buttonRowHeight: 22
 
-    readonly property color colSink: Theme.colSink
-    readonly property color colSource: Theme.colSource
-    readonly property color colVirtualSink: Theme.colVirtualSink
-    readonly property color colVirtualSource: Theme.colVirtualSource
-    readonly property color colStreamOut: Theme.colStreamOut
-    readonly property color colStreamIn: Theme.colStreamIn
-    readonly property color colDuplex: Theme.colDuplex
-    readonly property color colJack: Theme.colJack
-    readonly property color colLv2: Theme.colLv2
-    readonly property color colDefault: Theme.colDefault
-    readonly property color colNodeBg: Theme.nodeBg
-    readonly property color colNodeBorder: Theme.nodeBorder
-    readonly property color colPortIn: Theme.colPortIn
-    readonly property color colPortOut: Theme.colPortOut
-    readonly property color colMidi: Theme.colMidi
-    readonly property color colMidiPort: Theme.colMidiPort
-    readonly property color colLinkActive: Theme.colLinkActive
-    readonly property color colLinkInactive: Theme.colLinkInactive
-    readonly property color colLinkMidi: Theme.colLinkMidi
-    readonly property color colLinkConnecting: Theme.colLinkConnecting
-    readonly property color colDefaultOutline: Theme.colDefaultOutline
+    // Per-node layout (visible ports, collapse state, height), rebuilt by
+    // refreshData(); see computeNodeLayout().
+    property var nodeLayouts: ({})
+    // Ports with at least one link: portId -> true.
+    property var connectedPorts: ({})
+    // Plugins whose collapsed ports the user expanded (session only):
+    // layoutKey -> true.
+    property var expandedNodes: ({})
+    // Collapse a side's trailing free ports only when at least this many.
+    readonly property int collapseMinHidden: 3
+
+    // Toolbar search: non-matching nodes dim, matching ports get a ring.
+    property string searchText: ""
+    onSearchTextChanged: canvas.requestPaint()
+
+    // Hover state (canvas repaint + pin tooltip).
+    property int hoveredPortId: -1
+    property int hoveredLinkId: -1
+    property string hoveredButton: ""   // "<nodeId>:<key>" for footer buttons / toggle row
 
     // Redraw graph when system theme changes
     Connections {
@@ -268,8 +281,16 @@ Item {
         }
         portsByNode = newPorts
 
+        var newConnected = {}
+        for (var ci = 0; ci < links.length; ci++) {
+            newConnected[links[ci].outputPortId] = true
+            newConnected[links[ci].inputPortId] = true
+        }
+        connectedPorts = newConnected
+
         var newSorted = {}
         var newHeights = {}
+        var newLayouts = {}
         for (var si = 0; si < nodes.length; si++) {
             var sn = nodes[si]
             var sp = newPorts[sn.id] || []
@@ -278,13 +299,12 @@ Item {
                 outputs: sp.filter(function(p) { return p.direction === "Output" }).sort(function(a, b) { return portSortCmp(a, b) })
             }
             newSorted[sn.id] = sorted
-            var rows = Math.max(sorted.inputs.length, sorted.outputs.length, 1)
-            var hgt = headerHeight + nodePadding * 2 + rows * (portHeight + portSpacing)
-            if (sn.type === "Plugin")
-                hgt += buttonRowHeight + nodePadding
-            newHeights[sn.id] = hgt
+            var lay = computeNodeLayout(sn, sorted)
+            newLayouts[sn.id] = lay
+            newHeights[sn.id] = lay.height
         }
         sortedPortsByNode = newSorted
+        nodeLayouts = newLayouts
         nodeHeights = newHeights
         uniqueKeyById = buildUniqueLayoutKeys()
         widthsDirty = true
@@ -394,7 +414,7 @@ Item {
                 nodePositions[n.id] = { x: anchor.x, y: anchor.y }
                 var spot = findFreeSpot(n, anchor.x, anchor.y, true)
                 if (spot) {
-                    nodePositions[n.id] = spot
+                    nodePositions[n.id] = gridPos(spot)
                     persistLayout()
                 } else {
                     startPlacing(n.id)
@@ -409,9 +429,9 @@ Item {
                 autoPlaced[n.id] = true
                 if (!placeNearPeer(n)) {
                     var pa = provisionalAnchor(n)
-                    nodePositions[n.id] = pa
+                    nodePositions[n.id] = gridPos(pa)
                     var spot2 = findFreeSpot(n, pa.x, pa.y, false)
-                    if (spot2) nodePositions[n.id] = spot2
+                    if (spot2) nodePositions[n.id] = gridPos(spot2)
                     persistLayout()
                     if (!nodeIsPinned(n)) {
                         awaitingLinkPlacement[n.id] = true
@@ -516,7 +536,7 @@ Item {
 
             var anchor = adjacentAnchor(node, peerNode, nodeFeedsPeer)
             var spot = findFreeSpot(node, anchor.x, anchor.y, false)
-            nodePositions[nodeId] = spot || anchor
+            nodePositions[nodeId] = gridPos(spot || anchor)
             persistLayout()
             return true
         }
@@ -591,7 +611,7 @@ Item {
         var h = calculateNodeHeight(node)
         var w = getNodeWidth(node.id) || minNodeWidth
         var maxAttempts = 50
-        var spacing = 10
+        var spacing = snapGap
         for (var attempt = 0; attempt < maxAttempts; attempt++) {
             var overlaps = false
             for (var oi = 0; oi < nodes.length; oi++) {
@@ -613,8 +633,10 @@ Item {
                     var minH = Math.min(h, oh)
                     if (overlapTop < minH * 0.7) {
                         pos = { x: pos.x, y: opos.y - h - spacing }
+                        if (snapToGrid) pos.y = Math.floor(pos.y / gridSize) * gridSize
                     } else {
                         pos = { x: pos.x, y: opos.y + oh + spacing }
+                        if (snapToGrid) pos.y = Math.ceil(pos.y / gridSize) * gridSize
                     }
                     nodePositions[node.id] = pos
                     overlaps = true
@@ -628,15 +650,66 @@ Item {
     // Snap a node's position to nearby nodes.
     // Snaps left-edge to left-edge, and top/bottom edges within snapThreshold.
     // Returns { x, y, lines } where lines are the snap guide descriptors.
+    // ---- Grid --------------------------------------------------------------
+
+    // Nearest grid point to p (unchanged when snap to grid is off).
+    function gridPos(p) {
+        if (!snapToGrid || !p) return p
+        return { x: Math.round(p.x / gridSize) * gridSize, y: Math.round(p.y / gridSize) * gridSize }
+    }
+
+    // Put every visible node on the grid (when snapping is switched on or
+    // the grid size changes), then separate any that now overlap.
+    function alignAllToGrid() {
+        var moved = false
+        for (var i = 0; i < nodes.length; i++) {
+            var n = nodes[i]
+            if (n.layoutKey && hiddenNodes[n.layoutKey]) continue
+            var p = nodePositions[n.id]
+            if (!p) continue
+            var g = gridPos(p)
+            if (g.x !== p.x || g.y !== p.y) {
+                nodePositions[n.id] = g
+                moved = true
+            }
+        }
+        if (!moved) return
+        for (var j = 0; j < nodes.length; j++) {
+            if (nodePositions[nodes[j].id]) resolveNodeOverlap(nodes[j])
+        }
+        persistLayout()
+        canvas.requestPaint()
+    }
+
+    // Shift-drag snapping against the other visible nodes (canvas units).
+    // Aligning edges (left/left, top/top, bottom/bottom) snaps flush;
+    // stacking above/below or placing beside another node keeps `snapGap`
+    // between them. Returns { x, y, lines } with guide lines to draw.
     function computeSnap(nodeId, rawX, rawY, skipIds) {
         var w = getNodeWidth(nodeId) || minNodeWidth
         var node = findNodeData(nodeId)
         var h = node ? calculateNodeHeight(node) : 80
-        var snappedX = rawX
-        var snappedY = rawY
-        var lines = []
-        var bestDx = snapThreshold + 1
-        var bestDy = snapThreshold + 1
+        var gap = snapGap
+        var best = { x: null, dx: snapThreshold + 1, gx: 0,
+                     y: null, dy: snapThreshold + 1, gy: 0 }
+
+        // Candidate position `value` for this axis; `guide` is the edge of
+        // the other node that the guide line marks.
+        function tryX(value, guide) {
+            var d = Math.abs(rawX - value)
+            if (d < best.dx) { best.dx = d; best.x = value; best.gx = guide }
+        }
+        function tryY(value, guide) {
+            var d = Math.abs(rawY - value)
+            if (d < best.dy) { best.dy = d; best.y = value; best.gy = guide }
+        }
+
+        // Only nodes at least partly on screen: when zoomed in, a drag must
+        // not snap to something the user can't see.
+        var visL = -panX / zoom
+        var visT = -panY / zoom
+        var visR = (width - panX) / zoom
+        var visB = (height - panY) / zoom
 
         for (var i = 0; i < nodes.length; i++) {
             var other = nodes[i]
@@ -647,84 +720,29 @@ Item {
             if (!opos) continue
             var ow = getNodeWidth(other.id) || minNodeWidth
             var oh = calculateNodeHeight(other)
+            if (opos.x + ow < visL || opos.x > visR || opos.y + oh < visT || opos.y > visB) continue
 
-            // --- X axis: left-edge to left-edge ---
-            var dxLeft = Math.abs(rawX - opos.x)
-            if (dxLeft < bestDx) {
-                bestDx = dxLeft
-                snappedX = opos.x
-            }
+            tryX(opos.x, opos.x)                          // left edges aligned
+            tryX(opos.x + ow + gap, opos.x + ow)          // to the right of it
+            tryX(opos.x - gap - w, opos.x)                // to the left of it
 
-            // --- Y axis: top-to-top, top-to-bottom, bottom-to-top, bottom-to-bottom ---
-            // dragged top vs other top
-            var dyTT = Math.abs(rawY - opos.y)
-            if (dyTT < bestDy) {
-                bestDy = dyTT
-                snappedY = opos.y
-            }
-            // dragged top vs other bottom
-            var dyTB = Math.abs(rawY - (opos.y + oh))
-            if (dyTB < bestDy) {
-                bestDy = dyTB
-                snappedY = opos.y + oh
-            }
-            // dragged bottom vs other top
-            var dyBT = Math.abs((rawY + h) - opos.y)
-            if (dyBT < bestDy) {
-                bestDy = dyBT
-                snappedY = opos.y - h
-            }
-            // dragged bottom vs other bottom
-            var dyBB = Math.abs((rawY + h) - (opos.y + oh))
-            if (dyBB < bestDy) {
-                bestDy = dyBB
-                snappedY = opos.y + oh - h
-            }
+            tryY(opos.y, opos.y)                          // tops aligned
+            tryY(opos.y + oh - h, opos.y + oh)            // bottoms aligned
+            tryY(opos.y + oh + gap, opos.y + oh)          // stacked below it
+            tryY(opos.y - gap - h, opos.y)                // stacked above it
         }
 
-        // Only apply snap if within threshold
-        if (bestDx > snapThreshold) snappedX = rawX
-        if (bestDy > snapThreshold) snappedY = rawY
-
-        // Build guide lines for active snaps
-        if (snappedX !== rawX) {
-            lines.push({ axis: "x", pos: snappedX })
+        var lines = []
+        var snappedX = rawX
+        var snappedY = rawY
+        if (best.x !== null && best.dx <= snapThreshold) {
+            snappedX = best.x
+            lines.push({ axis: "x", pos: best.gx })
         }
-        if (snappedY !== rawY) {
-            // Determine which y edge snapped
-            var snapYEdge = snappedY  // top edge
-            // Check if bottom edge was closer
-            if (Math.abs((rawY + h) - (snappedY + h)) > 0.01) {
-                // It could be a bottom-edge snap; figure out the guide line y
-                // The snappedY was set such that the matching edge aligns.
-                // We need to find which other-node edge we matched:
-                for (var j = 0; j < nodes.length; j++) {
-                    var o2 = nodes[j]
-                    if (o2.id === nodeId) continue
-                    if (skipIds && skipIds[o2.id]) continue
-                    if (o2.layoutKey && hiddenNodes[o2.layoutKey]) continue
-                    var op2 = nodePositions[o2.id]
-                    if (!op2) continue
-                    var oh2 = calculateNodeHeight(o2)
-                    // Check which edge the snap aligned to
-                    if (Math.abs(snappedY - op2.y) < 0.5) {
-                        lines.push({ axis: "y", pos: op2.y }); break
-                    }
-                    if (Math.abs(snappedY - (op2.y + oh2)) < 0.5) {
-                        lines.push({ axis: "y", pos: op2.y + oh2 }); break
-                    }
-                    if (Math.abs((snappedY + h) - op2.y) < 0.5) {
-                        lines.push({ axis: "y", pos: op2.y }); break
-                    }
-                    if (Math.abs((snappedY + h) - (op2.y + oh2)) < 0.5) {
-                        lines.push({ axis: "y", pos: op2.y + oh2 }); break
-                    }
-                }
-            } else {
-                lines.push({ axis: "y", pos: snappedY })
-            }
+        if (best.y !== null && best.dy <= snapThreshold) {
+            snappedY = best.y
+            lines.push({ axis: "y", pos: best.gy })
         }
-
         return { x: snappedX, y: snappedY, lines: lines }
     }
 
@@ -766,10 +784,16 @@ Item {
     onPanXChanged: if (viewportLoaded) viewportSaveTimer.restart()
     onPanYChanged: if (viewportLoaded) viewportSaveTimer.restart()
 
-    Menu {
+    readonly property bool contextIsPlugin: contextNode !== null && contextNode.type === "Plugin"
+    readonly property bool contextCanBeDefault: contextNode !== null
+        && (contextNode.type === "Sink" || contextNode.type === "Duplex" || contextNode.type === "Plugin")
+
+    // Device / sink: Hide · Pin · — · Set as default.
+    // Plugin: Hide · Pin · — · Set as default · — · Rename… · Open UI… · — · Remove plugin.
+    ZbMenu {
         id: nodeContextMenu
 
-        MenuItem {
+        ZbMenuItem {
             text: "Hide"
             onTriggered: {
                 if (contextNode && contextNode.layoutKey) {
@@ -781,33 +805,21 @@ Item {
             }
         }
 
-        MenuItem {
+        ZbMenuItem {
             text: contextNode && contextNode.layoutKey && pinnedNodes[contextNode.layoutKey]
                   ? "Unpin" : "Pin"
-            onTriggered: {
-                if (contextNode && contextNode.layoutKey) {
-                    var key = contextNode.layoutKey
-                    if (pinnedNodes[key]) {
-                        delete pinnedNodes[key]
-                    } else {
-                        pinnedNodes[key] = true
-                    }
-                    pinnedNodes = pinnedNodes
-                    persistPinned()
-                    canvas.requestPaint()
-                }
-            }
+            onTriggered: togglePinned(contextNode)
         }
 
-        MenuSeparator {
-            visible: contextNode !== null && (contextNode.type === "Sink" || contextNode.type === "Duplex" || contextNode.type === "Plugin")
+        ZbMenuSeparator {
+            visible: contextCanBeDefault
             height: visible ? implicitHeight : 0
         }
 
-        MenuItem {
+        ZbMenuItem {
             text: contextNode && contextNode.layoutKey === defaultNodeKey && defaultNodeKey !== ""
-                  ? "Clear Default" : "Set as Default"
-            visible: contextNode !== null && (contextNode.type === "Sink" || contextNode.type === "Duplex" || contextNode.type === "Plugin")
+                  ? "Clear default" : "Set as default"
+            visible: contextCanBeDefault
             height: visible ? implicitHeight : 0
             onTriggered: {
                 if (contextNode) {
@@ -824,14 +836,14 @@ Item {
             }
         }
 
-        MenuSeparator {
-            visible: contextNode && contextNode.type === "Plugin"
+        ZbMenuSeparator {
+            visible: contextIsPlugin
             height: visible ? implicitHeight : 0
         }
 
-        MenuItem {
-            text: "Rename..."
-            visible: contextNode !== null && contextNode.type === "Plugin"
+        ZbMenuItem {
+            text: "Rename\u2026"
+            visible: contextIsPlugin
             height: visible ? implicitHeight : 0
             onTriggered: {
                 renameField.text = contextNode ? contextNode.name : ""
@@ -839,9 +851,10 @@ Item {
             }
         }
 
-        MenuItem {
-            text: "Open UI..."
-            visible: contextNode !== null && contextNode.type === "Plugin" && contextNode.pluginHasUi !== false
+        ZbMenuItem {
+            text: "Open UI\u2026"
+            visible: contextIsPlugin
+            enabled: contextIsPlugin && contextNode.pluginHasUi !== false
             height: visible ? implicitHeight : 0
             onTriggered: {
                 if (contextNodeId >= 0)
@@ -849,14 +862,15 @@ Item {
             }
         }
 
-        MenuSeparator {
-            visible: contextNode !== null && contextNode.type === "Plugin"
+        ZbMenuSeparator {
+            visible: contextIsPlugin
             height: visible ? implicitHeight : 0
         }
 
-        MenuItem {
-            text: "Remove Plugin"
-            visible: contextNode !== null && contextNode.type === "Plugin"
+        ZbMenuItem {
+            text: "Remove plugin"
+            destructive: true
+            visible: contextIsPlugin
             height: visible ? implicitHeight : 0
             onTriggered: {
                 if (contextNodeId >= 0)
@@ -865,11 +879,12 @@ Item {
         }
     }
 
-    Menu {
+    // Delete selected links · — · Add plugin… · — · Unhide all · Fit to view · Reset zoom · Auto layout
+    ZbMenu {
         id: canvasContextMenu
 
-        MenuItem {
-            text: "Delete Selected Links"
+        ZbMenuItem {
+            text: "Delete selected links"
             enabled: {
                 for (var k in selectedLinks) return true
                 return false
@@ -877,10 +892,10 @@ Item {
             onTriggered: deleteSelectedLinks()
         }
 
-        MenuSeparator {}
+        ZbMenuSeparator {}
 
-        MenuItem {
-            text: "Add Plugin..."
+        ZbMenuItem {
+            text: "Add plugin\u2026"
             onTriggered: {
                 if (contextCanvasPos) {
                     pendingPluginPosition = { x: contextCanvasPos.x, y: contextCanvasPos.y }
@@ -890,10 +905,10 @@ Item {
             }
         }
 
-        MenuSeparator {}
+        ZbMenuSeparator {}
 
-        MenuItem {
-            text: "Unhide All"
+        ZbMenuItem {
+            text: "Unhide all"
             enabled: {
                 for (var k in hiddenNodes) return true
                 return false
@@ -905,37 +920,38 @@ Item {
             }
         }
 
-        MenuItem {
-            text: "Fit to View (Home)"
+        ZbMenuItem {
+            text: "Fit to view"
+            shortcutHint: "Home"
             onTriggered: fitToView()
         }
 
-        MenuItem {
-            text: "Reset Zoom"
+        ZbMenuItem {
+            text: "Reset zoom"
             onTriggered: zoomAt(width / 2, height / 2, 1.0)
         }
 
-        MenuItem {
-            text: "Auto Layout"
+        ZbMenuItem {
+            text: "Auto layout"
             onTriggered: runAutoLayout()
         }
     }
 
-    Dialog {
+    ZbDialog {
         id: renameDialog
-        title: "Rename Plugin"
-        standardButtons: Dialog.Ok | Dialog.Cancel
-        anchors.centerIn: parent
-        modal: true
-        width: 320
+        title: "Rename plugin"
+        primaryText: "Rename"
+        secondaryText: "Cancel"
+        width: 360
 
-        contentItem: TextField {
+        ZbTextField {
             id: renameField
+            width: parent ? parent.width : 300
             placeholderText: "New name"
-            selectByMouse: true
             onAccepted: renameDialog.accept()
         }
 
+        onOpened: renameField.forceActiveFocus()
         onAccepted: {
             var newName = renameField.text.trim()
             if (newName.length > 0 && contextNodeId >= 0) {
@@ -948,19 +964,20 @@ Item {
     property int pendingInsertLinkId: -1
     property int pendingInsertNodeId: -1
 
-    Dialog {
+    ZbDialog {
         id: insertConfirmDialog
-        title: "Insert Plugin on Link"
-        standardButtons: Dialog.Yes | Dialog.No
-        anchors.centerIn: parent
-        modal: true
-        width: 360
+        title: "Insert plugin on link"
+        primaryText: "Insert"
+        secondaryText: "Cancel"
+        width: 380
 
-        contentItem: Text {
+        Text {
+            width: parent ? parent.width : 320
             text: "Insert this plugin between the connected nodes?"
             wrapMode: Text.WordWrap
+            font.family: Theme.fontSans
+            font.pixelSize: Theme.sizeBody
             color: Theme.textPrimary
-            padding: 12
         }
 
         onAccepted: {
@@ -1044,7 +1061,7 @@ Item {
     function runAutoLayout() {
         var sizesJson = JSON.stringify(collectNodeSizes())
         var pinnedJson = JSON.stringify(collectPinnedPositions())
-        var resultJson = controller.auto_layout(sizesJson, pinnedJson)
+        var resultJson = controller.auto_layout(sizesJson, pinnedJson, snapToGrid ? gridSize : 0)
         try {
             // Result is keyed by node id. Only the laid-out nodes move; hidden
             // nodes keep their positions and saved entries for absent devices
@@ -1161,6 +1178,8 @@ Item {
     // Finish in-hand placement, leaving the node wherever it currently sits.
     function finishPlacing() {
         if (placingNodeId < 0) return
+        if (nodePositions[placingNodeId])
+            nodePositions[placingNodeId] = gridPos(nodePositions[placingNodeId])
         delete autoPlaced[placingNodeId]
         delete placedKeyById[placingNodeId]
         placingNodeId = -1
@@ -1187,67 +1206,95 @@ Item {
         return "stream"
     }
 
-    function getNodeColor(node) {
-        if (node.mediaType === "Midi") return colMidi
-        if (node.isJack) return colJack
+    // Category of a node for its header chip: { color, glyph }.
+    function nodeCategory(node) {
         var type = node.type
-        if (!type) return colDefault
-        if (type === "Sink") return node.isVirtual ? colVirtualSink : colSink
-        if (type === "Source") return node.isVirtual ? colVirtualSource : colSource
-        if (type === "StreamOutput") return colStreamOut
-        if (type === "StreamInput") return colStreamIn
-        if (type === "Duplex") return colDuplex
-        if (type === "Plugin") return colLv2
-        return colDefault
+        if (node.mediaType === "Midi" || (node.layoutKey || "").indexOf("MidiBridge:") === 0)
+            return { color: Theme.catMidi, glyph: "din" }
+        if (type === "Plugin") return { color: Theme.catPlugin, glyph: "plug" }
+        if (type === "StreamOutput" || type === "StreamInput") return { color: Theme.catApp, glyph: "wave" }
+        if (node.mediaType === "Video") return { color: Theme.catHardware, glyph: "camera" }
+        if (node.isVirtual) return { color: Theme.catVirtual, glyph: type === "Source" ? "mic" : "speaker" }
+        if (type === "Source") return { color: Theme.catHardware, glyph: "mic" }
+        if (type === "Sink" || type === "Duplex") return { color: Theme.catHardware, glyph: "headphones" }
+        return { color: Theme.catHardware, glyph: "speaker" }
+    }
+
+    function signalColor(mediaType) {
+        if (mediaType === "Midi") return Theme.sigMidi
+        if (mediaType === "Video") return Theme.sigVideo
+        return Theme.sigAudio
+    }
+
+    // How many of a side's ports stay visible when collapsed: everything up
+    // to the last connected port, and at least two.
+    function visiblePortCount(ports) {
+        var last = -1
+        for (var i = 0; i < ports.length; i++) {
+            if (connectedPorts[ports[i].id]) last = i
+        }
+        return Math.min(ports.length, Math.max(last + 1, 2))
+    }
+
+    // Visible ports, collapse state and height of a node card. Plugins with
+    // many trailing unconnected ports fold them into one "n more" row.
+    function computeNodeLayout(node, sorted) {
+        var ins = sorted.inputs
+        var outs = sorted.outputs
+        var hiddenIn = 0
+        var hiddenOut = 0
+        if (node.type === "Plugin") {
+            hiddenIn = ins.length - visiblePortCount(ins)
+            hiddenOut = outs.length - visiblePortCount(outs)
+            if (hiddenIn < collapseMinHidden) hiddenIn = 0
+            if (hiddenOut < collapseMinHidden) hiddenOut = 0
+        }
+        var expandable = hiddenIn + hiddenOut > 0
+        var expanded = expandable && !!(node.layoutKey && expandedNodes[node.layoutKey])
+        var visIn = expandable && !expanded ? ins.slice(0, ins.length - hiddenIn) : ins
+        var visOut = expandable && !expanded ? outs.slice(0, outs.length - hiddenOut) : outs
+        var rows = Math.max(visIn.length, visOut.length, 1)
+        var h = Theme.nodeHeader + Theme.nodePortsTop
+              + Theme.nodePortRow * (rows + (expandable ? 1 : 0))
+              + Theme.nodePortsBottom + 2
+        if (node.type === "Plugin") h += Theme.nodeFooter
+        return { inputs: visIn, outputs: visOut, rows: rows, expandable: expandable,
+                 expanded: expanded, hiddenIn: hiddenIn, hiddenOut: hiddenOut, height: h }
+    }
+
+    function nodeLayout(node) {
+        return nodeLayouts[node.id] || computeNodeLayout(node, getSortedPorts(node.id))
     }
 
     function calculateNodeHeight(node) {
         var cached = nodeHeights[node.id]
         if (cached !== undefined) return cached
-        var ports = portsByNode[node.id] || []
-        var inputs = ports.filter(function(p) { return p.direction === "Input" }).length
-        var outputs = ports.filter(function(p) { return p.direction === "Output" }).length
-        var rows = Math.max(inputs, outputs, 1)
-        var h = headerHeight + nodePadding * 2 + rows * (portHeight + portSpacing)
-        if (node.type === "Plugin")
-            h += buttonRowHeight + nodePadding
-        return h
+        return nodeLayout(node).height
     }
 
-    function calculateNodeWidths(ctx) {
+    // Fixed card widths: devices, sinks and streams 184; plugins 208.
+    function calculateNodeWidths() {
         var newWidths = {}
-        ctx.save()
         for (var ni = 0; ni < nodes.length; ni++) {
             var node = nodes[ni]
-            var ports = portsByNode[node.id] || []
-
-            ctx.font = "bold 11px sans-serif"
-            var titleW = ctx.measureText(node.name || "").width + nodePadding * 2
-
-            ctx.font = "10px sans-serif"
-            var maxInputW = 0
-            var maxOutputW = 0
-            for (var pi = 0; pi < ports.length; pi++) {
-                var pw = ctx.measureText(ports[pi].name || "").width
-                if (ports[pi].direction === "Input") {
-                    if (pw > maxInputW) maxInputW = pw
-                } else {
-                    if (pw > maxOutputW) maxOutputW = pw
-                }
-            }
-
-            var portW = portRadius + 4 + maxInputW + nodePadding * 2 + maxOutputW + 4 + portRadius
-
-            var w = Math.max(titleW, portW, minNodeWidth)
-            w = Math.min(w, maxNodeWidth)
-            newWidths[node.id] = Math.ceil(w)
+            newWidths[node.id] = node.type === "Plugin" ? Theme.nodeWidthPlugin : Theme.nodeWidth
         }
-        ctx.restore()
         nodeWidths = newWidths
     }
 
     function getNodeWidth(nodeId) {
         return nodeWidths[nodeId] || minNodeWidth
+    }
+
+    function toggleExpanded(node) {
+        if (!node.layoutKey) return
+        if (expandedNodes[node.layoutKey]) delete expandedNodes[node.layoutKey]
+        else expandedNodes[node.layoutKey] = true
+        expandedNodes = expandedNodes
+        var lay = computeNodeLayout(node, getSortedPorts(node.id))
+        nodeLayouts[node.id] = lay
+        nodeHeights[node.id] = lay.height
+        canvas.requestPaint()
     }
 
     function toCanvas(sx, sy) {
@@ -1435,57 +1482,180 @@ Item {
         return -1
     }
 
-    // Pin glyph hit box (canvas coords relative to the node's top-right).
-    readonly property real pinAreaWidth: 20
-
-    // Only the topmost node under the cursor can have its pin/buttons hit.
-    function findPinButtonAt(sx, sy) {
-        var topId = findNodeAt(sx, sy)
-        if (topId < 0) return null
-        var n = findNodeData(topId)
-        var pos = n ? nodePositions[n.id] : null
-        if (!pos) return null
-        var c = toCanvas(sx, sy)
-        var nw = getNodeWidth(n.id)
-        var btnX = pos.x + nw - 18
-        var btnY = pos.y + 2
-        var btnSize = 16
-        if (c.x >= btnX && c.x <= btnX + btnSize &&
-            c.y >= btnY && c.y <= btnY + btnSize) {
-            return n
+    // Plugin footer buttons (On / UI / Params): canvas rects for node n.
+    function footerButtons(n, nx, ny, nh) {
+        var y = ny + nh - Theme.nodeFooter + (Theme.nodeFooter - Theme.nodeFooterButton) / 2
+        var widths = [{ key: "onoff", w: 48 }, { key: "ui", w: 32 }, { key: "params", w: 56 }]
+        var x = nx + 10
+        var out = []
+        for (var i = 0; i < widths.length; i++) {
+            out.push({ key: widths[i].key, x: x, y: y, w: widths[i].w, h: Theme.nodeFooterButton })
+            x += widths[i].w + 6
         }
-        return null
+        return out
     }
 
+    // Pin toggle in the header's right corner (canvas rect, 18 px hit box).
+    function pinRect(n, nx, ny) {
+        var s = 18
+        return { x: nx + getNodeWidth(n.id) - 8 - s, y: ny + (Theme.nodeHeader - s) / 2, w: s, h: s }
+    }
+
+    function togglePinned(node) {
+        if (!node || !node.layoutKey) return
+        if (pinnedNodes[node.layoutKey]) delete pinnedNodes[node.layoutKey]
+        else pinnedNodes[node.layoutKey] = true
+        pinnedNodes = pinnedNodes
+        persistPinned()
+        canvas.requestPaint()
+    }
+
+    // Canvas rect of a plugin's "n more" / "show fewer" row, or null.
+    function toggleRowRect(n, lay, nx, ny) {
+        if (!lay.expandable) return null
+        return { x: nx, y: ny + Theme.nodeHeader + Theme.nodePortsTop + lay.rows * Theme.nodePortRow,
+                 w: getNodeWidth(n.id), h: Theme.nodePortRow }
+    }
+
+    // Only the topmost node under the cursor can have its buttons hit.
+    // Returns { button: "onoff" | "ui" | "params" | "toggle", nodeId, ... }.
     function findButtonAt(sx, sy) {
         var topId = findNodeAt(sx, sy)
         if (topId < 0) return null
         var n = findNodeData(topId)
-        if (!n || n.type !== "Plugin") return null
+        if (!n) return null
         var pos = nodePositions[n.id]
         if (!pos) return null
         var c = toCanvas(sx, sy)
-        var h = calculateNodeHeight(n)
-        var nw = getNodeWidth(n.id)
-        var btnY = pos.y + h - buttonRowHeight - nodePadding
-        var btnH = buttonRowHeight
-        var btnW = (nw - nodePadding * 4) / 3
-        // On/Off button
-        if (c.x >= pos.x + nodePadding && c.x <= pos.x + nodePadding + btnW &&
-            c.y >= btnY && c.y <= btnY + btnH) {
-            return { button: "onoff", nodeId: n.id, bypassed: isNodeBypassed(n) }
-        }
-        // UI button
-        if (c.x >= pos.x + nodePadding * 2 + btnW && c.x <= pos.x + nodePadding * 2 + btnW * 2 &&
-            c.y >= btnY && c.y <= btnY + btnH) {
-            return { button: "ui", nodeId: n.id, hasUi: n.pluginHasUi !== false }
-        }
-        // Params button
-        if (c.x >= pos.x + nodePadding * 3 + btnW * 2 && c.x <= pos.x + nodePadding * 3 + btnW * 3 &&
-            c.y >= btnY && c.y <= btnY + btnH) {
-            return { button: "params", nodeId: n.id }
+        var pb = pinRect(n, pos.x, pos.y)
+        if (c.x >= pb.x && c.x <= pb.x + pb.w && c.y >= pb.y && c.y <= pb.y + pb.h)
+            return { button: "pin", nodeId: n.id }
+        var lay = nodeLayout(n)
+        var tr = toggleRowRect(n, lay, pos.x, pos.y)
+        if (tr && c.x >= tr.x && c.x <= tr.x + tr.w && c.y >= tr.y && c.y <= tr.y + tr.h)
+            return { button: "toggle", nodeId: n.id }
+        if (n.type !== "Plugin") return null
+        var btns = footerButtons(n, pos.x, pos.y, calculateNodeHeight(n))
+        for (var i = 0; i < btns.length; i++) {
+            var b = btns[i]
+            if (c.x >= b.x && c.x <= b.x + b.w && c.y >= b.y && c.y <= b.y + b.h) {
+                if (b.key === "onoff") return { button: "onoff", nodeId: n.id, bypassed: isNodeBypassed(n) }
+                if (b.key === "ui") return { button: "ui", nodeId: n.id, hasUi: n.pluginHasUi !== false }
+                return { button: "params", nodeId: n.id }
+            }
         }
         return null
+    }
+
+    // ---- Canvas drawing helpers -------------------------------------------
+
+    function fontSpec(weight, size, mono) {
+        return weight + " " + size + "px \"" + (mono ? Theme.fontMono : Theme.fontSans) + "\""
+    }
+
+    // Elide `str` with an ellipsis to fit `maxW` in the current ctx.font.
+    function elide(ctx, str, maxW) {
+        if (!str) return ""
+        if (ctx.measureText(str).width <= maxW) return str
+        var lo = 0
+        var hi = str.length
+        while (lo < hi) {
+            var mid = Math.ceil((lo + hi) / 2)
+            if (ctx.measureText(str.substring(0, mid) + "\u2026").width <= maxW) lo = mid
+            else hi = mid - 1
+        }
+        return str.substring(0, lo) + "\u2026"
+    }
+
+    function drawGlyph(ctx, name, x, y, size, color) {
+        var g = Glyphs.icons[name]
+        if (!g) return
+        ctx.save()
+        ctx.translate(x, y)
+        ctx.scale(size / g.vb, size / g.vb)
+        ctx.strokeStyle = "" + color
+        ctx.lineWidth = g.sw
+        ctx.lineCap = "round"
+        ctx.lineJoin = "round"
+        ctx.beginPath()
+        ctx.path = g.d
+        ctx.stroke()
+        ctx.restore()
+    }
+
+    function roundRectPath(ctx, x, y, w, h, r) {
+        ctx.beginPath()
+        ctx.moveTo(x + r, y)
+        ctx.lineTo(x + w - r, y)
+        ctx.arcTo(x + w, y, x + w, y + r, r)
+        ctx.lineTo(x + w, y + h - r)
+        ctx.arcTo(x + w, y + h, x + w - r, y + h, r)
+        ctx.lineTo(x + r, y + h)
+        ctx.arcTo(x, y + h, x, y + h - r, r)
+        ctx.lineTo(x, y + r)
+        ctx.arcTo(x, y, x + r, y, r)
+        ctx.closePath()
+    }
+
+    // Small neutral tag (format "LV2", "default"): mono 9, strong outline.
+    // Draws right-aligned at `right`; returns its left edge.
+    function drawTag(ctx, text, right, cy) {
+        ctx.font = fontSpec(500, Theme.sizeNodeTag, true)
+        var tw = ctx.measureText(text).width + 8
+        var th = 14
+        roundRectPath(ctx, right - tw, cy - th / 2, tw, th, Theme.radiusTag)
+        ctx.strokeStyle = "" + Theme.borderStrong
+        ctx.lineWidth = 1
+        ctx.stroke()
+        ctx.fillStyle = "" + Theme.textMuted
+        ctx.textAlign = "center"
+        ctx.textBaseline = "middle"
+        ctx.fillText(text, right - tw / 2, cy + 0.5)
+        return right - tw
+    }
+
+    // The default target: accent chip with a dot, like "Rules active".
+    // Draws right-aligned at `right`; returns its left edge.
+    function drawDefaultChip(ctx, right, cy) {
+        ctx.font = fontSpec(500, Theme.sizeNodeTag, true)
+        var label = "default"
+        var tw = ctx.measureText(label).width + 8 + 9
+        var th = 16
+        roundRectPath(ctx, right - tw, cy - th / 2, tw, th, Theme.radiusTag)
+        ctx.fillStyle = "" + Theme.accentFaint
+        ctx.fill()
+        ctx.beginPath()
+        ctx.arc(right - tw + 7, cy, 2.5, 0, Math.PI * 2)
+        ctx.fillStyle = "" + Theme.accent
+        ctx.fill()
+        ctx.textAlign = "left"
+        ctx.textBaseline = "middle"
+        ctx.fillText(label, right - tw + 12, cy + 0.5)
+        return right - tw
+    }
+
+    function nodeMatchesSearch(node) {
+        if (searchText.length === 0) return true
+        var q = searchText.toLowerCase()
+        if ((node.name || "").toLowerCase().indexOf(q) >= 0) return true
+        var ports = portsByNode[node.id] || []
+        for (var i = 0; i < ports.length; i++) {
+            if ((ports[i].name || "").toLowerCase().indexOf(q) >= 0) return true
+        }
+        return false
+    }
+
+    function portMatchesSearch(port) {
+        return searchText.length > 0 && (port.name || "").toLowerCase().indexOf(searchText.toLowerCase()) >= 0
+    }
+
+    // Could the wire being dragged end on this port?
+    function isValidDropTarget(port, nodeId) {
+        if (connectFromPortId < 0 || port.id === connectFromPortId) return false
+        if (port.direction === connectFromDir) return false
+        if (getPortNodeId(connectFromPortId) === nodeId) return false
+        var fromMt = portMediaTypes[connectFromPortId]
+        return !fromMt || fromMt === "Unknown" || !port.mediaType || port.mediaType === fromMt
     }
 
     Canvas {
@@ -1497,302 +1667,118 @@ Item {
             ctx.reset()
 
             if (widthsDirty) {
-                calculateNodeWidths(ctx)
+                calculateNodeWidths()
                 widthsDirty = false
             }
 
-            ctx.fillStyle = "" + Theme.windowBg
+            ctx.fillStyle = "" + Theme.bgCanvas
             ctx.fillRect(0, 0, width, height)
 
             ctx.save()
             ctx.translate(panX, panY)
             ctx.scale(zoom, zoom)
 
-            var newPortPositions = {}
+            var visLeft = -panX / zoom
+            var visTop = -panY / zoom
+            var visRight = (width - panX) / zoom
+            var visBottom = (height - panY) / zoom
 
-            // Pass 1: compute port positions (no drawing yet)
+            // ---- Dot grid (scene space; 1 screen px dots) -----------------
+            var pitch = gridSize
+            while (pitch * zoom < 10) pitch *= 2
+            var dot = 1.5 / zoom    // 1.5 screen px at any zoom
+            ctx.fillStyle = "" + Theme.gridDot
+            var gx0 = Math.floor(visLeft / pitch) * pitch
+            var gy0 = Math.floor(visTop / pitch) * pitch
+            for (var gx = gx0; gx <= visRight; gx += pitch) {
+                for (var gy = gy0; gy <= visBottom; gy += pitch) {
+                    ctx.fillRect(gx, gy, dot, dot)
+                }
+            }
+
+            var newPortPositions = {}
+            var hdr = Theme.nodeHeader
+            var rowH = Theme.nodePortRow
+            var portsTop = hdr + Theme.nodePortsTop
+
+            // ---- Pass 1: port positions (pins sit on the card's edge) -----
             for (var ni = 0; ni < nodes.length; ni++) {
                 var node = nodes[ni]
                 if (node.layoutKey && hiddenNodes[node.layoutKey]) continue
                 var pos = nodePositions[node.id]
                 if (!pos) continue
-
-                var x = pos.x
-                var y = pos.y
-                var sortedPorts = getSortedPorts(node.id)
-                var inputs = sortedPorts.inputs
-                var outputs = sortedPorts.outputs
+                var lay = nodeLayout(node)
                 var nw = getNodeWidth(node.id)
-
-                var portBaseY = y + headerHeight + nodePadding
-                for (var pi = 0; pi < inputs.length; pi++) {
-                    var py = portBaseY + pi * (portHeight + portSpacing) + portHeight / 2
-                    newPortPositions[inputs[pi].id] = { cx: x, cy: py, nodeId: node.id, z: ni }
+                for (var pi = 0; pi < lay.inputs.length; pi++) {
+                    newPortPositions[lay.inputs[pi].id] = { cx: pos.x, cy: pos.y + portsTop + pi * rowH + rowH / 2,
+                                                             nodeId: node.id, z: ni }
                 }
-                for (var po = 0; po < outputs.length; po++) {
-                    var pyo = portBaseY + po * (portHeight + portSpacing) + portHeight / 2
-                    newPortPositions[outputs[po].id] = { cx: x + nw, cy: pyo, nodeId: node.id, z: ni }
+                for (var po = 0; po < lay.outputs.length; po++) {
+                    newPortPositions[lay.outputs[po].id] = { cx: pos.x + nw, cy: pos.y + portsTop + po * rowH + rowH / 2,
+                                                              nodeId: node.id, z: ni }
                 }
             }
 
-            // Pass 2: draw links BEHIND nodes using freshly computed port positions
+            // ---- Pass 2: wires, behind the nodes --------------------------
+            ctx.lineCap = "round"
             for (var li = 0; li < links.length; li++) {
                 var link = links[li]
                 var fromPos = newPortPositions[link.outputPortId]
                 var toPos = newPortPositions[link.inputPortId]
-                if (fromPos && toPos) {
-                    var isSelected = !!selectedLinks[link.id]
-                    var isMidiLink = portMediaTypes[link.outputPortId] === "Midi"
-                                  || portMediaTypes[link.inputPortId] === "Midi"
-                    var linkColor = isSelected ? ("" + Theme.colLinkSelected)
-                                  : isMidiLink ? colLinkMidi
-                                  : (link.active ? colLinkActive : colLinkInactive)
-                    var linkWidth = isSelected ? 3 : 2
-                    drawBezier(ctx, fromPos.cx, fromPos.cy, toPos.cx, toPos.cy,
-                        linkColor, linkWidth)
-                }
+                if (!fromPos || !toPos) continue
+                var accented = !!selectedLinks[link.id] || !!selectedNodes[fromPos.nodeId] || !!selectedNodes[toPos.nodeId]
+                var hovered = link.id === hoveredLinkId
+                var mt = portMediaTypes[link.outputPortId]
+                if (!mt || mt === "Unknown") mt = portMediaTypes[link.inputPortId]
+                ctx.globalAlpha = accented || hovered ? 1 : (link.active === false ? 0.35 : Theme.wireOpacity)
+                drawBezier(ctx, fromPos.cx, fromPos.cy, toPos.cx, toPos.cy,
+                           accented ? Theme.accent : signalColor(mt),
+                           accented || hovered ? Theme.wireWidthActive : Theme.wireWidth)
             }
+            ctx.globalAlpha = 1
 
-            // Pass 3: draw nodes ON TOP of links
+            // ---- Pass 3: node cards ---------------------------------------
             for (var ni2 = 0; ni2 < nodes.length; ni2++) {
-                var node2 = nodes[ni2]
-                if (node2.layoutKey && hiddenNodes[node2.layoutKey]) continue
-                var pos2 = nodePositions[node2.id]
-                if (!pos2) continue
-
-                var nx = pos2.x
-                var ny = pos2.y
-                var nSorted = getSortedPorts(node2.id)
-                var nInputs = nSorted.inputs
-                var nOutputs = nSorted.outputs
-                var nh = calculateNodeHeight(node2)
-                var nnw = getNodeWidth(node2.id)
-
-                var isNodeSelected = !!selectedNodes[node2.id]
-                var isDefaultNode = defaultNodeKey !== "" && node2.layoutKey === defaultNodeKey
-                ctx.fillStyle = "" + colNodeBg
-                if (isNodeSelected) {
-                    ctx.strokeStyle = "" + Theme.selectionOutline
-                    ctx.lineWidth = 2.5
-                } else if (isDefaultNode) {
-                    ctx.strokeStyle = "" + colDefaultOutline
-                    ctx.lineWidth = 2.5
-                } else {
-                    ctx.strokeStyle = "" + colNodeBorder
-                    ctx.lineWidth = 1.5
-                }
-                roundRect(ctx, nx, ny, nnw, nh, 5)
-
-                // Draw "DEFAULT" badge for the default node
-                if (isDefaultNode) {
-                    ctx.font = "bold 8px sans-serif"
-                    var defBadgeText = "DEFAULT"
-                    var defBadgeW = ctx.measureText(defBadgeText).width + 6
-                    var defBadgeH = 12
-                    var defBadgeX = nx + 4
-                    var defBadgeY = ny + 3
-                    ctx.fillStyle = "" + Theme.defaultBadgeBg
-                    ctx.strokeStyle = "" + colDefaultOutline
-                    ctx.lineWidth = 1
-                    roundRect(ctx, defBadgeX, defBadgeY, defBadgeW, defBadgeH, 2)
-                    ctx.fillStyle = "" + colDefaultOutline
-                    ctx.textAlign = "center"
-                    ctx.textBaseline = "middle"
-                    ctx.fillText(defBadgeText, defBadgeX + defBadgeW / 2, defBadgeY + defBadgeH / 2)
-                }
-
-                ctx.fillStyle = "" + getNodeColor(node2)
-                roundRectTop(ctx, nx, ny, nnw, headerHeight, 5)
-
-                ctx.fillStyle = "" + Theme.textPrimary
-                ctx.font = "bold 11px sans-serif"
-                ctx.textAlign = "center"
-                ctx.textBaseline = "middle"
-                ctx.fillText(truncate(node2.name, 30), nx + nnw / 2, ny + headerHeight / 2)
-
-                var isPinned = !!(node2.layoutKey && pinnedNodes[node2.layoutKey])
-                var pinX = nx + nnw - 16
-                var pinY = ny + 3
-                var pinS = 12
-                var pinAlpha = isPinned ? 1.0 : 0.25
-                ctx.save()
-                ctx.globalAlpha = pinAlpha
-                ctx.fillStyle = "" + Theme.textPrimary
-                ctx.beginPath()
-                ctx.arc(pinX + pinS / 2, pinY + pinS * 0.3, pinS * 0.25, 0, Math.PI * 2)
-                ctx.fill()
-                ctx.strokeStyle = "" + Theme.textPrimary
-                ctx.lineWidth = 1.5
-                ctx.beginPath()
-                ctx.moveTo(pinX + pinS / 2, pinY + pinS * 0.5)
-                ctx.lineTo(pinX + pinS / 2, pinY + pinS)
-                ctx.stroke()
-                ctx.restore()
-
-                // Draw format badge (LV2/CLAP/VST3) for plugin nodes
-                if (node2.type === "Plugin" && node2.pluginFormat) {
-                    var fmt = node2.pluginFormat
-                    var badgeColor = fmt === "CLAP" ? ("" + Theme.badgeClapBg) : fmt === "VST3" ? ("" + Theme.badgeVst3Bg) : ("" + Theme.badgeLv2Bg)
-                    var badgeTextCol = fmt === "CLAP" ? ("" + Theme.badgeClapText) : fmt === "VST3" ? ("" + Theme.badgeVst3Text) : ("" + Theme.badgeLv2Text)
-                    ctx.font = "bold 8px sans-serif"
-                    var badgeW = ctx.measureText(fmt).width + 6
-                    var badgeH = 12
-                    var badgeX = nx + nnw - badgeW - pinAreaWidth
-                    var badgeY = ny + 3
-                    var br = 2
-                    ctx.fillStyle = badgeColor
-                    ctx.strokeStyle = badgeColor
-                    ctx.lineWidth = 1
-                    roundRect(ctx, badgeX, badgeY, badgeW, badgeH, br)
-                    ctx.fillStyle = badgeTextCol
-                    ctx.textAlign = "center"
-                    ctx.textBaseline = "middle"
-                    ctx.fillText(fmt, badgeX + badgeW / 2, badgeY + badgeH / 2)
-                }
-
-                var nPortBaseY = ny + headerHeight + nodePadding
-                for (var npi = 0; npi < nInputs.length; npi++) {
-                    var npy = nPortBaseY + npi * (portHeight + portSpacing) + portHeight / 2
-                    var npx = nx
-
-                    ctx.fillStyle = nInputs[npi].mediaType === "Midi" ? ("" + colMidiPort) : ("" + colPortIn)
-                    ctx.beginPath()
-                    ctx.arc(npx, npy, portRadius, 0, Math.PI * 2)
-                    ctx.fill()
-
-                    if (connectFromPortId >= 0 && connectFromDir === "Output") {
-                        var sxIn = npx * zoom + panX
-                        var syIn = npy * zoom + panY
-                        var dIn = Math.sqrt(Math.pow(connectMouseX - sxIn, 2) + Math.pow(connectMouseY - syIn, 2))
-                        if (dIn < portRadius * zoom * 3) {
-                            ctx.strokeStyle = "" + colLinkConnecting
-                            ctx.lineWidth = 2
-                            ctx.beginPath()
-                            ctx.arc(npx, npy, portRadius + 2, 0, Math.PI * 2)
-                            ctx.stroke()
-                        }
-                    }
-
-                    ctx.fillStyle = "" + Theme.textSecondary
-                    ctx.font = "10px sans-serif"
-                    ctx.textAlign = "left"
-                    ctx.textBaseline = "middle"
-                    ctx.fillText(truncate(nInputs[npi].name, 24), npx + portRadius + 4, npy)
-                }
-
-                for (var npo = 0; npo < nOutputs.length; npo++) {
-                    var npyo = nPortBaseY + npo * (portHeight + portSpacing) + portHeight / 2
-                    var npxo = nx + nnw
-
-                    ctx.fillStyle = nOutputs[npo].mediaType === "Midi" ? ("" + colMidiPort) : ("" + colPortOut)
-                    ctx.beginPath()
-                    ctx.arc(npxo, npyo, portRadius, 0, Math.PI * 2)
-                    ctx.fill()
-
-                    if (connectFromPortId >= 0 && connectFromDir === "Input") {
-                        var sxOut = npxo * zoom + panX
-                        var syOut = npyo * zoom + panY
-                        var dOut = Math.sqrt(Math.pow(connectMouseX - sxOut, 2) + Math.pow(connectMouseY - syOut, 2))
-                        if (dOut < portRadius * zoom * 3) {
-                            ctx.strokeStyle = "" + colLinkConnecting
-                            ctx.lineWidth = 2
-                            ctx.beginPath()
-                            ctx.arc(npxo, npyo, portRadius + 2, 0, Math.PI * 2)
-                            ctx.stroke()
-                        }
-                    }
-
-                    ctx.fillStyle = "" + Theme.textSecondary
-                    ctx.font = "10px sans-serif"
-                    ctx.textAlign = "right"
-                    ctx.textBaseline = "middle"
-                    ctx.fillText(truncate(nOutputs[npo].name, 24), npxo - portRadius - 4, npyo)
-                }
-
-                if (node2.type === "Plugin") {
-                    var btnY2 = ny + nh - buttonRowHeight - nodePadding
-                    var btnW3 = (nnw - nodePadding * 4) / 3
-                    var btnH2 = buttonRowHeight
-                    var hasUi = node2.pluginHasUi !== false
-                    var isBypassed = isNodeBypassed(node2)
-
-                    // On/Off button
-                    ctx.fillStyle = isBypassed ? ("" + Theme.buttonOffBg) : ("" + Theme.buttonActiveBg)
-                    ctx.strokeStyle = isBypassed ? ("" + Theme.buttonOffBorder) : ("" + Theme.buttonActiveBorder)
-                    ctx.lineWidth = 1
-                    roundRect(ctx, nx + nodePadding, btnY2, btnW3, btnH2, 3)
-
-                    ctx.fillStyle = isBypassed ? ("" + Theme.buttonOffText) : ("" + Theme.buttonActiveText)
-                    ctx.font = "bold 10px sans-serif"
-                    ctx.textAlign = "center"
-                    ctx.textBaseline = "middle"
-                    ctx.fillText(isBypassed ? "OFF" : "ON", nx + nodePadding + btnW3 / 2, btnY2 + btnH2 / 2)
-
-                    // UI button — disabled (dimmed) when plugin has no UI
-                    ctx.fillStyle = hasUi ? ("" + Theme.buttonBg) : ("" + Theme.buttonDisabledBg)
-                    ctx.strokeStyle = hasUi ? ("" + Theme.buttonBorder) : ("" + Theme.buttonDisabledBorder)
-                    ctx.lineWidth = 1
-                    roundRect(ctx, nx + nodePadding * 2 + btnW3, btnY2, btnW3, btnH2, 3)
-
-                    ctx.fillStyle = hasUi ? ("" + Theme.textPrimary) : ("" + Theme.textDisabled)
-                    ctx.font = "10px sans-serif"
-                    ctx.textAlign = "center"
-                    ctx.textBaseline = "middle"
-                    ctx.fillText("UI", nx + nodePadding * 2 + btnW3 + btnW3 / 2, btnY2 + btnH2 / 2)
-
-                    // Params button — always active
-                    ctx.fillStyle = "" + Theme.buttonBg
-                    ctx.strokeStyle = "" + Theme.buttonBorder
-                    ctx.lineWidth = 1
-                    roundRect(ctx, nx + nodePadding * 3 + btnW3 * 2, btnY2, btnW3, btnH2, 3)
-
-                    ctx.fillStyle = "" + Theme.textPrimary
-                    ctx.font = "10px sans-serif"
-                    ctx.textAlign = "center"
-                    ctx.textBaseline = "middle"
-                    ctx.fillText("Params", nx + nodePadding * 3 + btnW3 * 2 + btnW3 / 2, btnY2 + btnH2 / 2)
-                }
+                var n2 = nodes[ni2]
+                if (n2.layoutKey && hiddenNodes[n2.layoutKey]) continue
+                var p2 = nodePositions[n2.id]
+                if (!p2) continue
+                drawNode(ctx, n2, p2.x, p2.y)
             }
 
+            // ---- Drag wire: dashed, signal colour ------------------------
             if (connectFromPortId >= 0) {
                 var dragFrom = newPortPositions[connectFromPortId] || portPositions[connectFromPortId]
                 if (dragFrom) {
                     var dragToC = graphView.toCanvas(connectMouseX, connectMouseY)
-                    if (connectFromDir === "Input") {
-                        drawBezier(ctx, dragToC.x, dragToC.y, dragFrom.cx, dragFrom.cy, colLinkConnecting, 2)
-                    } else {
-                        drawBezier(ctx, dragFrom.cx, dragFrom.cy, dragToC.x, dragToC.y, colLinkConnecting, 2)
-                    }
+                    ctx.save()
+                    ctx.setLineDash([4, 4])
+                    if (connectFromDir === "Input")
+                        drawBezier(ctx, dragToC.x, dragToC.y, dragFrom.cx, dragFrom.cy, signalColor(portMediaTypes[connectFromPortId]), Theme.wireWidthActive)
+                    else
+                        drawBezier(ctx, dragFrom.cx, dragFrom.cy, dragToC.x, dragToC.y, signalColor(portMediaTypes[connectFromPortId]), Theme.wireWidthActive)
+                    ctx.restore()
                 }
             }
 
             if (selectDragging) {
                 var sc1 = graphView.toCanvas(selectStartX, selectStartY)
                 var sc2 = graphView.toCanvas(selectEndX, selectEndY)
-                var selX = Math.min(sc1.x, sc2.x)
-                var selY = Math.min(sc1.y, sc2.y)
-                var selW = Math.abs(sc2.x - sc1.x)
-                var selH = Math.abs(sc2.y - sc1.y)
-                ctx.strokeStyle = "" + Theme.selectionOutline
-                ctx.lineWidth = 1 / zoom
-                ctx.fillStyle = "rgba(255, 255, 0, " + Theme.selectionFillAlpha + ")"
                 ctx.beginPath()
-                ctx.rect(selX, selY, selW, selH)
+                ctx.rect(Math.min(sc1.x, sc2.x), Math.min(sc1.y, sc2.y), Math.abs(sc2.x - sc1.x), Math.abs(sc2.y - sc1.y))
+                ctx.fillStyle = "" + Theme.accentFaint
                 ctx.fill()
+                ctx.strokeStyle = "" + Theme.accent
+                ctx.lineWidth = 1 / zoom
                 ctx.stroke()
             }
 
-            // Draw snap guide lines
+            // Snap guides while dragging with Shift.
             if (activeSnapLines.length > 0) {
                 ctx.save()
                 ctx.setLineDash([4 / zoom, 4 / zoom])
-                ctx.strokeStyle = "" + Theme.snapGuide
+                ctx.strokeStyle = "" + Theme.textMuted
                 ctx.lineWidth = 1 / zoom
-                // Compute visible canvas bounds
-                var visLeft = -panX / zoom
-                var visTop = -panY / zoom
-                var visRight = (canvas.width - panX) / zoom
-                var visBottom = (canvas.height - panY) / zoom
                 for (var si = 0; si < activeSnapLines.length; si++) {
                     var sl = activeSnapLines[si]
                     ctx.beginPath()
@@ -1811,6 +1797,226 @@ Item {
             ctx.restore()
             portPositions = newPortPositions
             updateScrollBars()
+        }
+    }
+
+    // One node card (design bible §6.5). Canvas coordinates, scene space.
+    function drawNode(ctx, node, nx, ny) {
+        var lay = nodeLayout(node)
+        var nw = getNodeWidth(node.id)
+        var nh = calculateNodeHeight(node)
+        var isPlugin = node.type === "Plugin"
+        var selected = !!selectedNodes[node.id]
+        var isDefault = defaultNodeKey !== "" && node.layoutKey === defaultNodeKey
+        var cat = nodeCategory(node)
+        var hdr = Theme.nodeHeader
+        var rowH = Theme.nodePortRow
+        var portsTop = hdr + Theme.nodePortsTop
+
+        ctx.save()
+        // Search: non-matching nodes dim to 35 %.
+        var baseAlpha = nodeMatchesSearch(node) ? 1 : 0.35
+
+        // Shadow (layered rects, cheap) and selection halo.
+        ctx.fillStyle = "" + Theme.shadowNode
+        ctx.globalAlpha = baseAlpha * 0.35
+        for (var sh = 0; sh < 3; sh++) {
+            roundRectPath(ctx, nx - sh * 2, ny - sh * 2 + Theme.shadowNodeY * 0.5, nw + sh * 4, nh + sh * 4, Theme.radiusCard + sh * 2)
+            ctx.fill()
+        }
+        ctx.globalAlpha = baseAlpha
+        if (selected) {
+            roundRectPath(ctx, nx - 2.5, ny - 2.5, nw + 5, nh + 5, Theme.radiusCard + 2.5)
+            ctx.strokeStyle = "" + Theme.accentRing
+            ctx.lineWidth = 3
+            ctx.stroke()
+        }
+
+        // Body.
+        roundRectPath(ctx, nx, ny, nw, nh, Theme.radiusCard)
+        ctx.fillStyle = "" + Theme.bgSurface
+        ctx.fill()
+        ctx.strokeStyle = "" + (selected ? Theme.accent : Theme.borderStrong)
+        ctx.lineWidth = 1
+        ctx.stroke()
+
+        // Header: category chip, title, tags; hairline below.
+        var chip = Theme.nodeChip
+        var chipX = nx + 10
+        var chipY = ny + (hdr - chip) / 2
+        roundRectPath(ctx, chipX, chipY, chip, chip, Theme.radiusChip)
+        ctx.fillStyle = "" + Theme.tint(cat.color, Theme.chipAlpha)
+        ctx.fill()
+        drawGlyph(ctx, cat.glyph, chipX + (chip - Theme.nodeGlyph) / 2, chipY + (chip - Theme.nodeGlyph) / 2,
+                  Theme.nodeGlyph, cat.color)
+
+        // Pin toggle: solid when pinned, faint outline when not.
+        var pinned = !!(node.layoutKey && pinnedNodes[node.layoutKey])
+        var pinHover = hoveredButton === node.id + ":pin"
+        var pr = pinRect(node, nx, ny)
+        var pinCol = pinned || pinHover ? Theme.textIcon : Theme.textDisabled
+        ctx.save()
+        if (!pinned && !pinHover) ctx.globalAlpha = baseAlpha * 0.6
+        if (pinned) {
+            ctx.save()
+            ctx.translate(pr.x + 3, pr.y + 3)
+            ctx.beginPath()
+            ctx.path = Glyphs.icons["pinFill"].d
+            ctx.fillStyle = "" + pinCol
+            ctx.fill()
+            ctx.restore()
+        }
+        drawGlyph(ctx, "pin", pr.x + 3, pr.y + 3, 12, pinCol)
+        ctx.restore()
+
+        var tagRight = pr.x - 4
+        if (isPlugin && node.pluginFormat)
+            tagRight = drawTag(ctx, node.pluginFormat, tagRight, ny + hdr / 2) - 6
+        if (isDefault)
+            tagRight = drawDefaultChip(ctx, tagRight, ny + hdr / 2) - 6
+
+        ctx.font = fontSpec(600, Theme.sizeNodeTitle, false)
+        ctx.fillStyle = "" + Theme.textPrimary
+        ctx.textAlign = "left"
+        ctx.textBaseline = "middle"
+        var titleX = chipX + chip + 8
+        ctx.fillText(elide(ctx, node.name, tagRight - titleX - 2), titleX, ny + hdr / 2 + 0.5)
+
+        ctx.fillStyle = "" + Theme.borderHairline
+        ctx.fillRect(nx + 1, ny + hdr, nw - 2, 1)
+
+        // Port rows.
+        var both = lay.inputs.length > 0 && lay.outputs.length > 0
+        var labelW = both ? (nw - 2 * Theme.nodePadX - 8) / 2 : nw - 2 * Theme.nodePadX
+        ctx.font = fontSpec(400, Theme.sizeMono, true)
+        ctx.textBaseline = "middle"
+        for (var i = 0; i < lay.inputs.length; i++) {
+            var pin = lay.inputs[i]
+            var py = ny + portsTop + i * rowH + rowH / 2
+            ctx.fillStyle = "" + Theme.textSecondary
+            ctx.textAlign = "left"
+            ctx.fillText(elide(ctx, pin.name, labelW), nx + Theme.nodePadX, py)
+            drawPin(ctx, pin, node.id, nx, py, selected)
+        }
+        for (var o = 0; o < lay.outputs.length; o++) {
+            var pout = lay.outputs[o]
+            var pyo = ny + portsTop + o * rowH + rowH / 2
+            ctx.font = fontSpec(400, Theme.sizeMono, true)
+            ctx.fillStyle = "" + Theme.textSecondary
+            ctx.textAlign = "right"
+            ctx.fillText(elide(ctx, pout.name, labelW), nx + nw - Theme.nodePadX, pyo)
+            drawPin(ctx, pout, node.id, nx + nw, pyo, selected)
+        }
+
+        // Collapsed-ports row: "⌄ n more outputs" / "show fewer".
+        var tr = toggleRowRect(node, lay, nx, ny)
+        if (tr) {
+            var hidden = lay.hiddenIn + lay.hiddenOut
+            var what = lay.hiddenIn > 0 && lay.hiddenOut > 0 ? "ports"
+                     : lay.hiddenOut > 0 ? (hidden === 1 ? "output" : "outputs")
+                     : (hidden === 1 ? "input" : "inputs")
+            var label = lay.expanded ? "show fewer" : hidden + " more " + what
+            var hoverT = hoveredButton === node.id + ":toggle"
+            ctx.font = fontSpec(400, Theme.sizeBadge, true)
+            var lw = ctx.measureText(label).width + 12
+            var lx = lay.hiddenIn > 0 && lay.hiddenOut === 0 ? nx + Theme.nodePadX
+                   : lay.hiddenOut > 0 && lay.hiddenIn === 0 ? nx + nw - Theme.nodePadX - lw
+                   : nx + (nw - lw) / 2
+            var cy = tr.y + tr.h / 2
+            ctx.save()
+            if (lay.expanded) {
+                ctx.translate(lx + 4, cy)
+                ctx.rotate(Math.PI)
+                drawGlyph(ctx, "chevronDown", -4, -4, 8, hoverT ? Theme.textPrimary : Theme.textMuted)
+            } else {
+                drawGlyph(ctx, "chevronDown", lx, cy - 4, 8, hoverT ? Theme.textPrimary : Theme.textMuted)
+            }
+            ctx.restore()
+            ctx.font = fontSpec(400, Theme.sizeBadge, true)
+            ctx.fillStyle = "" + (hoverT ? Theme.textPrimary : Theme.textMuted)
+            ctx.textAlign = "left"
+            ctx.textBaseline = "middle"
+            ctx.fillText(label, lx + 12, cy)
+        }
+
+        // Plugin footer: On / UI / Params; hairline above.
+        if (isPlugin) {
+            ctx.fillStyle = "" + Theme.borderHairline
+            ctx.fillRect(nx + 1, ny + nh - Theme.nodeFooter, nw - 2, 1)
+            var bypassed = isNodeBypassed(node)
+            var hasUi = node.pluginHasUi !== false
+            var btns = footerButtons(node, nx, ny, nh)
+            for (var b = 0; b < btns.length; b++) {
+                var bt = btns[b]
+                var hoverB = hoveredButton === node.id + ":" + bt.key
+                var on = bt.key === "onoff" && !bypassed
+                roundRectPath(ctx, bt.x, bt.y, bt.w, bt.h, Theme.radiusSmall)
+                ctx.fillStyle = "" + (on ? Theme.accentFaint : (hoverB ? Theme.borderStrong : Theme.bgSubtle))
+                ctx.fill()
+                var txt = bt.key === "onoff" ? (bypassed ? "Off" : "On") : bt.key === "ui" ? "UI" : "Params"
+                var col = on ? Theme.accent
+                        : bt.key === "ui" && !hasUi ? Theme.textDisabled
+                        : bt.key === "onoff" ? Theme.textMuted
+                        : Theme.textIcon
+                ctx.font = fontSpec(on ? 600 : 500, 11, false)
+                ctx.fillStyle = "" + col
+                ctx.textBaseline = "middle"
+                if (bt.key === "onoff") {
+                    ctx.beginPath()
+                    ctx.arc(bt.x + 12, bt.y + bt.h / 2, 3, 0, Math.PI * 2)
+                    if (on) {
+                        ctx.fill()
+                    } else {
+                        ctx.strokeStyle = "" + col
+                        ctx.lineWidth = 1.25
+                        ctx.stroke()
+                    }
+                    ctx.textAlign = "left"
+                    ctx.fillText(txt, bt.x + 20, bt.y + bt.h / 2 + 0.5)
+                } else {
+                    ctx.textAlign = "center"
+                    ctx.fillText(txt, bt.x + bt.w / 2, bt.y + bt.h / 2 + 0.5)
+                }
+            }
+        }
+        ctx.restore()
+    }
+
+    // A 10 px pin centred on the card edge: filled when connected, hollow
+    // ring when free; accent on the selected node; halos for hover, valid
+    // drop targets and search matches.
+    function drawPin(ctx, port, nodeId, cx, cy, nodeSelected) {
+        var connected = !!connectedPorts[port.id]
+        var col = signalColor(port.mediaType)
+        if (nodeSelected && connected) col = Theme.accent
+        var r = port.id === hoveredPortId ? Theme.nodePinHover / 2 : Theme.nodePin / 2
+
+        if (connectFromPortId >= 0 && isValidDropTarget(port, nodeId)) {
+            ctx.beginPath()
+            ctx.arc(cx, cy, r + 4, 0, Math.PI * 2)
+            ctx.fillStyle = "" + Theme.accentRing
+            ctx.fill()
+        }
+        ctx.beginPath()
+        ctx.arc(cx, cy, r, 0, Math.PI * 2)
+        if (connected) {
+            ctx.fillStyle = "" + col
+            ctx.fill()
+        } else {
+            ctx.fillStyle = "" + Theme.bgSurface
+            ctx.fill()
+            ctx.beginPath()
+            ctx.arc(cx, cy, r - 1, 0, Math.PI * 2)
+            ctx.strokeStyle = "" + col
+            ctx.lineWidth = 2
+            ctx.stroke()
+        }
+        if (portMatchesSearch(port)) {
+            ctx.beginPath()
+            ctx.arc(cx, cy, r + 3, 0, Math.PI * 2)
+            ctx.strokeStyle = "" + Theme.accent
+            ctx.lineWidth = 2
+            ctx.stroke()
         }
     }
 
@@ -1876,23 +2082,14 @@ Item {
             }
 
             if (mouse.button === Qt.LeftButton) {
-                var pinHit = findPinButtonAt(mouse.x, mouse.y)
-                if (pinHit && pinHit.layoutKey) {
-                    var pk = pinHit.layoutKey
-                    if (pinnedNodes[pk]) {
-                        delete pinnedNodes[pk]
-                    } else {
-                        pinnedNodes[pk] = true
-                    }
-                    pinnedNodes = pinnedNodes
-                    persistPinned()
-                    canvas.requestPaint()
-                    return
-                }
-
                 var btnHit = findButtonAt(mouse.x, mouse.y)
                 if (btnHit) {
-                    if (btnHit.button === "onoff") {
+                    if (btnHit.button === "toggle") {
+                        var tn = findNodeData(btnHit.nodeId)
+                        if (tn) toggleExpanded(tn)
+                    } else if (btnHit.button === "pin") {
+                        togglePinned(findNodeData(btnHit.nodeId))
+                    } else if (btnHit.button === "onoff") {
                         var newBypassed = !btnHit.bypassed
                         // Immediate local feedback
                         localBypassState[btnHit.nodeId] = newBypassed
@@ -1943,8 +2140,14 @@ Item {
                             }
                         }
                         var cg = toCanvas(mouse.x, mouse.y)
-                        groupDragLastX = cg.x
-                        groupDragLastY = cg.y
+                        groupDragStartX = cg.x
+                        groupDragStartY = cg.y
+                        var starts = {}
+                        for (var gsid in selectedNodes) {
+                            if (selectedNodes[gsid] && nodePositions[gsid])
+                                starts[gsid] = { x: nodePositions[gsid].x, y: nodePositions[gsid].y }
+                        }
+                        groupDragStart = starts
                     } else {
                         selectedNodes = {}
                         selectedLinks = {}
@@ -2014,52 +2217,34 @@ Item {
             }
 
             if (groupDragging && (mouse.buttons & Qt.LeftButton)) {
+                // Move from the start positions; grid or Shift-snap the
+                // reference node and offset the whole group by the same amount.
                 var cg = toCanvas(mouse.x, mouse.y)
-                var deltaX = cg.x - groupDragLastX
-                var deltaY = cg.y - groupDragLastY
-                groupDragLastX = cg.x
-                groupDragLastY = cg.y
-
-                // Move all selected nodes by delta
-                for (var nid in selectedNodes) {
-                    if (selectedNodes[nid] && nodePositions[nid]) {
-                        nodePositions[nid] = {
-                            x: nodePositions[nid].x + deltaX,
-                            y: nodePositions[nid].y + deltaY
-                        }
-                    }
-                }
-
-                // Snap only while Shift is held
-                if (mouse.modifiers & Qt.ShiftModifier) {
-                    var refId = -1
-                    for (var rid in selectedNodes) {
-                        if (selectedNodes[rid]) { refId = parseInt(rid); break }
-                    }
-                    if (refId >= 0 && nodePositions[refId]) {
-                        var rawGX = nodePositions[refId].x
-                        var rawGY = nodePositions[refId].y
+                var deltaX = cg.x - groupDragStartX
+                var deltaY = cg.y - groupDragStartY
+                var refId = -1
+                for (var rid in groupDragStart) { refId = parseInt(rid); break }
+                var adjX = 0
+                var adjY = 0
+                activeSnapLines = []
+                if (refId >= 0) {
+                    var rawGX = groupDragStart[refId].x + deltaX
+                    var rawGY = groupDragStart[refId].y + deltaY
+                    if (snapToGrid) {
+                        var gp = gridPos({ x: rawGX, y: rawGY })
+                        adjX = gp.x - rawGX
+                        adjY = gp.y - rawGY
+                    } else if (mouse.modifiers & Qt.ShiftModifier) {
                         var gsnap = computeSnap(refId, rawGX, rawGY, selectedNodes)
-                        var sdx = gsnap.x - rawGX
-                        var sdy = gsnap.y - rawGY
-                        if (sdx !== 0 || sdy !== 0) {
-                            for (var sid in selectedNodes) {
-                                if (selectedNodes[sid] && nodePositions[sid]) {
-                                    nodePositions[sid] = {
-                                        x: nodePositions[sid].x + sdx,
-                                        y: nodePositions[sid].y + sdy
-                                    }
-                                }
-                            }
-                        }
+                        adjX = gsnap.x - rawGX
+                        adjY = gsnap.y - rawGY
                         activeSnapLines = gsnap.lines
-                    } else {
-                        activeSnapLines = []
                     }
-                } else {
-                    activeSnapLines = []
                 }
-
+                for (var nid in groupDragStart) {
+                    nodePositions[nid] = { x: groupDragStart[nid].x + deltaX + adjX,
+                                           y: groupDragStart[nid].y + deltaY + adjY }
+                }
                 canvas.requestPaint()
                 return
             }
@@ -2068,7 +2253,10 @@ Item {
                 var c = toCanvas(mouse.x, mouse.y)
                 var rawX = c.x - dragOffsetX
                 var rawY = c.y - dragOffsetY
-                if (mouse.modifiers & Qt.ShiftModifier) {
+                if (snapToGrid) {
+                    nodePositions[dragNodeId] = gridPos({ x: rawX, y: rawY })
+                    activeSnapLines = []
+                } else if (mouse.modifiers & Qt.ShiftModifier) {
                     var snap = computeSnap(dragNodeId, rawX, rawY, null)
                     nodePositions[dragNodeId] = { x: snap.x, y: snap.y }
                     activeSnapLines = snap.lines
@@ -2091,8 +2279,13 @@ Item {
                 selectEndX = mouse.x
                 selectEndY = mouse.y
                 canvas.requestPaint()
+                return
             }
+
+            if (mouse.buttons === Qt.NoButton) updateHover(mouse.x, mouse.y)
         }
+
+        onExited: updateHover(-1, -1)
 
         onReleased: (mouse) => {
             activeSnapLines = []
@@ -2172,7 +2365,9 @@ Item {
         }
     }
 
-    ScrollBar {
+    // The canvas has no content box to sit beside, so its bars overlay the
+    // edges (design bible §5.3).
+    ZbScrollBar {
         id: hScrollBar
         orientation: Qt.Horizontal
         anchors.left: parent.left
@@ -2191,7 +2386,7 @@ Item {
         onPressedChanged: if (!pressed) canvas.requestPaint()
     }
 
-    ScrollBar {
+    ZbScrollBar {
         id: vScrollBar
         orientation: Qt.Vertical
         anchors.top: parent.top
@@ -2209,53 +2404,88 @@ Item {
         onPressedChanged: if (!pressed) canvas.requestPaint()
     }
 
+    // Hover feedback: pin enlarges + tooltip, wire brightens, buttons and
+    // the collapse row highlight. (-1, -1) clears it.
+    function updateHover(sx, sy) {
+        var port = -1
+        var link = -1
+        var btn = ""
+        if (sx >= 0 && connectFromPortId < 0 && dragNodeId < 0 && !groupDragging) {
+            port = findPortAt(sx, sy)
+            if (port < 0) {
+                var hit = findButtonAt(sx, sy)
+                if (hit) btn = hit.nodeId + ":" + hit.button
+                else if (findNodeAt(sx, sy) < 0) link = findLinkAt(sx, sy)
+            }
+        }
+        if (port !== hoveredPortId || link !== hoveredLinkId || btn !== hoveredButton) {
+            hoveredPortId = port
+            hoveredLinkId = link
+            hoveredButton = btn
+            mouseArea.cursorShape = btn !== "" || port >= 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
+            if (port >= 0 && portPositions[port]) {
+                var pp = portPositions[port]
+                var sp = toScreen(pp.cx, pp.cy)
+                pinTip.text = portName(port)
+                pinTip.x = sp.x + 10
+                pinTip.y = sp.y + 10
+                pinTip.open()
+            } else if (btn.indexOf(":pin") > 0) {
+                var pn = findNodeData(parseInt(btn))
+                var pnPos = pn ? nodePositions[pn.id] : null
+                if (pnPos) {
+                    var pinned = !!(pn.layoutKey && pinnedNodes[pn.layoutKey])
+                    var r = pinRect(pn, pnPos.x, pnPos.y)
+                    var tp = toScreen(r.x + r.w, r.y + r.h)
+                    pinTip.text = pinned ? "Pinned \u2014 click to unpin" : "Pin (keep this position)"
+                    pinTip.x = tp.x
+                    pinTip.y = tp.y + 4
+                    pinTip.open()
+                }
+            } else {
+                pinTip.close()
+            }
+            canvas.requestPaint()
+        }
+    }
+
+    function portName(portId) {
+        for (var nid in portsByNode) {
+            var ports = portsByNode[nid]
+            for (var i = 0; i < ports.length; i++) {
+                if (ports[i].id === portId) return ports[i].name
+            }
+        }
+        return ""
+    }
+
+    // Full port name on pin hover.
+    ZbTooltip {
+        id: pinTip
+        delay: 300
+    }
+
+    // Wire control-point offset: clamp(0.5·|dx|, 32, 200), horizontal only,
+    // so wires leave and enter pins horizontally. Shared by drawing and
+    // every hit test.
+    function bezierCtrl(x1, x2) {
+        return Math.max(32, Math.min(200, Math.abs(x2 - x1) / 2))
+    }
+
     function drawBezier(ctx, x1, y1, x2, y2, color, lineWidth) {
-        var ctrlDist = Math.max(Math.abs(x2 - x1) / 2, 50)
+        var ctrlDist = bezierCtrl(x1, x2)
         ctx.strokeStyle = "" + color
         ctx.lineWidth = lineWidth
+        ctx.lineCap = "round"
         ctx.beginPath()
         ctx.moveTo(x1, y1)
         ctx.bezierCurveTo(x1 + ctrlDist, y1, x2 - ctrlDist, y2, x2, y2)
         ctx.stroke()
     }
 
-    function roundRect(ctx, x, y, w, h, r) {
-        ctx.beginPath()
-        ctx.moveTo(x + r, y)
-        ctx.lineTo(x + w - r, y)
-        ctx.arcTo(x + w, y, x + w, y + r, r)
-        ctx.lineTo(x + w, y + h - r)
-        ctx.arcTo(x + w, y + h, x + w - r, y + h, r)
-        ctx.lineTo(x + r, y + h)
-        ctx.arcTo(x, y + h, x, y + h - r, r)
-        ctx.lineTo(x, y + r)
-        ctx.arcTo(x, y, x + r, y, r)
-        ctx.closePath()
-        ctx.fill()
-        ctx.stroke()
-    }
-
-    function roundRectTop(ctx, x, y, w, h, r) {
-        ctx.beginPath()
-        ctx.moveTo(x + r, y)
-        ctx.lineTo(x + w - r, y)
-        ctx.arcTo(x + w, y, x + w, y + r, r)
-        ctx.lineTo(x + w, y + h)
-        ctx.lineTo(x, y + h)
-        ctx.lineTo(x, y + r)
-        ctx.arcTo(x, y, x + r, y, r)
-        ctx.closePath()
-        ctx.fill()
-    }
-
-    function truncate(str, maxLen) {
-        if (!str) return ""
-        return str.length > maxLen ? str.substring(0, maxLen - 1) + "\u2026" : str
-    }
-
     function findLinkAt(sx, sy) {
         var c = toCanvas(sx, sy)
-        var threshold = 6 / zoom
+        var threshold = 4 / zoom   // 8 px band around the wire
         var bestId = -1
         var bestDist = threshold + 1
 
@@ -2296,7 +2526,7 @@ Item {
             var toPos = portPositions[link.inputPortId]
             if (!fromPos || !toPos) continue
 
-            var ctrlDist = Math.max(Math.abs(toPos.cx - fromPos.cx) / 2, 50)
+            var ctrlDist = bezierCtrl(fromPos.cx, toPos.cx)
             var cx1 = fromPos.cx + ctrlDist
             var cy1 = fromPos.cy
             var cx2 = toPos.cx - ctrlDist
@@ -2325,7 +2555,7 @@ Item {
     }
 
     function distToBezier(px, py, x1, y1, x2, y2) {
-        var ctrlDist = Math.max(Math.abs(x2 - x1) / 2, 50)
+        var ctrlDist = bezierCtrl(x1, x2)
         var cx1 = x1 + ctrlDist
         var cy1 = y1
         var cx2 = x2 - ctrlDist
@@ -2346,7 +2576,7 @@ Item {
     }
 
     function bezierIntersectsRect(x1, y1, x2, y2, rx, ry, rw, rh) {
-        var ctrlDist = Math.max(Math.abs(x2 - x1) / 2, 50)
+        var ctrlDist = bezierCtrl(x1, x2)
         var cx1 = x1 + ctrlDist
         var cy1 = y1
         var cx2 = x2 - ctrlDist

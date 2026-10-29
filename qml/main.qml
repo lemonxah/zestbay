@@ -3,13 +3,14 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import ZestBay
 
-ApplicationWindow {
+ZbWindow {
     id: mainWindow
     visible: false
-    width: 800
-    height: 600
-    color: Theme.windowBg
-    title: "ZestBay - Qt6"
+    width: 1280
+    height: 800
+    minimumWidth: 760
+    minimumHeight: 480
+    title: "ZestBay"
 
     Component.onCompleted: {
         try {
@@ -26,6 +27,14 @@ ApplicationWindow {
 
         try {
             var prefs = JSON.parse(controller.get_preferences_json());
+            if (prefs.theme)
+                Theme.mode = prefs.theme;
+            if (prefs.snap_gap_px !== undefined)
+                graphView.snapGap = prefs.snap_gap_px;
+            if (prefs.grid_size_px !== undefined)
+                graphView.gridSize = prefs.grid_size_px;
+            if (prefs.snap_to_grid !== undefined)
+                graphView.snapToGrid = prefs.snap_to_grid;
             if (prefs.start_minimized) {
                 controller.set_window_visible(false);
                 return;
@@ -72,10 +81,21 @@ ApplicationWindow {
         Component.onCompleted: controller.init()
     }
 
+    // Rule counts for the toolbar Rules button.
+    property int ruleCount: 0
+    function refreshRuleCount() {
+        try {
+            ruleCount = JSON.parse(controller.get_rules_json()).length
+        } catch (e) {
+            ruleCount = 0
+        }
+    }
+
     Connections {
         target: controller
         function onGraph_changed() {
             graphView.refreshData();
+            mainWindow.refreshRuleCount();
         }
         function onError_occurred(message) {
             // Errors can arrive in bursts (e.g. while PipeWire reconnects):
@@ -99,6 +119,14 @@ ApplicationWindow {
             controller.set_window_visible(true);
             graphView.refreshData();
             graphView.forceActiveFocus();
+        }
+        function onTray_action_requested(action) {
+            if (action === "add_plugin")
+                mainWindow.addPluginAtCenter();
+            else if (action === "rules")
+                ruleEditor.open();
+            else if (action === "preferences")
+                preferencesDialog.open();
         }
         function onHide_window_requested() {
             mainWindow.visible = false;
@@ -131,27 +159,27 @@ ApplicationWindow {
         }
     }
 
-    Dialog {
+    ZbDialog {
         id: errorDialog
         title: "Error"
-        anchors.centerIn: parent
-        modal: true
-        standardButtons: Dialog.Ok
+        primaryText: "OK"
         width: Math.min(mainWindow.width * 0.6, 500)
 
-        Label {
+        Text {
             id: errorDialogText
-            width: parent.width
+            width: parent ? parent.width : 400
             wrapMode: Text.WordWrap
+            font.family: Theme.fontSans
+            font.pixelSize: Theme.sizeBody
+            color: Theme.textPrimary
         }
     }
 
-    Dialog {
+    ZbDialog {
         id: crashRecoveryDialog
-        title: "Crash Recovery"
-        anchors.centerIn: parent
-        modal: true
-        standardButtons: Dialog.Yes | Dialog.No
+        title: "Crash recovery"
+        primaryText: "Restore"
+        secondaryText: "Ignore"
         width: Math.min(mainWindow.width * 0.7, 550)
 
         onAccepted: {
@@ -164,10 +192,13 @@ ApplicationWindow {
             }
         }
 
-        Label {
+        Text {
             id: crashRecoveryDialogText
-            width: parent.width
+            width: parent ? parent.width : 450
             wrapMode: Text.WordWrap
+            font.family: Theme.fontSans
+            font.pixelSize: Theme.sizeBody
+            color: Theme.textPrimary
         }
     }
 
@@ -179,199 +210,485 @@ ApplicationWindow {
         onTriggered: controller.poll_events()
     }
 
-    menuBar: MenuBar {
-        Menu {
-            title: "&File"
-            Action {
-                text: "Add &Plugin..."
-                onTriggered: {
-                    var center = graphView.toCanvas(graphView.width / 2, graphView.height / 2)
-                    graphView.pendingPluginPosition = { x: center.x, y: center.y }
-                    pluginBrowser.open()
+    // Toolbar / menu grid controls; persisted like the Preferences rows.
+    function setSnapToGrid(on) {
+        controller.set_preference("snap_to_grid", String(on))
+        graphView.snapToGrid = on
+    }
+    function setGridSize(px) {
+        controller.set_preference("grid_size_px", String(px))
+        graphView.gridSize = px
+    }
+
+    function addPluginAtCenter() {
+        var center = graphView.toCanvas(graphView.width / 2, graphView.height / 2)
+        graphView.pendingPluginPosition = { x: center.x, y: center.y }
+        pluginBrowser.open()
+    }
+
+    Shortcut {
+        sequence: "Ctrl+F"
+        onActivated: searchField.forceActiveFocus()
+    }
+
+    // ---- Toolbar (replaces the menu bar; design bible §6.4) -------------
+    header: Rectangle {
+        implicitHeight: Theme.toolbarHeight
+        color: Theme.bgPanel
+
+        Rectangle {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            height: 1
+            color: Theme.borderPanel
+        }
+
+        RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: Theme.toolbarPadding
+            anchors.rightMargin: Theme.toolbarPadding
+            spacing: 8
+
+            ZbLogo {
+                size: 22
+            }
+            Text {
+                text: "ZestBay"
+                font.family: Theme.fontSans
+                font.pixelSize: 14
+                font.weight: Font.DemiBold
+                color: Theme.textStrong
+                Layout.rightMargin: 16
+            }
+
+            ZbSearchField {
+                id: searchField
+                Layout.preferredWidth: 280
+                Layout.minimumWidth: 160
+                Layout.fillWidth: true
+                Layout.maximumWidth: 280
+                placeholderText: "Search nodes and ports"
+                onTextChanged: graphView.searchText = text
+                Keys.onEscapePressed: {
+                    text = ""
+                    graphView.forceActiveFocus()
                 }
             }
-            Action {
-                text: "&Manage Plugins..."
-                onTriggered: pluginManagerDialog.open()
+
+            Item { Layout.fillWidth: true }
+
+            ZbButton {
+                kind: "primary"
+                text: "Add plugin"
+                iconName: "plus"
+                onClicked: mainWindow.addPluginAtCenter()
             }
-            Action {
-                text: "MIDI &Mappings..."
-                onTriggered: midiMappingsDialog.open()
+
+            // Rules: accent dot while rules are active, rule count pill.
+            ZbButton {
+                id: rulesButton
+                implicitWidth: rulesRow.implicitWidth + 24
+                onClicked: ruleEditor.open()
+                contentItem: Item {
+                    implicitWidth: rulesRow.implicitWidth
+                    Row {
+                        id: rulesRow
+                        anchors.centerIn: parent
+                        spacing: 8
+                        Rectangle {
+                            visible: controller.patchbay_enabled
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 7
+                            height: 7
+                            radius: 3.5
+                            color: Theme.accent
+                        }
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "Rules"
+                            font.family: Theme.fontSans
+                            font.pixelSize: Theme.sizeButton
+                            font.weight: Font.Medium
+                            color: Theme.textPrimary
+                        }
+                        ZbCountPill {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: mainWindow.ruleCount
+                        }
+                    }
+                }
             }
-            MenuSeparator {}
-            Action {
-                text: "&Preferences..."
-                onTriggered: preferencesDialog.open()
+
+            ZbDivider { vertical: true; strong: true; Layout.leftMargin: 4; Layout.rightMargin: 4 }
+
+            // Zoom cluster: [−] [100%] [+] [fit], one bordered group.
+            Rectangle {
+                implicitHeight: Theme.controlHeight
+                implicitWidth: zoomRow.implicitWidth + 2
+                radius: Theme.radiusControl
+                color: Theme.bgRaised
+                border.width: 1
+                border.color: Theme.borderStrong
+
+                Row {
+                    id: zoomRow
+                    anchors.centerIn: parent
+                    ZoomCell {
+                        iconName: "minus"
+                        tip: "Zoom out"
+                        onClicked: graphView.zoomAt(graphView.width / 2, graphView.height / 2, graphView.zoom / 1.1)
+                    }
+                    Rectangle { width: 1; height: Theme.controlHeight - 2; color: Theme.borderHairline }
+                    ZoomCell {
+                        width: 44
+                        label: Math.round(graphView.zoom * 100) + "%"
+                        tip: "Reset zoom"
+                        onClicked: graphView.zoomAt(graphView.width / 2, graphView.height / 2, 1.0)
+                    }
+                    Rectangle { width: 1; height: Theme.controlHeight - 2; color: Theme.borderHairline }
+                    ZoomCell {
+                        iconName: "plus"
+                        tip: "Zoom in"
+                        onClicked: graphView.zoomAt(graphView.width / 2, graphView.height / 2, graphView.zoom * 1.1)
+                    }
+                    ZoomCell {
+                        iconName: "fit"
+                        tip: "Fit to view (Home)"
+                        onClicked: graphView.fitToView()
+                    }
+                }
             }
-            MenuSeparator {}
-            Action {
-                text: "&Quit"
-                onTriggered: controller.request_quit()
+
+            // Grid cluster: [snap to grid toggle] [grid size ▾].
+            Rectangle {
+                implicitHeight: Theme.controlHeight
+                implicitWidth: gridRow.implicitWidth + 2
+                radius: Theme.radiusControl
+                color: Theme.bgRaised
+                border.width: 1
+                border.color: Theme.borderStrong
+
+                Row {
+                    id: gridRow
+                    anchors.centerIn: parent
+                    ZoomCell {
+                        iconName: "grid"
+                        active: graphView.snapToGrid
+                        tip: graphView.snapToGrid ? "Snap to grid: on" : "Snap to grid: off"
+                        onClicked: mainWindow.setSnapToGrid(!graphView.snapToGrid)
+                    }
+                    Rectangle { width: 1; height: Theme.controlHeight - 2; color: Theme.borderHairline }
+                    ZoomCell {
+                        id: gridSizeCell
+                        width: 60
+                        label: Math.round(graphView.gridSize) + "px"
+                        trailingIcon: "chevronDown"
+                        tip: "Grid size"
+                        onClicked: gridSizeMenu.popup(gridSizeCell, 0, gridSizeCell.height + 6)
+
+                        ZbMenu {
+                            id: gridSizeMenu
+                            implicitWidth: 140
+                            Repeater {
+                                model: [8, 12, 16, 20, 24, 32, 40, 48, 64, 96]
+                                delegate: ZbMenuItem {
+                                    required property int modelData
+                                    implicitWidth: 128
+                                    text: modelData + " px"
+                                    selected: Math.round(graphView.gridSize) === modelData
+                                    onTriggered: mainWindow.setGridSize(modelData)
+                                }
+                            }
+                        }
+                    }
+                }
             }
-        }
-        Menu {
-            title: "&Patchbay"
-            Action {
-                text: "Enable Rules"
-                checkable: true
-                checked: controller.patchbay_enabled
-                onToggled: controller.toggle_patchbay(checked)
+
+            ZbDivider { vertical: true; strong: true; Layout.leftMargin: 4; Layout.rightMargin: 4 }
+
+            ZbButton {
+                iconName: "settings"
+                iconSize: 16
+                textColor: Theme.textIcon
+                onClicked: preferencesDialog.open()
+                ZbTooltip { visible: parent.hovered; text: "Preferences" }
             }
-            Action {
-                // Off: rules only add links; nothing they don't cover is removed.
-                text: "Exclusive Mode"
-                checkable: true
-                enabled: controller.patchbay_enabled
-                checked: controller.patchbay_exclusive
-                onToggled: controller.toggle_patchbay_exclusive(checked)
-            }
-            MenuSeparator {}
-            Action {
-                text: "Edit Rules..."
-                onTriggered: ruleEditor.open()
-            }
-            Action {
-                text: "Apply Rules Now"
-                onTriggered: controller.apply_rules()
-            }
-            MenuSeparator {}
-            Action {
-                text: "Snapshot Connections"
-                onTriggered: controller.snapshot_rules()
-            }
-        }
-        Menu {
-            title: "&Help"
-            Action {
-                text: "&About ZestBay..."
-                onTriggered: aboutDialog.open()
+
+            ZbButton {
+                id: menuButton
+                iconName: "menu"
+                iconSize: 16
+                textColor: Theme.textIcon
+                onClicked: appMenu.popup(menuButton, menuButton.width - appMenu.width, menuButton.height + 6)
+
+                // The old File / Patchbay / Help menus.
+                ZbMenu {
+                    id: appMenu
+                    ZbMenuItem {
+                        text: "Enable rules"
+                        checkable: true
+                        checked: controller.patchbay_enabled
+                        onToggled: controller.toggle_patchbay(!controller.patchbay_enabled)
+                    }
+                    ZbMenuItem {
+                        // Off: rules only add links; nothing they don't cover is removed.
+                        text: "Exclusive mode"
+                        checkable: true
+                        enabled: controller.patchbay_enabled
+                        checked: controller.patchbay_exclusive
+                        onToggled: controller.toggle_patchbay_exclusive(!controller.patchbay_exclusive)
+                    }
+                    ZbMenuItem {
+                        text: "Apply rules now"
+                        onTriggered: controller.apply_rules()
+                    }
+                    ZbMenuItem {
+                        text: "Snapshot connections"
+                        onTriggered: controller.snapshot_rules()
+                    }
+                    ZbMenuSeparator {}
+                    ZbMenuItem {
+                        text: "Snap to grid"
+                        checkable: true
+                        checked: graphView.snapToGrid
+                        onToggled: mainWindow.setSnapToGrid(!graphView.snapToGrid)
+                    }
+                    ZbMenuSeparator {}
+                    ZbMenuItem {
+                        text: "Manage plugins…"
+                        onTriggered: pluginManagerDialog.open()
+                    }
+                    ZbMenuItem {
+                        text: "MIDI mappings…"
+                        onTriggered: midiMappingsDialog.open()
+                    }
+                    ZbMenuItem {
+                        text: "CPU usage…"
+                        onTriggered: cpuOverlayDialog.open()
+                    }
+                    ZbMenuSeparator {}
+                    ZbMenuItem {
+                        text: "About ZestBay"
+                        onTriggered: aboutDialog.open()
+                    }
+                    ZbMenuItem {
+                        text: "Quit"
+                        shortcutHint: "Ctrl+Q"
+                        onTriggered: controller.request_quit()
+                    }
+                }
             }
         }
     }
 
-    footer: ToolBar {
-        RowLayout {
-            anchors.fill: parent
-            anchors.leftMargin: 8
-            anchors.rightMargin: 8
+    Shortcut {
+        sequence: "Ctrl+Q"
+        onActivated: controller.request_quit()
+    }
 
-            Label {
-                text: "Nodes: " + controller.node_count + "  Links: " + controller.link_count
-            }
-
-            Item {
-                Layout.fillWidth: true
-            }
-
-            Canvas {
-                id: cpuSparkline
-                width: 80
-                height: 40
-                Layout.alignment: Qt.AlignVCenter
-
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: cpuOverlayDialog.open()
+    // A cell of the zoom cluster: icon or label, no own border.
+    // A cell of a toolbar cluster (zoom, grid): icon and/or label, no own
+    // border. `active` = toggle on (accentFaint + accent, like a plugin's On).
+    component ZoomCell: AbstractButton {
+        id: cell
+        property string iconName: ""
+        property string label: ""
+        property string trailingIcon: ""
+        property string tip: ""
+        property bool active: false
+        readonly property color fg: active ? Theme.accent : Theme.textIcon
+        width: Theme.controlHeight
+        height: Theme.controlHeight - 2
+        hoverEnabled: true
+        background: Rectangle {
+            radius: Theme.radiusControl - 1
+            color: cell.active ? Theme.accentFaint
+                 : cell.hovered || cell.down ? Theme.bgHover : "transparent"
+        }
+        contentItem: Item {
+            Row {
+                anchors.centerIn: parent
+                spacing: 5
+                ZbIcon {
+                    visible: cell.iconName.length > 0
+                    anchors.verticalCenter: parent.verticalCenter
+                    name: cell.iconName
+                    size: 14
+                    color: cell.fg
                 }
-
-                ToolTip.visible: cpuSparklineHover.hovered
-                ToolTip.text: "Click for detailed CPU view"
-
-                HoverHandler {
-                    id: cpuSparklineHover
+                Text {
+                    visible: cell.label.length > 0
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: cell.label
+                    font.family: Theme.fontMono
+                    font.pixelSize: Theme.sizeMono
+                    color: cell.active ? Theme.accent : Theme.textPrimary
                 }
-
-                property var cpuData: []
-
-                Connections {
-                    target: controller
-                    function onCpu_usageChanged() {
-                        try {
-                            cpuSparkline.cpuData = JSON.parse(controller.get_cpu_history())
-                        } catch(e) {
-                            cpuSparkline.cpuData = []
-                        }
-                        cpuSparkline.requestPaint()
-                    }
+                ZbIcon {
+                    visible: cell.trailingIcon.length > 0
+                    anchors.verticalCenter: parent.verticalCenter
+                    name: cell.trailingIcon
+                    size: 8
+                    color: Theme.textMuted
                 }
-
-                onPaint: {
-                    var ctx = getContext("2d")
-                    ctx.reset()
-                    var d = cpuData
-                    var w = width
-                    var h = height
-
-                    ctx.fillStyle = "" + Theme.chartBg
-                    ctx.fillRect(0, 0, w, h)
-
-                    ctx.setLineDash([2, 2])
-
-                    ctx.strokeStyle = "" + Theme.chartGrid25
-                    ctx.lineWidth = 0.5
-                    ctx.beginPath()
-                    ctx.moveTo(0, h * 0.75)
-                    ctx.lineTo(w, h * 0.75)
-                    ctx.stroke()
-                    ctx.beginPath()
-                    ctx.moveTo(0, h * 0.25)
-                    ctx.lineTo(w, h * 0.25)
-                    ctx.stroke()
-
-                    ctx.strokeStyle = "" + Theme.chartGrid50
-                    ctx.lineWidth = 0.5
-                    ctx.beginPath()
-                    ctx.moveTo(0, h * 0.5)
-                    ctx.lineTo(w, h * 0.5)
-                    ctx.stroke()
-
-                    ctx.setLineDash([])
-
-                    if (d.length >= 2) {
-                        ctx.strokeStyle = "" + Theme.chartLine
-                        ctx.lineWidth = 1
-                        ctx.beginPath()
-                        var step = w / (d.length - 1)
-                        for (var j = 0; j < d.length; j++) {
-                            var x = j * step
-                            var y = h - (d[j] / 100.0) * (h - 2) - 1
-                            if (j === 0) ctx.moveTo(x, y)
-                            else ctx.lineTo(x, y)
-                        }
-                        ctx.stroke()
-                    }
-
-                    ctx.strokeStyle = "" + Theme.chartBorder
-                    ctx.lineWidth = 1
-                    ctx.strokeRect(0, 0, w, h)
-                }
-            }
-
-            Label {
-                text: "CPU: " + controller.cpu_usage
-                font.family: "monospace"
-                opacity: 0.7
-
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: cpuOverlayDialog.open()
-                }
-            }
-
-            Rectangle {
-                width: 1
-                height: parent.height * 0.6
-                color: Theme.separator
-                Layout.alignment: Qt.AlignVCenter
-            }
-
-            Label {
-                text: controller.patchbay_enabled ? "Rules Active" : "Rules Disabled"
-                opacity: controller.patchbay_enabled ? 1.0 : 0.5
             }
         }
+        ZbTooltip { visible: cell.hovered && cell.tip.length > 0; text: cell.tip }
+    }
+
+    // ---- Status bar -----------------------------------------------------
+    footer: Rectangle {
+        implicitHeight: Theme.statusBarHeight
+        color: Theme.bgPanel
+
+        Rectangle {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            height: 1
+            color: Theme.borderPanel
+        }
+
+        RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: Theme.toolbarPadding
+            anchors.rightMargin: Theme.toolbarPadding
+            spacing: 16
+
+            StatusText {
+                text: controller.node_count + " nodes · " + controller.link_count + " links"
+            }
+
+            Row {
+                spacing: 14
+                Repeater {
+                    model: [
+                        { label: "Audio", color: Theme.sigAudio, hollow: false },
+                        { label: "MIDI", color: Theme.sigMidi, hollow: false },
+                        { label: "Video", color: Theme.sigVideo, hollow: false },
+                        { label: "Unconnected", color: Theme.textMuted, hollow: true }
+                    ]
+                    Row {
+                        required property var modelData
+                        spacing: 6
+                        Rectangle {
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 8
+                            height: 8
+                            radius: 4
+                            color: modelData.hollow ? "transparent" : modelData.color
+                            border.width: modelData.hollow ? 1.5 : 0
+                            border.color: modelData.color
+                        }
+                        StatusText { text: modelData.label }
+                    }
+                }
+            }
+
+            Item { Layout.fillWidth: true }
+
+            // CPU sparkline + readout; click for the CPU usage window.
+            Item {
+                implicitWidth: cpuRow.implicitWidth
+                implicitHeight: cpuRow.implicitHeight
+                Row {
+                    id: cpuRow
+                    spacing: 8
+                    Canvas {
+                        id: cpuSparkline
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 64
+                        height: 14
+                        property var cpuData: []
+
+                        Connections {
+                            target: controller
+                            function onCpu_usageChanged() {
+                                try {
+                                    cpuSparkline.cpuData = JSON.parse(controller.get_cpu_history())
+                                } catch (e) {
+                                    cpuSparkline.cpuData = []
+                                }
+                                cpuSparkline.requestPaint()
+                            }
+                        }
+                        Connections {
+                            target: Theme
+                            function onDarkChanged() { cpuSparkline.requestPaint() }
+                        }
+
+                        onPaint: {
+                            var ctx = getContext("2d")
+                            ctx.reset()
+                            var d = cpuData.slice(-40)
+                            if (d.length < 2) return
+                            var maxV = 1
+                            for (var i = 0; i < d.length; i++) maxV = Math.max(maxV, d[i])
+                            ctx.strokeStyle = "" + Theme.catHardware
+                            ctx.lineWidth = 1.5
+                            ctx.lineJoin = "round"
+                            ctx.beginPath()
+                            for (var j = 0; j < d.length; j++) {
+                                var x = j * (width - 1) / (d.length - 1) + 0.5
+                                var y = height - 1.5 - (d[j] / maxV) * (height - 3)
+                                if (j === 0) ctx.moveTo(x, y)
+                                else ctx.lineTo(x, y)
+                            }
+                            ctx.stroke()
+                        }
+                    }
+                    StatusText {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "CPU " + controller.cpu_usage
+                    }
+                }
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: cpuOverlayDialog.open()
+                }
+            }
+
+            // Rules chip: accent while active, neutral when off.
+            Rectangle {
+                implicitHeight: 20
+                implicitWidth: chipRow.implicitWidth + 16
+                radius: Theme.radiusSmall
+                color: controller.patchbay_enabled ? Theme.accentFaint : "transparent"
+                border.width: controller.patchbay_enabled ? 0 : 1
+                border.color: Theme.borderStrong
+                Row {
+                    id: chipRow
+                    anchors.centerIn: parent
+                    spacing: 6
+                    Rectangle {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 6
+                        height: 6
+                        radius: 3
+                        color: controller.patchbay_enabled ? Theme.accent : Theme.textMuted
+                    }
+                    StatusText {
+                        text: controller.patchbay_enabled
+                              ? (controller.patchbay_exclusive ? "Rules active" : "Rules active · non-exclusive")
+                              : "Rules off"
+                        color: controller.patchbay_enabled ? Theme.accent : Theme.textMuted
+                    }
+                }
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: ruleEditor.open()
+                }
+            }
+        }
+    }
+
+    component StatusText: Text {
+        font.family: Theme.fontMono
+        font.pixelSize: Theme.sizeMono
+        color: Theme.textMuted
     }
 
     GraphView {
@@ -379,6 +696,7 @@ ApplicationWindow {
         anchors.fill: parent
         controller: controller
         onOpenPluginBrowser: pluginBrowser.open()
+        Component.onCompleted: mainWindow.refreshRuleCount()
         onOpenPluginParams: nodeId => pluginParamsDialog.openForNode(nodeId)
     }
 
@@ -402,6 +720,7 @@ ApplicationWindow {
     RuleEditor {
         id: ruleEditor
         controller: controller
+        onVisibleChanged: if (!visible) mainWindow.refreshRuleCount()
     }
 
     PluginManager {
@@ -420,6 +739,9 @@ ApplicationWindow {
         onPollIntervalChanged: intervalMs => {
             pollTimer.interval = intervalMs;
         }
+        onSnapGapChanged: px => graphView.snapGap = px
+        onSnapToGridChanged: enabled => graphView.snapToGrid = enabled
+        onGridSizeChanged: px => graphView.gridSize = px
     }
 
     CpuOverlay {

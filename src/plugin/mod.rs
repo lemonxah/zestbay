@@ -7,6 +7,7 @@
 
 pub mod cpu_stats;
 pub mod manager;
+pub mod paths;
 pub mod sandbox;
 pub mod types;
 

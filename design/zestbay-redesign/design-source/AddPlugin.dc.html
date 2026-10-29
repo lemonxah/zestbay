@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Add plugin</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+body{margin:0;background:#121418}
+a{color:#c9e265}a:hover{color:#e3f29a}
+input::placeholder{color:#7b8390}
+button{cursor:pointer}
+</style>
+</helmet>
+<div style="width: 880px; height: 700px; box-sizing: border-box; display: flex; flex-direction: column; background: #1a1d23; color: #e8eaee; border: 1px solid #2a2f38; border-radius: 12px; overflow: hidden; font-family: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif; font-size: 13px; line-height: 1.3">
+
+  <div style="display: flex; align-items: center; gap: 16px; padding: 20px 24px 12px">
+    <h1 style="margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -0.01em; flex: 1">Add plugin</h1>
+    <button type="button" aria-label="Close" style="width: 32px; height: 32px; border-radius: 8px; border: 0; background: transparent; color: #8b93a0; display: flex; align-items: center; justify-content: center"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"></path></svg></button>
+  </div>
+
+  <div style="padding: 0 24px 12px">
+    <label style="display: flex; align-items: center; gap: 10px; height: 40px; box-sizing: border-box; padding: 0 12px; background: #121418; border: 1px solid {{accent}}; border-radius: 10px; color: #8b93a0; box-shadow: 0 0 0 3px {{accentSoft}}">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.8"></circle><path d="M10.6 10.6L14 14"></path></svg>
+      <input type="search" placeholder="Search by name, author or category" aria-label="Search plugins" style="flex: 1; min-width: 0; background: transparent; border: 0; outline: 0; color: #e8eaee; font: inherit; font-size: 14px">
+    </label>
+  </div>
+
+  <div style="display: flex; align-items: center; gap: 12px; padding: 0 24px 12px; flex-wrap: wrap">
+    <div style="display: flex; align-items: center; height: 30px; padding: 2px; gap: 2px; border: 1px solid #2f353f; border-radius: 8px; background: #121418">
+      <button type="button" aria-pressed="true" style="height: 24px; padding: 0 10px; border-radius: 6px; border: 0; background: #2a2f38; color: #e8eaee; font: inherit; font-size: 12px; font-weight: 500">All</button>
+      <button type="button" style="height: 24px; padding: 0 10px; border-radius: 6px; border: 0; background: transparent; color: #aab1bc; font: inherit; font-size: 12px; font-weight: 500">LV2</button>
+      <button type="button" style="height: 24px; padding: 0 10px; border-radius: 6px; border: 0; background: transparent; color: #aab1bc; font: inherit; font-size: 12px; font-weight: 500">VST3</button>
+      <button type="button" style="height: 24px; padding: 0 10px; border-radius: 6px; border: 0; background: transparent; color: #aab1bc; font: inherit; font-size: 12px; font-weight: 500">CLAP</button>
+    </div>
+    <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #8b93a0">908 of 930 plugins</span>
+    <div style="flex: 1"></div>
+    <label style="display: flex; align-items: center; gap: 10px; font-size: 12px; font-weight: 500; color: #aab1bc">Compatible only
+      <button type="button" role="switch" aria-checked="true" aria-label="Show compatible plugins only" style="width: 32px; height: 18px; border-radius: 9px; border: 0; padding: 0; position: relative; background: {{accent}}"><span style="position: absolute; top: 2px; left: 16px; width: 14px; height: 14px; border-radius: 50%; background: #141413"></span></button>
+    </label>
+  </div>
+
+  <div style="flex: 1; min-height: 0; margin: 0 24px 24px; background: #1f232a; border: 1px solid #2a2f38; border-radius: 10px; overflow: hidden; display: flex; flex-direction: column">
+
+    <div style="display: flex; align-items: center; gap: 14px; height: 64px; box-sizing: border-box; padding: 0 16px; border-bottom: 1px solid #262b33">
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px">
+        <div style="display: flex; align-items: center; gap: 8px"><span style="font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">1/3 Octave Spectrum Display Mono</span><span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; font-weight: 500; padding: 1px 5px; border-radius: 4px; background: rgba(90,169,255,0.14); color: #8fc3ff">LV2</span></div>
+        <div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #8b93a0"><span>Analyser · Robin Gareus</span><span style="width: 1px; height: 10px; background: #2f353f"></span><span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px">1 in · 1 out · 4 controls</span></div>
+      </div>
+      <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; color: #8b93a0; border: 1px solid #2f353f; border-radius: 4px; padding: 2px 6px">no UI</span>
+      <button type="button" style="height: 30px; padding: 0 14px; border-radius: 8px; border: 1px solid #2f353f; background: #22262e; color: #e8eaee; font: inherit; font-size: 12px; font-weight: 500">Add</button>
+    </div>
+
+    <div style="display: flex; align-items: center; gap: 14px; height: 64px; box-sizing: border-box; padding: 0 16px; border-bottom: 1px solid #262b33">
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px">
+        <div style="display: flex; align-items: center; gap: 8px"><span style="font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">1/3 Octave Spectrum Display Stereo</span><span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; font-weight: 500; padding: 1px 5px; border-radius: 4px; background: rgba(90,169,255,0.14); color: #8fc3ff">LV2</span></div>
+        <div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #8b93a0"><span>Analyser · Robin Gareus</span><span style="width: 1px; height: 10px; background: #2f353f"></span><span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px">2 in · 2 out · 4 controls</span></div>
+      </div>
+      <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; color: #8b93a0; border: 1px solid #2f353f; border-radius: 4px; padding: 2px 6px">no UI</span>
+      <button type="button" style="height: 30px; padding: 0 14px; border-radius: 8px; border: 1px solid #2f353f; background: #22262e; color: #e8eaee; font: inherit; font-size: 12px; font-weight: 500">Add</button>
+    </div>
+
+    <div style="display: flex; align-items: center; gap: 14px; height: 64px; box-sizing: border-box; padding: 0 16px; border-bottom: 1px solid #262b33">
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px">
+        <div style="display: flex; align-items: center; gap: 8px"><span style="font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">16 Step Sequencer</span><span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; font-weight: 500; padding: 1px 5px; border-radius: 4px; background: rgba(90,169,255,0.14); color: #8fc3ff">LV2</span></div>
+        <div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #8b93a0"><span>Plugin · David Robillard</span><span style="width: 1px; height: 10px; background: #2f353f"></span><span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px">2 in · 1 out · 19 controls</span></div>
+      </div>
+      <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; color: #8b93a0; border: 1px solid #2f353f; border-radius: 4px; padding: 2px 6px">no UI</span>
+      <button type="button" style="height: 30px; padding: 0 14px; border-radius: 8px; border: 1px solid #2f353f; background: #22262e; color: #e8eaee; font: inherit; font-size: 12px; font-weight: 500">Add</button>
+    </div>
+
+    <div style="display: flex; align-items: center; gap: 14px; height: 64px; box-sizing: border-box; padding: 0 16px; border-bottom: 1px solid #262b33">
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px">
+        <div style="display: flex; align-items: center; gap: 8px"><span style="font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">3 Band EQ</span><span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; font-weight: 500; padding: 1px 5px; border-radius: 4px; background: rgba(240,160,64,0.14); color: #f5b35a">VST3</span></div>
+        <div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #8b93a0"><span>Equaliser · DISTRHO</span><span style="width: 1px; height: 10px; background: #2f353f"></span><span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px">2 in · 2 out</span></div>
+      </div>
+      <button type="button" style="height: 30px; padding: 0 14px; border-radius: 8px; border: 1px solid #2f353f; background: #22262e; color: #e8eaee; font: inherit; font-size: 12px; font-weight: 500">Add</button>
+    </div>
+
+    <div style="display: flex; align-items: center; gap: 14px; height: 64px; box-sizing: border-box; padding: 0 16px; border-bottom: 1px solid #262b33">
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px">
+        <div style="display: flex; align-items: center; gap: 8px"><span style="font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">3 Band EQ</span><span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; font-weight: 500; padding: 1px 5px; border-radius: 4px; background: rgba(90,169,255,0.14); color: #8fc3ff">LV2</span></div>
+        <div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #8b93a0"><span>Equaliser · DISTRHO</span><span style="width: 1px; height: 10px; background: #2f353f"></span><span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px">2 in · 2 out · 6 controls</span></div>
+      </div>
+      <button type="button" style="height: 30px; padding: 0 14px; border-radius: 8px; border: 1px solid #2f353f; background: #22262e; color: #e8eaee; font: inherit; font-size: 12px; font-weight: 500">Add</button>
+    </div>
+
+    <div style="display: flex; align-items: center; gap: 14px; height: 64px; box-sizing: border-box; padding: 0 16px; border-bottom: 1px solid #262b33">
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px">
+        <div style="display: flex; align-items: center; gap: 8px"><span style="font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">3 Band EQ</span><span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; font-weight: 500; padding: 1px 5px; border-radius: 4px; background: rgba(57,198,176,0.14); color: #5fd6c3">CLAP</span></div>
+        <div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #8b93a0"><span>Equaliser · DISTRHO</span><span style="width: 1px; height: 10px; background: #2f353f"></span><span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px">2 in · 2 out</span></div>
+      </div>
+      <button type="button" style="height: 30px; padding: 0 14px; border-radius: 8px; border: 1px solid #2f353f; background: #22262e; color: #e8eaee; font: inherit; font-size: 12px; font-weight: 500">Add</button>
+    </div>
+
+    <div style="display: flex; align-items: center; gap: 14px; height: 64px; box-sizing: border-box; padding: 0 16px; border-bottom: 1px solid #262b33; background: #262b33">
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px">
+        <div style="display: flex; align-items: center; gap: 8px"><span style="font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">3 Band Splitter</span><span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; font-weight: 500; padding: 1px 5px; border-radius: 4px; background: rgba(240,160,64,0.14); color: #f5b35a">VST3</span></div>
+        <div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #8b93a0"><span>Equaliser · DISTRHO</span><span style="width: 1px; height: 10px; background: #2f353f"></span><span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px">2 in · 2 out</span></div>
+      </div>
+      <button type="button" style="height: 30px; padding: 0 14px; border-radius: 8px; border: 0; background: {{accent}}; color: #141413; font: inherit; font-size: 12px; font-weight: 600">Add</button>
+    </div>
+
+    <div style="display: flex; align-items: center; gap: 14px; height: 64px; box-sizing: border-box; padding: 0 16px; border-bottom: 1px solid #262b33">
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px">
+        <div style="display: flex; align-items: center; gap: 8px"><span style="font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">3 Band Splitter</span><span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; font-weight: 500; padding: 1px 5px; border-radius: 4px; background: rgba(57,198,176,0.14); color: #5fd6c3">CLAP</span></div>
+        <div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #8b93a0"><span>Equaliser · DISTRHO</span><span style="width: 1px; height: 10px; background: #2f353f"></span><span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px">2 in · 2 out</span></div>
+      </div>
+      <button type="button" style="height: 30px; padding: 0 14px; border-radius: 8px; border: 1px solid #2f353f; background: #22262e; color: #e8eaee; font: inherit; font-size: 12px; font-weight: 500">Add</button>
+    </div>
+
+  </div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#c9e265","options":["#c9e265","#63b3ff","#f0a040","#e879b5"]},"$preview":{"width":880,"height":700}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const accent = this.props.accent ?? '#c9e265';
+    const m = /^#?([0-9a-f]{6})$/i.exec(accent);
+    const n = m ? parseInt(m[1], 16) : 0xc9e265;
+    const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+    return { accent, accentSoft: 'rgba(' + r + ',' + g + ',' + b + ',0.22)' };
+  }
+}
+</script>
+</body>
+</html>

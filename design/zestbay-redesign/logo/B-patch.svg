@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <!-- Option B · Patch (recommended). Single colour: accent (#c9e265 dark / #5d7a00 light), or text.primary on a light surface. -->
+  <path d="M19 19C47 19 17 45 45 45" fill="none" stroke="#c9e265" stroke-width="5.5" stroke-linecap="round"/>
+  <circle cx="19" cy="19" r="6.5" fill="#c9e265"/>
+  <circle cx="45" cy="45" r="6.5" fill="#c9e265"/>
+</svg>
