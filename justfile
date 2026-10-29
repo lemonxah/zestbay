@@ -30,8 +30,6 @@ install: build
     sudo cp target/release/zestbay-ui-bridge /usr/lib/zestbay/zestbay-ui-bridge
     @echo "Installed"
 
-aur_dir := "../aur/zestbay"
-
 # Bump, commit, tag, and push. Optional message: just release 0.5.0 "fix remapping"
 release new_version msg="":
     just bump {{new_version}}
@@ -40,10 +38,3 @@ release new_version msg="":
     git tag -a "v{{new_version}}" -m "v{{new_version}}{{ if msg != "" { ": " + msg } else { "" } }}"
     git push && git push --tags
     gh release create "v{{new_version}}" --generate-notes
-    @just aur-publish {{new_version}}
-
-# Update AUR repo with new version
-aur-publish new_version:
-    sed -i 's/^pkgver=.*/pkgver={{new_version}}/' {{aur_dir}}/PKGBUILD
-    cd {{aur_dir}} && makepkg --printsrcinfo > .SRCINFO
-    cd {{aur_dir}} && git commit -am "updated the version to {{new_version}}" && git push
