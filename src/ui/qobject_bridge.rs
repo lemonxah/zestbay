@@ -505,6 +505,8 @@ impl qobject::AppController {
 
         // Already loaded when the controller was created (see Default).
         let prefs = self.rust().prefs.clone();
+        // Before PipeWire starts and saved plugins are restored.
+        crate::plugin::PASSIVE_EFFECTS.store(prefs.passive_plugins, std::sync::atomic::Ordering::Relaxed);
         log::info!(
             "Preferences: rule_settle={}ms, params_persist={}ms, links_persist={}ms, poll={}ms, auto_learn={}, pw_tick={}ms, pw_cooldown={}ms",
             prefs.rule_settle_ms,
@@ -3169,6 +3171,12 @@ impl qobject::AppController {
                     self.as_mut().rust_mut().prefs.pw_tick_interval_ms = v.clamp(1, 200);
                 }
             }
+            "passive_plugins" => {
+                if let Ok(v) = val_str.parse::<bool>() {
+                    self.as_mut().rust_mut().prefs.passive_plugins = v;
+                    crate::plugin::PASSIVE_EFFECTS.store(v, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
             "snap_to_grid" => {
                 if let Ok(v) = val_str.parse::<bool>() {
                     self.as_mut().rust_mut().prefs.snap_to_grid = v;
@@ -3210,6 +3218,7 @@ impl qobject::AppController {
     pub fn reset_preferences(mut self: Pin<&mut Self>) {
         self.as_mut().rust_mut().prefs = Preferences::default();
         save_preferences(&self.rust().prefs);
+        crate::plugin::PASSIVE_EFFECTS.store(false, std::sync::atomic::Ordering::Relaxed);
         let exclusive = self.rust().prefs.patchbay_exclusive;
         if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
             patchbay.exclusive = exclusive;
@@ -4539,6 +4548,11 @@ struct Preferences {
     /// Grid pitch in graph units (pixels at 100 % zoom); also the dot grid.
     #[serde(default = "Preferences::default_grid_size_px")]
     pub grid_size_px: u32,
+
+    /// Effect plugins as passive PipeWire nodes, letting linked devices
+    /// suspend when nothing else uses them (see plugin::PASSIVE_EFFECTS).
+    #[serde(default)]
+    pub passive_plugins: bool,
 }
 
 impl Preferences {
@@ -4603,6 +4617,7 @@ impl Default for Preferences {
             snap_gap_px: Self::default_snap_gap_px(),
             snap_to_grid: Self::default_snap_to_grid(),
             grid_size_px: Self::default_grid_size_px(),
+            passive_plugins: false,
         }
     }
 }

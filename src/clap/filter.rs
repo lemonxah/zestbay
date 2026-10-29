@@ -65,11 +65,15 @@ impl ClapFilterNode {
             .unwrap_or_else(|_| CString::new("CLAP Plugin").unwrap());
         let instance_id_str = config.instance_id.to_string();
 
-        // Instrument plugins (audio_inputs == 0) must NOT be passive:
+        // Effects are passive only when the user opted in (PASSIVE_EFFECTS):
+        // a passive node never wakes the devices it is linked to, so
+        // mic -> effect -> headset would stay silent until something else
+        // woke the mic. Instruments (audio_inputs == 0) are never passive:
         // their only input is MIDI, and when the MIDI device disconnects
         // PipeWire would stop scheduling a passive node with no connected
         // inputs, killing the audio output chain.
-        let is_passive = config.audio_inputs > 0;
+        let is_passive = config.audio_inputs > 0
+            && crate::plugin::PASSIVE_EFFECTS.load(std::sync::atomic::Ordering::Relaxed);
 
         let props = unsafe {
             let p = pipewire::sys::pw_properties_new(

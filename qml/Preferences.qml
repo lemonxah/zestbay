@@ -456,6 +456,13 @@ ZbWindow {
                         label: "Advanced"
                         hint: "Rarely needed; some take effect after a restart."
 
+                        ToggleRow {
+                            title: "Let idle devices sleep"
+                            description: "Mark effect plugins as passive, so a mic or output linked only through plugins can suspend when nothing else uses it. Off keeps chains like mic \u2192 effect \u2192 headset running. Applies to plugins added or reloaded afterwards."
+                            key: "passive_plugins"
+                            fallback: false
+                        }
+                        ZbDivider { Layout.fillWidth: true }
                         SliderRow {
                             title: "Link save debounce"
                             description: "Wait this long after the last link change before saving plugin connections to disk."
