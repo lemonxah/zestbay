@@ -13,6 +13,14 @@ Item {
     property real panX: 0
     property real panY: 0
     property bool viewportLoaded: false
+    // Set once the first refresh with nodes has checked that the restored
+    // viewport actually shows some of them.
+    property bool initialViewChecked: false
+
+    readonly property real minZoom: 0.25
+    readonly property real maxZoom: 3.0
+    // Screen pixels of the graph that panning/zooming must leave in view.
+    readonly property real minVisibleContent: 80
 
     property var nodePositions: ({})
     property var layoutCursors: ({ "source": {x: 50, y: 50}, "stream": {x: 350, y: 50}, "sink": {x: 650, y: 50} })
@@ -422,6 +430,16 @@ Item {
                 delete autoPlaced[bid]
                 placeNearPeer(bnode)
             }
+        }
+
+        // A restored viewport (or one saved on a bigger screen) may show none of
+        // the graph; bring it back into view once, on the first populated refresh.
+        if (!initialViewChecked && nodes.length > 0 && width > 0 && height > 0) {
+            initialViewChecked = true
+            var b = contentBounds()
+            if (b && (b.right * zoom + panX < 0 || b.left * zoom + panX > width
+                      || b.bottom * zoom + panY < 0 || b.top * zoom + panY > height))
+                fitToView()
         }
 
         canvas.requestPaint()
@@ -865,13 +883,13 @@ Item {
         }
 
         MenuItem {
+            text: "Fit to View (Home)"
+            onTriggered: fitToView()
+        }
+
+        MenuItem {
             text: "Reset Zoom"
-            onTriggered: {
-                zoom = 1.0
-                panX = 0
-                panY = 0
-                canvas.requestPaint()
-            }
+            onTriggered: zoomAt(width / 2, height / 2, 1.0)
         }
 
         MenuItem {
@@ -1213,6 +1231,110 @@ Item {
 
     function toScreen(cx, cy) {
         return { x: cx * zoom + panX, y: cy * zoom + panY }
+    }
+
+    // Canvas-space bounding box of all visible (non-hidden) nodes, or null.
+    function contentBounds() {
+        var b = null
+        for (var i = 0; i < nodes.length; i++) {
+            var node = nodes[i]
+            if (node.layoutKey && hiddenNodes[node.layoutKey]) continue
+            var pos = nodePositions[node.id]
+            if (!pos) continue
+            var r = pos.x + getNodeWidth(node.id)
+            var btm = pos.y + calculateNodeHeight(node)
+            if (!b) {
+                b = { left: pos.x, top: pos.y, right: r, bottom: btm }
+            } else {
+                b.left = Math.min(b.left, pos.x)
+                b.top = Math.min(b.top, pos.y)
+                b.right = Math.max(b.right, r)
+                b.bottom = Math.max(b.bottom, btm)
+            }
+        }
+        return b
+    }
+
+    // Keep at least minVisibleContent screen px of the graph inside the
+    // viewport so it can't be panned or zoomed out of reach.
+    function clampPan() {
+        var b = contentBounds()
+        if (!b || width <= 0 || height <= 0) return
+        var keepX = Math.min(minVisibleContent, (b.right - b.left) * zoom, width)
+        var keepY = Math.min(minVisibleContent, (b.bottom - b.top) * zoom, height)
+        var l = b.left * zoom + panX, r = b.right * zoom + panX
+        var t = b.top * zoom + panY, btm = b.bottom * zoom + panY
+        if (r < keepX) panX += keepX - r
+        else if (l > width - keepX) panX -= l - (width - keepX)
+        if (btm < keepY) panY += keepY - btm
+        else if (t > height - keepY) panY -= t - (height - keepY)
+    }
+
+    // Zoom to `newZoom` keeping the canvas point under screen (sx, sy) fixed.
+    function zoomAt(sx, sy, newZoom) {
+        newZoom = Math.max(minZoom, Math.min(maxZoom, newZoom))
+        var c = toCanvas(sx, sy)
+        panX += c.x * (zoom - newZoom)
+        panY += c.y * (zoom - newZoom)
+        zoom = newZoom
+        clampPan()
+        canvas.requestPaint()
+    }
+
+    // Center the view on all visible nodes, zoomed to fit (never above 100%).
+    function fitToView() {
+        var b = contentBounds()
+        if (!b || width <= 0 || height <= 0) {
+            zoom = 1.0
+            panX = 0
+            panY = 0
+            canvas.requestPaint()
+            return
+        }
+        var margin = 40
+        var bw = Math.max(b.right - b.left, 1)
+        var bh = Math.max(b.bottom - b.top, 1)
+        var z = Math.min((width - 2 * margin) / bw, (height - 2 * margin) / bh, 1.0)
+        zoom = Math.max(minZoom, z)
+        panX = width / 2 - (b.left + bw / 2) * zoom
+        panY = height / 2 - (b.top + bh / 2) * zoom
+        canvas.requestPaint()
+    }
+
+    // Scrollable range (canvas space) for one axis: the padded graph extent
+    // united with the current view, so the bar always covers where you are.
+    function scrollRange(lo, hi, viewLo, viewLen) {
+        var pad = 40 / zoom
+        var a = Math.min(lo - pad, viewLo)
+        var e = Math.max(hi + pad, viewLo + viewLen)
+        return { lo: a, len: e - a }
+    }
+
+    // Sync the scroll bars with the current view. Called after every paint;
+    // a bar being dragged keeps the range captured when the drag started.
+    function updateScrollBars() {
+        var b = contentBounds()
+        var viewW = width / zoom, viewH = height / zoom
+        var viewL = -panX / zoom, viewT = -panY / zoom
+        if (!b) {
+            hScrollBar.size = 1
+            vScrollBar.size = 1
+            return
+        }
+        if (!hScrollBar.pressed) {
+            var hr = scrollRange(b.left, b.right, viewL, viewW)
+            hScrollBar.rangeLo = hr.lo
+            hScrollBar.rangeLen = hr.len
+            hScrollBar.size = Math.min(1, viewW / hr.len)
+            hScrollBar.position = (viewL - hr.lo) / hr.len
+        }
+        if (!vScrollBar.pressed) {
+            var vr = scrollRange(b.top, b.bottom, viewT, viewH)
+            vScrollBar.rangeLo = vr.lo
+            vScrollBar.rangeLen = vr.len
+            vScrollBar.size = Math.min(1, viewH / vr.len)
+            vScrollBar.position = (viewT - vr.lo) / vr.len
+        }
     }
 
     // Is canvas point (cx, cy) covered by a visible node drawn above z-index `z`?
@@ -1663,6 +1785,7 @@ Item {
 
             ctx.restore()
             portPositions = newPortPositions
+            updateScrollBars()
         }
     }
 
@@ -1671,6 +1794,10 @@ Item {
     Keys.onPressed: (event) => {
         if (event.key === Qt.Key_Delete || event.key === Qt.Key_Backspace) {
             deleteSelectedLinks()
+            event.accepted = true
+        }
+        if (event.key === Qt.Key_Home) {
+            fitToView()
             event.accepted = true
         }
         if (event.key === Qt.Key_Escape) {
@@ -1850,6 +1977,7 @@ Item {
             if (mouse.buttons & Qt.MiddleButton) {
                 panX += mouse.x - lastX
                 panY += mouse.y - lastY
+                clampPan()
                 lastX = mouse.x
                 lastY = mouse.y
                 canvas.requestPaint()
@@ -2009,20 +2137,47 @@ Item {
         }
 
         onWheel: (wheel) => {
-            var oldZoom = zoom
+            if (wheel.angleDelta.y === 0) return
             var factor = wheel.angleDelta.y > 0 ? 1.1 : 0.9
-            var newZoom = Math.max(0.25, Math.min(3.0, oldZoom * factor))
+            zoomAt(wheel.x, wheel.y, zoom * factor)
+        }
+    }
 
-            var mx = wheel.x
-            var my = wheel.y
-            var canvasX = (mx - panX) / oldZoom
-            var canvasY = (my - panY) / oldZoom
-
-            panX += canvasX * (oldZoom - newZoom)
-            panY += canvasY * (oldZoom - newZoom)
-            zoom = newZoom
+    ScrollBar {
+        id: hScrollBar
+        orientation: Qt.Horizontal
+        anchors.left: parent.left
+        anchors.right: vScrollBar.visible ? vScrollBar.left : parent.right
+        anchors.bottom: parent.bottom
+        visible: size < 1
+        policy: ScrollBar.AlwaysOn
+        // Canvas-space range the bar spans (see updateScrollBars).
+        property real rangeLo: 0
+        property real rangeLen: 1
+        onPositionChanged: {
+            if (!pressed) return
+            panX = -(rangeLo + position * rangeLen) * zoom
             canvas.requestPaint()
         }
+        onPressedChanged: if (!pressed) canvas.requestPaint()
+    }
+
+    ScrollBar {
+        id: vScrollBar
+        orientation: Qt.Vertical
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.bottom: hScrollBar.visible ? hScrollBar.top : parent.bottom
+        visible: size < 1
+        policy: ScrollBar.AlwaysOn
+        property real rangeLo: 0
+        property real rangeLen: 1
+        onPositionChanged: {
+            if (!pressed) return
+            panY = -(rangeLo + position * rangeLen) * zoom
+            canvas.requestPaint()
+        }
+        onPressedChanged: if (!pressed) canvas.requestPaint()
     }
 
     function drawBezier(ctx, x1, y1, x2, y2, color, lineWidth) {
