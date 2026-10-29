@@ -48,5 +48,7 @@ ship `cargo-sources.json` next to it.
 
 ## Before submitting to Flathub
 
-- Add screenshots to the metainfo (`<screenshots>`, hosted image URLs).
+- Screenshots in the metainfo point at `docs/screenshots/*.png` on the
+  `main` branch; regenerate them with `design/screenshots/render.sh` after UI
+  changes and push before submitting.
 - Add a `<release>` entry for the version being published.

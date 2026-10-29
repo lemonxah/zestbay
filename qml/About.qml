@@ -7,17 +7,15 @@ ZbWindow {
     id: aboutWindow
     title: "About ZestBay"
     width: 420
-    height: 380
+    height: 470
     minimumWidth: 360
-    minimumHeight: 360
+    minimumHeight: 450
     visible: false
 
     required property var controller
 
     readonly property string sourceUrl: "https://github.com/lemonxah/zestbay"
-    // No Theme tokens for these yet (spec §3 / §6.5): About wordmark 24/600,
-    // info-grid label column 96 px.
-    readonly property int wordmarkSize: 24
+    // No Theme token for this yet (spec §6.5): info-grid label column 96 px.
     readonly property int labelColumnWidth: 96
 
     function open() {
@@ -91,20 +89,12 @@ ZbWindow {
         anchors.rightMargin: Theme.dialogPadding
         spacing: 0
 
+        // The full logo with the wordmark: the only place the name is part
+        // of the logo (bible §7).
         ZbLogo {
             Layout.alignment: Qt.AlignHCenter
-            size: 48
-        }
-
-        Text {
-            Layout.alignment: Qt.AlignHCenter
-            Layout.topMargin: Theme.grid * 4
-            text: "ZestBay"
-            font.family: Theme.fontSans
-            font.pixelSize: aboutWindow.wordmarkSize
-            font.weight: Font.DemiBold
-            font.letterSpacing: -aboutWindow.wordmarkSize * 0.02
-            color: Theme.textStrong
+            size: 132
+            withName: true
         }
 
         Text {

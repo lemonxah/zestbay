@@ -54,10 +54,29 @@ ZbWindow {
     // be read from exactly one place (refresh()).
     Timer {
         id: overlayRefreshTimer
-        interval: 500
+        interval: 250
         running: cpuOverlay.visible
         repeat: true
         onTriggered: cpuOverlay.refresh()
+    }
+
+    // Smooth scrolling: redraw at ~30 fps with the time axis following the
+    // clock (one sample interval behind it, so the newest point slides in at
+    // the right edge instead of the chart jumping on every sample).
+    property real viewT: 0
+    property real hoverMouseX: -1
+    Timer {
+        id: frameTimer
+        interval: 33
+        running: cpuOverlay.visible && cpuOverlay.lastPollT > 0
+        repeat: true
+        onTriggered: {
+            cpuOverlay.viewT = Date.now() - overlayRefreshTimer.interval
+            if (cpuOverlay.hoverActive && cpuOverlay.hoverMouseX >= 0)
+                cpuOverlay.updateHover(cpuOverlay.hoverMouseX)
+            else
+                chart.requestPaint()
+        }
     }
 
     Connections {
@@ -189,7 +208,7 @@ ZbWindow {
     readonly property var gridValues: [100, 10, 1, 0.1, 0.01]
 
     function xFor(t) {
-        var f = 1 - (lastPollT - t) / windowMs
+        var f = 1 - ((viewT > 0 ? viewT : lastPollT) - t) / windowMs
         return plotLeft + f * (plotRight - plotLeft)
     }
     function yFor(v) {
@@ -220,7 +239,9 @@ ZbWindow {
             chart.requestPaint()
             return
         }
-        var t = lastPollT - (1 - (mx - plotLeft) / (plotRight - plotLeft)) * windowMs
+        hoverMouseX = mx
+        var nowT = viewT > 0 ? viewT : lastPollT
+        var t = nowT - (1 - (mx - plotLeft) / (plotRight - plotLeft)) * windowMs
         // Snap to the nearest process sample so every series lines up.
         var proc = seriesByKey["cpu"]
         var snap = proc ? nearestPoint(proc.points, t, gapMs) : null
@@ -235,7 +256,7 @@ ZbWindow {
                         text: formatValue(s, pt.v), y: yFor(pt.v) })
         }
         rows.sort(function(a, b) { return b.value - a.value })
-        var secs = Math.round((lastPollT - t) / 1000)
+        var secs = Math.round((nowT - t) / 1000)
         hoverLabel = secs <= 0 ? "now" : "-" + secs + " s"
         hoverX = xFor(t)
         hoverRows = rows
@@ -435,6 +456,7 @@ ZbWindow {
                     acceptedButtons: Qt.NoButton
                     onPositionChanged: mouse => cpuOverlay.updateHover(mouse.x)
                     onExited: {
+                        cpuOverlay.hoverMouseX = -1
                         cpuOverlay.hoverActive = false
                         chart.requestPaint()
                     }

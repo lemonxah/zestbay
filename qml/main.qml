@@ -251,7 +251,7 @@ ZbWindow {
             spacing: 8
 
             ZbLogo {
-                size: 22
+                size: 26
             }
             Text {
                 text: "ZestBay"
@@ -602,9 +602,14 @@ ZbWindow {
                         height: 14
                         property var cpuData: []
 
-                        Connections {
-                            target: controller
-                            function onCpu_usageChanged() {
+                        // Redraw on every poll, not on cpu_usage changes: the
+                        // rounded text often stays the same while the history
+                        // moves, which made the line freeze and then jump.
+                        Timer {
+                            interval: pollTimer.interval
+                            running: mainWindow.visible
+                            repeat: true
+                            onTriggered: {
                                 try {
                                     cpuSparkline.cpuData = JSON.parse(controller.get_cpu_history())
                                 } catch (e) {
@@ -621,7 +626,9 @@ ZbWindow {
                         onPaint: {
                             var ctx = getContext("2d")
                             ctx.reset()
-                            var d = cpuData.slice(-40)
+                            // All 120 samples: each poll shifts the line by
+                            // about half a pixel, so it scrolls smoothly.
+                            var d = cpuData
                             if (d.length < 2) return
                             var maxV = 1
                             for (var i = 0; i < d.length; i++) maxV = Math.max(maxV, d[i])
