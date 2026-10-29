@@ -10,7 +10,8 @@ use vst3::Steinberg::*;
 
 use crate::plugin::types::*;
 
-/// Standard Linux directories where VST3 plugins are installed.
+/// Standard Linux directories where VST3 plugins are installed
+/// (`VST3_PATH` and Flatpak locations are added by `plugin::paths`).
 const VST3_SEARCH_DIRS: &[&str] = &[
     "~/.vst3",
     "/usr/lib/vst3",
@@ -49,25 +50,7 @@ pub fn scan_plugins() -> Vec<PluginInfo> {
 }
 
 fn expand_search_dirs() -> Vec<PathBuf> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let mut seen = std::collections::HashSet::new();
-    VST3_SEARCH_DIRS
-        .iter()
-        .filter_map(|d| {
-            let path = if d.starts_with('~') {
-                PathBuf::from(d.replacen('~', &home, 1))
-            } else {
-                PathBuf::from(d)
-            };
-            let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-            if seen.insert(canonical) {
-                Some(path)
-            } else {
-                log::debug!("VST3: skipping duplicate directory {}", path.display());
-                None
-            }
-        })
-        .collect()
+    crate::plugin::paths::search_dirs("VST3_PATH", VST3_SEARCH_DIRS, "vst3", "VST3")
 }
 
 fn scan_directory(dir: &Path, plugins: &mut Vec<PluginInfo>) {

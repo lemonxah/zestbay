@@ -2,14 +2,15 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-ApplicationWindow {
+// Manage plugins: the active plugin instances (list left, details right).
+// Follows the dialog shell (bible §6.1) with card lists and parameter rows.
+ZbWindow {
     id: pluginManager
-    title: "Manage Plugins"
-    color: Theme.windowBg
-    width: 750
-    height: 600
-    minimumWidth: 550
-    minimumHeight: 400
+    title: "Manage plugins"
+    width: 820
+    height: 640
+    minimumWidth: 600
+    minimumHeight: 420
     visible: false
 
     required property var controller
@@ -20,6 +21,11 @@ ApplicationWindow {
     property string selectedStableId: ""
     property int selectedIndex: indexOfPlugin(plugins, selectedStableId)
     property var selectedPlugin: selectedIndex >= 0 ? plugins[selectedIndex] : null
+    readonly property var selectedParams: selectedPlugin && selectedPlugin.parameters ? selectedPlugin.parameters : []
+
+    // Two-click confirmation for "Remove plugin" (cleared after a few seconds).
+    property bool confirmRemove: false
+    onSelectedStableIdChanged: confirmRemove = false
 
     function indexOfPlugin(list, stableId) {
         if (!stableId) return -1
@@ -48,83 +54,120 @@ ApplicationWindow {
         requestActivate()
     }
 
+    function formatValue(v) {
+        return v !== undefined && v !== null ? Number(v).toFixed(3) : ""
+    }
+
     Timer {
         id: refreshTimer
         interval: 500
         running: pluginManager.visible
         repeat: true
-        onTriggered: loadPlugins()
+        onTriggered: pluginManager.loadPlugins()
+    }
+
+    Timer {
+        id: confirmTimer
+        interval: 3000
+        running: pluginManager.confirmRemove
+        onTriggered: pluginManager.confirmRemove = false
+    }
+
+    Shortcut {
+        sequence: "Escape"
+        onActivated: pluginManager.visible = false
     }
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: 16
-        spacing: 8
+        anchors.margins: Theme.dialogPadding
+        spacing: 16
+
+        ZbDialogHeader {
+            title: "Manage plugins"
+            subtitle: pluginManager.plugins.length + " active plugin" + (pluginManager.plugins.length !== 1 ? "s" : "")
+        }
 
         RowLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            spacing: 8
+            spacing: 16
 
-            ColumnLayout {
-                Layout.preferredWidth: 260
+            // ── Active plugin list ──────────────────────────────────────
+            ZbCard {
+                Layout.preferredWidth: 280
                 Layout.fillHeight: true
-                spacing: 4
-
-                Label {
-                    text: plugins.length + " active plugin" + (plugins.length !== 1 ? "s" : "")
-                    font.italic: true
-                    opacity: 0.7
-                }
 
                 ListView {
                     id: pluginList
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
+                    ZbWheelScroll { flickable: pluginList }
+                    anchors {
+                        left: parent.left
+                        top: parent.top
+                        bottom: parent.bottom
+                        right: pluginBar.visible ? pluginBar.left : parent.right
+                        leftMargin: 1
+                        topMargin: Theme.scrollGap
+                        bottomMargin: Theme.scrollGap
+                        rightMargin: pluginBar.visible ? Theme.scrollGap : 1
+                    }
                     clip: true
-                    model: plugins.length
-                    currentIndex: selectedIndex
-
-                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                    boundsBehavior: Flickable.StopAtBounds
+                    // Int model: the list is reloaded every 500 ms; an array
+                    // model would rebuild every delegate (and reset scroll).
+                    model: pluginManager.plugins.length
+                    currentIndex: pluginManager.selectedIndex
+                    highlightFollowsCurrentItem: false
+                    ScrollBar.vertical: pluginBar
 
                     delegate: Rectangle {
-                        id: pluginDelegate
+                        id: pluginRow
                         required property int index
-                        width: pluginList.width
-                        height: 48
-                        color: index === selectedIndex ? Theme.rowSelected :
-                               pluginMouse.containsMouse ? Theme.rowHover :
-                               (index % 2 === 0 ? Theme.rowEven : Theme.rowOdd)
-                        radius: 3
+                        readonly property var plugin: pluginManager.plugins[index] || {}
+                        readonly property bool selected: index === pluginManager.selectedIndex
+                        readonly property int paramCount: plugin.parameters ? plugin.parameters.length : 0
 
-                        property var plugin: plugins[index] || {}
+                        width: ListView.view.width
+                        height: Theme.rowRule
+                        color: selected || pluginMouse.containsMouse ? Theme.bgHover : "transparent"
+
+                        // Selection marker (accent: selection).
+                        Rectangle {
+                            visible: pluginRow.selected
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 2
+                            height: parent.height - 16
+                            radius: 1
+                            color: Theme.accent
+                        }
 
                         ColumnLayout {
-                            anchors.fill: parent
-                            anchors.margins: 6
-                            spacing: 2
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.leftMargin: Theme.cardPadding
+                            anchors.rightMargin: Theme.cardPadding
+                            spacing: 4
 
-                            Label {
-                                text: plugin.displayName || ""
-                                font.bold: true
-                                font.pointSize: 9
+                            Text {
+                                text: pluginRow.plugin.displayName || ""
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.sizeBody
+                                font.weight: Font.Medium
+                                color: Theme.textPrimary
                                 elide: Text.ElideRight
                                 Layout.fillWidth: true
                             }
 
-                            RowLayout {
-                                spacing: 6
-                                Label {
-                                    text: plugin.bypassed ? "Bypassed" : "Active"
-                                    font.pointSize: 8
-                                    color: plugin.bypassed ? Theme.statusBypassed : Theme.statusActive
-                                    opacity: 0.8
-                                }
-                                Label {
-                                    text: (plugin.parameters ? plugin.parameters.length : 0) + " params"
-                                    font.pointSize: 8
-                                    opacity: 0.5
-                                }
+                            Text {
+                                text: (pluginRow.plugin.bypassed ? "Bypassed" : "Active")
+                                      + " · " + pluginRow.paramCount + (pluginRow.paramCount === 1 ? " param" : " params")
+                                font.family: Theme.fontMono
+                                font.pixelSize: Theme.sizeMono
+                                color: Theme.textMuted
+                                elide: Text.ElideRight
+                                Layout.fillWidth: true
                             }
                         }
 
@@ -132,194 +175,294 @@ ApplicationWindow {
                             id: pluginMouse
                             anchors.fill: parent
                             hoverEnabled: true
-                            onClicked: selectedStableId = plugin.stableId || ""
+                            onClicked: pluginManager.selectedStableId = pluginRow.plugin.stableId || ""
                         }
+
+                        ZbDivider {
+                            visible: pluginRow.index < pluginList.count - 1
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.bottom: parent.bottom
+                        }
+                    }
+
+                    Text {
+                        visible: pluginList.count === 0
+                        anchors.centerIn: parent
+                        text: "No active plugins"
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.sizeBody
+                        color: Theme.textMuted
+                    }
+                }
+
+                ZbScrollBar {
+                    id: pluginBar
+                    anchors {
+                        top: parent.top
+                        bottom: parent.bottom
+                        right: parent.right
+                        topMargin: Theme.scrollGap
+                        bottomMargin: Theme.scrollGap
+                        rightMargin: Theme.scrollGap
                     }
                 }
             }
 
-            Rectangle {
-                Layout.fillHeight: true
-                width: 1
-                color: Theme.separator
-            }
-
-            ColumnLayout {
+            // ── Details of the selected plugin ──────────────────────────
+            Item {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                spacing: 8
 
-                Label {
-                    visible: !selectedPlugin
+                Text {
+                    visible: !pluginManager.selectedPlugin
+                    anchors.centerIn: parent
                     text: "Select a plugin from the list"
-                    opacity: 0.5
-                    Layout.alignment: Qt.AlignHCenter | Qt.AlignVCenter
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.sizeBody
+                    color: Theme.textMuted
                 }
 
                 ColumnLayout {
-                    visible: !!selectedPlugin
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    spacing: 6
+                    visible: !!pluginManager.selectedPlugin
+                    anchors.fill: parent
+                    spacing: 16
 
-                    Label {
-                        text: selectedPlugin ? selectedPlugin.displayName : ""
-                        font.bold: true
-                        font.pointSize: 12
-                        elide: Text.ElideRight
-                        Layout.fillWidth: true
-                    }
-
-                    Label {
-                        text: selectedPlugin ? selectedPlugin.pluginUri : ""
-                        font.pointSize: 8
-                        opacity: 0.5
-                        elide: Text.ElideRight
-                        Layout.fillWidth: true
-                    }
-
+                    // Name, URI and actions
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: 8
 
-                        Button {
-                            text: "Reset Params"
-                            enabled: selectedPlugin && selectedPlugin.parameters && selectedPlugin.parameters.length > 0
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 4
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    text: pluginManager.selectedPlugin ? pluginManager.selectedPlugin.displayName : ""
+                                    font.family: Theme.fontSans
+                                    font.pixelSize: Theme.sizeListPrimary
+                                    font.weight: Font.DemiBold
+                                    color: Theme.textPrimary
+                                    elide: Text.ElideRight
+                                    Layout.fillWidth: true
+                                    Layout.preferredWidth: Math.ceil(implicitWidth)
+                                    Layout.maximumWidth: Math.ceil(implicitWidth)
+                                }
+                                ZbBadge {
+                                    id: detailFormatBadge
+                                    visible: !!pluginManager.selectedPlugin && !!pluginManager.selectedPlugin.format
+                                    text: pluginManager.selectedPlugin && pluginManager.selectedPlugin.format
+                                          ? pluginManager.selectedPlugin.format : ""
+                                    tone: detailFormatBadge.formatTone(text)
+                                }
+                                ZbBadge {
+                                    visible: !!pluginManager.selectedPlugin && !!pluginManager.selectedPlugin.bypassed
+                                    text: "bypassed"
+                                }
+                                Item { Layout.fillWidth: true }
+                            }
+
+                            Text {
+                                text: pluginManager.selectedPlugin ? pluginManager.selectedPlugin.pluginUri : ""
+                                font.family: Theme.fontMono
+                                font.pixelSize: Theme.sizeMono
+                                color: Theme.textMuted
+                                elide: Text.ElideMiddle
+                                Layout.fillWidth: true
+                            }
+                        }
+
+                        ZbButton {
+                            text: "Reset params"
+                            iconName: "reset"
+                            enabled: pluginManager.selectedParams.length > 0
                             onClicked: {
-                                if (selectedPlugin) {
-                                    controller.reset_plugin_params_by_stable_id(selectedPlugin.stableId)
+                                if (pluginManager.selectedPlugin) {
+                                    pluginManager.controller.reset_plugin_params_by_stable_id(pluginManager.selectedPlugin.stableId)
                                 }
                             }
                         }
 
-                        Button {
-                            text: "Remove Plugin"
+                        ZbButton {
+                            text: pluginManager.confirmRemove ? "Confirm remove" : "Remove plugin"
+                            iconName: "trash"
+                            destructive: true
                             onClicked: {
-                                if (selectedPlugin) {
-                                    controller.remove_plugin_by_stable_id(selectedPlugin.stableId)
-                                    selectedStableId = ""
-                                    loadPlugins()
+                                if (!pluginManager.selectedPlugin) return
+                                if (!pluginManager.confirmRemove) {
+                                    pluginManager.confirmRemove = true
+                                    return
                                 }
+                                pluginManager.confirmRemove = false
+                                pluginManager.controller.remove_plugin_by_stable_id(pluginManager.selectedPlugin.stableId)
+                                pluginManager.selectedStableId = ""
+                                pluginManager.loadPlugins()
                             }
                         }
-
-                        Item { Layout.fillWidth: true }
                     }
 
-                    Rectangle {
+                    // Parameters section
+                    RowLayout {
                         Layout.fillWidth: true
-                        height: 1
-                        color: Theme.separator
-                    }
-
-                    Label {
-                        text: {
-                            if (!selectedPlugin || !selectedPlugin.parameters) return ""
-                            return selectedPlugin.parameters.length + " parameter" +
-                                   (selectedPlugin.parameters.length !== 1 ? "s" : "")
+                        spacing: 8
+                        ZbSectionLabel { text: "Parameters" }
+                        Item { Layout.fillWidth: true }
+                        Text {
+                            text: pluginManager.selectedParams.length + " parameter"
+                                  + (pluginManager.selectedParams.length !== 1 ? "s" : "")
+                            font.family: Theme.fontMono
+                            font.pixelSize: Theme.sizeMono
+                            color: Theme.textMuted
                         }
-                        opacity: 0.6
-                        visible: selectedPlugin && selectedPlugin.parameters && selectedPlugin.parameters.length > 0
                     }
 
-                    Label {
-                        text: "No control parameters"
-                        opacity: 0.5
-                        visible: !selectedPlugin || !selectedPlugin.parameters || selectedPlugin.parameters.length === 0
-                        Layout.alignment: Qt.AlignHCenter
-                    }
-
-                    ListView {
-                        id: paramList
+                    ZbCard {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
-                        clip: true
-                        model: selectedPlugin && selectedPlugin.parameters ? selectedPlugin.parameters.length : 0
-                        spacing: 2
 
-                        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                        Text {
+                            visible: pluginManager.selectedParams.length === 0
+                            anchors.centerIn: parent
+                            text: "No control parameters"
+                            font.family: Theme.fontSans
+                            font.pixelSize: Theme.sizeBody
+                            color: Theme.textMuted
+                        }
 
-                        delegate: Rectangle {
-                            id: paramDelegate
-                            required property int index
-                            width: paramList.width - 12
-                            height: 56
-                            color: index % 2 === 0 ? Theme.rowEven : Theme.rowOdd
-                            radius: 3
+                        ListView {
+                            id: paramList
+                            ZbWheelScroll { flickable: paramList }
+                            anchors {
+                                left: parent.left
+                                top: parent.top
+                                bottom: parent.bottom
+                                right: paramBar.visible ? paramBar.left : parent.right
+                                leftMargin: 1
+                                topMargin: Theme.scrollGap
+                                bottomMargin: Theme.scrollGap
+                                rightMargin: paramBar.visible ? Theme.scrollGap : 1
+                            }
+                            clip: true
+                            boundsBehavior: Flickable.StopAtBounds
+                            model: pluginManager.selectedParams.length
+                            ScrollBar.vertical: paramBar
 
-                            property var param: selectedPlugin && selectedPlugin.parameters ? selectedPlugin.parameters[index] : {}
+                            delegate: Item {
+                                id: paramRow
+                                required property int index
+                                readonly property var param: pluginManager.selectedParams[index] || {}
+                                readonly property real pMin: param.min !== undefined ? param.min : 0
+                                readonly property real pMax: param.max !== undefined ? param.max : 1
 
-                            ColumnLayout {
-                                anchors.fill: parent
-                                anchors.margins: 6
-                                spacing: 2
+                                width: ListView.view.width
+                                height: paramCol.implicitHeight + 24
 
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    Label {
-                                        text: param.name || param.symbol || ""
-                                        font.pointSize: 9
-                                        elide: Text.ElideRight
+                                ColumnLayout {
+                                    id: paramCol
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    anchors.leftMargin: Theme.cardPadding
+                                    anchors.rightMargin: Theme.cardPadding
+                                    spacing: 8
+
+                                    RowLayout {
                                         Layout.fillWidth: true
-                                    }
-                                    Label {
-                                        text: param.value !== undefined ? param.value.toFixed(3) : ""
-                                        font.pointSize: 9
-                                        font.family: "monospace"
-                                        opacity: 0.8
-                                    }
-                                    Button {
-                                        text: "R"
-                                        flat: true
-                                        implicitWidth: 24
-                                        implicitHeight: 20
-                                        font.pointSize: 8
-                                        ToolTip.visible: hovered
-                                        ToolTip.text: "Reset to default (" + (param.default !== undefined ? param.default.toFixed(3) : "") + ")"
-                                        onClicked: {
-                                            if (selectedPlugin && param.portIndex !== undefined) {
-                                                controller.set_plugin_param_by_stable_id(
-                                                    selectedPlugin.stableId, param.portIndex, param.default)
+                                        spacing: 8
+
+                                        Text {
+                                            text: paramRow.param.name || paramRow.param.symbol || ""
+                                            font.family: Theme.fontSans
+                                            font.pixelSize: Theme.sizeBody
+                                            font.weight: Font.Medium
+                                            color: Theme.textPrimary
+                                            elide: Text.ElideRight
+                                            Layout.fillWidth: true
+                                        }
+
+                                        Text {
+                                            text: pluginManager.formatValue(paramRow.param.value)
+                                            font.family: Theme.fontMono
+                                            font.pixelSize: Theme.sizeMono
+                                            color: Theme.textPrimary
+                                            horizontalAlignment: Text.AlignRight
+                                            Layout.preferredWidth: 64
+                                        }
+
+                                        ZbButton {
+                                            id: resetButton
+                                            compact: true
+                                            iconName: "reset"
+                                            onClicked: {
+                                                if (pluginManager.selectedPlugin && paramRow.param.portIndex !== undefined) {
+                                                    pluginManager.controller.set_plugin_param_by_stable_id(
+                                                        pluginManager.selectedPlugin.stableId, paramRow.param.portIndex, paramRow.param.default)
+                                                }
+                                            }
+                                            ZbTooltip {
+                                                visible: resetButton.hovered
+                                                text: "Reset to default (" + pluginManager.formatValue(paramRow.param.default) + ")"
                                             }
                                         }
                                     }
-                                }
 
-                                Slider {
-                                    Layout.fillWidth: true
-                                    from: param.min !== undefined ? param.min : 0
-                                    to: param.max !== undefined ? param.max : 1
-                                    value: param.value !== undefined ? param.value : 0
-                                    onMoved: {
-                                        if (selectedPlugin && param.portIndex !== undefined) {
-                                            controller.set_plugin_param_by_stable_id(
-                                                selectedPlugin.stableId, param.portIndex, value)
+                                    ZbSlider {
+                                        flush: true
+                                        Layout.fillWidth: true
+                                        from: paramRow.pMin
+                                        to: paramRow.pMax
+                                        value: paramRow.param.value !== undefined ? paramRow.param.value : 0
+                                        onMoved: {
+                                            if (pluginManager.selectedPlugin && paramRow.param.portIndex !== undefined) {
+                                                pluginManager.controller.set_plugin_param_by_stable_id(
+                                                    pluginManager.selectedPlugin.stableId, paramRow.param.portIndex, value)
+                                            }
+                                        }
+                                    }
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        Text {
+                                            text: pluginManager.formatValue(paramRow.pMin)
+                                            font.family: Theme.fontMono
+                                            font.pixelSize: Theme.sizeBadge
+                                            color: Theme.textMuted
+                                        }
+                                        Item { Layout.fillWidth: true }
+                                        Text {
+                                            text: pluginManager.formatValue(paramRow.pMax)
+                                            font.family: Theme.fontMono
+                                            font.pixelSize: Theme.sizeBadge
+                                            color: Theme.textMuted
                                         }
                                     }
                                 }
+
+                                ZbDivider {
+                                    visible: paramRow.index < paramList.count - 1
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.bottom: parent.bottom
+                                }
+                            }
+                        }
+
+                        ZbScrollBar {
+                            id: paramBar
+                            anchors {
+                                top: parent.top
+                                bottom: parent.bottom
+                                right: parent.right
+                                topMargin: Theme.scrollGap
+                                bottomMargin: Theme.scrollGap
+                                rightMargin: Theme.scrollGap
                             }
                         }
                     }
                 }
-            }
-        }
-
-        Rectangle {
-            Layout.fillWidth: true
-            height: 1
-            color: Theme.separator
-        }
-
-        RowLayout {
-            Layout.fillWidth: true
-
-            Item { Layout.fillWidth: true }
-
-            Button {
-                text: "Close"
-                onClicked: pluginManager.visible = false
             }
         }
     }

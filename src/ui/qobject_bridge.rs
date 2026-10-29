@@ -197,6 +197,7 @@ pub mod qobject {
             self: Pin<&mut Self>,
             node_sizes_json: QString,
             pinned_positions_json: QString,
+            grid_size: f64,
         ) -> QString;
 
         #[qinvokable]
@@ -247,6 +248,11 @@ pub mod qobject {
 
         #[qsignal]
         fn show_window_requested(self: Pin<&mut AppController>);
+
+        /// A tray menu action for the UI: "add_plugin", "rules" or
+        /// "preferences" (the window has already been asked to show).
+        #[qsignal]
+        fn tray_action_requested(self: Pin<&mut AppController>, action: QString);
 
         #[qsignal]
         fn hide_window_requested(self: Pin<&mut AppController>);
@@ -475,7 +481,10 @@ impl Default for AppControllerRust {
             pw_reconnecting: false,
             links_suppressed_until: None,
             dormant_midi_mappings: Vec::new(),
-            prefs: Preferences::default(),
+            // Loaded here, not in init(): QML reads preferences (theme,
+            // grid, start minimized) in its Component.onCompleted, which can
+            // run before init().
+            prefs: load_preferences(),
             tray_state: None,
             cpu_usage: QString::from("0.0%"),
             prev_cpu_ticks: 0,
@@ -494,7 +503,8 @@ impl qobject::AppController {
     pub fn init(mut self: Pin<&mut Self>) {
         log::info!("AppController::init — starting PipeWire");
 
-        let prefs = load_preferences();
+        // Already loaded when the controller was created (see Default).
+        let prefs = self.rust().prefs.clone();
         log::info!(
             "Preferences: rule_settle={}ms, params_persist={}ms, links_persist={}ms, poll={}ms, auto_learn={}, pw_tick={}ms, pw_cooldown={}ms",
             prefs.rule_settle_ms,
@@ -718,6 +728,7 @@ impl qobject::AppController {
                 .store(false, std::sync::atomic::Ordering::Release);
         }
         self.as_mut().rust_mut().tray_state = Some(tray_state);
+        self.as_mut().sync_tray_flags();
 
         if let Some(ref uris) = crashed_uris_str {
             if has_known_good_plugins() {
@@ -1252,17 +1263,44 @@ impl qobject::AppController {
                 log::info!("Tray: show window requested — emitting signal to QML");
                 tray.window_visible.store(true, Ordering::Release);
                 self.as_mut().show_window_requested();
+                tray.refresh();
             }
             if tray.hide_requested.swap(false, Ordering::AcqRel) {
                 log::info!("Tray: hide window requested — emitting signal to QML");
                 tray.window_visible.store(false, Ordering::Release);
                 self.as_mut().hide_window_requested();
+                tray.refresh();
             }
 
             if let Ok(mut req) = tray.open_plugin_ui.lock() {
                 if let Some(node_id) = req.take() {
                     log::info!("Tray: open plugin UI requested for node_id={}", node_id);
                     self.as_mut().open_plugin_ui(node_id);
+                }
+            }
+
+            for action in tray.take_actions() {
+                use crate::tray::TrayAction;
+                let ui_action = match action {
+                    TrayAction::AddPlugin => Some("add_plugin"),
+                    TrayAction::Rules => Some("rules"),
+                    TrayAction::Preferences => Some("preferences"),
+                    TrayAction::ToggleRules => {
+                        let on = !self.rust().patchbay_enabled;
+                        self.as_mut().toggle_patchbay(on);
+                        None
+                    }
+                    TrayAction::ToggleExclusive => {
+                        let on = !self.rust().patchbay_exclusive;
+                        self.as_mut().toggle_patchbay_exclusive(on);
+                        None
+                    }
+                };
+                if let Some(name) = ui_action {
+                    tray.window_visible.store(true, Ordering::Release);
+                    self.as_mut().show_window_requested();
+                    self.as_mut().tray_action_requested(QString::from(name));
+                    tray.refresh();
                 }
             }
         }
@@ -2209,7 +2247,13 @@ impl qobject::AppController {
     /// UI (hidden nodes are omitted and therefore not laid out).
     /// `pinned_positions_json`: nodeId → [x, y]. Returns nodeId → [x, y].
     /// Pinned nodes keep their positions; free nodes are laid out.
-    pub fn auto_layout(mut self: Pin<&mut Self>, node_sizes_json: QString, pinned_positions_json: QString) -> QString {
+    /// `grid_size` > 0 puts the result on that grid (snap to grid is on).
+    pub fn auto_layout(
+        mut self: Pin<&mut Self>,
+        node_sizes_json: QString,
+        pinned_positions_json: QString,
+        grid_size: f64,
+    ) -> QString {
         use crate::layout;
 
         let sizes_str: String = node_sizes_json.to_string();
@@ -2320,7 +2364,11 @@ impl qobject::AppController {
         log::info!("auto_layout: {} nodes ({} pinned), {} links",
             layout_nodes.len(), pinned_by_id.len(), layout_links.len());
 
-        let positions = layout::sugiyama_layout(layout_nodes, layout_ports, layout_links, config, &pinned_by_id);
+        let sizes_by_id: HashMap<u32, (f64, f64)> =
+            layout_nodes.iter().map(|&(id, _, _, w, h)| (id, (w, h))).collect();
+        let gap = config.margin_y;
+        let mut positions = layout::sugiyama_layout(layout_nodes, layout_ports, layout_links, config, &pinned_by_id);
+        layout::snap_to_grid(&mut positions, &sizes_by_id, &pinned_by_id, grid_size, gap);
 
         let mut result: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
         for (node_id, (x, y)) in &positions {
@@ -2968,6 +3016,7 @@ impl qobject::AppController {
             patchbay.enabled = enabled;
         }
         self.as_mut().set_patchbay_enabled(enabled);
+        self.as_mut().sync_tray_flags();
     }
 
     pub fn toggle_patchbay_exclusive(mut self: Pin<&mut Self>, exclusive: bool) {
@@ -2977,6 +3026,7 @@ impl qobject::AppController {
         self.as_mut().rust_mut().prefs.patchbay_exclusive = exclusive;
         save_preferences(&self.rust().prefs);
         self.as_mut().set_patchbay_exclusive(exclusive);
+        self.as_mut().sync_tray_flags();
         log::info!("Patchbay exclusive mode: {}", exclusive);
         // Turning it on should enforce the rules now, not on the next change.
         if exclusive && self.rust().patchbay_enabled {
@@ -3117,6 +3167,29 @@ impl qobject::AppController {
             "pw_tick_interval_ms" => {
                 if let Ok(v) = val_str.parse::<u64>() {
                     self.as_mut().rust_mut().prefs.pw_tick_interval_ms = v.clamp(1, 200);
+                }
+            }
+            "snap_to_grid" => {
+                if let Ok(v) = val_str.parse::<bool>() {
+                    self.as_mut().rust_mut().prefs.snap_to_grid = v;
+                }
+            }
+            "grid_size_px" => {
+                if let Ok(v) = val_str.parse::<u32>() {
+                    self.as_mut().rust_mut().prefs.grid_size_px = v.clamp(8, 96);
+                }
+            }
+            "snap_gap_px" => {
+                if let Ok(v) = val_str.parse::<u32>() {
+                    self.as_mut().rust_mut().prefs.snap_gap_px = v.clamp(0, 200);
+                }
+            }
+            "theme" => {
+                if matches!(val_str.as_str(), "system" | "dark" | "light") {
+                    self.as_mut().rust_mut().prefs.theme = val_str.clone();
+                } else {
+                    log::warn!("Unknown theme '{}'", val_str);
+                    return;
                 }
             }
             "pw_operation_cooldown_ms" => {
@@ -3389,6 +3462,17 @@ impl qobject::AppController {
             use std::sync::atomic::Ordering;
             tray.window_visible.store(visible, Ordering::Release);
             log::info!("Window visible state updated to {}", visible);
+            tray.refresh();
+        }
+    }
+
+    /// Mirror the patchbay switches into the tray menu's check marks.
+    fn sync_tray_flags(self: Pin<&mut Self>) {
+        if let Some(ref tray) = self.rust().tray_state {
+            use std::sync::atomic::Ordering;
+            tray.rules_enabled.store(self.rust().patchbay_enabled, Ordering::Release);
+            tray.exclusive.store(self.rust().patchbay_exclusive, Ordering::Release);
+            tray.refresh();
         }
     }
 
@@ -3420,8 +3504,15 @@ impl qobject::AppController {
             .collect();
         entries.sort_by(|a, b| a.name.cmp(&b.name));
 
-        if let Ok(mut plugins) = tray.plugins.lock() {
-            *plugins = entries;
+        let changed = match tray.plugins.lock() {
+            Ok(mut plugins) if *plugins != entries => {
+                *plugins = entries;
+                true
+            }
+            _ => false,
+        };
+        if changed {
+            tray.refresh();
         }
     }
 
@@ -4431,6 +4522,23 @@ struct Preferences {
     /// Disconnect links that no rule allows (see `PatchbayManager::exclusive`).
     #[serde(default = "Preferences::default_patchbay_exclusive")]
     pub patchbay_exclusive: bool,
+
+    /// UI colour scheme: "system" (follow the desktop), "dark" or "light".
+    #[serde(default = "Preferences::default_theme")]
+    pub theme: String,
+
+    /// Gap left between nodes when Shift-drag snaps one next to another,
+    /// in graph units (pixels at 100 % zoom).
+    #[serde(default = "Preferences::default_snap_gap_px")]
+    pub snap_gap_px: u32,
+
+    /// Snap node positions (drags, placement, auto layout) to a grid.
+    #[serde(default = "Preferences::default_snap_to_grid")]
+    pub snap_to_grid: bool,
+
+    /// Grid pitch in graph units (pixels at 100 % zoom); also the dot grid.
+    #[serde(default = "Preferences::default_grid_size_px")]
+    pub grid_size_px: u32,
 }
 
 impl Preferences {
@@ -4464,6 +4572,18 @@ impl Preferences {
     fn default_patchbay_exclusive() -> bool {
         true
     }
+    fn default_theme() -> String {
+        "system".to_string()
+    }
+    fn default_snap_gap_px() -> u32 {
+        10
+    }
+    fn default_grid_size_px() -> u32 {
+        24
+    }
+    fn default_snap_to_grid() -> bool {
+        true
+    }
 }
 
 impl Default for Preferences {
@@ -4479,6 +4599,10 @@ impl Default for Preferences {
             pw_tick_interval_ms: Self::default_pw_tick_interval_ms(),
             pw_operation_cooldown_ms: Self::default_pw_operation_cooldown_ms(),
             patchbay_exclusive: Self::default_patchbay_exclusive(),
+            theme: Self::default_theme(),
+            snap_gap_px: Self::default_snap_gap_px(),
+            snap_to_grid: Self::default_snap_to_grid(),
+            grid_size_px: Self::default_grid_size_px(),
         }
     }
 }

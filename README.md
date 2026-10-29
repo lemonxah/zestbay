@@ -1,7 +1,7 @@
 # ZestBay
 
 <p align="center">
-  <img src="images/zesticon.png" alt="ZestBay" width="200">
+  <img src="images/logo/zestbay-launcher.svg" alt="ZestBay" width="200">
 </p>
 
 <p align="center">

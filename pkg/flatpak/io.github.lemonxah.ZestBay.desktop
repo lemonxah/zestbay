@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=ZestBay
+Comment=PipeWire patchbay and audio routing manager
+Exec=zestbay
+Icon=io.github.lemonxah.ZestBay
+Terminal=false
+Type=Application
+Categories=AudioVideo;Audio;Mixer;
+Keywords=pipewire;patchbay;audio;routing;plugins;lv2;clap;vst3;

@@ -1,15 +1,16 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQml.Models
 
-ApplicationWindow {
+// Add plugin dialog (design spec §6.3, 880x700).
+ZbWindow {
     id: pluginBrowser
-    title: "Add Plugin"
-    color: Theme.windowBg
-    width: 700
-    height: 500
-    minimumWidth: 450
-    minimumHeight: 350
+    title: "Add plugin"
+    width: 880
+    height: 700
+    minimumWidth: 560
+    minimumHeight: 400
     visible: false
 
     required property var controller
@@ -25,10 +26,13 @@ ApplicationWindow {
         if (!visible && !addedPlugin) cancelled()
     }
 
+    readonly property var formats: ["All", "LV2", "VST3", "CLAP"]
+
     property var allPlugins: []
     property var filteredPlugins: []
     property var categories: []
     property string selectedCategory: "All"
+    property string selectedFormat: "All"
     property bool showCompatibleOnly: true
 
     function loadPlugins() {
@@ -63,15 +67,20 @@ ApplicationWindow {
             if (showCompatibleOnly && !p.compatible)
                 continue
 
-            if (selectedCategory !== "All" && p.category !== selectedCategory)
+            if (selectedFormat !== "All" && (p.format || "LV2") !== selectedFormat)
+                continue
+
+            if (selectedCategory !== "All" && (p.category || "Other") !== selectedCategory)
                 continue
 
             if (query.length > 0) {
                 var name = (p.name || "").toLowerCase()
                 var author = (p.author || "").toLowerCase()
+                var category = (p.category || "").toLowerCase()
                 var uri = (p.uri || "").toLowerCase()
                 if (name.indexOf(query) < 0 &&
                     author.indexOf(query) < 0 &&
+                    category.indexOf(query) < 0 &&
                     uri.indexOf(query) < 0)
                     continue
             }
@@ -80,197 +89,311 @@ ApplicationWindow {
         }
 
         result.sort(function(a, b) {
-            return a.name.localeCompare(b.name)
+            return (a.name || "").localeCompare(b.name || "")
         })
 
         filteredPlugins = result
+        pluginList.currentIndex = result.length > 0 ? 0 : -1
+        pluginList.positionViewAtBeginning()
+    }
+
+    function addPlugin(plugin) {
+        if (!plugin || !plugin.uri || plugin.compatible === false)
+            return
+        var addedName = controller.add_plugin(plugin.uri)
+        pluginBrowser.addedPlugin = true
+        if (addedName) pluginBrowser.pluginAdded(addedName)
+        pluginBrowser.visible = false
+    }
+
+    function moveHighlight(delta) {
+        var n = filteredPlugins.length
+        if (n === 0) return
+        var i = Math.max(0, Math.min(n - 1, pluginList.currentIndex + delta))
+        pluginList.currentIndex = i
+        pluginList.positionViewAtIndex(i, ListView.Contain)
     }
 
     function open() {
         addedPlugin = false
-        loadPlugins()
         searchField.text = ""
+        loadPlugins()
         visible = true
         raise()
         requestActivate()
         searchField.forceActiveFocus()
     }
 
+    Shortcut {
+        sequence: "Escape"
+        onActivated: pluginBrowser.visible = false
+    }
+
+    Shortcut {
+        sequences: ["Return", "Enter"]
+        onActivated: {
+            var i = pluginList.currentIndex
+            if (i >= 0 && i < pluginBrowser.filteredPlugins.length)
+                pluginBrowser.addPlugin(pluginBrowser.filteredPlugins[i])
+        }
+    }
+
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: 16
-        spacing: 8
+        anchors.margins: Theme.dialogPadding
+        spacing: 16
 
-        RowLayout {
+        ZbDialogHeader {
+            title: "Add plugin"
+        }
+
+        ZbSearchField {
+            id: searchField
+            large: true
             Layout.fillWidth: true
-            spacing: 8
-
-            TextField {
-                id: searchField
-                placeholderText: "Search plugins..."
-                Layout.fillWidth: true
-                selectByMouse: true
-                onTextChanged: filterPlugins()
-            }
-
-            ComboBox {
-                id: categoryCombo
-                model: categories
-                implicitWidth: 160
-                onCurrentTextChanged: {
-                    selectedCategory = currentText
-                    filterPlugins()
+            placeholderText: "Search by name, author or category"
+            onTextChanged: pluginBrowser.filterPlugins()
+            Keys.onUpPressed: pluginBrowser.moveHighlight(-1)
+            Keys.onDownPressed: pluginBrowser.moveHighlight(1)
+            Keys.onPressed: event => {
+                if (event.key === Qt.Key_PageUp) {
+                    pluginBrowser.moveHighlight(-8)
+                    event.accepted = true
+                } else if (event.key === Qt.Key_PageDown) {
+                    pluginBrowser.moveHighlight(8)
+                    event.accepted = true
                 }
             }
         }
 
+        // Filter row: format · count · spacer · category · compatible only
         RowLayout {
             Layout.fillWidth: true
-            spacing: 8
+            spacing: 12
 
-            Label {
-                text: filteredPlugins.length + " of " + allPlugins.length + " plugins"
-                font.italic: true
-                opacity: 0.7
+            ZbSegmented {
+                model: pluginBrowser.formats
+                currentIndex: Math.max(0, pluginBrowser.formats.indexOf(pluginBrowser.selectedFormat))
+                onActivated: index => {
+                    pluginBrowser.selectedFormat = pluginBrowser.formats[index]
+                    pluginBrowser.filterPlugins()
+                }
+            }
+
+            Text {
+                text: pluginBrowser.filteredPlugins.length + " of " + pluginBrowser.allPlugins.length + " plugins"
+                font.family: Theme.fontMono
+                font.pixelSize: Theme.sizeMono
+                color: Theme.textMuted
             }
 
             Item { Layout.fillWidth: true }
 
-            CheckBox {
-                id: compatibleCheck
+            ZbButton {
+                id: categoryButton
+                text: pluginBrowser.selectedCategory === "All" ? "All categories" : pluginBrowser.selectedCategory
+                trailingIconName: "chevronDown"
+                Layout.maximumWidth: 220
+                onClicked: categoryMenu.opened ? categoryMenu.close() : categoryMenu.open()
+
+                ZbMenu {
+                    id: categoryMenu
+                    y: categoryButton.height + 4
+
+                    Instantiator {
+                        model: pluginBrowser.categories
+                        delegate: ZbMenuItem {
+                            required property var modelData
+                            text: modelData === "All" ? "All categories" : modelData
+                            selected: pluginBrowser.selectedCategory === modelData
+                            onTriggered: {
+                                pluginBrowser.selectedCategory = modelData
+                                pluginBrowser.filterPlugins()
+                            }
+                        }
+                        onObjectAdded: (index, object) => categoryMenu.insertItem(index, object)
+                        onObjectRemoved: (index, object) => categoryMenu.removeItem(object)
+                    }
+                }
+            }
+
+            ZbSwitch {
+                compact: true
                 text: "Compatible only"
-                checked: showCompatibleOnly
+                checked: pluginBrowser.showCompatibleOnly
                 onToggled: {
-                    showCompatibleOnly = checked
-                    filterPlugins()
+                    pluginBrowser.showCompatibleOnly = checked
+                    pluginBrowser.filterPlugins()
                 }
             }
         }
 
-        ListView {
-            id: pluginList
+        // Plugin list card
+        ZbCard {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            clip: true
-            model: filteredPlugins.length
 
-            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+            ListView {
+                id: pluginList
+                ZbWheelScroll { flickable: pluginList }
+                anchors {
+                    left: parent.left
+                    top: parent.top
+                    bottom: parent.bottom
+                    right: listBar.visible ? listBar.left : parent.right
+                    leftMargin: 1
+                    topMargin: Theme.scrollGap
+                    bottomMargin: Theme.scrollGap
+                    rightMargin: listBar.visible ? Theme.scrollGap : 1
+                }
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                highlightFollowsCurrentItem: false
+                model: pluginBrowser.filteredPlugins
+                ScrollBar.vertical: listBar
 
-            delegate: Rectangle {
-                id: pluginDelegate
-                required property int index
-                width: pluginList.width
-                height: 64
-                color: pluginMouseArea.containsMouse ? Theme.rowHover : (index % 2 === 0 ? Theme.rowEven : Theme.rowOdd)
-                opacity: plugin.compatible ? 1.0 : 0.5
+                delegate: Rectangle {
+                    id: row
+                    required property int index
+                    required property var modelData
+                    readonly property var plugin: modelData || {}
+                    readonly property bool active: ListView.isCurrentItem
+                    readonly property bool isCompatible: plugin.compatible !== false
 
-                property var plugin: filteredPlugins[index] || {}
+                    readonly property string metaText: {
+                        var parts = []
+                        if (plugin.category) parts.push(plugin.category)
+                        if (plugin.author) parts.push(plugin.author)
+                        return parts.join(" · ")
+                    }
+                    readonly property string portsText: {
+                        var parts = [(plugin.audioIn || 0) + " in", (plugin.audioOut || 0) + " out"]
+                        if (plugin.controlIn > 0) parts.push(plugin.controlIn + " controls")
+                        return parts.join(" · ")
+                    }
 
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.margins: 8
-                    spacing: 12
+                    width: ListView.view.width
+                    height: Theme.rowPlugin
+                    color: active ? Theme.bgHover : "transparent"
 
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 2
+                    MouseArea {
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onContainsMouseChanged: if (containsMouse) pluginList.currentIndex = row.index
+                        onClicked: pluginList.currentIndex = row.index
+                        onDoubleClicked: pluginBrowser.addPlugin(row.plugin)
+                    }
 
-                        RowLayout {
-                            spacing: 6
-                            Label {
-                                text: plugin.name || ""
-                                font.bold: true
-                                font.pointSize: 10
-                                elide: Text.ElideRight
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 16
+                        anchors.rightMargin: 16
+                        spacing: 14
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 4
+                            opacity: row.isCompatible ? 1 : 0.5
+
+                            RowLayout {
                                 Layout.fillWidth: true
-                            }
-                            Label {
-                                visible: plugin.format !== undefined
-                                text: plugin.format || ""
-                                font.pointSize: 7
-                                color: plugin.format === "CLAP" ? Theme.badgeClapText : plugin.format === "VST3" ? Theme.badgeVst3Text : Theme.badgeLv2Text
-                                padding: 2
-                                background: Rectangle {
-                                    color: plugin.format === "CLAP" ? Theme.badgeClapBg : plugin.format === "VST3" ? Theme.badgeVst3Bg : Theme.badgeLv2Bg
-                                    radius: 3
+                                spacing: 8
+                                Text {
+                                    text: row.plugin.name || ""
+                                    font.family: Theme.fontSans
+                                    font.pixelSize: Theme.sizeListPrimary
+                                    font.weight: Font.DemiBold
+                                    color: Theme.textPrimary
+                                    elide: Text.ElideRight
+                                    Layout.fillWidth: true
+                                    Layout.preferredWidth: Math.ceil(implicitWidth)
+                                    Layout.maximumWidth: Math.ceil(implicitWidth)
                                 }
+                                ZbBadge {
+                                    id: formatBadge
+                                    text: row.plugin.format || "LV2"
+                                    tone: formatBadge.formatTone(text)
+                                }
+                                Item { Layout.fillWidth: true }
                             }
-                            Label {
-                                visible: plugin.hasUi === false
-                                text: "no UI"
-                                font.pointSize: 7
-                                color: Theme.badgeNoUiText
-                                padding: 2
-                                background: Rectangle { color: Theme.badgeNoUiBg; radius: 3 }
-                            }
-                            Label {
-                                visible: !plugin.compatible
-                                text: "incompatible"
-                                font.pointSize: 8
-                                color: Theme.statusError
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    visible: row.metaText.length > 0
+                                    text: row.metaText
+                                    font.family: Theme.fontSans
+                                    font.pixelSize: Theme.sizeCaption
+                                    color: Theme.textMuted
+                                    elide: Text.ElideRight
+                                    Layout.fillWidth: true
+                                    Layout.preferredWidth: Math.ceil(implicitWidth)
+                                    Layout.maximumWidth: Math.ceil(implicitWidth)
+                                }
+                                ZbDivider {
+                                    visible: row.metaText.length > 0
+                                    vertical: true
+                                    strong: true
+                                    Layout.preferredHeight: 10
+                                }
+                                Text {
+                                    text: row.portsText
+                                    font.family: Theme.fontMono
+                                    font.pixelSize: Theme.sizeMono
+                                    color: Theme.textMuted
+                                }
+                                Item { Layout.fillWidth: true }
                             }
                         }
 
-                        Label {
-                            text: {
-                                var parts = []
-                                if (plugin.category) parts.push(plugin.category)
-                                if (plugin.author) parts.push("by " + plugin.author)
-                                return parts.join("  |  ")
-                            }
-                            font.pointSize: 8
-                            opacity: 0.7
-                            elide: Text.ElideRight
-                            Layout.fillWidth: true
+                        ZbBadge {
+                            visible: !row.isCompatible
+                            text: "incompatible"
+                            tone: "danger"
                         }
 
-                        Label {
-                            text: {
-                                var parts = []
-                                if (plugin.audioIn > 0 || plugin.audioOut > 0)
-                                    parts.push("Audio: " + plugin.audioIn + " in / " + plugin.audioOut + " out")
-                                if (plugin.controlIn > 0)
-                                    parts.push("Controls: " + plugin.controlIn)
-                                return parts.join("  |  ")
-                            }
-                            font.pointSize: 8
-                            opacity: 0.5
-                            elide: Text.ElideRight
-                            Layout.fillWidth: true
+                        ZbBadge {
+                            visible: row.plugin.hasUi === false
+                            text: "no UI"
+                        }
+
+                        ZbButton {
+                            text: "Add"
+                            kind: row.active && row.isCompatible ? "primary" : "ghost"
+                            enabled: row.isCompatible
+                            onClicked: pluginBrowser.addPlugin(row.plugin)
                         }
                     }
 
-                    Button {
-                        text: "Add"
-                        enabled: plugin.compatible !== false
-                        onClicked: {
-                            if (plugin.uri) {
-                                var addedName = controller.add_plugin(plugin.uri)
-                                pluginBrowser.addedPlugin = true
-                                if (addedName) pluginBrowser.pluginAdded(addedName)
-                                pluginBrowser.visible = false
-                            }
-                        }
+                    ZbDivider {
+                        visible: row.index < pluginList.count - 1
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
                     }
                 }
 
-                MouseArea {
-                    id: pluginMouseArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    acceptedButtons: Qt.NoButton
+                Text {
+                    visible: pluginList.count === 0
+                    anchors.centerIn: parent
+                    text: pluginBrowser.allPlugins.length === 0 ? "No plugins found" : "No plugins match the current filters"
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.sizeBody
+                    color: Theme.textMuted
                 }
             }
-        }
 
-        RowLayout {
-            Layout.fillWidth: true
-
-            Item { Layout.fillWidth: true }
-
-            Button {
-                text: "Close"
-                onClicked: pluginBrowser.visible = false
+            ZbScrollBar {
+                id: listBar
+                anchors {
+                    top: parent.top
+                    bottom: parent.bottom
+                    right: parent.right
+                    topMargin: Theme.scrollGap
+                    bottomMargin: Theme.scrollGap
+                    rightMargin: Theme.scrollGap
+                }
             }
         }
     }

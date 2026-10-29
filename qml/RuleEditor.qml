@@ -2,15 +2,16 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-ApplicationWindow {
+// Patchbay Rules (spec §6.2): dialog shell, filterable card list of rules,
+// footer with secondary actions left and "Apply rules now" as the primary.
+ZbWindow {
     id: ruleEditor
     title: "Patchbay Rules"
-    width: 720
-    height: 520
-    minimumWidth: 500
-    minimumHeight: 400
+    width: 760
+    height: 780
+    minimumWidth: 560
+    minimumHeight: 420
     visible: false
-    color: Theme.windowBg
 
     required property var controller
 
@@ -20,110 +21,44 @@ ApplicationWindow {
     property var backups: []
     property string pendingRestoreFilename: ""
 
-    Dialog {
-        id: snapshotConfirmDialog
-        title: "Confirm Snapshot"
-        anchors.centerIn: parent
-        modal: true
-        standardButtons: Dialog.Yes | Dialog.No
-        width: Math.min(ruleEditor.width * 0.8, 420)
+    // Indices into `rules` that match the filter. The list model is the
+    // count (not the array) so reloading rules keeps the scroll position.
+    readonly property var filteredIdx: computeFilter(rules, filterField.text)
+    readonly property int enabledCount: {
+        var n = 0;
+        for (var i = 0; i < rules.length; i++)
+            if (rules[i].enabled)
+                n++;
+        return n;
+    }
+    readonly property bool popupOpen: snapshotConfirmDialog.visible || restoreConfirmDialog.visible
+                                      || backupNameDialog.visible || addRuleDialog.visible
+                                      || backupsDialog.visible
 
-        ColumnLayout {
-            width: parent.width
-            spacing: 12
-
-            Label {
-                text: "Replace all rules?"
-                font.bold: true
-                font.pointSize: 11
+    function computeFilter(list, text) {
+        var q = (text || "").trim().toLowerCase();
+        var out = [];
+        for (var i = 0; i < list.length; i++) {
+            var r = list[i] || {};
+            if (q.length === 0) {
+                out.push(i);
+                continue;
             }
-
-            Label {
-                text: "This will delete all existing rules (" + rules.length + ") and replace them with rules based on the connections currently active on the graph.\n\nThis cannot be undone."
-                wrapMode: Text.WordWrap
-                Layout.fillWidth: true
-            }
+            var hay = ((r.sourcePattern || "") + " " + (r.sourceLabel || "") + " "
+                       + (r.targetPattern || "") + " " + (r.targetLabel || "")).toLowerCase();
+            if (hay.indexOf(q) >= 0)
+                out.push(i);
         }
-
-        onAccepted: {
-            controller.snapshot_rules()
-            loadRules()
-        }
+        return out;
     }
 
-    Dialog {
-        id: restoreConfirmDialog
-        title: "Restore Backup"
-        anchors.centerIn: parent
-        modal: true
-        standardButtons: Dialog.Yes | Dialog.No
-        width: Math.min(ruleEditor.width * 0.8, 420)
-
-        ColumnLayout {
-            width: parent.width
-            spacing: 12
-
-            Label {
-                text: "Restore this backup?"
-                font.bold: true
-                font.pointSize: 11
-            }
-
-            Label {
-                text: "This will replace all current rules (" + rules.length + ") with the rules from the selected backup.\n\nThis cannot be undone."
-                wrapMode: Text.WordWrap
-                Layout.fillWidth: true
-            }
-        }
-
-        onAccepted: {
-            if (pendingRestoreFilename !== "") {
-                controller.restore_rule_backup(pendingRestoreFilename)
-                pendingRestoreFilename = ""
-                loadRules()
-                loadBackups()
-            }
-        }
-
-        onRejected: {
-            pendingRestoreFilename = ""
-        }
-    }
-
-    Dialog {
-        id: backupNameDialog
-        title: "Save Backup"
-        anchors.centerIn: parent
-        modal: true
-        standardButtons: Dialog.Ok | Dialog.Cancel
-        width: Math.min(ruleEditor.width * 0.8, 360)
-
-        ColumnLayout {
-            width: parent.width
-            spacing: 8
-
-            Label {
-                text: "Enter a name for this backup (optional):"
-            }
-
-            TextField {
-                id: backupNameField
-                placeholderText: "e.g. Before mixer changes"
-                Layout.fillWidth: true
-                selectByMouse: true
-                onAccepted: backupNameDialog.accept()
-            }
-        }
-
-        onAccepted: {
-            controller.backup_rules(backupNameField.text)
-            backupNameField.text = ""
-            loadBackups()
-        }
-
-        onRejected: {
-            backupNameField.text = ""
-        }
+    // Badge tone for a rule endpoint type (bible §2.4).
+    function typeTone(t) {
+        if (t === "Source" || t === "Duplex") return "teal";
+        if (t === "Sink") return "blue";
+        if (t === "Plugin") return "violet";
+        if (t === "App Out" || t === "App In") return "orange";
+        return "neutral";
     }
 
     function loadRules() {
@@ -156,619 +91,661 @@ ApplicationWindow {
     }
 
     Connections {
-        target: controller
+        target: ruleEditor.controller
         function onGraph_changed() {
             if (ruleEditor.visible) {
-                loadRules();
+                ruleEditor.loadRules();
             }
         }
     }
 
+    // Escape closes the window (open sub-dialogs handle Escape themselves).
+    Shortcut {
+        sequence: "Escape"
+        enabled: ruleEditor.active && !ruleEditor.popupOpen
+        onActivated: ruleEditor.close()
+    }
+
+    // Sub-dialogs use ZbDialog (in-window modal shell).
+    component BodyText: Text {
+        font.family: Theme.fontSans
+        font.pixelSize: Theme.sizeBody
+        color: Theme.textPrimary
+        wrapMode: Text.WordWrap
+    }
+
+    component CaptionText: Text {
+        font.family: Theme.fontSans
+        font.pixelSize: Theme.sizeCaption
+        color: Theme.textMuted
+        wrapMode: Text.WordWrap
+    }
+
+    // Footer matching ZbDialog's, for sub-dialogs that need their own
+    // buttons (a primary that can be disabled, or extra actions on the left).
+    component DialogFooter: Item {
+        default property alias buttons: footerRow.data
+        implicitHeight: footerRow.implicitHeight + 16 + 20
+        RowLayout {
+            id: footerRow
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.leftMargin: Theme.dialogPadding
+            anchors.rightMargin: Theme.dialogPadding
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: 20
+            spacing: 8
+        }
+    }
+
+    ZbDialog {
+        id: snapshotConfirmDialog
+        z: 2
+        title: "Replace all rules?"
+        primaryText: "Snapshot connections"
+        secondaryText: "Cancel"
+        width: Math.min(ruleEditor.width - 2 * Theme.dialogPadding, 440)
+
+        BodyText {
+            width: parent.width
+            text: "This will delete all existing rules (" + ruleEditor.rules.length + ") and replace them with rules based on the connections currently active on the graph.\n\nThis cannot be undone."
+        }
+
+        onAccepted: {
+            ruleEditor.controller.snapshot_rules()
+            ruleEditor.loadRules()
+        }
+    }
+
+    ZbDialog {
+        id: restoreConfirmDialog
+        z: 2
+        title: "Restore this backup?"
+        primaryText: "Restore"
+        secondaryText: "Cancel"
+        width: Math.min(ruleEditor.width - 2 * Theme.dialogPadding, 440)
+
+        BodyText {
+            width: parent.width
+            text: "This will replace all current rules (" + ruleEditor.rules.length + ") with the rules from the selected backup.\n\nThis cannot be undone."
+        }
+
+        onAccepted: {
+            if (ruleEditor.pendingRestoreFilename !== "") {
+                ruleEditor.controller.restore_rule_backup(ruleEditor.pendingRestoreFilename)
+                ruleEditor.pendingRestoreFilename = ""
+                ruleEditor.loadRules()
+                ruleEditor.loadBackups()
+            }
+        }
+
+        onRejected: {
+            ruleEditor.pendingRestoreFilename = ""
+        }
+    }
+
+    ZbDialog {
+        id: backupNameDialog
+        z: 2
+        title: "Save backup"
+        primaryText: "Save backup"
+        secondaryText: "Cancel"
+        width: Math.min(ruleEditor.width - 2 * Theme.dialogPadding, 400)
+
+        ColumnLayout {
+            width: parent.width
+            spacing: 12
+
+            CaptionText {
+                text: "Enter a name for this backup (optional)."
+                Layout.fillWidth: true
+            }
+            ZbTextField {
+                id: backupNameField
+                Layout.fillWidth: true
+                placeholderText: "e.g. Before mixer changes"
+                onAccepted: backupNameDialog.accept()
+            }
+        }
+
+        onOpened: {
+            backupNameField.text = ""
+            backupNameField.forceActiveFocus()
+        }
+
+        onAccepted: {
+            ruleEditor.controller.backup_rules(backupNameField.text)
+            backupNameField.text = ""
+            ruleEditor.loadBackups()
+        }
+    }
+
+    // ─── Add rule ───────────────────────────────────────────────────────
+    ZbDialog {
+        id: addRuleDialog
+        title: "Add rule"
+        primaryText: "Create rule"
+        secondaryText: "Cancel"
+        width: Math.min(ruleEditor.width - 2 * Theme.dialogPadding, 560)
+
+        readonly property bool acceptEnabled: sourcePatternField.text.length > 0 && targetPatternField.text.length > 0
+
+        primaryEnabled: acceptEnabled
+
+        function resetFields() {
+            sourcePatternField.text = "";
+            targetPatternField.text = "";
+            sourceTypeSeg.currentIndex = 0;
+            targetTypeSeg.currentIndex = 0;
+        }
+
+        function createRule() {
+            if (!acceptEnabled)
+                return;
+            var srcType = ruleEditor.nodeTypes[sourceTypeSeg.currentIndex];
+            var tgtType = ruleEditor.nodeTypes[targetTypeSeg.currentIndex];
+            srcType = srcType === "Any" ? "" : srcType;
+            tgtType = tgtType === "Any" ? "" : tgtType;
+            ruleEditor.controller.add_rule(sourcePatternField.text, srcType, targetPatternField.text, tgtType);
+            resetFields();
+            ruleEditor.loadRules();
+        }
+
+        onOpened: sourcePatternField.forceActiveFocus()
+        onAccepted: createRule()
+
+        ColumnLayout {
+            width: parent.width
+            spacing: 8
+
+            CaptionText {
+                text: "Patterns match node names; * is a wildcard."
+                Layout.fillWidth: true
+            }
+
+            Item { implicitHeight: 4 }
+
+            ZbSectionLabel { text: "Source" }
+            ZbTextField {
+                id: sourcePatternField
+                Layout.fillWidth: true
+                placeholderText: "Pattern (e.g. Firefox*)"
+                onAccepted: targetPatternField.forceActiveFocus()
+            }
+            ZbSegmented {
+                id: sourceTypeSeg
+                model: ruleEditor.nodeTypes
+            }
+
+            Item { implicitHeight: 8 }
+
+            ZbSectionLabel { text: "Target" }
+            ZbTextField {
+                id: targetPatternField
+                Layout.fillWidth: true
+                placeholderText: "Pattern (e.g. Built-in Audio*)"
+                onAccepted: if (addRuleDialog.acceptEnabled) addRuleDialog.accept()
+            }
+            ZbSegmented {
+                id: targetTypeSeg
+                model: ruleEditor.nodeTypes
+            }
+
+            Item {
+                implicitHeight: 8
+                visible: ruleEditor.nodeNames.length > 0
+            }
+
+            ZbSectionLabel {
+                text: "Quick-fill from current nodes"
+                visible: ruleEditor.nodeNames.length > 0
+            }
+            CaptionText {
+                visible: ruleEditor.nodeNames.length > 0
+                text: "Fills the source first, then the target."
+                Layout.fillWidth: true
+            }
+
+            Flow {
+                visible: ruleEditor.nodeNames.length > 0
+                Layout.fillWidth: true
+                spacing: 4
+
+                Repeater {
+                    model: Math.min(ruleEditor.nodeNames.length, 20)
+                    delegate: ZbButton {
+                        required property int index
+                        property var nodeInfo: ruleEditor.nodeNames[index] || {}
+                        kind: "subtle"
+                        compact: true
+                        text: (nodeInfo.name || "") + (nodeInfo.type ? " · " + nodeInfo.type : "")
+                        onClicked: {
+                            var idx = ruleEditor.nodeTypes.indexOf(nodeInfo.type || "");
+                            if (sourcePatternField.text.length === 0) {
+                                sourcePatternField.text = nodeInfo.name || "";
+                                if (idx >= 0)
+                                    sourceTypeSeg.currentIndex = idx;
+                            } else {
+                                targetPatternField.text = nodeInfo.name || "";
+                                if (idx >= 0)
+                                    targetTypeSeg.currentIndex = idx;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ─── Backups ────────────────────────────────────────────────────────
+    ZbDialog {
+        id: backupsDialog
+        title: "Backups"
+        width: Math.min(ruleEditor.width - 2 * Theme.dialogPadding, 600)
+
+        onAboutToShow: ruleEditor.loadBackups()
+
+        // List dialog: "Save backup…" left, Close right, no primary.
+        footer: DialogFooter {
+            ZbButton {
+                text: "Save backup…"
+                onClicked: backupNameDialog.open()
+            }
+            Item { Layout.fillWidth: true }
+            ZbButton {
+                text: "Close"
+                onClicked: backupsDialog.close()
+            }
+        }
+
+        ColumnLayout {
+            width: parent.width
+            spacing: 12
+
+            CaptionText {
+                Layout.fillWidth: true
+                text: ruleEditor.backups.length > 0
+                      ? ruleEditor.backups.length + " backup" + (ruleEditor.backups.length !== 1 ? "s" : "") + " saved"
+                      : "No backups yet. Use “Save backup…” to create one."
+            }
+
+            ZbCard {
+                Layout.fillWidth: true
+                visible: ruleEditor.backups.length > 0
+                implicitHeight: Math.min(ruleEditor.backups.length * Theme.rowRule,
+                                         Math.max(Theme.rowRule * 2, ruleEditor.height - 360)) + 2
+
+                ListView {
+                    id: backupList
+                    ZbWheelScroll { flickable: backupList }
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    anchors.right: backupBar.visible ? backupBar.left : parent.right
+                    anchors.margins: 1
+                    anchors.rightMargin: backupBar.visible ? Theme.scrollGap : 1
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    model: ruleEditor.backups.length
+                    ScrollBar.vertical: backupBar
+
+                    delegate: Item {
+                        id: backupDelegate
+                        required property int index
+                        property var backup: ruleEditor.backups[index] || {}
+                        width: ListView.view.width
+                        height: Theme.rowRule
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: Theme.cardPadding
+                            anchors.rightMargin: Theme.cardPadding
+                            spacing: 12
+
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 3
+
+                                Text {
+                                    text: backupDelegate.backup.name || backupDelegate.backup.date || ""
+                                    font.family: Theme.fontSans
+                                    font.pixelSize: Theme.sizeBody
+                                    font.weight: Font.Medium
+                                    color: Theme.textPrimary
+                                    elide: Text.ElideRight
+                                    Layout.fillWidth: true
+                                }
+                                Text {
+                                    text: (backupDelegate.backup.name ? (backupDelegate.backup.date || "") + " · " : "")
+                                          + (backupDelegate.backup.ruleCount || 0) + " rules"
+                                    font.family: Theme.fontMono
+                                    font.pixelSize: Theme.sizeMono
+                                    color: Theme.textMuted
+                                    elide: Text.ElideRight
+                                    Layout.fillWidth: true
+                                }
+                            }
+
+                            ZbButton {
+                                id: restoreButton
+                                kind: "subtle"
+                                compact: true
+                                text: "Restore"
+                                onClicked: {
+                                    ruleEditor.pendingRestoreFilename = backupDelegate.backup.filename || ""
+                                    restoreConfirmDialog.open()
+                                }
+                                ZbTooltip {
+                                    visible: restoreButton.hovered
+                                    text: "Replace current rules with this backup"
+                                }
+                            }
+
+                            ZbButton {
+                                id: backupTrashButton
+                                iconName: "trash"
+                                compact: true
+                                implicitWidth: 28
+                                implicitHeight: 28
+                                onClicked: {
+                                    if (backupDelegate.backup.filename) {
+                                        ruleEditor.controller.delete_rule_backup(backupDelegate.backup.filename)
+                                        ruleEditor.loadBackups()
+                                    }
+                                }
+                                ZbTooltip {
+                                    visible: backupTrashButton.hovered
+                                    text: "Delete backup"
+                                }
+                            }
+                        }
+
+                        ZbDivider {
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.bottom: parent.bottom
+                            visible: backupDelegate.index < ruleEditor.backups.length - 1
+                        }
+                    }
+                }
+
+                ZbScrollBar {
+                    id: backupBar
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    anchors.right: parent.right
+                    anchors.margins: 4
+                }
+            }
+        }
+    }
+
+    // ─── Main content ───────────────────────────────────────────────────
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: 16
-        spacing: 8
+        anchors.margins: Theme.dialogPadding
+        spacing: 16
+
+        ZbDialogHeader {
+            title: "Auto-connect rules"
+            subtitle: "Learned automatically when you connect ports by hand. Disabled rules are kept but not applied."
+
+            ZbSwitch {
+                id: patchbaySwitch
+                text: "Rules"
+                checked: ruleEditor.controller.patchbay_enabled
+                onToggled: ruleEditor.controller.toggle_patchbay(checked)
+            }
+        }
 
         RowLayout {
             Layout.fillWidth: true
             spacing: 12
 
-            Label {
-                text: "Auto-Connect Rules"
-                font.bold: true
-                font.pointSize: 12
-            }
-
-            Item {
+            ZbSearchField {
+                id: filterField
                 Layout.fillWidth: true
+                placeholderText: "Filter rules"
             }
 
-            Label {
-                text: "Rules:"
+            Text {
+                text: {
+                    var total = ruleEditor.rules.length;
+                    var shown = ruleEditor.filteredIdx.length;
+                    var head = filterField.text.trim().length > 0
+                               ? shown + " of " + total + " rule" + (total !== 1 ? "s" : "")
+                               : total + " rule" + (total !== 1 ? "s" : "");
+                    return head + " · " + ruleEditor.enabledCount + " enabled";
+                }
+                font.family: Theme.fontMono
+                font.pixelSize: Theme.sizeMono
+                color: Theme.textMuted
             }
-
-            Switch {
-                id: patchbaySwitch
-                checked: controller.patchbay_enabled
-                onToggled: controller.toggle_patchbay(checked)
-            }
         }
 
-        Label {
-            text: "Rules are auto-learned when you connect ports manually."
-            font.italic: true
-            opacity: 0.7
-            Layout.fillWidth: true
-        }
-
-        Label {
-            text: rules.length + " rule" + (rules.length !== 1 ? "s" : "")
-            opacity: 0.6
-        }
-
-        Rectangle {
-            Layout.fillWidth: true
-            height: 1
-            color: Theme.separator
-        }
-
-        ListView {
-            id: ruleList
+        ZbCard {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            clip: true
-            model: rules.length
-            spacing: 2
 
-            ScrollBar.vertical: ScrollBar {
-                policy: ScrollBar.AsNeeded
-            }
+            ListView {
+                id: ruleList
+                ZbWheelScroll { flickable: ruleList }
+                anchors.left: parent.left
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                anchors.right: ruleBar.visible ? ruleBar.left : parent.right
+                anchors.margins: 1
+                anchors.rightMargin: ruleBar.visible ? Theme.scrollGap : 1
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                model: ruleEditor.filteredIdx.length
+                ScrollBar.vertical: ruleBar
 
-            // Column header row
-            header: Item {
-                width: ruleList.width - 12
-                height: rules.length > 0 ? 28 : 0
-                visible: rules.length > 0
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: 10
-                    anchors.rightMargin: 8
-                    spacing: 8
+                delegate: Item {
+                    id: ruleDelegate
+                    required property int index
+                    property var rule: ruleEditor.rules[ruleEditor.filteredIdx[index]] || {}
+                    readonly property int mappingCount: rule.portMappings ? rule.portMappings.length : 0
+                    width: ListView.view.width
+                    height: Theme.rowRule
 
-                    Label {
-                        text: "Rule"
-                        font.bold: true
-                        font.pointSize: 9
-                        opacity: 0.5
-                        Layout.fillWidth: true
-                    }
-                    Label {
-                        text: "Enabled"
-                        font.bold: true
-                        font.pointSize: 9
-                        opacity: 0.5
-                        Layout.preferredWidth: 58
-                        horizontalAlignment: Text.AlignRight
-                    }
-                    Label {
-                        text: "Remove"
-                        font.bold: true
-                        font.pointSize: 9
-                        opacity: 0.5
-                        Layout.preferredWidth: 58
-                        horizontalAlignment: Text.AlignRight
-                    }
-                }
-            }
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: Theme.cardPadding
+                        anchors.rightMargin: Theme.cardPadding
+                        spacing: 12
 
-            delegate: Rectangle {
-                id: ruleDelegate
-                required property int index
-                width: ruleList.width - 12
-                height: 56
-                color: ruleMouseArea.containsMouse ? Theme.rowHover : (index % 2 === 0 ? Theme.rowEven : Theme.rowOdd)
-                radius: 4
-
-                property var rule: rules[index] || {}
-
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: 10
-                    anchors.rightMargin: 8
-                    anchors.topMargin: 6
-                    anchors.bottomMargin: 6
-                    spacing: 8
-
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        spacing: 2
-
-                        RowLayout {
-                            spacing: 6
+                        ColumnLayout {
                             Layout.fillWidth: true
-                            Label {
-                                text: rule.sourceLabel || ""
-                                font.bold: true
-                                elide: Text.ElideRight
-                                Layout.maximumWidth: 220
-                            }
-                            Label {
-                                text: "\u2192"
-                                font.pointSize: 12
-                                elide: Text.ElideRight
-                                opacity: 0.5
-                            }
-                            Label {
-                                text: rule.targetLabel || ""
-                                font.bold: true
-                                elide: Text.ElideRight
-                                Layout.maximumWidth: 220
-                            }
-                        }
+                            Layout.preferredWidth: 0
+                            spacing: 3
 
-                        Label {
-                            text: {
-                                if (rule.portMappings && rule.portMappings.length > 0)
-                                    return rule.portMappings.length + " port mapping" + (rule.portMappings.length > 1 ? "s" : "");
-                                return "heuristic matching";
-                            }
-                            font.pointSize: 8
-                            opacity: 0.4
-                        }
-                    }
-
-                    Item {
-                        Layout.preferredWidth: 58
-                        Layout.preferredHeight: 30
-                        Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
-                        Layout.fillWidth: true
-
-                        Switch {
-                            anchors.right: parent.right
-                            anchors.verticalCenter: parent.verticalCenter
-                            checked: rule.enabled || false
-                            onToggled: {
-                                if (rule.id) {
-                                    controller.toggle_rule(rule.id);
-                                    loadRules();
-                                }
-                            }
-
-                            ToolTip.visible: hovered
-                            ToolTip.text: rule.enabled ? "Enabled" : "Disabled"
-                        }
-                    }
-
-                    Rectangle {
-                        Layout.preferredWidth: 36
-                        Layout.preferredHeight: 30
-                        Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
-                        radius: 4
-                        color: delMouseArea.containsMouse ? Theme.deleteBg : "transparent"
-                        border.color: delMouseArea.containsMouse ? Theme.deleteBorder : Theme.borderMuted
-                        border.width: 1
-
-                        // Trash can icon drawn with Canvas
-                        Canvas {
-                            id: ruleTrashCanvas
-                            anchors.centerIn: parent
-                            width: 16
-                            height: 16
-
-                            property color iconColor: delMouseArea.containsMouse ? Theme.deleteIcon : Theme.deleteIconMuted
-                            onIconColorChanged: requestPaint()
-
-                            onPaint: {
-                                var ctx = getContext("2d");
-                                ctx.reset();
-                                var c = iconColor;
-                                ctx.strokeStyle = c;
-                                ctx.fillStyle = c;
-                                ctx.lineWidth = 1.2;
-                                ctx.lineCap = "round";
-
-                                // Lid
-                                ctx.beginPath();
-                                ctx.moveTo(2, 4);
-                                ctx.lineTo(14, 4);
-                                ctx.stroke();
-
-                                // Handle
-                                ctx.beginPath();
-                                ctx.moveTo(6, 4);
-                                ctx.lineTo(6, 2.5);
-                                ctx.lineTo(10, 2.5);
-                                ctx.lineTo(10, 4);
-                                ctx.stroke();
-
-                                // Can body
-                                ctx.beginPath();
-                                ctx.moveTo(3.5, 4);
-                                ctx.lineTo(4.5, 14);
-                                ctx.lineTo(11.5, 14);
-                                ctx.lineTo(12.5, 4);
-                                ctx.stroke();
-
-                                // Inner lines
-                                ctx.beginPath();
-                                ctx.moveTo(6.5, 6.5);
-                                ctx.lineTo(6.5, 11.5);
-                                ctx.stroke();
-                                ctx.beginPath();
-                                ctx.moveTo(9.5, 6.5);
-                                ctx.lineTo(9.5, 11.5);
-                                ctx.stroke();
-                            }
-                        }
-
-                        MouseArea {
-                            id: delMouseArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                if (rule.id) {
-                                    controller.remove_rule(rule.id);
-                                    loadRules();
-                                }
-                            }
-                        }
-
-                        ToolTip.visible: delMouseArea.containsMouse
-                        ToolTip.text: "Delete rule"
-                    }
-                }
-
-                MouseArea {
-                    id: ruleMouseArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    acceptedButtons: Qt.NoButton
-                }
-            }
-
-            Label {
-                anchors.centerIn: parent
-                text: "No rules yet.\nConnect some ports to create rules automatically,\nor use 'Add Rule' below."
-                horizontalAlignment: Text.AlignHCenter
-                opacity: 0.5
-                visible: rules.length === 0
-            }
-        }
-
-        Rectangle {
-            Layout.fillWidth: true
-            height: 1
-            color: Theme.separator
-        }
-
-        ColumnLayout {
-            id: addRuleSection
-            Layout.fillWidth: true
-            spacing: 6
-
-            property bool expanded: false
-
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 8
-
-                Button {
-                    text: addRuleSection.expanded ? "Cancel" : "Add Rule..."
-                    onClicked: addRuleSection.expanded = !addRuleSection.expanded
-                }
-
-                Item {
-                    Layout.fillWidth: true
-                }
-
-                Button {
-                    text: "Apply Rules Now"
-                    onClicked: {
-                        controller.apply_rules();
-                    }
-                }
-
-                Button {
-                    text: "Snapshot Connections"
-                    onClicked: snapshotConfirmDialog.open()
-
-                    ToolTip.visible: hovered
-                    ToolTip.text: "Replace all rules with current connections"
-                }
-
-                Button {
-                    text: "Close"
-                    onClicked: ruleEditor.visible = false
-                }
-            }
-
-            GridLayout {
-                visible: addRuleSection.expanded
-                Layout.fillWidth: true
-                columns: 4
-                columnSpacing: 8
-                rowSpacing: 6
-
-                Label {
-                    text: "Source:"
-                }
-                TextField {
-                    id: sourcePatternField
-                    placeholderText: "Pattern (e.g. Firefox*)"
-                    Layout.fillWidth: true
-                    selectByMouse: true
-                }
-                Label {
-                    text: "Type:"
-                }
-                ComboBox {
-                    id: sourceTypeCombo
-                    model: nodeTypes
-                    implicitWidth: 120
-                }
-
-                Label {
-                    text: "Target:"
-                }
-                TextField {
-                    id: targetPatternField
-                    placeholderText: "Pattern (e.g. Built-in Audio*)"
-                    Layout.fillWidth: true
-                    selectByMouse: true
-                }
-                Label {
-                    text: "Type:"
-                }
-                ComboBox {
-                    id: targetTypeCombo
-                    model: nodeTypes
-                    implicitWidth: 120
-                }
-
-                Item {}
-                Button {
-                    text: "Create Rule"
-                    enabled: sourcePatternField.text.length > 0 && targetPatternField.text.length > 0
-                    onClicked: {
-                        var srcType = sourceTypeCombo.currentText === "Any" ? "" : sourceTypeCombo.currentText;
-                        var tgtType = targetTypeCombo.currentText === "Any" ? "" : targetTypeCombo.currentText;
-                        controller.add_rule(sourcePatternField.text, srcType, targetPatternField.text, tgtType);
-                        sourcePatternField.text = "";
-                        targetPatternField.text = "";
-                        sourceTypeCombo.currentIndex = 0;
-                        targetTypeCombo.currentIndex = 0;
-                        addRuleSection.expanded = false;
-                        loadRules();
-                    }
-                }
-                Item {}
-                Item {}
-            }
-
-            GridLayout {
-                visible: addRuleSection.expanded && nodeNames.length > 0
-                Layout.fillWidth: true
-                columns: 1
-                columnSpacing: 8
-
-                Label {
-                    text: "Quick-fill from existing nodes:"
-                    font.italic: true
-                    opacity: 0.6
-                }
-
-                Flow {
-                    Layout.fillWidth: true
-                    spacing: 4
-
-                    Repeater {
-                        model: Math.min(nodeNames.length, 20)
-                        delegate: Button {
-                            required property int index
-                            property var nodeInfo: nodeNames[index] || {}
-                            text: (nodeInfo.name || "") + " [" + (nodeInfo.type || "") + "]"
-                            flat: true
-                            font.pointSize: 8
-                            onClicked: {
-                                if (sourcePatternField.text.length === 0) {
-                                    sourcePatternField.text = nodeInfo.name || "";
-                                    var srcIdx = nodeTypes.indexOf(nodeInfo.type || "");
-                                    if (srcIdx >= 0)
-                                        sourceTypeCombo.currentIndex = srcIdx;
-                                } else {
-                                    targetPatternField.text = nodeInfo.name || "";
-                                    var tgtIdx = nodeTypes.indexOf(nodeInfo.type || "");
-                                    if (tgtIdx >= 0)
-                                        targetTypeCombo.currentIndex = tgtIdx;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Rectangle {
-            Layout.fillWidth: true
-            height: 1
-            color: Theme.separator
-        }
-
-        ColumnLayout {
-            id: backupSection
-            Layout.fillWidth: true
-            spacing: 6
-
-            property bool expanded: false
-
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 8
-
-                Button {
-                    text: backupSection.expanded ? "Hide Backups" : "Backups..."
-                    onClicked: {
-                        if (!backupSection.expanded) loadBackups()
-                        backupSection.expanded = !backupSection.expanded
-                    }
-                }
-
-                Item { Layout.fillWidth: true }
-
-                Button {
-                    text: "Save Backup"
-                    onClicked: backupNameDialog.open()
-
-                    ToolTip.visible: hovered
-                    ToolTip.text: "Save current rules as a backup"
-                }
-            }
-
-            ColumnLayout {
-                visible: backupSection.expanded
-                Layout.fillWidth: true
-                spacing: 4
-
-                Label {
-                    text: backups.length + " backup" + (backups.length !== 1 ? "s" : "") + " saved"
-                    opacity: 0.6
-                    visible: backups.length > 0
-                }
-
-                Label {
-                    text: "No backups yet. Use 'Save Backup' to create one."
-                    opacity: 0.5
-                    visible: backups.length === 0
-                }
-
-                ListView {
-                    id: backupList
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: Math.min(backups.length * 42, 180)
-                    clip: true
-                    model: backups.length
-                    spacing: 2
-                    visible: backups.length > 0
-
-                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-
-                    delegate: Rectangle {
-                        id: backupDelegate
-                        required property int index
-                        width: backupList.width - 12
-                        height: 38
-                        color: backupMouse.containsMouse ? Theme.rowHover : (index % 2 === 0 ? Theme.rowEven : Theme.rowOdd)
-                        radius: 3
-
-                        property var backup: backups[index] || {}
-
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 8
-                            anchors.rightMargin: 8
-                            spacing: 8
-
-                            ColumnLayout {
+                            // Line 1: source + badge → target + badge, one line;
+                            // the two names share what's left and elide.
+                            Item {
+                                id: line1
                                 Layout.fillWidth: true
-                                spacing: 1
+                                implicitHeight: lineRow.implicitHeight
+                                clip: true
 
-                                Label {
-                                    text: backup.name || backup.date || ""
-                                    font.bold: backup.name ? true : false
-                                    font.pointSize: 9
-                                    elide: Text.ElideRight
-                                    Layout.fillWidth: true
-                                }
+                                readonly property int parts: 3 + (srcBadge.visible ? 1 : 0) + (tgtBadge.visible ? 1 : 0)
+                                readonly property real fixedWidth: (srcBadge.visible ? srcBadge.implicitWidth : 0)
+                                                                   + arrowIcon.implicitWidth
+                                                                   + (tgtBadge.visible ? tgtBadge.implicitWidth : 0)
+                                                                   + (parts - 1) * lineRow.spacing
+                                readonly property real nameSpace: Math.max(0, width - fixedWidth)
 
-                                RowLayout {
+                                Row {
+                                    id: lineRow
                                     spacing: 8
-                                    Label {
-                                        text: backup.date || ""
-                                        font.pointSize: 8
-                                        opacity: 0.5
-                                        visible: backup.name ? true : false
+
+                                    Text {
+                                        id: srcName
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        width: Math.min(implicitWidth, Math.max(line1.nameSpace / 2, line1.nameSpace - tgtName.implicitWidth))
+                                        text: ruleDelegate.rule.sourcePattern || ruleDelegate.rule.sourceLabel || ""
+                                        font.family: Theme.fontSans
+                                        font.pixelSize: Theme.sizeBody
+                                        font.weight: Font.Medium
+                                        color: Theme.textPrimary
+                                        elide: Text.ElideRight
                                     }
-                                    Label {
-                                        text: (backup.ruleCount || 0) + " rules"
-                                        font.pointSize: 8
-                                        opacity: 0.5
+                                    ZbBadge {
+                                        id: srcBadge
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        visible: !!ruleDelegate.rule.sourceType && ruleDelegate.rule.sourceType !== "Any"
+                                        text: ruleDelegate.rule.sourceType || ""
+                                        tone: ruleEditor.typeTone(ruleDelegate.rule.sourceType)
+                                    }
+                                    ZbIcon {
+                                        id: arrowIcon
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        name: "arrow"
+                                        size: 14
+                                        color: Theme.textMuted
+                                    }
+                                    Text {
+                                        id: tgtName
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        width: Math.min(implicitWidth, Math.max(line1.nameSpace / 2, line1.nameSpace - srcName.implicitWidth))
+                                        text: ruleDelegate.rule.targetPattern || ruleDelegate.rule.targetLabel || ""
+                                        font.family: Theme.fontSans
+                                        font.pixelSize: Theme.sizeBody
+                                        font.weight: Font.Medium
+                                        color: Theme.textPrimary
+                                        elide: Text.ElideRight
+                                    }
+                                    ZbBadge {
+                                        id: tgtBadge
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        visible: !!ruleDelegate.rule.targetType && ruleDelegate.rule.targetType !== "Any"
+                                        text: ruleDelegate.rule.targetType || ""
+                                        tone: ruleEditor.typeTone(ruleDelegate.rule.targetType)
                                     }
                                 }
                             }
 
-                            Button {
-                                text: "Restore"
-                                font.pointSize: 9
-                                implicitHeight: 28
-                                onClicked: {
-                                    pendingRestoreFilename = backup.filename || ""
-                                    restoreConfirmDialog.open()
-                                }
-
-                                ToolTip.visible: hovered
-                                ToolTip.text: "Replace current rules with this backup"
-                            }
-
-                            Rectangle {
-                                width: 26
-                                height: 26
-                                radius: 3
-                                color: backupDelMouse.containsMouse ? Theme.deleteBg : "transparent"
-                                border.color: backupDelMouse.containsMouse ? Theme.deleteBorder : Theme.borderMuted
-                                border.width: 1
-
-                                Canvas {
-                                    id: backupTrashCanvas
-                                    anchors.centerIn: parent
-                                    width: 14
-                                    height: 14
-
-                                    property color iconColor: backupDelMouse.containsMouse ? Theme.deleteIcon : Theme.deleteIconMuted
-                                    onIconColorChanged: requestPaint()
-
-                                    onPaint: {
-                                        var ctx = getContext("2d")
-                                        ctx.reset()
-                                        var c = iconColor
-                                        ctx.strokeStyle = c
-                                        ctx.lineWidth = 1.2
-                                        ctx.lineCap = "round"
-                                        ctx.beginPath(); ctx.moveTo(2, 3.5); ctx.lineTo(12, 3.5); ctx.stroke()
-                                        ctx.beginPath(); ctx.moveTo(5, 3.5); ctx.lineTo(5, 2); ctx.lineTo(9, 2); ctx.lineTo(9, 3.5); ctx.stroke()
-                                        ctx.beginPath(); ctx.moveTo(3, 3.5); ctx.lineTo(4, 12); ctx.lineTo(10, 12); ctx.lineTo(11, 3.5); ctx.stroke()
-                                        ctx.beginPath(); ctx.moveTo(5.5, 5.5); ctx.lineTo(5.5, 10); ctx.stroke()
-                                        ctx.beginPath(); ctx.moveTo(8.5, 5.5); ctx.lineTo(8.5, 10); ctx.stroke()
-                                    }
-                                }
-
-                                MouseArea {
-                                    id: backupDelMouse
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: {
-                                        if (backup.filename) {
-                                            controller.delete_rule_backup(backup.filename)
-                                            loadBackups()
-                                        }
-                                    }
-                                }
-
-                                ToolTip.visible: backupDelMouse.containsMouse
-                                ToolTip.text: "Delete backup"
+                            Text {
+                                text: ruleDelegate.mappingCount > 0
+                                      ? ruleDelegate.mappingCount + " port mapping" + (ruleDelegate.mappingCount !== 1 ? "s" : "")
+                                      : "heuristic matching"
+                                font.family: Theme.fontMono
+                                font.pixelSize: Theme.sizeMono
+                                color: Theme.textMuted
                             }
                         }
 
-                        MouseArea {
-                            id: backupMouse
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            acceptedButtons: Qt.NoButton
+                        ZbSwitch {
+                            id: ruleSwitch
+                            compact: true
+                            checked: ruleDelegate.rule.enabled === true
+                            onToggled: {
+                                if (ruleDelegate.rule.id) {
+                                    ruleEditor.controller.toggle_rule(ruleDelegate.rule.id);
+                                    ruleEditor.loadRules();
+                                }
+                            }
+                            ZbTooltip {
+                                visible: ruleSwitch.hovered
+                                text: ruleDelegate.rule.enabled ? "Enabled" : "Disabled"
+                            }
+                        }
+
+                        ZbButton {
+                            id: ruleTrashButton
+                            iconName: "trash"
+                            compact: true
+                            implicitWidth: 28
+                            implicitHeight: 28
+                            onClicked: {
+                                if (ruleDelegate.rule.id) {
+                                    ruleEditor.controller.remove_rule(ruleDelegate.rule.id);
+                                    ruleEditor.loadRules();
+                                }
+                            }
+                            ZbTooltip {
+                                visible: ruleTrashButton.hovered
+                                text: "Delete rule"
+                            }
                         }
                     }
+
+                    ZbDivider {
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                        visible: ruleDelegate.index < ruleList.count - 1
+                    }
                 }
+            }
+
+            ZbScrollBar {
+                id: ruleBar
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                anchors.right: parent.right
+                anchors.margins: 4
+            }
+
+            Text {
+                anchors.centerIn: parent
+                width: parent.width - 2 * Theme.dialogPadding
+                visible: ruleList.count === 0
+                text: ruleEditor.rules.length === 0
+                      ? "No rules yet.\nConnect some ports to create rules automatically, or use “Add rule” below."
+                      : "No rules match “" + filterField.text.trim() + "”."
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.WordWrap
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.sizeBody
+                color: Theme.textMuted
+            }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+
+            ZbButton {
+                text: "Add rule"
+                iconName: "plus"
+                onClicked: addRuleDialog.open()
+            }
+
+            ZbButton {
+                text: "Backups…"
+                onClicked: {
+                    ruleEditor.loadBackups()
+                    backupsDialog.open()
+                }
+            }
+
+            ZbButton {
+                id: saveBackupButton
+                text: "Save backup"
+                onClicked: backupNameDialog.open()
+                ZbTooltip {
+                    visible: saveBackupButton.hovered
+                    text: "Save current rules as a backup"
+                }
+            }
+
+            Item { Layout.fillWidth: true }
+
+            ZbButton {
+                id: snapshotButton
+                text: "Snapshot connections"
+                onClicked: snapshotConfirmDialog.open()
+                ZbTooltip {
+                    visible: snapshotButton.hovered
+                    text: "Replace all rules with current connections"
+                }
+            }
+
+            ZbButton {
+                kind: "primary"
+                text: "Apply rules now"
+                onClicked: ruleEditor.controller.apply_rules()
             }
         }
     }

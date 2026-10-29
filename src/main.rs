@@ -42,6 +42,14 @@ fn main() {
     // In-process LV2 GTK UIs are X11-embedded.  Set before any thread is
     // spawned: setenv races with getenv on other threads.
     unsafe { std::env::set_var("GDK_BACKEND", "x11") };
+    // Every control is custom-drawn from the Theme tokens; the Basic style
+    // draws nothing of its own, so the UI looks the same on every desktop.
+    unsafe { std::env::set_var("QT_QUICK_CONTROLS_STYLE", "Basic") };
+    // lilv only searches its compiled-in LV2 path; in a Flatpak point it at
+    // the user, extension and host plugin directories.
+    if let Some(lv2_path) = plugin::paths::flatpak_lv2_path() {
+        unsafe { std::env::set_var("LV2_PATH", lv2_path) };
+    }
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
@@ -68,7 +76,10 @@ fn main() {
 
     let mut app = QGuiApplication::new();
 
-    QGuiApplication::set_desktop_file_name(&QString::from("zestbay"));
+    // Must match the installed .desktop file (Wayland app id, taskbar icon).
+    let desktop_file_name =
+        plugin::paths::flatpak_app_id().unwrap_or_else(|| "zestbay".to_string());
+    QGuiApplication::set_desktop_file_name(&QString::from(&desktop_file_name));
 
     let mut engine = QQmlApplicationEngine::new();
 

@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use crate::plugin::types::*;
 
-/// Standard Linux directories where CLAP plugins are installed.
+/// Standard Linux directories where CLAP plugins are installed
+/// (`CLAP_PATH` and Flatpak locations are added by `plugin::paths`).
 const CLAP_SEARCH_DIRS: &[&str] = &[
     "~/.clap",
     "/usr/lib/clap",
@@ -98,25 +99,7 @@ pub fn scan_plugins() -> Vec<PluginInfo> {
 }
 
 fn expand_search_dirs() -> Vec<PathBuf> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let mut seen = std::collections::HashSet::new();
-    CLAP_SEARCH_DIRS
-        .iter()
-        .filter_map(|d| {
-            let path = if d.starts_with('~') {
-                PathBuf::from(d.replacen('~', &home, 1))
-            } else {
-                PathBuf::from(d)
-            };
-            let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-            if seen.insert(canonical) {
-                Some(path)
-            } else {
-                log::debug!("CLAP: skipping duplicate directory {}", path.display());
-                None
-            }
-        })
-        .collect()
+    crate::plugin::paths::search_dirs("CLAP_PATH", CLAP_SEARCH_DIRS, "clap", "CLAP")
 }
 
 fn scan_directory(dir: &Path, plugins: &mut Vec<PluginInfo>) {

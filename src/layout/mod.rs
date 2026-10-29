@@ -206,6 +206,58 @@ fn nearest_free_y(placed: &[(f64, f64, f64, f64)], x: f64, y: f64, w: f64, h: f6
     }
 }
 
+/// Put a finished layout on a `grid`: round every free node's position to
+/// the nearest grid point, then push any node that now collides with one
+/// already placed (keeping `gap` between them) down by whole grid steps.
+/// Pinned nodes are obstacles and keep their positions. Nodes are placed
+/// left to right, top to bottom, so columns stay stacked in order.
+pub fn snap_to_grid(
+    positions: &mut LayoutResult,
+    sizes: &HashMap<NodeId, (f64, f64)>,
+    pinned: &HashMap<NodeId, (f64, f64)>,
+    grid: f64,
+    gap: f64,
+) {
+    if !(grid > 0.0) {
+        return;
+    }
+    let size = |id: &NodeId| sizes.get(id).copied().unwrap_or((0.0, 0.0));
+    let mut placed: Vec<(f64, f64, f64, f64)> = positions
+        .iter()
+        .filter(|(id, _)| pinned.contains_key(id))
+        .map(|(id, &(x, y))| {
+            let (w, h) = size(id);
+            (x, y, w, h)
+        })
+        .collect();
+
+    let mut free: Vec<(NodeId, f64, f64)> = positions
+        .iter()
+        .filter(|(id, _)| !pinned.contains_key(id))
+        .map(|(&id, &(x, y))| (id, x, y))
+        .collect();
+    free.sort_by(|a, b| {
+        a.1.total_cmp(&b.1)
+            .then(a.2.total_cmp(&b.2))
+            .then(a.0.cmp(&b.0))
+    });
+
+    for (id, x, y) in free {
+        let (w, h) = size(&id);
+        let gx = (x / grid).round() * grid;
+        let mut gy = (y / grid).round() * grid;
+        // Each step clears at least one grid row; bounded by the stack size.
+        let limit = placed.iter().map(|r| r.3 + gap).sum::<f64>() / grid + placed.len() as f64 + 1.0;
+        let mut steps = 0.0;
+        while steps < limit && placed.iter().any(|r| collides(r, gx, gy, w, h, gap)) {
+            gy += grid;
+            steps += 1.0;
+        }
+        placed.push((gx, gy, w, h));
+        positions.insert(id, (gx, gy));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -747,5 +799,31 @@ mod tests {
             }
             x += 100.0;
         }
+    }
+
+    #[test]
+    fn snap_to_grid_rounds_and_keeps_gaps() {
+        let mut pos: LayoutResult = HashMap::new();
+        pos.insert(1, (13.0, 11.0));
+        pos.insert(2, (13.0, 70.0)); // would overlap node 1 after rounding
+        pos.insert(3, (500.0, 500.0));
+        let sizes: HashMap<NodeId, (f64, f64)> =
+            [(1, (100.0, 50.0)), (2, (100.0, 50.0)), (3, (100.0, 50.0))].into_iter().collect();
+        let pinned: HashMap<NodeId, (f64, f64)> = [(3, (500.0, 500.0))].into_iter().collect();
+        snap_to_grid(&mut pos, &sizes, &pinned, 24.0, 10.0);
+        let (x1, y1) = pos[&1];
+        let (x2, y2) = pos[&2];
+        for v in [x1, y1, x2, y2] {
+            assert_eq!(v % 24.0, 0.0, "{v} is not on the grid");
+        }
+        assert!(y2 >= y1 + 50.0 + 10.0, "node 2 must keep the gap below node 1");
+        assert_eq!(pos[&3], (500.0, 500.0), "pinned nodes don't move");
+    }
+
+    #[test]
+    fn snap_to_grid_off_is_a_no_op() {
+        let mut pos: LayoutResult = [(1, (13.0, 11.0))].into_iter().collect();
+        snap_to_grid(&mut pos, &HashMap::new(), &HashMap::new(), 0.0, 10.0);
+        assert_eq!(pos[&1], (13.0, 11.0));
     }
 }

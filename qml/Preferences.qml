@@ -2,21 +2,27 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-ApplicationWindow {
+// Preferences (spec §6.4): General toggles, Appearance (theme), Timing and
+// Advanced slider rows. Every change is saved immediately.
+ZbWindow {
     id: prefsWindow
     title: "Preferences"
-    width: 520
-    height: 640
-    minimumWidth: 400
+    width: 720
+    height: 760
+    minimumWidth: 480
     minimumHeight: 400
     visible: false
-    color: Theme.windowBg
 
     required property var controller
 
     signal pollIntervalChanged(int intervalMs)
+    signal snapGapChanged(int px)
+    signal snapToGridChanged(bool enabled)
+    signal gridSizeChanged(int px)
 
     property var prefs: ({})
+
+    readonly property var themeModes: ["system", "dark", "light"]
 
     function loadPrefs() {
         try {
@@ -33,621 +39,486 @@ ApplicationWindow {
         prefsWindow.requestActivate();
     }
 
+    // Current value of a preference, or `fallback` when it isn't set.
+    function pref(key, fallback) {
+        const v = prefs[key];
+        return v !== undefined ? v : fallback;
+    }
+
     function setPref(key, value) {
         controller.set_preference(key, String(value));
         loadPrefs();
         if (key === "poll_interval_ms") {
             pollIntervalChanged(value);
         }
+        if (key === "snap_gap_px") {
+            snapGapChanged(value);
+        }
+        if (key === "snap_to_grid") {
+            snapToGridChanged(value);
+        }
+        if (key === "grid_size_px") {
+            gridSizeChanged(value);
+        }
     }
+
+    function themeIndex() {
+        return Math.max(0, themeModes.indexOf(Theme.mode));
+    }
+
+    function setTheme(mode) {
+        Theme.mode = mode;
+        setPref("theme", mode);
+        themeSegmented.currentIndex = Qt.binding(() => prefsWindow.themeIndex());
+    }
+
+    function resetToDefaults() {
+        controller.reset_preferences();
+        loadPrefs();
+        pollIntervalChanged(pref("poll_interval_ms", 100));
+        snapGapChanged(pref("snap_gap_px", 10));
+        snapToGridChanged(pref("snap_to_grid", true));
+        gridSizeChanged(pref("grid_size_px", 24));
+        Theme.mode = "system";
+        themeSegmented.currentIndex = Qt.binding(() => prefsWindow.themeIndex());
+    }
+
+    // "10 000" style grouping for five-digit-plus range labels.
+    function formatNumber(n) {
+        const s = String(n);
+        return s.length > 4 ? s.replace(/\B(?=(\d{3})+(?!\d))/g, " ") : s;
+    }
+
+    Shortcut {
+        sequence: "Escape"
+        onActivated: prefsWindow.visible = false
+    }
+
+    // ─── Building blocks ────────────────────────────────────────────────
+
+    // Row title 13/500 + description 12 muted.
+    component RowText: ColumnLayout {
+        id: rowText
+        property string title
+        property string description
+        spacing: Theme.grid
+        Text {
+            Layout.fillWidth: true
+            text: rowText.title
+            font.family: Theme.fontSans
+            font.pixelSize: Theme.sizeBody
+            font.weight: Font.Medium
+            color: Theme.textPrimary
+            wrapMode: Text.WordWrap
+        }
+        Text {
+            Layout.fillWidth: true
+            visible: text.length > 0
+            text: rowText.description
+            font.family: Theme.fontSans
+            font.pixelSize: Theme.sizeCaption
+            color: Theme.textMuted
+            wrapMode: Text.WordWrap
+        }
+    }
+
+    // Uppercase label (+ optional inline hint) above a card of rows.
+    // Separate rows with ZbDivider { Layout.fillWidth: true }.
+    component SettingsSection: ColumnLayout {
+        id: section
+        property string label
+        property string hint: ""
+        default property alias rows: rowsColumn.data
+        Layout.fillWidth: true
+        spacing: Theme.grid * 2
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Theme.grid * 2
+            ZbSectionLabel {
+                Layout.alignment: Qt.AlignBaseline
+                text: section.label
+            }
+            Text {
+                Layout.alignment: Qt.AlignBaseline
+                Layout.fillWidth: true
+                visible: section.hint.length > 0
+                text: section.hint
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.sizeCaption
+                color: Theme.textMuted
+                elide: Text.ElideRight
+            }
+        }
+
+        ZbCard {
+            Layout.fillWidth: true
+            implicitHeight: rowsColumn.implicitHeight + 2
+            ColumnLayout {
+                id: rowsColumn
+                x: 1
+                y: 1
+                width: parent.width - 2
+                spacing: 0
+            }
+        }
+    }
+
+    // Toggle row: text left, standard switch right.
+    component ToggleRow: RowLayout {
+        id: toggleRow
+        property string title
+        property string description
+        property string key
+        property bool fallback: false
+        Layout.fillWidth: true
+        Layout.leftMargin: Theme.grid * 4
+        Layout.rightMargin: Theme.grid * 4
+        Layout.topMargin: Theme.grid * 3
+        Layout.bottomMargin: Theme.grid * 3
+        spacing: Theme.grid * 4
+
+        RowText {
+            Layout.fillWidth: true
+            title: toggleRow.title
+            description: toggleRow.description
+        }
+        ZbSwitch {
+            id: toggle
+            Layout.alignment: Qt.AlignVCenter
+            checked: prefsWindow.pref(toggleRow.key, toggleRow.fallback)
+            onToggled: {
+                prefsWindow.setPref(toggleRow.key, checked);
+                checked = Qt.binding(() => prefsWindow.pref(toggleRow.key, toggleRow.fallback));
+            }
+        }
+    }
+
+    // Slider row: text left, value read-out right, slider and range labels
+    // beneath. Saved on release (or on each keyboard step).
+    component SliderRow: ColumnLayout {
+        id: sliderRow
+        property string title
+        property string description
+        property string key
+        property real from: 0
+        property real to: 100
+        property real stepSize: 1
+        property real fallback: 0
+        property string unit: "ms"
+        Layout.fillWidth: true
+        Layout.leftMargin: Theme.grid * 4
+        Layout.rightMargin: Theme.grid * 4
+        Layout.topMargin: Theme.cardPadding
+        Layout.bottomMargin: Theme.grid * 3
+        spacing: Theme.grid * 2
+
+        function commit() {
+            prefsWindow.setPref(key, Math.round(slider.value));
+            slider.value = Qt.binding(() => prefsWindow.pref(sliderRow.key, sliderRow.fallback));
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Theme.grid * 4
+            RowText {
+                Layout.fillWidth: true
+                title: sliderRow.title
+                description: sliderRow.description
+            }
+            Rectangle {
+                Layout.alignment: Qt.AlignVCenter
+                implicitWidth: readout.implicitWidth + Theme.grid * 5
+                implicitHeight: Theme.compactButtonHeight
+                radius: Theme.radiusSmall
+                color: Theme.bgInset
+                border.width: 1
+                border.color: Theme.borderStrong
+                Row {
+                    id: readout
+                    anchors.centerIn: parent
+                    spacing: Theme.grid
+                    Text {
+                        text: Math.round(slider.value)
+                        font.family: Theme.fontMono
+                        font.pixelSize: Theme.sizeCaption
+                        color: Theme.textPrimary
+                    }
+                    Text {
+                        text: sliderRow.unit
+                        font.family: Theme.fontMono
+                        font.pixelSize: Theme.sizeCaption
+                        color: Theme.textMuted
+                    }
+                }
+            }
+        }
+
+        ZbSlider {
+            id: slider
+            Layout.fillWidth: true
+            leftPadding: 0
+            rightPadding: 0
+            from: sliderRow.from
+            to: sliderRow.to
+            stepSize: sliderRow.stepSize
+            snapMode: Slider.SnapAlways
+            value: prefsWindow.pref(sliderRow.key, sliderRow.fallback)
+            onPressedChanged: {
+                if (!pressed)
+                    sliderRow.commit();
+            }
+            onMoved: {
+                if (!pressed)
+                    sliderRow.commit();
+            }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Theme.grid * 2
+            Text {
+                text: prefsWindow.formatNumber(sliderRow.from) + " " + sliderRow.unit
+                font.family: Theme.fontMono
+                font.pixelSize: Theme.sizeBadge
+                color: Theme.textMuted
+            }
+            Item { Layout.fillWidth: true }
+            Text {
+                text: prefsWindow.formatNumber(sliderRow.to) + " " + sliderRow.unit
+                font.family: Theme.fontMono
+                font.pixelSize: Theme.sizeBadge
+                color: Theme.textMuted
+            }
+        }
+    }
+
+    // ─── Layout ─────────────────────────────────────────────────────────
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: 16
-        spacing: 12
+        spacing: 0
 
-        Label {
-            text: "Preferences"
-            font.bold: true
-            font.pointSize: 13
+        ZbDialogHeader {
+            Layout.leftMargin: Theme.dialogPadding
+            Layout.rightMargin: Theme.dialogPadding
+            Layout.topMargin: Theme.dialogPadding - Theme.grid
+            Layout.bottomMargin: Theme.grid * 4
+            title: "Preferences"
         }
 
-        Rectangle {
-            Layout.fillWidth: true
-            height: 1
-            color: Theme.separator
-        }
-
+        // Scroll area: the bar sits in the right padding gutter, beside the
+        // content (bible §5.3).
         Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
 
             Flickable {
                 id: prefsFlickable
-                anchors.fill: parent
-                contentHeight: settingsColumn.implicitHeight
+                ZbWheelScroll { flickable: prefsFlickable }
+                anchors.left: parent.left
+                anchors.leftMargin: Theme.dialogPadding
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                anchors.right: prefsScrollBar.visible ? prefsScrollBar.left : parent.right
+                anchors.rightMargin: prefsScrollBar.visible ? Theme.scrollGap : Theme.dialogPadding
+                contentWidth: width
+                contentHeight: settingsColumn.implicitHeight + Theme.grid * 4
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
-
-                ScrollBar.vertical: ScrollBar {
-                    id: prefsScrollBar
-                    policy: ScrollBar.AlwaysOn
-                    minimumSize: 0.08
-                }
-
-            ColumnLayout {
-                id: settingsColumn
-                width: parent.width
-                spacing: 16
-
-                Label {
-                    text: "General"
-                    font.bold: true
-                    font.pointSize: 11
-                    opacity: 0.8
-                }
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 12
-
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 2
-
-                        Label {
-                            text: "Start minimized to tray"
-                            font.bold: true
-                        }
-                        Label {
-                            text: "Launch with the window hidden. Use the system tray icon to show it."
-                            wrapMode: Text.WordWrap
-                            Layout.fillWidth: true
-                            font.pointSize: 9
-                            opacity: 0.5
-                        }
-                    }
-
-                    Switch {
-                        checked: prefs.start_minimized !== undefined ? prefs.start_minimized : false
-                        onToggled: setPref("start_minimized", checked)
-                    }
-                }
-
-                Rectangle {
-                    Layout.fillWidth: true
-                    height: 1
-                    color: Theme.separatorLight
-                }
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 12
-
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 2
-
-                        Label {
-                            text: "Close to tray"
-                            font.bold: true
-                        }
-                        Label {
-                            text: "Clicking the window close button hides to the system tray instead of quitting."
-                            wrapMode: Text.WordWrap
-                            Layout.fillWidth: true
-                            font.pointSize: 9
-                            opacity: 0.5
-                        }
-                    }
-
-                    Switch {
-                        checked: prefs.close_to_tray !== undefined ? prefs.close_to_tray : false
-                        onToggled: setPref("close_to_tray", checked)
-                    }
-                }
-
-                Rectangle {
-                    Layout.fillWidth: true
-                    height: 1
-                    color: Theme.separatorLight
-                }
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 12
-
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 2
-
-                        Label {
-                            text: "Auto-learn patchbay rules"
-                            font.bold: true
-                        }
-                        Label {
-                            text: "Automatically create/update rules when you manually connect ports."
-                            wrapMode: Text.WordWrap
-                            Layout.fillWidth: true
-                            font.pointSize: 9
-                            opacity: 0.5
-                        }
-                    }
-
-                    Switch {
-                        checked: prefs.auto_learn_rules !== undefined ? prefs.auto_learn_rules : true
-                        onToggled: setPref("auto_learn_rules", checked)
-                    }
-                }
-
-                Rectangle {
-                    Layout.fillWidth: true
-                    height: 1
-                    color: Theme.separator
-                }
-
-                Label {
-                    text: "Timing"
-                    font.bold: true
-                    font.pointSize: 11
-                    opacity: 0.8
-                }
-
-                Label {
-                    text: "Adjust timing parameters to fine-tune responsiveness vs. reliability."
-                    font.italic: true
-                    opacity: 0.5
-                    Layout.fillWidth: true
-                    wrapMode: Text.WordWrap
-                }
+                ScrollBar.vertical: prefsScrollBar
 
                 ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: 4
+                    id: settingsColumn
+                    width: prefsFlickable.width
+                    spacing: Theme.dialogPadding
 
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Label {
-                            text: "Rule settle time"
-                            font.bold: true
+                    SettingsSection {
+                        label: "General"
+
+                        ToggleRow {
+                            title: "Start minimized to tray"
+                            description: "Launch with the window hidden; show it from the tray icon."
+                            key: "start_minimized"
+                            fallback: false
                         }
-                        Item {
-                            Layout.fillWidth: true
+                        ZbDivider { Layout.fillWidth: true }
+                        ToggleRow {
+                            title: "Close to tray"
+                            description: "The window close button hides ZestBay instead of quitting."
+                            key: "close_to_tray"
+                            fallback: false
                         }
-                        Label {
-                            text: ruleSettleSlider.value + " ms"
-                            font.family: "monospace"
-                            opacity: 0.8
+                        ZbDivider { Layout.fillWidth: true }
+                        ToggleRow {
+                            title: "Auto-learn patchbay rules"
+                            description: "Create or update a rule whenever you connect ports by hand."
+                            key: "auto_learn_rules"
+                            fallback: true
                         }
                     }
 
-                    Label {
-                        text: "How long to wait after the graph stops changing before auto-applying patchbay rules. Higher values are more reliable on slow hardware."
-                        wrapMode: Text.WordWrap
-                        Layout.fillWidth: true
-                        font.pointSize: 9
-                        opacity: 0.5
-                    }
+                    SettingsSection {
+                        label: "Appearance"
 
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
-
-                        Label {
-                            text: "0ms"
-                            opacity: 0.4
-                            font.pointSize: 8
-                        }
-                        Slider {
-                            id: ruleSettleSlider
+                        RowLayout {
                             Layout.fillWidth: true
-                            from: 0
-                            to: 100
-                            stepSize: 2
-                            value: prefs.rule_settle_ms !== undefined ? prefs.rule_settle_ms : 50
-                            onPressedChanged: {
-                                if (!pressed) {
-                                    setPref("rule_settle_ms", value);
-                                }
+                            Layout.leftMargin: Theme.grid * 4
+                            Layout.rightMargin: Theme.grid * 4
+                            Layout.topMargin: Theme.grid * 3
+                            Layout.bottomMargin: Theme.grid * 3
+                            spacing: Theme.grid * 4
+
+                            RowText {
+                                Layout.fillWidth: true
+                                title: "Theme"
+                                description: "System follows the desktop's colour scheme."
+                            }
+                            ZbSegmented {
+                                id: themeSegmented
+                                Layout.alignment: Qt.AlignVCenter
+                                model: ["System", "Dark", "Light"]
+                                currentIndex: prefsWindow.themeIndex()
+                                onActivated: index => prefsWindow.setTheme(prefsWindow.themeModes[index])
                             }
                         }
-                        Label {
-                            text: "100ms"
-                            opacity: 0.4
-                            font.pointSize: 8
-                        }
-                    }
-                }
-
-                Rectangle {
-                    Layout.fillWidth: true
-                    height: 1
-                    color: Theme.separatorLight
-                }
-
-                ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: 4
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Label {
-                            text: "Poll interval"
-                            font.bold: true
-                        }
-                        Item {
-                            Layout.fillWidth: true
-                        }
-                        Label {
-                            text: pollIntervalSlider.value + " ms"
-                            font.family: "monospace"
-                            opacity: 0.8
-                        }
                     }
 
-                    Label {
-                        text: "How often the UI checks for PipeWire events. Lower values give smoother updates but use more CPU."
-                        wrapMode: Text.WordWrap
-                        Layout.fillWidth: true
-                        font.pointSize: 9
-                        opacity: 0.5
+                    SettingsSection {
+                        label: "Graph"
+
+                        ToggleRow {
+                            title: "Snap to grid"
+                            description: "Keep every node on the grid when dragging, placing and running Auto layout."
+                            key: "snap_to_grid"
+                            fallback: true
+                        }
+                        ZbDivider { Layout.fillWidth: true }
+                        SliderRow {
+                            title: "Grid size"
+                            description: "Spacing of the grid and its dots (at 100 % zoom)."
+                            key: "grid_size_px"
+                            from: 8
+                            to: 96
+                            stepSize: 4
+                            fallback: 24
+                            unit: "px"
+                        }
+                        ZbDivider { Layout.fillWidth: true }
+                        SliderRow {
+                            title: "Snap gap"
+                            description: "Space left between nodes when Shift-dragging snaps one above, below or beside another (at 100 % zoom). Not used while snap to grid is on."
+                            key: "snap_gap_px"
+                            from: 0
+                            to: 48
+                            stepSize: 1
+                            fallback: 10
+                            unit: "px"
+                        }
                     }
 
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
+                    SettingsSection {
+                        label: "Timing"
+                        hint: "Trade responsiveness against reliability."
 
-                        Label {
-                            text: "16"
-                            opacity: 0.4
-                            font.pointSize: 8
+                        SliderRow {
+                            title: "Rule settle time"
+                            description: "Wait this long after the graph stops changing before applying rules. Higher is safer on slow hardware."
+                            key: "rule_settle_ms"
+                            from: 0
+                            to: 2000
+                            stepSize: 50
+                            fallback: 500
                         }
-                        Slider {
-                            id: pollIntervalSlider
-                            Layout.fillWidth: true
+                        ZbDivider { Layout.fillWidth: true }
+                        SliderRow {
+                            title: "Poll interval"
+                            description: "How often the UI checks for PipeWire events. Lower is smoother but uses more CPU."
+                            key: "poll_interval_ms"
                             from: 16
                             to: 500
                             stepSize: 1
-                            value: prefs.poll_interval_ms || 100
-                            onPressedChanged: {
-                                if (!pressed) {
-                                    setPref("poll_interval_ms", value);
-                                }
-                            }
+                            fallback: 100
                         }
-                        Label {
-                            text: "500"
-                            opacity: 0.4
-                            font.pointSize: 8
-                        }
-                    }
-                }
-
-                Rectangle {
-                    Layout.fillWidth: true
-                    height: 1
-                    color: Theme.separatorLight
-                }
-
-                ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: 4
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Label {
-                            text: "Parameter save debounce"
-                            font.bold: true
-                        }
-                        Item {
-                            Layout.fillWidth: true
-                        }
-                        Label {
-                            text: paramsPersistSlider.value + " ms"
-                            font.family: "monospace"
-                            opacity: 0.8
-                        }
-                    }
-
-                    Label {
-                        text: "How long to wait after the last parameter change before saving to disk."
-                        wrapMode: Text.WordWrap
-                        Layout.fillWidth: true
-                        font.pointSize: 9
-                        opacity: 0.5
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
-
-                        Label {
-                            text: "100"
-                            opacity: 0.4
-                            font.pointSize: 8
-                        }
-                        Slider {
-                            id: paramsPersistSlider
-                            Layout.fillWidth: true
+                        ZbDivider { Layout.fillWidth: true }
+                        SliderRow {
+                            title: "Parameter save debounce"
+                            description: "Wait this long after the last parameter change before writing to disk."
+                            key: "params_persist_ms"
                             from: 100
                             to: 10000
                             stepSize: 100
-                            value: prefs.params_persist_ms || 1000
-                            onPressedChanged: {
-                                if (!pressed) {
-                                    setPref("params_persist_ms", value);
-                                }
-                            }
-                        }
-                        Label {
-                            text: "10000"
-                            opacity: 0.4
-                            font.pointSize: 8
-                        }
-                    }
-                }
-
-                Rectangle {
-                    Layout.fillWidth: true
-                    height: 1
-                    color: Theme.separatorLight
-                }
-
-                ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: 4
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Label {
-                            text: "PipeWire tick interval"
-                            font.bold: true
-                        }
-                        Item {
-                            Layout.fillWidth: true
-                        }
-                        Label {
-                            text: pwTickSlider.value + " ms"
-                            font.family: "monospace"
-                            opacity: 0.8
+                            fallback: 1000
                         }
                     }
 
-                    Label {
-                        text: "How often the PipeWire thread checks for pending operations. Lower values reduce link latency. Requires restart."
-                        wrapMode: Text.WordWrap
-                        Layout.fillWidth: true
-                        font.pointSize: 9
-                        opacity: 0.5
-                    }
+                    SettingsSection {
+                        label: "Advanced"
+                        hint: "Rarely needed; some take effect after a restart."
 
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
-
-                        Label {
-                            text: "1"
-                            opacity: 0.4
-                            font.pointSize: 8
+                        SliderRow {
+                            title: "Link save debounce"
+                            description: "Wait this long after the last link change before saving plugin connections to disk."
+                            key: "links_persist_ms"
+                            from: 100
+                            to: 10000
+                            stepSize: 100
+                            fallback: 2000
                         }
-                        Slider {
-                            id: pwTickSlider
-                            Layout.fillWidth: true
+                        ZbDivider { Layout.fillWidth: true }
+                        SliderRow {
+                            title: "PipeWire tick interval"
+                            description: "How often the PipeWire thread checks for pending operations. Lower reduces link latency. Requires restart."
+                            key: "pw_tick_interval_ms"
                             from: 1
                             to: 200
                             stepSize: 1
-                            value: prefs.pw_tick_interval_ms || 10
-                            onPressedChanged: {
-                                if (!pressed) {
-                                    setPref("pw_tick_interval_ms", value);
-                                }
-                            }
+                            fallback: 10
                         }
-                        Label {
-                            text: "200"
-                            opacity: 0.4
-                            font.pointSize: 8
-                        }
-                    }
-                }
-
-                Rectangle {
-                    Layout.fillWidth: true
-                    height: 1
-                    color: Theme.separatorLight
-                }
-
-                ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: 4
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Label {
-                            text: "Plugin operation cooldown"
-                            font.bold: true
-                        }
-                        Item {
-                            Layout.fillWidth: true
-                        }
-                        Label {
-                            text: pwCooldownSlider.value + " ms"
-                            font.family: "monospace"
-                            opacity: 0.8
-                        }
-                    }
-
-                    Label {
-                        text: "Minimum gap between heavy operations (plugin add/remove). Connect/disconnect are always instant. Requires restart."
-                        wrapMode: Text.WordWrap
-                        Layout.fillWidth: true
-                        font.pointSize: 9
-                        opacity: 0.5
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
-
-                        Label {
-                            text: "10"
-                            opacity: 0.4
-                            font.pointSize: 8
-                        }
-                        Slider {
-                            id: pwCooldownSlider
-                            Layout.fillWidth: true
+                        ZbDivider { Layout.fillWidth: true }
+                        SliderRow {
+                            title: "Plugin operation cooldown"
+                            description: "Minimum gap between heavy operations (plugin add/remove). Connecting and disconnecting are always instant. Requires restart."
+                            key: "pw_operation_cooldown_ms"
                             from: 10
                             to: 1000
                             stepSize: 10
-                            value: prefs.pw_operation_cooldown_ms || 50
-                            onPressedChanged: {
-                                if (!pressed) {
-                                    setPref("pw_operation_cooldown_ms", value);
-                                }
-                            }
-                        }
-                        Label {
-                            text: "1000"
-                            opacity: 0.4
-                            font.pointSize: 8
+                            fallback: 50
                         }
                     }
-                }
-
-                Rectangle {
-                    Layout.fillWidth: true
-                    height: 1
-                    color: Theme.separatorLight
-                }
-
-                ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: 4
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Label {
-                            text: "Link save debounce"
-                            font.bold: true
-                        }
-                        Item {
-                            Layout.fillWidth: true
-                        }
-                        Label {
-                            text: linksPersistSlider.value + " ms"
-                            font.family: "monospace"
-                            opacity: 0.8
-                        }
-                    }
-
-                    Label {
-                        text: "How long to wait after the last link change before saving plugin connections to disk."
-                        wrapMode: Text.WordWrap
-                        Layout.fillWidth: true
-                        font.pointSize: 9
-                        opacity: 0.5
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
-
-                        Label {
-                            text: "100"
-                            opacity: 0.4
-                            font.pointSize: 8
-                        }
-                        Slider {
-                            id: linksPersistSlider
-                            Layout.fillWidth: true
-                            from: 100
-                            to: 10000
-                            stepSize: 100
-                            value: prefs.links_persist_ms || 2000
-                            onPressedChanged: {
-                                if (!pressed) {
-                                    setPref("links_persist_ms", value);
-                                }
-                            }
-                        }
-                        Label {
-                            text: "10000"
-                            opacity: 0.4
-                            font.pointSize: 8
-                        }
-                    }
-                }
-
-                Item {
-                    Layout.fillHeight: true
-                }
-            }
-        }
-
-            // Bottom fade gradient to hint there's more content below
-            Rectangle {
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.rightMargin: prefsScrollBar.width
-                anchors.bottom: parent.bottom
-                height: 32
-                visible: !prefsFlickable.atYEnd
-                gradient: Gradient {
-                    GradientStop { position: 0.0; color: "transparent" }
-                    GradientStop { position: 1.0; color: Theme.fadeColor }
-                }
-
-                Label {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    anchors.bottom: parent.bottom
-                    anchors.bottomMargin: 4
-                    text: "\u25BC  scroll for more  \u25BC"
-                    font.pointSize: 8
-                    opacity: 0.5
                 }
             }
 
-            // Top fade gradient when scrolled down
-            Rectangle {
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.rightMargin: prefsScrollBar.width
+            ZbScrollBar {
+                id: prefsScrollBar
                 anchors.top: parent.top
-                height: 24
-                visible: !prefsFlickable.atYBeginning
-                gradient: Gradient {
-                    GradientStop { position: 0.0; color: Theme.fadeColor }
-                    GradientStop { position: 1.0; color: "transparent" }
-                }
+                anchors.bottom: parent.bottom
+                anchors.right: parent.right
+                // Keeps the content's right edge at dialogPadding either way.
+                anchors.rightMargin: Theme.dialogPadding - Theme.scrollBarWidth - Theme.scrollGap
             }
         }
 
-        Rectangle {
-            Layout.fillWidth: true
-            height: 1
-            color: Theme.separator
-        }
+        ZbDivider { Layout.fillWidth: true }
 
         RowLayout {
             Layout.fillWidth: true
+            Layout.leftMargin: Theme.dialogPadding
+            Layout.rightMargin: Theme.dialogPadding
+            Layout.topMargin: Theme.grid * 4
+            Layout.bottomMargin: Theme.grid * 5
+            spacing: Theme.grid * 2
 
-            Button {
-                text: "Reset to Defaults"
-                onClicked: {
-                    controller.reset_preferences();
-                    loadPrefs();
-                    pollIntervalChanged(prefs.poll_interval_ms || 100);
-                }
+            ZbButton {
+                text: "Reset to defaults"
+                onClicked: prefsWindow.resetToDefaults()
             }
-
-            Item {
-                Layout.fillWidth: true
-            }
-
-            Button {
-                text: "Close"
-                onClicked: prefsWindow.visible = false
+            Item { Layout.fillWidth: true }
+            Text {
+                text: "Changes apply immediately."
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.sizeCaption
+                color: Theme.textMuted
             }
         }
     }

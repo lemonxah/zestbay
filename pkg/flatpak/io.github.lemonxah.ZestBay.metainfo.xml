@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.lemonxah.ZestBay</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <name>ZestBay</name>
+  <summary>PipeWire patchbay with LV2, VST3 and CLAP plugin hosting</summary>
+
+  <developer id="io.github.lemonxah">
+    <name>Ryno Kotze</name>
+  </developer>
+
+  <description>
+    <p>
+      ZestBay is a visual audio routing tool for PipeWire. It shows every
+      audio node in your system — applications, hardware devices and virtual
+      sinks — and lets you connect and disconnect ports with drag-and-drop.
+    </p>
+    <ul>
+      <li>Host LV2, VST3 and CLAP effect and instrument plugins inline as real PipeWire filter nodes, with their native editors</li>
+      <li>Patchbay rules that restore your routing whenever devices or applications appear, learned automatically from the connections you make</li>
+      <li>Exclusive or non-exclusive rule enforcement, and a default target for applications without a rule</li>
+      <li>Map hardware MIDI controllers to plugin parameters with one-click learn</li>
+      <li>Plugins, parameters, links, MIDI mappings and node layout persist across restarts</li>
+      <li>System tray with start-minimized, so routing rules keep working in the background</li>
+    </ul>
+    <p>
+      Plugins packaged as Flatpak extensions (org.freedesktop.LinuxAudio.Plugins)
+      are supported. Plugins installed by your distribution are also scanned,
+      but ones that depend on host libraries may not load inside the sandbox.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.lemonxah.ZestBay.desktop</launchable>
+
+  <url type="homepage">https://github.com/lemonxah/zestbay</url>
+  <url type="bugtracker">https://github.com/lemonxah/zestbay/issues</url>
+  <url type="vcs-browser">https://github.com/lemonxah/zestbay</url>
+
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+  </categories>
+
+  <keywords>
+    <keyword>pipewire</keyword>
+    <keyword>patchbay</keyword>
+    <keyword>routing</keyword>
+    <keyword>lv2</keyword>
+    <keyword>clap</keyword>
+    <keyword>vst3</keyword>
+  </keywords>
+
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.8.8" date="2026-10-29">
+      <description>
+        <ul>
+          <li>Exclusive Mode setting: with it off, patchbay rules only add links and never disconnect anything</li>
+          <li>Fixed a black window on Qt versions before 6.5</li>
+          <li>Moved and pinned plugin nodes keep their saved positions</li>
+          <li>Scroll bars, Fit to View (Home) and pan limits in the graph view</li>
+          <li>No more duplicate link errors when rules and saved links restore together</li>
+        </ul>
+      </description>
+    </release>
+  </releases>
+</component>

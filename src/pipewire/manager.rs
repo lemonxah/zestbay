@@ -2064,15 +2064,22 @@ fn parse_node(global: &GlobalObject<&DictRef>) -> Option<Node> {
         None
     };
 
-    let is_virtual = props
-        .get("node.virtual")
-        .map(|v| v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
     let is_jack = props
         .get("client.api")
         .map(|v| v == "jack")
         .unwrap_or(false);
     let is_bridge = effective_class.contains("Bridge");
+    // The registry doesn't announce `node.virtual`, so also treat a sink or
+    // source with no backing device (null sinks, loopbacks, combine sinks)
+    // as virtual: hardware nodes always carry `device.id`.
+    let is_virtual = props
+        .get("node.virtual")
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+        || (matches!(node_type, Some(NodeType::Sink) | Some(NodeType::Source))
+            && props.get("device.id").is_none()
+            && !is_jack
+            && !is_bridge);
 
     Some(Node {
         id: global.id,
