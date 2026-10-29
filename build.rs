@@ -37,6 +37,8 @@ fn main() {
             .qml_file("qml/About.qml")
             .qml_file(QmlFile::from("qml/Theme.qml").singleton(true)),
     )
+    // Declares Theme a singleton for the qml/ directory import (Qt < 6.5).
+    .qrc_resources(["qml/qmldir"])
     .qt_module("Network")
     .files(["src/ui/qobject_bridge.rs"])
     .build();

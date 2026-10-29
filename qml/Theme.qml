@@ -4,9 +4,14 @@ import QtQuick
 QtObject {
     id: theme
 
-    // System theme detection via Qt.styleHints (Qt 6.5+)
+    // System theme detection via Qt.styleHints (Qt 6.5+); older Qt has no
+    // Qt.ColorScheme, so fall back to the lightness of the system palette.
     // This binding automatically re-evaluates when colorScheme changes
-    readonly property bool dark: Qt.styleHints.colorScheme === Qt.ColorScheme.Dark
+    readonly property bool dark: Qt.ColorScheme !== undefined
+        ? Qt.styleHints.colorScheme === Qt.ColorScheme.Dark
+        : systemPalette.window.hslLightness < 0.5
+
+    property SystemPalette systemPalette: SystemPalette {}
 
     // ─── Window / Base backgrounds ───
     readonly property color windowBg:       dark ? "#1e1e1e" : "#f5f5f5"
