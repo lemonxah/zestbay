@@ -43,6 +43,34 @@ pub enum PortDirection {
     Output,
 }
 
+/// Which edge of a subgraph a ZestBay boundary node belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SubgraphRole {
+    /// Feeds the subgraph: external inputs, internal outputs.
+    In,
+    /// Leaves the subgraph: internal inputs, external outputs.
+    Out,
+}
+
+/// Which side of the boundary a node carries. A plain pass-through node has
+/// both; a subgraph shown as a device splits into a device node (external)
+/// and a loopback stream (internal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SubgraphSide {
+    Both,
+    External,
+    Internal,
+}
+
+/// Marks a node ZestBay created for a subgraph boundary
+/// (`zestbay.subgraph.*` properties).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubgraphTag {
+    pub id: String,
+    pub role: SubgraphRole,
+    pub side: SubgraphSide,
+}
+
 #[derive(Debug, Clone)]
 pub struct Node {
     pub id: ObjectId,
@@ -54,6 +82,11 @@ pub struct Node {
     pub is_jack: bool,
     pub is_bridge: bool,
     pub ready: bool,
+    /// Set on subgraph boundary nodes.
+    pub subgraph: Option<SubgraphTag>,
+    /// Set on both halves of a virtual device ZestBay created
+    /// (`zestbay.vdev.id`).
+    pub vdev_id: Option<String>,
 }
 
 impl Node {
@@ -180,6 +213,45 @@ pub enum PwCommand {
     /// Ask the PipeWire thread to snapshot the state of every live plugin.
     /// Replies with one `PluginStateSaved` per plugin, then `PluginStatesDone`.
     RequestPluginStates,
+    /// Create (or re-create, when the spec changed) a node ZestBay owns —
+    /// a subgraph boundary or a virtual device — under `key`; `None`
+    /// removes it.
+    SetOwnedNode {
+        key: String,
+        spec: Option<OwnedNodeSpec>,
+    },
+}
+
+/// A node ZestBay creates in PipeWire itself (not a plugin).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnedNodeSpec {
+    /// A `pw_filter` that copies each input channel (and MIDI) to the
+    /// matching output: a subgraph boundary that isn't a device.
+    Pass(PassSpec),
+    /// An in-process `libpipewire-module-loopback`: a capture stream and a
+    /// playback stream joined inside PipeWire. One side is a device
+    /// (`media.class` Audio/Sink or Audio/Source) when its props say so.
+    Loopback(LoopbackSpec),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PassSpec {
+    pub node_name: String,
+    pub description: String,
+    /// Channel positions (FL, FR, MONO, AUX0…); one input and one output
+    /// port per channel.
+    pub channels: Vec<String>,
+    pub midi: bool,
+    /// Extra node properties (tags).
+    pub props: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoopbackSpec {
+    pub description: String,
+    pub channels: Vec<String>,
+    pub capture_props: Vec<(String, String)>,
+    pub playback_props: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone)]

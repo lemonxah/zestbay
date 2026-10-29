@@ -19,6 +19,14 @@ ZbWindow {
     signal pluginAdded(string displayName)
     // Emitted when the browser closes without adding a plugin.
     signal cancelled()
+    // Emitted with a subgraph template's file name when one is inserted.
+    signal templateChosen(string file)
+
+    // Saved subgraphs can be inserted (not while inside a subgraph: no nesting).
+    property bool allowSubgraphs: true
+    property var templates: []
+    // Flatpak only: where users put their own plugins ("" when native).
+    readonly property string appPluginFolder: controller.get_app_plugin_folder()
 
     property bool addedPlugin: false
 
@@ -26,7 +34,9 @@ ZbWindow {
         if (!visible && !addedPlugin) cancelled()
     }
 
-    readonly property var formats: ["All", "LV2", "VST3", "CLAP"]
+    readonly property var formats: allowSubgraphs ? ["All", "LV2", "VST3", "CLAP", "Subgraphs"]
+                                                  : ["All", "LV2", "VST3", "CLAP"]
+    readonly property bool showingTemplates: selectedFormat === "Subgraphs"
 
     property var allPlugins: []
     property var filteredPlugins: []
@@ -55,12 +65,43 @@ ZbWindow {
         categories = cats
         selectedCategory = "All"
 
+        loadTemplates()
         filterPlugins()
+    }
+
+    function loadTemplates() {
+        var list = []
+        try {
+            list = JSON.parse(controller.list_subgraph_templates_json())
+        } catch (e) {}
+        for (var i = 0; i < list.length; i++) {
+            list[i].isTemplate = true
+            list[i].compatible = true
+        }
+        templates = list
+    }
+
+    function chooseTemplate(t) {
+        if (!t || !t.file) return
+        pluginBrowser.addedPlugin = true
+        pluginBrowser.templateChosen(t.file)
+        pluginBrowser.visible = false
     }
 
     function filterPlugins() {
         var query = searchField.text.toLowerCase()
         var result = []
+        if (showingTemplates) {
+            for (var ti = 0; ti < templates.length; ti++) {
+                var tp = templates[ti]
+                var hay = ((tp.name || "") + " " + (tp.plugins || []).join(" ")).toLowerCase()
+                if (query.length === 0 || hay.indexOf(query) >= 0) result.push(tp)
+            }
+            filteredPlugins = result
+            pluginList.currentIndex = result.length > 0 ? 0 : -1
+            pluginList.positionViewAtBeginning()
+            return
+        }
         for (var i = 0; i < allPlugins.length; i++) {
             var p = allPlugins[i]
 
@@ -98,6 +139,10 @@ ZbWindow {
     }
 
     function addPlugin(plugin) {
+        if (plugin && plugin.isTemplate) {
+            chooseTemplate(plugin)
+            return
+        }
         if (!plugin || !plugin.uri || plugin.compatible === false)
             return
         var addedName = controller.add_plugin(plugin.uri)
@@ -116,6 +161,7 @@ ZbWindow {
 
     function open() {
         addedPlugin = false
+        if (!allowSubgraphs && selectedFormat === "Subgraphs") selectedFormat = "All"
         searchField.text = ""
         loadPlugins()
         visible = true
@@ -126,11 +172,13 @@ ZbWindow {
 
     Shortcut {
         sequence: "Escape"
+        enabled: pluginBrowser.visible
         onActivated: pluginBrowser.visible = false
     }
 
     Shortcut {
         sequences: ["Return", "Enter"]
+        enabled: pluginBrowser.visible
         onActivated: {
             var i = pluginList.currentIndex
             if (i >= 0 && i < pluginBrowser.filteredPlugins.length)
@@ -181,7 +229,9 @@ ZbWindow {
             }
 
             Text {
-                text: pluginBrowser.filteredPlugins.length + " of " + pluginBrowser.allPlugins.length + " plugins"
+                text: pluginBrowser.showingTemplates
+                      ? pluginBrowser.filteredPlugins.length + " of " + pluginBrowser.templates.length + " subgraphs"
+                      : pluginBrowser.filteredPlugins.length + " of " + pluginBrowser.allPlugins.length + " plugins"
                 font.family: Theme.fontMono
                 font.pixelSize: Theme.sizeMono
                 color: Theme.textMuted
@@ -191,6 +241,7 @@ ZbWindow {
 
             ZbButton {
                 id: categoryButton
+                visible: !pluginBrowser.showingTemplates
                 text: pluginBrowser.selectedCategory === "All" ? "All categories" : pluginBrowser.selectedCategory
                 trailingIconName: "chevronDown"
                 Layout.maximumWidth: 220
@@ -219,6 +270,7 @@ ZbWindow {
 
             ZbSwitch {
                 compact: true
+                visible: !pluginBrowser.showingTemplates
                 text: "Compatible only"
                 checked: pluginBrowser.showCompatibleOnly
                 onToggled: {
@@ -260,13 +312,20 @@ ZbWindow {
                     readonly property bool active: ListView.isCurrentItem
                     readonly property bool isCompatible: plugin.compatible !== false
 
+                    readonly property bool isTemplate: !!plugin.isTemplate
                     readonly property string metaText: {
+                        if (isTemplate) return (plugin.plugins || []).join(" \u2192 ")
                         var parts = []
                         if (plugin.category) parts.push(plugin.category)
                         if (plugin.author) parts.push(plugin.author)
                         return parts.join(" · ")
                     }
                     readonly property string portsText: {
+                        if (isTemplate) {
+                            var tparts = [(plugin.inputs || 0) + " in", (plugin.outputs || 0) + " out"]
+                            if (plugin.asSink || plugin.asSource) tparts.push("device")
+                            return tparts.join(" \u00b7 ")
+                        }
                         var parts = [(plugin.audioIn || 0) + " in", (plugin.audioOut || 0) + " out"]
                         if (plugin.controlIn > 0) parts.push(plugin.controlIn + " controls")
                         return parts.join(" · ")
@@ -311,8 +370,8 @@ ZbWindow {
                                 }
                                 ZbBadge {
                                     id: formatBadge
-                                    text: row.plugin.format || "LV2"
-                                    tone: formatBadge.formatTone(text)
+                                    text: row.isTemplate ? "SUBGRAPH" : (row.plugin.format || "LV2")
+                                    tone: row.isTemplate ? "neutral" : formatBadge.formatTone(text)
                                 }
                                 Item { Layout.fillWidth: true }
                             }
@@ -359,7 +418,21 @@ ZbWindow {
                         }
 
                         ZbButton {
-                            text: "Add"
+                            id: deleteTemplateButton
+                            visible: row.isTemplate
+                            iconName: "trash"
+                            compact: true
+                            implicitWidth: 28
+                            onClicked: {
+                                pluginBrowser.controller.delete_subgraph_template(row.plugin.file)
+                                pluginBrowser.loadTemplates()
+                                pluginBrowser.filterPlugins()
+                            }
+                            ZbTooltip { visible: deleteTemplateButton.hovered; text: "Delete template" }
+                        }
+
+                        ZbButton {
+                            text: row.isTemplate ? "Insert" : "Add"
                             kind: row.active && row.isCompatible ? "primary" : "ghost"
                             enabled: row.isCompatible
                             onClicked: pluginBrowser.addPlugin(row.plugin)
@@ -377,7 +450,12 @@ ZbWindow {
                 Text {
                     visible: pluginList.count === 0
                     anchors.centerIn: parent
-                    text: pluginBrowser.allPlugins.length === 0 ? "No plugins found" : "No plugins match the current filters"
+                    text: pluginBrowser.showingTemplates
+                          ? (pluginBrowser.templates.length === 0
+                             ? "No saved subgraphs yet.\nRight-click a subgraph and choose Save as template\u2026"
+                             : "No subgraphs match")
+                          : pluginBrowser.allPlugins.length === 0 ? "No plugins found" : "No plugins match the current filters"
+                    horizontalAlignment: Text.AlignHCenter
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.sizeBody
                     color: Theme.textMuted
@@ -394,6 +472,30 @@ ZbWindow {
                     bottomMargin: Theme.scrollGap
                     rightMargin: Theme.scrollGap
                 }
+            }
+        }
+
+        // Flatpak: the sandbox only sees Flathub plugin packages and this
+        // app's own folder, so say where users' own plugins go.
+        RowLayout {
+            visible: pluginBrowser.appPluginFolder !== ""
+            Layout.fillWidth: true
+            spacing: 12
+
+            Text {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.sizeCaption
+                color: Theme.textMuted
+                text: "Your own plugins (e.g. Pianoteq): put them in the lv2, vst3 or clap folder inside "
+                      + pluginBrowser.appPluginFolder.replace(/^\/home\/[^\/]+/, "~")
+                      + ", then restart ZestBay. Free plugins are on Flathub as org.freedesktop.LinuxAudio.Plugins.*."
+            }
+            ZbButton {
+                text: "Open folder"
+                compact: true
+                onClicked: Qt.openUrlExternally("file://" + pluginBrowser.appPluginFolder)
             }
         }
     }

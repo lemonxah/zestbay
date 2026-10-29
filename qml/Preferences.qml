@@ -91,6 +91,7 @@ ZbWindow {
 
     Shortcut {
         sequence: "Escape"
+        enabled: prefsWindow.visible
         onActivated: prefsWindow.visible = false
     }
 

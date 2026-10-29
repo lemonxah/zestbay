@@ -5,6 +5,7 @@ mod midi;
 mod patchbay;
 mod pipewire;
 mod plugin;
+mod subgraph;
 mod tray;
 mod ui;
 pub mod ui_bridge;
@@ -59,6 +60,7 @@ fn main() {
     unsafe { std::env::set_var("QT_QUICK_CONTROLS_STYLE", "Basic") };
     // lilv only searches its compiled-in LV2 path; in a Flatpak point it at
     // the user, extension and host plugin directories.
+    plugin::paths::ensure_app_plugin_dirs();
     if let Some(lv2_path) = plugin::paths::flatpak_lv2_path() {
         unsafe { std::env::set_var("LV2_PATH", lv2_path) };
     }

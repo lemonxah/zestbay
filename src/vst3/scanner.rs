@@ -341,10 +341,11 @@ pub fn hex_to_tuid(hex: &str) -> Option<[std::ffi::c_char; 16]> {
     if hex.len() != 32 {
         return None;
     }
-    let mut tuid = [0i8; 16];
+    // c_char is i8 on x86_64 but u8 on aarch64: build it as c_char.
+    let mut tuid = [0 as std::ffi::c_char; 16];
     for i in 0..16 {
         let byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
-        tuid[i] = byte as i8;
+        tuid[i] = byte as std::ffi::c_char;
     }
     Some(tuid)
 }
@@ -408,9 +409,9 @@ mod tests {
         let hex = "0123456789ABCDEF0123456789ABCDEF";
         let tuid = hex_to_tuid(hex).expect("valid 32-char hex should parse");
         assert_eq!(tuid.len(), 16);
-        assert_eq!(tuid[0], 0x01_u8 as i8);
-        assert_eq!(tuid[1], 0x23_u8 as i8);
-        assert_eq!(tuid[15], 0xEF_u8 as i8);
+        assert_eq!(tuid[0] as u8, 0x01);
+        assert_eq!(tuid[1] as u8, 0x23);
+        assert_eq!(tuid[15] as u8, 0xEF);
     }
 
     #[test]
@@ -445,13 +446,13 @@ mod tests {
 
     #[test]
     fn tuid_to_hex_all_zeros() {
-        let tuid = [0i8; 16];
+        let tuid = [0 as std::ffi::c_char; 16];
         assert_eq!(tuid_to_hex(&tuid), "00000000000000000000000000000000");
     }
 
     #[test]
     fn tuid_to_hex_all_ff() {
-        let tuid = [-1i8; 16]; // 0xFF as i8 = -1
+        let tuid = [0xFF_u8 as std::ffi::c_char; 16];
         assert_eq!(tuid_to_hex(&tuid), "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF");
     }
 

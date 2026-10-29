@@ -34,6 +34,9 @@ QtObject {
         "trash":      { vb: 14, sw: 1.4, d: "M2 3.5h10M5.5 3.5V2h3v1.5M3.5 3.5l.6 8h5.8l.6-8" },
         "reset":      { vb: 14, sw: 1.5, d: "M2.5 7a4.5 4.5 0 1 0 1.3-3.2M2.5 2.5v2.5H5" },
         "arrow":      { vb: 14, sw: 1.5, d: "M1 7h11M9 3.5L12.5 7 9 10.5" },
+        // Subgraph: a frame holding two linked nodes. "enter" opens one.
+        "subgraph":   { vb: 14, sw: 1.4, d: "M1.5 2.5h11v9h-11zM3.5 5h2.5v4H3.5zM8 5h2.5v4H8zM6 7h2" },
+        "enter":      { vb: 14, sw: 1.5, d: "M7 2.5h4.5v9H7M1.5 7h7M6 4.5L8.5 7 6 9.5" },
         // Block rule (⊘): "never connect", in place of the arrow.
         "block":      { vb: 14, sw: 1.5, d: _circle(7, 7, 5) + "M3.5 10.5L10.5 3.5" },
         // Gear (Preferences). The design source drew a sun here, which read

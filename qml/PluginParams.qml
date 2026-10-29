@@ -67,6 +67,7 @@ ZbWindow {
     // Escape: cancel a value edit, then clear the filter, then close.
     Shortcut {
         sequence: "Escape"
+        enabled: pluginParams.visible
         onActivated: {
             if (midiConflictDialog.opened) {
                 midiConflictDialog.reject()

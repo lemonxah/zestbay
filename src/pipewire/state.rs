@@ -360,6 +360,8 @@ mod tests {
             is_jack: false,
             is_bridge: false,
             ready: true,
+            subgraph: None,
+            vdev_id: None,
         }
     }
 
