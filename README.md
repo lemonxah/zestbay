@@ -1,7 +1,7 @@
 # ZestBay
 
 <p align="center">
-  <img src="images/logo/zestbay-launcher.svg" alt="ZestBay" width="200">
+  <img src="images/logo/zestbay-logo.svg" alt="ZestBay" width="420">
 </p>
 
 <p align="center">
@@ -17,6 +17,30 @@
 ## What is ZestBay?
 
 ZestBay is a visual audio routing tool for PipeWire on Linux. It lets you see every audio node in your system (applications, hardware devices, virtual sinks), connect and disconnect ports with drag-and-drop, host LV2, VST3, and CLAP effects plugins inline, and define patchbay rules that automatically restore your routing whenever devices or apps appear.
+
+## Screenshots
+
+<p align="center">
+  <img src="docs/screenshots/main-dark.png" alt="ZestBay patchbay (dark theme)" width="100%">
+</p>
+
+<table>
+  <tr>
+    <td><img src="docs/screenshots/rules.png" alt="Auto-connect rules"></td>
+    <td><img src="docs/screenshots/add-plugin.png" alt="Add plugin"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/parameters.png" alt="Plugin parameters with MIDI learn"></td>
+    <td><img src="docs/screenshots/cpu-usage.png" alt="CPU usage"></td>
+  </tr>
+</table>
+
+<p align="center">
+  <img src="docs/screenshots/main-light.png" alt="ZestBay patchbay (light theme)" width="100%">
+</p>
+
+<sub>Screenshots are rendered from the real UI with sample data by
+<code>design/screenshots/render.sh</code>.</sub>
 
 ## How it differs from other tools
 

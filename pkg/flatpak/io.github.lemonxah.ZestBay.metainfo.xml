@@ -60,6 +60,33 @@
     <control>keyboard</control>
   </supports>
 
+  <screenshots>
+    <screenshot type="default">
+      <caption>The patchbay: devices, apps and hosted plugins wired by signal type</caption>
+      <image>https://raw.githubusercontent.com/lemonxah/zestbay/main/docs/screenshots/main-dark.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Auto-connect rules, learned from the connections you make</caption>
+      <image>https://raw.githubusercontent.com/lemonxah/zestbay/main/docs/screenshots/rules.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Add LV2, VST3 and CLAP plugins</caption>
+      <image>https://raw.githubusercontent.com/lemonxah/zestbay/main/docs/screenshots/add-plugin.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Plugin parameters with MIDI learn</caption>
+      <image>https://raw.githubusercontent.com/lemonxah/zestbay/main/docs/screenshots/parameters.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Per-plugin DSP load and process CPU</caption>
+      <image>https://raw.githubusercontent.com/lemonxah/zestbay/main/docs/screenshots/cpu-usage.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>The light theme</caption>
+      <image>https://raw.githubusercontent.com/lemonxah/zestbay/main/docs/screenshots/main-light.png</image>
+    </screenshot>
+  </screenshots>
+
   <content_rating type="oars-1.1"/>
 
   <releases>

@@ -77,8 +77,10 @@ QtObject {
     readonly property color accentFaint: dark ? Qt.rgba(201/255, 226/255, 101/255, 0.14) : Qt.rgba(93/255, 122/255, 0, 0.12)
     readonly property color accentRing:  dark ? Qt.rgba(201/255, 226/255, 101/255, 0.26) : Qt.rgba(93/255, 122/255, 0, 0.22)
     readonly property color accentHover: dark ? "#e3f29a" : "#3f5400"
-    // Logo mark: accent in dark, text.primary on light surfaces.
-    readonly property color logoMark:    dark ? accent : textPrimary
+    // Logo colours (brand orange and lime). Light mode uses slightly deeper
+    // shades: the brand lime nearly disappears on white.
+    readonly property color logoOrange:  dark ? "#f48d11" : "#e07c00"
+    readonly property color logoLime:    dark ? "#96dc2e" : "#6aaa12"
 
     // ─── Signal colours (pins and wires) ────────────────────────────────
     readonly property color sigAudio: dark ? "#63b3ff" : "#2a78d6"

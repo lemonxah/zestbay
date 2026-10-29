@@ -1483,14 +1483,23 @@ Item {
     }
 
     // Plugin footer buttons (On / UI / Params): canvas rects for node n.
+    // The three buttons share the card width (10 px margins, 6 px gaps),
+    // in proportion to their content so "Params" stays the widest.
     function footerButtons(n, nx, ny, nh) {
         var y = ny + nh - Theme.nodeFooter + (Theme.nodeFooter - Theme.nodeFooterButton) / 2
-        var widths = [{ key: "onoff", w: 48 }, { key: "ui", w: 32 }, { key: "params", w: 56 }]
-        var x = nx + 10
+        var base = [{ key: "onoff", w: 48 }, { key: "ui", w: 32 }, { key: "params", w: 56 }]
+        var margin = 10
+        var gap = 6
+        var avail = getNodeWidth(n.id) - 2 * margin - gap * (base.length - 1)
+        var total = 0
+        for (var t = 0; t < base.length; t++) total += base[t].w
+        var x = nx + margin
         var out = []
-        for (var i = 0; i < widths.length; i++) {
-            out.push({ key: widths[i].key, x: x, y: y, w: widths[i].w, h: Theme.nodeFooterButton })
-            x += widths[i].w + 6
+        for (var i = 0; i < base.length; i++) {
+            var w = i === base.length - 1 ? nx + getNodeWidth(n.id) - margin - x
+                                          : Math.round(avail * base[i].w / total)
+            out.push({ key: base[i].key, x: x, y: y, w: w, h: Theme.nodeFooterButton })
+            x += w + gap
         }
         return out
     }
@@ -1962,8 +1971,11 @@ Item {
                 ctx.fillStyle = "" + col
                 ctx.textBaseline = "middle"
                 if (bt.key === "onoff") {
+                    // Dot + label, centred as a group in the (wider) button.
+                    var groupW = 6 + 5 + ctx.measureText(txt).width
+                    var gx = bt.x + (bt.w - groupW) / 2
                     ctx.beginPath()
-                    ctx.arc(bt.x + 12, bt.y + bt.h / 2, 3, 0, Math.PI * 2)
+                    ctx.arc(gx + 3, bt.y + bt.h / 2, 3, 0, Math.PI * 2)
                     if (on) {
                         ctx.fill()
                     } else {
@@ -1972,7 +1984,7 @@ Item {
                         ctx.stroke()
                     }
                     ctx.textAlign = "left"
-                    ctx.fillText(txt, bt.x + 20, bt.y + bt.h / 2 + 0.5)
+                    ctx.fillText(txt, gx + 11, bt.y + bt.h / 2 + 0.5)
                 } else {
                     ctx.textAlign = "center"
                     ctx.fillText(txt, bt.x + bt.w / 2, bt.y + bt.h / 2 + 0.5)
