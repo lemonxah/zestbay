@@ -534,36 +534,28 @@ impl PatchbayManager {
                 // No rules match this source — use the default target if set,
                 // but only for application streams (StreamOutput), not hardware
                 // sources like microphones or other node types.
-                let is_app_stream = node.node_type == Some(NodeType::StreamOutput);
-                if is_app_stream {
-                if let Some(ref default_name) = self.default_target {
-                    if let Some(target) = nodes.iter().find(|n| {
-                        n.id != node.id
-                            && n.ready
-                            && n.node_type.map(|t| t.has_inputs()).unwrap_or(false)
-                            && n.display_name() == default_name
-                    }) {
-                        // Auto-connect by port matching (no explicit port mappings)
-                        let target_ports = self.graph.get_input_ports(target.id);
-                        for source_port in &output_ports {
-                            if let Some(target_port) =
-                                self.find_matching_port(source_port, &target_ports)
+                if node.node_type == Some(NodeType::StreamOutput)
+                    && let Some(target) = self.default_target_node(&nodes, node.id)
+                {
+                    // Auto-connect by port matching (no explicit port mappings)
+                    let target_ports = self.graph.get_input_ports(target.id);
+                    for source_port in &output_ports {
+                        if let Some(target_port) =
+                            self.find_matching_port(source_port, &target_ports)
+                        {
+                            if self
+                                .graph
+                                .find_link(source_port.id, target_port.id)
+                                .is_none()
                             {
-                                if self
-                                    .graph
-                                    .find_link(source_port.id, target_port.id)
-                                    .is_none()
-                                {
-                                    commands.push(PwCommand::Connect {
-                                        output_port_id: source_port.id,
-                                        input_port_id: target_port.id,
-                                    });
-                                }
+                                commands.push(PwCommand::Connect {
+                                    output_port_id: source_port.id,
+                                    input_port_id: target_port.id,
+                                });
                             }
                         }
                     }
                 }
-                } // is_app_stream
             } else {
                 for rule in &matching_rules {
                     if let Some(target) = self.find_matching_target(rule, &nodes, node.id) {
@@ -706,6 +698,17 @@ impl PatchbayManager {
             .or_else(|| compatible.first().copied())
     }
 
+    /// The default target node, if one is set and present (and isn't `exclude`).
+    fn default_target_node<'a>(&self, nodes: &'a [Node], exclude: ObjectId) -> Option<&'a Node> {
+        let name = self.default_target.as_deref()?;
+        nodes.iter().find(|n| {
+            n.id != exclude
+                && n.ready
+                && n.node_type.map(|t| t.has_inputs()).unwrap_or(false)
+                && n.display_name() == name
+        })
+    }
+
     fn find_matching_target<'a>(
         &self,
         rule: &AutoConnectRule,
@@ -822,7 +825,8 @@ impl PatchbayManager {
     /// Only links whose *source* is governed by an enabled rule are ever
     /// removed, and only while at least one of that source's rule targets is
     /// present (so session-manager fallback routing while the target is gone
-    /// is left alone). Links from sources no rule matches are never touched.
+    /// is left alone). App streams no rule matches are governed by the
+    /// default target the same way; other unruled sources are never touched.
     fn should_remove_link(&self, link: &Link, nodes: &[Node]) -> bool {
         let source_node = match self.graph.get_node(link.output_node_id) {
             Some(n) => n,
@@ -862,7 +866,14 @@ impl PatchbayManager {
             })
             .collect();
         if source_rules.is_empty() {
-            return false;
+            // An app stream with no rules belongs to the default target: once
+            // that node is present, links anywhere else are unauthorized.
+            if source_node.node_type != Some(NodeType::StreamOutput) {
+                return false;
+            }
+            return self
+                .default_target_node(nodes, source_node.id)
+                .is_some_and(|d| d.id != target_node.id);
         }
 
         let any_target_present = source_rules
@@ -1383,6 +1394,28 @@ mod tests {
         pb.set_default_target(Some("Headphones".into()));
         let cmds = pb.scan();
         assert_eq!(connects(&cmds), vec![(10, hp_in.id)]);
+    }
+
+    #[test]
+    fn exclusive_default_target_removes_other_links() {
+        let (graph, out, hp_in, sp_in) = setup();
+        // The session manager also routed the unruled App to its own default.
+        graph.insert_link(link(100, &out, &hp_in));
+        graph.insert_link(link(101, &out, &sp_in));
+        let mut pb = PatchbayManager::new(graph.clone());
+        pb.set_default_target(Some("Speakers".into()));
+        assert_eq!(disconnects(&pb.scan()), vec![100]);
+        pb.exclusive = false;
+        assert!(disconnects(&pb.scan()).is_empty());
+    }
+
+    #[test]
+    fn default_target_absent_keeps_links() {
+        let (graph, out, hp_in, _) = setup();
+        graph.insert_link(link(100, &out, &hp_in));
+        let mut pb = PatchbayManager::new(graph.clone());
+        pb.set_default_target(Some("Missing".into()));
+        assert!(disconnects(&pb.scan()).is_empty());
     }
 
     #[test]
