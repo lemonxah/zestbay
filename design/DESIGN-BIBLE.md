@@ -46,7 +46,9 @@ usage) → the redesign spec (intent, anything not covered here).
 - Every colour, size and font comes from the `Theme` singleton. **Never write a
   colour literal, font family or magic size in a screen.** If a value is
   missing, add a token to `Theme.qml` (both modes) and document it here.
-- `Theme.mode` is `"system"` (follows the desktop via `Qt.styleHints`),
+- `Theme.mode` is `"system"` (follows the desktop via `Qt.styleHints`; when
+  the scheme is Unknown — older Qt, qt6ct on sway-style compositors — it
+  judges by the system palette's window colour),
   `"dark"` or `"light"`. It is stored in preferences (`theme`) and set at
   startup. `Theme.dark` is the resolved boolean.
 - Every top-level window is a `ZbWindow` (theme colours, palette, default
