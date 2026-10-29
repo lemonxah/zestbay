@@ -15,6 +15,9 @@ pub struct PatchbayManager {
     graph: Arc<GraphState>,
     rules: Vec<AutoConnectRule>,
     pub enabled: bool,
+    /// Exclusive mode: links from a ruled source that no rule allows are
+    /// disconnected. Off, rules only ever add links and nothing is removed.
+    pub exclusive: bool,
     pub rules_dirty: bool,
     /// Display name of the default target node. When a source node has no
     /// matching rules, its output ports will be connected to this node instead.
@@ -30,6 +33,7 @@ impl PatchbayManager {
             graph,
             rules: Vec::new(),
             enabled: true,
+            exclusive: true,
             rules_dirty: false,
             default_target: None,
             recent_destroys: HashMap::new(),
@@ -333,6 +337,10 @@ impl PatchbayManager {
                     }
                 }
             }
+        }
+
+        if !self.exclusive {
+            return commands;
         }
 
         let now = Instant::now();
@@ -801,6 +809,18 @@ mod tests {
         // The link keeps coming back: stop fighting it.
         assert!(disconnects(&pb.scan()).is_empty());
         assert!(disconnects(&pb.scan()).is_empty());
+    }
+
+    #[test]
+    fn non_exclusive_keeps_unauthorized_links_but_still_connects() {
+        let (graph, out, hp_in, sp_in) = setup();
+        graph.insert_link(link(100, &out, &sp_in));
+        let mut pb = PatchbayManager::new(graph.clone());
+        pb.exclusive = false;
+        pb.add_rule(AutoConnectRule::new("App", None, "Headphones", None, None));
+        let cmds = pb.scan();
+        assert!(disconnects(&cmds).is_empty());
+        assert_eq!(connects(&cmds), vec![(out.id, hp_in.id)]);
     }
 
     #[test]
