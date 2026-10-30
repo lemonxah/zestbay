@@ -30,9 +30,17 @@ jobs:
         # A .deb works on the release it was built for and newer
         image: ["ubuntu:24.04"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG || github.ref }}
+
+      # Packaging (pkg/) comes from the branch running the workflow, so an
+      # existing tag is built from its own source with the current packaging
+      - name: Use this branch's packaging
+        if: env.TAG != ''
+        run: |
+          git fetch --depth=1 origin "$GITHUB_SHA"
+          git checkout "$GITHUB_SHA" -- pkg/
 
       - name: Build .deb
         run: pkg/deb/build-deb.sh --container "${{ matrix.image }}"
@@ -49,7 +57,7 @@ jobs:
           cp LICENSE "$dir/"
           tar -czf "pkg/deb/$dir.tar.gz" "$dir"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: deb-${{ strategy.job-index }}
           path: |
@@ -66,14 +74,22 @@ jobs:
         # An .rpm only works on the Fedora release it was built for
         image: ["fedora:latest"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG || github.ref }}
+
+      # Packaging (pkg/) comes from the branch running the workflow, so an
+      # existing tag is built from its own source with the current packaging
+      - name: Use this branch's packaging
+        if: env.TAG != ''
+        run: |
+          git fetch --depth=1 origin "$GITHUB_SHA"
+          git checkout "$GITHUB_SHA" -- pkg/
 
       - name: Build .rpm
         run: pkg/rpm/build-rpm.sh --container "${{ matrix.image }}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: rpm-${{ strategy.job-index }}
           # Just the package, not the debuginfo/debugsource ones rpmbuild also makes
@@ -86,9 +102,17 @@ jobs:
     name: Nix
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG || github.ref }}
+
+      # Packaging (pkg/) comes from the branch running the workflow, so an
+      # existing tag is built from its own source with the current packaging
+      - name: Use this branch's packaging
+        if: env.TAG != ''
+        run: |
+          git fetch --depth=1 origin "$GITHUB_SHA"
+          git checkout "$GITHUB_SHA" -- pkg/
 
       - uses: cachix/install-nix-action@v31
 
@@ -106,7 +130,7 @@ jobs:
     if: github.event_name == 'release' || inputs.tag != ''
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
