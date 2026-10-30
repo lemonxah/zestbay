@@ -4,3 +4,6 @@
 /repo
 /builddir
 /dist
+/pkg/deb/*.deb
+/pkg/deb/zestbay_*/
+/pkg/rpm/rpmbuild/

@@ -1,0 +1,11 @@
+# Fedora build environment for the ZestBay .rpm (used by build-rpm.sh --container).
+# The .rpm must be built on the Fedora release it targets: a binary built on
+# another distro links against its glibc/Qt and won't run on Fedora.
+ARG BASE=fedora:latest
+FROM ${BASE}
+
+# Install the spec's BuildRequires, so this stays in step with zestbay.spec
+COPY zestbay.spec /tmp/zestbay.spec
+RUN dnf -y install rpm-build 'dnf-command(builddep)' \
+    && dnf -y builddep /tmp/zestbay.spec \
+    && dnf clean all

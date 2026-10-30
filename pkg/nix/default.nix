@@ -1,7 +1,6 @@
 {
   lib,
   rustPlatform,
-  fetchFromGitHub,
   pkg-config,
   cmake,
   clang,
@@ -9,24 +8,39 @@
   qt6,
   lilv,
   lv2,
+  suil,
+  gtk3,
   xorg,
   dbus,
   copyDesktopItems,
   makeDesktopItem,
 }:
 
-rustPlatform.buildRustPackage rec {
+let
+  root = ../..;
+in
+rustPlatform.buildRustPackage {
   pname = "zestbay";
-  version = "0.7.0";
+  # Version and crates come from the repo itself, so nothing here needs
+  # updating per release
+  version = (lib.importTOML (root + "/Cargo.toml")).package.version;
 
-  src = fetchFromGitHub {
-    owner = "lemonxah";
-    repo = "zestbay";
-    rev = "v${version}";
-    hash = lib.fakeHash; # Replace with real hash after first build
+  src = lib.fileset.toSource {
+    inherit root;
+    fileset = lib.fileset.unions [
+      (root + "/Cargo.toml")
+      (root + "/Cargo.lock")
+      (root + "/build.rs")
+      (root + "/src")
+      (root + "/crates")
+      (root + "/qml")
+      (root + "/fonts")
+      (root + "/images")
+      (root + "/LICENSE")
+    ];
   };
 
-  cargoHash = lib.fakeHash; # Replace with real hash after first build
+  cargoLock.lockFile = root + "/Cargo.lock";
 
   # Build the entire workspace (main binary + UI bridge)
   cargoBuildFlags = [ "--workspace" ];
@@ -45,6 +59,8 @@ rustPlatform.buildRustPackage rec {
     qt6.qtdeclarative
     lilv
     lv2
+    suil
+    gtk3
     xorg.libX11
     dbus
   ];
@@ -55,8 +71,9 @@ rustPlatform.buildRustPackage rec {
   };
 
   postInstall = ''
-    # Install UI bridge binary to lib directory
-    install -Dm755 target/release/zestbay-ui-bridge $out/lib/zestbay/zestbay-ui-bridge
+    # zestbay looks for the UI bridge in <prefix>/lib/zestbay
+    install -Dm755 $out/bin/zestbay-ui-bridge $out/lib/zestbay/zestbay-ui-bridge
+    rm $out/bin/zestbay-ui-bridge
 
     install -Dm644 images/logo/zestbay-launcher.svg $out/share/icons/hicolor/scalable/apps/zestbay.svg
     install -Dm644 images/zesticon.png $out/share/icons/hicolor/256x256/apps/zestbay.png

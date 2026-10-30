@@ -1,0 +1,120 @@
+name: Packages
+
+# Builds the .deb, .rpm, Nix package and the plain executables. On a published
+# release the files are attached to it; a manual run attaches them to the
+# release named in "tag", or with no tag just keeps them as run artifacts.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and attach the packages to (e.g. v1.1.2); empty builds the selected branch without attaching"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  # The tag being built: the published release, or the one given on a manual run
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  deb:
+    name: .deb (${{ matrix.image }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # A .deb works on the release it was built for and newer
+        image: ["ubuntu:24.04"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG || github.ref }}
+
+      - name: Build .deb
+        run: pkg/deb/build-deb.sh --container "${{ matrix.image }}"
+
+      # Built on the oldest supported Ubuntu so they run on as many distros as possible
+      - name: Package the executables
+        if: matrix.image == 'ubuntu:24.04'
+        run: |
+          version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          dir="zestbay-${version}-x86_64-linux"
+          mkdir "$dir"
+          install -m755 target/deb-ubuntu-24.04/release/zestbay target/deb-ubuntu-24.04/release/zestbay-ui-bridge "$dir/"
+          strip "$dir/zestbay" "$dir/zestbay-ui-bridge"
+          cp LICENSE "$dir/"
+          tar -czf "pkg/deb/$dir.tar.gz" "$dir"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ strategy.job-index }}
+          path: |
+            pkg/deb/*.deb
+            pkg/deb/*.tar.gz
+          if-no-files-found: error
+
+  rpm:
+    name: .rpm (${{ matrix.image }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # An .rpm only works on the Fedora release it was built for
+        image: ["fedora:latest"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG || github.ref }}
+
+      - name: Build .rpm
+        run: pkg/rpm/build-rpm.sh --container "${{ matrix.image }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm-${{ strategy.job-index }}
+          # Just the package, not the debuginfo/debugsource ones rpmbuild also makes
+          path: pkg/rpm/rpmbuild/RPMS/*/zestbay-[0-9]*.rpm
+          if-no-files-found: error
+
+  # A Nix package isn't a file to download: users install it from the flake at
+  # the tag (nix run github:lemonxah/zestbay?dir=pkg/nix). This checks it builds.
+  nix:
+    name: Nix
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG || github.ref }}
+
+      - uses: cachix/install-nix-action@v31
+
+      - name: Build Nix package
+        run: nix build ./pkg/nix -L
+
+      - name: Check the installed layout
+        run: |
+          test -x result/bin/zestbay
+          test -x result/lib/zestbay/zestbay-ui-bridge
+
+  publish:
+    name: Attach to release
+    needs: [deb, rpm, nix]
+    if: github.event_name == 'release' || inputs.tag != ''
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Upload release assets
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha256sum ./* > SHA256SUMS
+          gh release upload "$TAG" ./* --clobber --repo "$GITHUB_REPOSITORY"

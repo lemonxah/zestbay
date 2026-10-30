@@ -20,6 +20,7 @@ BuildRequires:  lv2-devel
 BuildRequires:  libX11-devel
 BuildRequires:  dbus-devel
 BuildRequires:  suil-devel
+BuildRequires:  gtk3-devel
 
 Requires:       pipewire
 Requires:       qt6-qtbase
@@ -28,6 +29,7 @@ Requires:       lilv
 Requires:       libX11
 Requires:       dbus
 Requires:       suil
+Requires:       gtk3
 
 %description
 ZestBay is a PipeWire patchbay application with LV2, CLAP, and VST3
@@ -44,7 +46,7 @@ cargo build --workspace --release
 
 %install
 install -Dm755 target/release/%{name} %{buildroot}%{_bindir}/%{name}
-install -Dm755 target/release/zestbay-ui-bridge %{buildroot}%{_libdir}/%{name}/zestbay-ui-bridge
+install -Dm755 target/release/zestbay-ui-bridge %{buildroot}%{_prefix}/lib/%{name}/zestbay-ui-bridge
 install -Dm644 zestbay.desktop %{buildroot}%{_datadir}/applications/zestbay.desktop
 install -Dm644 images/logo/zestbay-launcher.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/zestbay.svg
 install -Dm644 images/zesticon.png %{buildroot}%{_datadir}/icons/hicolor/256x256/apps/zestbay.png
@@ -54,14 +56,14 @@ install -Dm644 LICENSE %{buildroot}%{_datadir}/licenses/%{name}/LICENSE
 %files
 %license LICENSE
 %{_bindir}/%{name}
-%{_libdir}/%{name}/zestbay-ui-bridge
+%{_prefix}/lib/%{name}/zestbay-ui-bridge
 %{_datadir}/applications/zestbay.desktop
 %{_datadir}/icons/hicolor/scalable/apps/zestbay.svg
 %{_datadir}/icons/hicolor/256x256/apps/zestbay.png
 %{_datadir}/icons/hicolor/256x256/apps/zestbay-tray.png
 
 %changelog
-* Tue Apr 01 2026 Ryno Kotze <lemon.xah@gmail.com> - 0.7.0-1
+* Wed Apr 01 2026 Ryno Kotze <lemon.xah@gmail.com> - 0.7.0-1
 - MIDI input support for LV2, CLAP, and VST3 plugins
 - Media type validation for port connections
 - Fix plugin processing when output ports are unconnected
