@@ -55,14 +55,20 @@ jobs:
           install -m755 target/deb-ubuntu-24.04/release/zestbay target/deb-ubuntu-24.04/release/zestbay-ui-bridge "$dir/"
           strip "$dir/zestbay" "$dir/zestbay-ui-bridge"
           cp LICENSE "$dir/"
-          tar -czf "pkg/deb/$dir.tar.gz" "$dir"
+          tar -czf "$dir.tar.gz" "$dir"
+
+      - name: Upload the executables
+        if: matrix.image == 'ubuntu:24.04'
+        uses: actions/upload-artifact@v7
+        with:
+          name: executables-x86_64-linux
+          path: zestbay-*-x86_64-linux.tar.gz
+          if-no-files-found: error
 
       - uses: actions/upload-artifact@v7
         with:
           name: deb-${{ strategy.job-index }}
-          path: |
-            pkg/deb/*.deb
-            pkg/deb/*.tar.gz
+          path: pkg/deb/*.deb
           if-no-files-found: error
 
   rpm:
