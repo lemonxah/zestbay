@@ -7,6 +7,7 @@
   pipewire,
   qt6,
   lilv,
+  serd,
   lv2,
   suil,
   gtk3,
@@ -58,6 +59,7 @@ rustPlatform.buildRustPackage {
     qt6.qtbase
     qt6.qtdeclarative
     lilv
+    serd
     lv2
     suil
     gtk3
