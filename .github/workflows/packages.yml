@@ -99,7 +99,8 @@ jobs:
         with:
           name: rpm-${{ strategy.job-index }}
           # Just the package, not the debuginfo/debugsource ones rpmbuild also makes
-          path: pkg/rpm/rpmbuild/RPMS/*/zestbay-[0-9]*.rpm
+          # No wildcard in the directory part, or the artifact keeps an x86_64/ folder
+          path: pkg/rpm/rpmbuild/RPMS/x86_64/zestbay-[0-9]*.rpm
           if-no-files-found: error
 
   # A Nix package isn't a file to download: users install it from the flake at
@@ -146,5 +147,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          sha256sum ./* > SHA256SUMS
+          # Flatten, in case an artifact kept a sub-folder
+          find . -mindepth 2 -type f -exec mv -t . {} +
+          find . -mindepth 1 -type d -empty -delete
+          sha256sum -- * > SHA256SUMS
           gh release upload "$TAG" ./* --clobber --repo "$GITHUB_REPOSITORY"
