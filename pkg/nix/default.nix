@@ -19,6 +19,10 @@
 
 let
   root = ../..;
+  # cxx-qt finds every Qt tool and library through one `qmake -query`, but
+  # nixpkgs splits Qt into a store path per module (qmlcachegen lives in
+  # qtdeclarative, not qtbase), so give it one merged Qt prefix
+  qtEnv = qt6.env "zestbay-qt-${qt6.qtbase.version}" [ qt6.qtdeclarative ];
 in
 rustPlatform.buildRustPackage {
   pname = "zestbay";
@@ -67,10 +71,14 @@ rustPlatform.buildRustPackage {
     dbus
   ];
 
-  # CXX-Qt needs to find Qt tools
   env = {
     LIBCLANG_PATH = "${clang.cc.lib}/lib";
   };
+
+  # Set here rather than in env: qtbase's setup hook exports its own QMAKE
+  preBuild = ''
+    export QMAKE=${qtEnv}/bin/qmake
+  '';
 
   postInstall = ''
     # zestbay looks for the UI bridge in <prefix>/lib/zestbay
