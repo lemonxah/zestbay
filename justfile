@@ -120,3 +120,10 @@ flatpak-bundle: flatpak
 flatpak-lint:
     flatpak run --command=flatpak-builder-lint org.flatpak.Builder manifest {{flatpak_manifest}}
     flatpak run --command=flatpak-builder-lint org.flatpak.Builder repo repo
+
+# ---- Debian/Ubuntu ----------------------------------------------------------
+
+# Works on that Ubuntu release and newer; build one per target, e.g. just deb ubuntu:25.04
+# Build a .deb inside an Ubuntu container (podman/docker): pkg/deb/zestbay_<version>-<image>_amd64.deb
+deb image="ubuntu:24.04":
+    pkg/deb/build-deb.sh --container {{image}}

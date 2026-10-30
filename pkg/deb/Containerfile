@@ -1,0 +1,19 @@
+# Ubuntu build environment for the ZestBay .deb (used by build-deb.sh --container).
+# The .deb must be built on the Ubuntu release it targets: a binary built on a
+# newer distro links against a newer glibc/Qt and won't start on Ubuntu.
+ARG BASE=ubuntu:24.04
+FROM ${BASE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential pkg-config cmake clang libclang-dev curl ca-certificates \
+        dpkg-dev file \
+        libpipewire-0.3-dev qt6-base-dev qt6-base-private-dev qt6-declarative-dev \
+        qt6-declarative-private-dev liblilv-dev lv2-dev libsuil-dev libdbus-1-dev \
+        libx11-dev libgtk-3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Edition 2024 needs Rust >= 1.85, newer than Ubuntu's packaged rustc
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable \
+    && chmod -R a+rwX /opt/cargo /opt/rustup
