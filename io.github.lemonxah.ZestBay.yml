@@ -26,7 +26,7 @@ finish-args:
   - --own-name=org.kde.StatusNotifierItem-2-1
   # No home or host access: plugins come from Flathub's
   # org.freedesktop.LinuxAudio.Plugins.* extensions and from the app's own
-  # folder ~/.var/app/io.github.lemonxah.ZestBay/data/{lv2,vst3,clap}, which
+  # folder ~/.var/app/io.github.lemonxah.ZestBay/data/{lv2,vst,vst3,clap}, which
   # ZestBay creates and shows in Add plugin. Plugins keep their settings and
   # licences in the app's XDG folders too.
 
@@ -37,7 +37,7 @@ add-extensions:
     directory: extensions/Plugins
     version: '25.08'
     add-ld-path: lib
-    merge-dirs: lv2;clap;vst3;ladspa;dssi
+    merge-dirs: lv2;clap;vst;vst3;ladspa;dssi
     subdirectories: true
     no-autodownload: true
 

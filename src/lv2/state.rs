@@ -65,6 +65,8 @@ pub struct StateEntry {
     pub type_uri: String,
     pub value: Vec<u8>,
     pub flags: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub urid_references: Vec<(usize, String)>,
 }
 
 impl StateEntry {
@@ -77,6 +79,7 @@ impl StateEntry {
             type_uri: atom_string_uri.to_string(),
             value: bytes,
             flags: 0,
+            urid_references: Vec::new(),
         }
     }
 
@@ -133,11 +136,13 @@ unsafe extern "C" fn store_callback(
         } else {
             std::slice::from_raw_parts(value as *const u8, size).to_vec()
         };
+        let urid_references = super::atom_state::references(&data, &type_uri, &ctx.mapper);
         ctx.entries.push(StateEntry {
             key_uri,
             type_uri,
             value: data,
             flags,
+            urid_references,
         });
         LV2_STATE_SUCCESS
     }
@@ -217,7 +222,7 @@ pub unsafe fn restore_plugin_state(
         .map(|e| RetrieveEntry {
             key_urid: mapper.map(&e.key_uri),
             type_urid: mapper.map(&e.type_uri),
-            data: e.value.clone(),
+            data: super::atom_state::restored_bytes(e, mapper),
             flags: e.flags,
         })
         .collect();

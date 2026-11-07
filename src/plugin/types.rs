@@ -16,6 +16,7 @@ pub type PluginInstanceId = u64;
 pub enum PluginFormat {
     Lv2,
     Clap,
+    Vst2,
     Vst3,
 }
 
@@ -24,6 +25,7 @@ impl PluginFormat {
         match self {
             Self::Lv2 => "LV2",
             Self::Clap => "CLAP",
+            Self::Vst2 => "VST2",
             Self::Vst3 => "VST3",
         }
     }

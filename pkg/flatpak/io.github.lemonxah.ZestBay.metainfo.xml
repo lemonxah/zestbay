@@ -5,7 +5,7 @@
   <project_license>MIT</project_license>
 
   <name>ZestBay</name>
-  <summary>PipeWire patchbay with LV2, VST3 and CLAP plugin hosting</summary>
+  <summary>PipeWire patchbay with LV2, VST2, VST3 and CLAP plugin hosting</summary>
 
   <developer id="io.github.lemonxah">
     <name>Ryno Kotze</name>
@@ -18,7 +18,7 @@
       sinks — and lets you connect and disconnect ports with drag-and-drop.
     </p>
     <ul>
-      <li>Host LV2, VST3 and CLAP effect and instrument plugins inline as real PipeWire filter nodes, with their native editors</li>
+      <li>Host LV2, VST2, VST3 and CLAP effect and instrument plugins inline as real PipeWire filter nodes, with their native editors</li>
       <li>Patchbay rules that restore your routing whenever devices or applications appear, learned automatically from the connections you make</li>
       <li>Exclusive or non-exclusive rule enforcement, and a default target for applications without a rule</li>
       <li>Map hardware MIDI controllers to plugin parameters with one-click learn</li>
@@ -49,6 +49,7 @@
     <keyword>routing</keyword>
     <keyword>lv2</keyword>
     <keyword>clap</keyword>
+    <keyword>vst2</keyword>
     <keyword>vst3</keyword>
   </keywords>
 
@@ -70,7 +71,7 @@
       <image>https://raw.githubusercontent.com/lemonxah/zestbay/main/docs/screenshots/rules.png</image>
     </screenshot>
     <screenshot>
-      <caption>Add LV2, VST3 and CLAP plugins</caption>
+      <caption>Add LV2, VST2, VST3 and CLAP plugins</caption>
       <image>https://raw.githubusercontent.com/lemonxah/zestbay/main/docs/screenshots/add-plugin.png</image>
     </screenshot>
     <screenshot>

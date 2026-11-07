@@ -89,6 +89,7 @@ pub fn run_scan_main(args: &[String]) -> ! {
     match args[0].as_str() {
         "clap" => crate::clap::scanner::scan_clap_file(path, &mut plugins),
         "vst3" => crate::vst3::scanner::scan_vst3_bundle(path, &mut plugins),
+        "vst2" => crate::vst2::scanner::scan_vst2_file(path, &mut plugins),
         _ => crate::exit_now(2),
     }
     let ok = serde_json::to_writer(&mut result, &plugins).is_ok() && result.flush().is_ok();
@@ -371,9 +372,9 @@ pub fn exec_probe(
 /// state (PipeWire connections, lilv worlds, Qt, etc.), so plugins that rely
 /// on clean global state will not false-positive as crashed.
 ///
-/// `format` must be one of `"lv2"`, `"clap"`, or `"vst3"`.
+/// `format` must be one of `"lv2"`, `"clap"`, `"vst2"`, or `"vst3"`.
 /// `uri` is the plugin URI / id.
-/// `library_path` (CLAP file / VST3 bundle) lets the probe load just that
+/// `library_path` (CLAP/VST2 file or VST3 bundle) lets the probe load just that
 /// library instead of looking the plugin up by scanning; ignored for LV2.
 /// `sample_rate` is passed to the probe for instantiation.
 /// `block_length` is only used for LV2 probes.
@@ -638,6 +639,24 @@ pub fn run_probe_main(args: &[String]) -> ! {
                     )
                 };
             }
+        }
+        "vst2" => {
+            let info = match library_path {
+                Some(lib) => Some(probe_plugin_info(uri, lib, crate::plugin::types::PluginFormat::Vst2)),
+                None => crate::vst2::scanner::find_plugin(uri),
+            };
+            let Some(info) = info else { crate::exit_now(1); };
+            let inst = unsafe {
+                crate::vst2::host::Vst2PluginInstance::new(&info.library_path, uri, &info, sample_rate, None)
+            };
+            let Some(inst) = inst else { crate::exit_now(1); };
+            // Exercise a real block as well as constructor/destructor code.
+            let inputs = vec![vec![0.0; 64]; inst.audio_input_channels];
+            let mut outputs = vec![vec![0.0; 64]; inst.audio_output_channels];
+            let inputs: Vec<&[f32]> = inputs.iter().map(Vec::as_slice).collect();
+            let mut outputs: Vec<&mut [f32]> = outputs.iter_mut().map(Vec::as_mut_slice).collect();
+            unsafe { inst.process(&inputs, &mut outputs, 64, &[]); }
+            drop(inst);
         }
         other => {
             eprintln!("probe: unknown format '{}'", other);

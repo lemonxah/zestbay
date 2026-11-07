@@ -61,13 +61,13 @@ manifest's directory, which is why the manifest sits at the repo root.
   - Flathub plugin packages, mounted at `/app/extensions/Plugins`; install
     with e.g. `flatpak install flathub org.freedesktop.LinuxAudio.Plugins.LSP//25.08`
     (the branch must match the manifest's extension version).
-  - The app's own folders `~/.var/app/io.github.lemonxah.ZestBay/data/{lv2,vst3,clap}`,
+  - The app's own folders `~/.var/app/io.github.lemonxah.ZestBay/data/{lv2,vst,vst3,clap}`,
     created at startup and shown in Add plugin (with an Open folder button).
     Copy paid or vendor plugins (e.g. Pianoteq's `.lv2`/`.vst3` bundles) there;
     a symlink into `/usr` won't work, the sandbox can't see `/usr`.
-  - `$LV2_PATH`/`$CLAP_PATH`/`$VST3_PATH`.
+  - `$LV2_PATH`/`$CLAP_PATH`/`$VST_PATH`/`$VST3_PATH`.
   - Optional, per user: `flatpak override --user --filesystem=host-os:ro io.github.lemonxah.ZestBay`
-    adds the host's `/usr/lib*/{lv2,clap,vst3}` (seen under `/run/host/usr`)
+    adds the host's `/usr/lib*/{lv2,clap,vst,vst3}` (seen under `/run/host/usr`)
     and `--filesystem=~/.lv2` (etc.) the classic home folders. Host plugins
     built against distro libraries may not load in the runtime; the sandbox
     probe keeps that from crashing ZestBay.
