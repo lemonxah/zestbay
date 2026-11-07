@@ -9,6 +9,7 @@ mod subgraph;
 mod tray;
 mod ui;
 pub mod ui_bridge;
+mod vst2;
 mod vst3;
 
 use cxx_qt::casting::Upcast;

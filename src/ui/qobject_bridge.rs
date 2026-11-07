@@ -815,6 +815,7 @@ impl qobject::AppController {
 
         let plugin_format = match sp.format.as_str() {
             "CLAP" => crate::plugin::PluginFormat::Clap,
+            "VST2" => crate::plugin::PluginFormat::Vst2,
             "VST3" => crate::plugin::PluginFormat::Vst3,
             _ => crate::plugin::PluginFormat::Lv2,
         };
@@ -1784,6 +1785,7 @@ impl qobject::AppController {
         lv2_state: Vec<crate::lv2::state::StateEntry>,
         blob: Option<Vec<u8>>,
     ) {
+        let mut labels_changed = false;
         if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager
             && let Some(info) = mgr.get_instance_mut(instance_id)
         {
@@ -1794,7 +1796,16 @@ impl qobject::AppController {
                 blob.as_ref().map(|b| b.len()).unwrap_or(0)
             );
             match info.format {
-                crate::plugin::PluginFormat::Lv2 => info.lv2_state = lv2_state,
+                crate::plugin::PluginFormat::Lv2 => {
+                    labels_changed = crate::lv2::atom_state::is_lsp_mixer(&info.plugin_uri)
+                        && info.lv2_state.iter()
+                            .find(|e| e.key_uri.ends_with("/KVT"))
+                            .map(|e| (&e.value, &e.urid_references))
+                            != lv2_state.iter()
+                                .find(|e| e.key_uri.ends_with("/KVT"))
+                                .map(|e| (&e.value, &e.urid_references));
+                    info.lv2_state = lv2_state;
+                }
                 _ => {
                     // Keep the previous blob if the plugin couldn't produce one.
                     if blob.is_some() {
@@ -1802,6 +1813,12 @@ impl qobject::AppController {
                     }
                 }
             }
+        }
+        if labels_changed {
+            if self.plugins_persistable() {
+                persist_active_plugins(self.rust().plugin_manager.as_ref());
+            }
+            self.as_mut().graph_changed();
         }
     }
 
@@ -2041,6 +2058,13 @@ impl qobject::AppController {
                     } else {
                         port_ui_name(p, self.rust().bridge_split.is_virtual_id(node_id))
                     };
+                    let display_name = self.rust().plugin_manager.as_ref()
+                        .and_then(|m| m.active_instances().values()
+                            .find(|i| i.pw_node_id == Some(p.node_id)))
+                        .and_then(|i| crate::lv2::atom_state::port_label(
+                            &i.plugin_uri, &i.lv2_state, &p.name,
+                        ))
+                        .unwrap_or(display_name);
                     serde_json::json!({
                         "id": p.id,
                         "name": display_name,
@@ -4332,7 +4356,7 @@ impl SavedPlugin {
         }
         let path = std::path::Path::new(&info.library_path);
         let exists = match info.format {
-            crate::plugin::PluginFormat::Clap => path.is_file(),
+            crate::plugin::PluginFormat::Clap | crate::plugin::PluginFormat::Vst2 => path.is_file(),
             crate::plugin::PluginFormat::Vst3 => crate::vst3::scanner::find_bundle_binary(path)
                 .is_some_and(|binary| binary.is_file()),
             crate::plugin::PluginFormat::Lv2 => false,
@@ -5255,61 +5279,64 @@ mod tests {
     #[test]
     fn old_config_gains_a_direct_start_descriptor_without_losing_state() {
         use crate::plugin::{PluginCategory, PluginFormat, PluginInfo, PluginInstanceInfo};
-        let old: SavedPlugin = serde_json::from_str(r#"{
-            "stable_id":"stable", "uri":"test.instrument", "display_name":"My synth",
-            "format":"CLAP", "bypassed":true, "plugin_state":"AAEC/w==",
-            "parameters":[{"port_index":3,"symbol":"gain","value":0.7}]
-        }"#).unwrap();
-        assert!(old.usable_scan_info().is_none());
-        let library = std::env::temp_dir().join(format!("zestbay-{}.clap", uuid::Uuid::new_v4()));
-        std::fs::write(&library, "fixture").unwrap();
-        let discovered = PluginInfo {
-            uri: old.uri.clone(), name: "Synth".into(), format: PluginFormat::Clap,
-            category: PluginCategory::Instrument, author: None, ports: Vec::new(),
-            audio_inputs: 0, audio_outputs: 2, control_inputs: 0, control_outputs: 0,
-            required_features: Vec::new(), compatible: true, has_ui: true,
-            library_path: library.to_str().unwrap().into(),
-        };
-        let mut manager = PluginManager::new();
-        manager.register_instance(PluginInstanceInfo {
-            id: 1, stable_id: old.stable_id.clone(), plugin_uri: old.uri.clone(),
-            format: PluginFormat::Clap, scan_info: None, display_name: old.display_name.clone(),
-            pw_node_id: None, parameters: vec![crate::plugin::ParameterValue {
-                port_index: 3, symbol: "gain".into(), name: "Gain".into(), value: 0.7,
-                min: 0.0, max: 1.0, default: 0.5, is_toggle: false,
-            }], active: true, bypassed: old.bypassed, lv2_state: Vec::new(),
-            plugin_state: old.decode_plugin_state(),
-        });
-        assert!(!manager.startup_complete());
-        manager.set_available_plugins(vec![discovered.clone()]);
-        // Discovery alone must not allow an unfinished restore to be persisted.
-        assert!(!manager.startup_complete());
-        manager.finish_startup();
-        let saved = SavedPlugin::from(manager.get_instance(1).unwrap());
-        let json = serde_json::to_string(&saved).unwrap();
-        let next_start: SavedPlugin = serde_json::from_str(&json).unwrap();
-        let info = next_start.usable_scan_info().expect("next start can bypass discovery");
-        assert_eq!(info.library_path, discovered.library_path);
-        assert_eq!(info.category, PluginCategory::Instrument);
-        assert_eq!(next_start.stable_id, old.stable_id);
-        assert_eq!(next_start.decode_plugin_state(), old.decode_plugin_state());
-        assert!(next_start.bypassed);
-        assert_eq!(next_start.parameters[0].value, 0.7);
+        for format in [PluginFormat::Clap, PluginFormat::Vst2] {
+            let mut old: SavedPlugin = serde_json::from_str(r#"{
+                "stable_id":"stable", "uri":"test.instrument", "display_name":"My synth",
+                "format":"CLAP", "bypassed":true, "plugin_state":"AAEC/w==",
+                "parameters":[{"port_index":3,"symbol":"gain","value":0.7}]
+            }"#).unwrap();
+            old.format = format.as_str().into();
+            assert!(old.usable_scan_info().is_none());
+            let library = std::env::temp_dir().join(format!("zestbay-{}.clap", uuid::Uuid::new_v4()));
+            std::fs::write(&library, "fixture").unwrap();
+            let discovered = PluginInfo {
+                uri: old.uri.clone(), name: "Synth".into(), format,
+                category: PluginCategory::Instrument, author: None, ports: Vec::new(),
+                audio_inputs: 0, audio_outputs: 2, control_inputs: 0, control_outputs: 0,
+                required_features: Vec::new(), compatible: true, has_ui: true,
+                library_path: library.to_str().unwrap().into(),
+            };
+            let mut manager = PluginManager::new();
+            manager.register_instance(PluginInstanceInfo {
+                id: 1, stable_id: old.stable_id.clone(), plugin_uri: old.uri.clone(),
+                format, scan_info: None, display_name: old.display_name.clone(),
+                pw_node_id: None, parameters: vec![crate::plugin::ParameterValue {
+                    port_index: 3, symbol: "gain".into(), name: "Gain".into(), value: 0.7,
+                    min: 0.0, max: 1.0, default: 0.5, is_toggle: false,
+                }], active: true, bypassed: old.bypassed, lv2_state: Vec::new(),
+                plugin_state: old.decode_plugin_state(),
+            });
+            assert!(!manager.startup_complete());
+            manager.set_available_plugins(vec![discovered.clone()]);
+            // Discovery alone must not allow an unfinished restore to be persisted.
+            assert!(!manager.startup_complete());
+            manager.finish_startup();
+            let saved = SavedPlugin::from(manager.get_instance(1).unwrap());
+            let json = serde_json::to_string(&saved).unwrap();
+            let next_start: SavedPlugin = serde_json::from_str(&json).unwrap();
+            let info = next_start.usable_scan_info().expect("next start can bypass discovery");
+            assert_eq!(info.library_path, discovered.library_path);
+            assert_eq!(info.category, PluginCategory::Instrument);
+            assert_eq!(next_start.stable_id, old.stable_id);
+            assert_eq!(next_start.decode_plugin_state(), old.decode_plugin_state());
+            assert!(next_start.bypassed);
+            assert_eq!(next_start.parameters[0].value, 0.7);
 
-        let mut mismatched = next_start.clone();
-        mismatched.uri = "another.plugin".into();
-        assert!(mismatched.usable_scan_info().is_none());
-        mismatched.uri = next_start.uri.clone();
-        mismatched.format = "VST3".into();
-        assert!(mismatched.usable_scan_info().is_none());
+            let mut mismatched = next_start.clone();
+            mismatched.uri = "another.plugin".into();
+            assert!(mismatched.usable_scan_info().is_none());
+            mismatched.uri = next_start.uri.clone();
+            mismatched.format = "VST3".into();
+            assert!(mismatched.usable_scan_info().is_none());
 
-        std::fs::remove_file(&library).unwrap();
-        assert!(next_start.usable_scan_info().is_none(), "missing paths must wait for discovery");
-        let mut relocated = discovered.clone();
-        relocated.library_path = "/new/location/synth.clap".into();
-        manager.set_available_plugins(vec![relocated.clone()]);
-        assert_eq!(SavedPlugin::from(manager.get_instance(1).unwrap()).scan_info.unwrap().library_path,
-            relocated.library_path);
+            std::fs::remove_file(&library).unwrap();
+            assert!(next_start.usable_scan_info().is_none(), "missing paths must wait for discovery");
+            let mut relocated = discovered.clone();
+            relocated.library_path = "/new/location/synth.clap".into();
+            manager.set_available_plugins(vec![relocated.clone()]);
+            assert_eq!(SavedPlugin::from(manager.get_instance(1).unwrap()).scan_info.unwrap().library_path,
+                relocated.library_path);
+        }
     }
 
     #[test]

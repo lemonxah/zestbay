@@ -341,7 +341,9 @@ fn run_pipewire_thread(
         clap_instances: RefCell::new(HashMap::new()),
         clap_filters: RefCell::new(HashMap::new()),
         vst3_instances: RefCell::new(HashMap::new()),
+        vst2_instances: RefCell::new(HashMap::new()),
         vst3_filters: RefCell::new(HashMap::new()),
+        vst2_filters: RefCell::new(HashMap::new()),
         meta: RefCell::new(HashMap::new()),
         midi_mapping_table: RefCell::new(std::mem::take(&mut carry.midi_mappings)),
         pending_ops: RefCell::new(VecDeque::new()),
@@ -353,6 +355,7 @@ fn run_pipewire_thread(
         lv2_zombies: RefCell::new(std::mem::take(&mut carry.lv2_zombies)),
         reported_params: RefCell::new(HashMap::new()),
         last_param_report: Cell::new(Instant::now()),
+        last_label_report: Cell::new(Instant::now()),
         last_op_time: Cell::new(Instant::now() - Duration::from_secs(1)),
         changes_pending: Cell::new(false),
         owned: RefCell::new(HashMap::new()),
@@ -500,7 +503,9 @@ struct Host {
     clap_instances: InstanceMap<crate::clap::host::ClapPluginInstance>,
     clap_filters: RefCell<HashMap<u64, crate::clap::filter::ClapFilterNode>>,
     vst3_instances: InstanceMap<crate::vst3::host::Vst3PluginInstance>,
+    vst2_instances: InstanceMap<crate::vst2::host::Vst2PluginInstance>,
     vst3_filters: RefCell<HashMap<u64, crate::vst3::filter::Vst3FilterNode>>,
+    vst2_filters: RefCell<HashMap<u64, crate::vst2::filter::Vst2FilterNode>>,
     meta: RefCell<HashMap<u64, PluginMeta>>,
 
     midi_mapping_table: RefCell<crate::midi::MidiMappingTable>,
@@ -517,6 +522,7 @@ struct Host {
     /// Parameter values last reported to the UI, per instance.
     reported_params: RefCell<HashMap<u64, Vec<(usize, f32)>>>,
     last_param_report: Cell<Instant>,
+    last_label_report: Cell<Instant>,
     last_op_time: Cell<Instant>,
     changes_pending: Cell<bool>,
     /// Owned nodes by key, with the spec they were created from.
@@ -627,6 +633,10 @@ impl Host {
                         let inst = inst.borrow_mut();
                         inst.set_parameter(port_index, value);
                         Some(slot_value(&inst.port_updates, port_index))
+                    } else if let Some(inst) = self.vst2_instances.borrow().get(&instance_id) {
+                        let inst = inst.borrow();
+                        inst.set_parameter(port_index, value);
+                        Some(slot_value(&inst.port_updates, port_index))
                     } else {
                         None
                     };
@@ -661,6 +671,8 @@ impl Host {
                     inst.borrow_mut().set_bypassed(bypassed);
                 } else if let Some(inst) = self.vst3_instances.borrow().get(&instance_id) {
                     inst.borrow_mut().set_bypassed(bypassed);
+                } else if let Some(inst) = self.vst2_instances.borrow().get(&instance_id) {
+                    inst.borrow().set_bypassed(bypassed);
                 } else {
                     self.patch_queued_add(instance_id, |req| req.bypassed = bypassed);
                 }
@@ -677,6 +689,8 @@ impl Host {
                 } else if let Some(filter) = self.clap_filters.borrow().get(&instance_id) {
                     filter.set_learn_mode(true);
                 } else if let Some(filter) = self.vst3_filters.borrow().get(&instance_id) {
+                    filter.set_learn_mode(true);
+                } else if let Some(filter) = self.vst2_filters.borrow().get(&instance_id) {
                     filter.set_learn_mode(true);
                 }
                 let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::MidiLearnStarted {
@@ -799,6 +813,9 @@ impl Host {
             filter.set_learn_mode(enabled);
         }
         for filter in self.vst3_filters.borrow().values() {
+            filter.set_learn_mode(enabled);
+        }
+        for filter in self.vst2_filters.borrow().values() {
             filter.set_learn_mode(enabled);
         }
     }
@@ -925,6 +942,7 @@ impl Host {
                 let _ = crate::lv2::ui::close_plugin_ui(instance_id);
                 crate::clap::ui::close_clap_gui(instance_id, &self.event_tx);
                 crate::vst3::ui::close_vst3_gui(instance_id, &self.event_tx);
+                crate::vst2::ui::close_vst2_gui(instance_id, &self.event_tx);
             }
         }
     }
@@ -938,6 +956,23 @@ impl Host {
 
         self.drain_filter_events();
         self.report_param_changes(now);
+        // Channel names are LSP KVT strings rather than numeric parameters.
+        // Snapshot them on the control loop; the UI persists changed labels.
+        if now.duration_since(self.last_label_report.get()) >= Duration::from_secs(1) {
+            self.last_label_report.set(now);
+            for (&instance_id, instance) in self.lv2_instances.borrow().iter() {
+                let inst = instance.borrow();
+                if crate::lv2::atom_state::is_lsp_mixer(&inst.plugin_uri) {
+                    if let Some(lv2_state) = unsafe { inst.save_state() } {
+                        let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::PluginStateSaved {
+                            instance_id,
+                            lv2_state,
+                            blob: None,
+                        }));
+                    }
+                }
+            }
+        }
         self.release_lv2_zombies();
         self.check_sample_rates(now);
 
@@ -1009,6 +1044,7 @@ impl Host {
     fn pump_plugin_hosts(&self, now: Instant) {
         crate::clap::ui::idle();
         crate::vst3::ui::idle();
+        crate::vst2::ui::idle();
 
         // A failed restart parks the instance (audio thread excluded) until
         // it is dropped, so a parked instance is reloaded on every tick
@@ -1038,6 +1074,22 @@ impl Host {
             .collect();
         for (id, inst) in vst3 {
             let mut i = inst.borrow_mut();
+            i.idle();
+            if i.needs_restart() {
+                i.restart();
+            }
+            if i.is_parked() {
+                parked.push(id);
+            }
+        }
+        let vst2: Vec<(u64, Rc<RefCell<crate::vst2::host::Vst2PluginInstance>>)> = self
+            .vst2_instances
+            .borrow()
+            .iter()
+            .map(|(id, inst)| (*id, inst.clone()))
+            .collect();
+        for (id, inst) in vst2 {
+            let i = inst.borrow();
             i.idle();
             if i.needs_restart() {
                 i.restart();
@@ -1109,6 +1161,9 @@ impl Host {
         for (id, inst) in self.vst3_instances.borrow().iter() {
             current.push((*id, slot_values(&inst.borrow().port_updates)));
         }
+        for (id, inst) in self.vst2_instances.borrow().iter() {
+            current.push((*id, slot_values(&inst.borrow().port_updates)));
+        }
 
         let mut reported = self.reported_params.borrow_mut();
         for (instance_id, values) in current {
@@ -1152,6 +1207,9 @@ impl Host {
         for filter in self.vst3_filters.borrow().values() {
             filter.drain_events(&self.event_tx);
         }
+        for filter in self.vst2_filters.borrow().values() {
+            filter.drain_events(&self.event_tx);
+        }
     }
 
     /// Start sandbox probes for queued adds (on worker threads so the
@@ -1177,6 +1235,7 @@ impl Host {
             let (fmt, block) = match req.format.as_str() {
                 "CLAP" => ("clap", 0),
                 "VST3" => ("vst3", 0),
+                "VST2" => ("vst2", 0),
                 _ => ("lv2", quantum),
             };
             let uri = req.plugin_uri.clone();
@@ -1184,6 +1243,7 @@ impl Host {
             let lib = req.scan_info.as_ref().map(|i| i.library_path.clone()).or_else(|| match fmt {
                 "clap" => crate::clap::scanner::cached_plugin(&uri).map(|i| i.library_path),
                 "vst3" => crate::vst3::scanner::cached_plugin(&uri).map(|i| i.library_path),
+                "vst2" => crate::vst2::scanner::cached_plugin(&uri).map(|i| i.library_path),
                 _ => None,
             });
             if fmt != "lv2" && lib.is_none() {
@@ -1232,6 +1292,7 @@ impl Host {
             match req.format.as_str() {
                 "CLAP" => self.instantiate_clap(req, sr),
                 "VST3" => self.instantiate_vst3(req, sr),
+                "VST2" => self.instantiate_vst2(req, sr),
                 _ => self.instantiate_lv2(req, sr),
             }
         }));
@@ -1449,6 +1510,52 @@ impl Host {
         Ok(())
     }
 
+    fn instantiate_vst2(&self, req: &AddRequest, sr: f64) -> Result<(), String> {
+        let info = req.scan_info.clone().or_else(|| crate::vst2::scanner::cached_plugin(&req.plugin_uri))
+            .ok_or_else(|| format!("VST2 plugin not found: {}", req.plugin_uri))?;
+        // The saved state is restored before setup/activation.
+        let inst = unsafe {
+            crate::vst2::host::Vst2PluginInstance::new(
+                &info.library_path,
+                &req.plugin_uri,
+                &info,
+                sr,
+                req.plugin_state.as_deref(),
+            )
+        }
+        .ok_or_else(|| format!("Failed to instantiate VST2 plugin: {}", req.plugin_uri))?;
+
+        for &(port_index, value) in &req.params {
+            inst.set_parameter(port_index, value);
+        }
+        if req.bypassed {
+            inst.set_bypassed(true);
+        }
+
+        let filter_config = crate::vst2::filter::FilterConfig {
+            instance_id: req.instance_id,
+            display_name: req.display_name.clone(),
+            audio_inputs: inst.audio_input_channels,
+            audio_outputs: inst.audio_output_channels,
+            has_midi_in: inst.has_midi_in,
+            has_midi_out: inst.has_midi_out,
+        };
+        let instance_rc = Rc::new(RefCell::new(inst));
+        let filter = crate::vst2::filter::Vst2FilterNode::new(
+            &self.core,
+            filter_config,
+            instance_rc.clone(),
+            self.event_tx.clone(),
+        )
+        .map_err(|e| format!("Failed to create VST2 filter node: {}", e))?;
+
+        self.vst2_instances
+            .borrow_mut()
+            .insert(req.instance_id, instance_rc);
+        self.vst2_filters.borrow_mut().insert(req.instance_id, filter);
+        Ok(())
+    }
+
     /// Tear down one plugin: close its UI (blocks until closed), destroy the
     /// filter (stops processing), then drop the instance. Emits nothing.
     fn remove_plugin(&self, instance_id: u64) -> bool {
@@ -1485,6 +1592,13 @@ impl Host {
             let filter = self.vst3_filters.borrow_mut().remove(&instance_id);
             drop(filter);
             let inst = self.vst3_instances.borrow_mut().remove(&instance_id);
+            drop(inst);
+            true
+        } else if self.vst2_instances.borrow().contains_key(&instance_id) {
+            crate::vst2::ui::close_vst2_gui(instance_id, &self.event_tx);
+            let filter = self.vst2_filters.borrow_mut().remove(&instance_id);
+            drop(filter);
+            let inst = self.vst2_instances.borrow_mut().remove(&instance_id);
             drop(inst);
             true
         } else {
@@ -1528,6 +1642,14 @@ impl Host {
                     .map(|p| (p.port_index, p.value))
                     .collect();
                 (Vec::new(), inst.get_state(), params, inst.is_bypassed())
+            } else if let Some(inst) = self.vst2_instances.borrow().get(&instance_id) {
+                let inst = inst.borrow();
+                let params = inst
+                    .get_parameters()
+                    .iter()
+                    .map(|p| (p.port_index, p.value))
+                    .collect();
+                (Vec::new(), inst.get_state(), params, inst.is_bypassed())
             } else {
                 return None;
             };
@@ -1555,6 +1677,8 @@ impl Host {
         } else if let Some(f) = self.clap_filters.borrow().get(&instance_id) {
             f.node_id()
         } else if let Some(f) = self.vst3_filters.borrow().get(&instance_id) {
+            f.node_id()
+        } else if let Some(f) = self.vst2_filters.borrow().get(&instance_id) {
             f.node_id()
         } else {
             return None;
@@ -1694,6 +1818,11 @@ impl Host {
                 check(*id, f.graph_rate(), inst.borrow().sample_rate);
             }
         }
+        for (id, f) in self.vst2_filters.borrow().iter() {
+            if let Some(inst) = self.vst2_instances.borrow().get(id) {
+                check(*id, f.graph_rate(), inst.borrow().sample_rate);
+            }
+        }
 
         for (id, rate) in mismatched {
             if let Some(last) = self.last_reload.borrow().get(&id)
@@ -1825,6 +1954,12 @@ impl Host {
                     .iter()
                     .map(|(&id, inst)| (id, inst.borrow().get_state())),
             )
+            .chain(
+                self.vst2_instances
+                    .borrow()
+                    .iter()
+                    .map(|(&id, inst)| (id, inst.borrow().get_state())),
+            )
             .collect();
         for (instance_id, blob) in blobs {
             if blob.is_none() {
@@ -1887,6 +2022,20 @@ impl Host {
             unsafe {
                 crate::vst3::ui::open_vst3_gui(
                     controller_ptr,
+                    instance_id,
+                    &display_name,
+                    &self.event_tx,
+                    &self.cmd_tx,
+                );
+            }
+        } else if let Some(instance) = self.vst2_instances.borrow().get(&instance_id) {
+            let inst = instance.borrow();
+            let effect_ptr = inst.effect_ptr();
+            let display_name = inst.display_name.clone();
+            drop(inst);
+            unsafe {
+                crate::vst2::ui::open_vst2_gui(
+                    effect_ptr,
                     instance_id,
                     &display_name,
                     &self.event_tx,
@@ -1998,6 +2147,9 @@ impl Host {
         for (id, filter) in self.vst3_filters.borrow().iter() {
             filter.update_mappings(resolved_for(id));
         }
+        for (id, filter) in self.vst2_filters.borrow().iter() {
+            filter.update_mappings(resolved_for(id));
+        }
     }
 
     fn resolve_mapping_entry(
@@ -2043,6 +2195,22 @@ impl Host {
         }
 
         if let Some(inst_rc) = self.vst3_instances.borrow().get(&instance_id) {
+            let inst = inst_rc.borrow();
+            let p = inst.params.iter().find(|p| p.port_index == port_index)?;
+            return Some(crate::midi::filter::ResolvedMappingEntry {
+                port_updates: inst.port_updates.clone(),
+                port_index,
+                instance_id,
+                min: 0.0,
+                max: 1.0,
+                mode: mapping.mode,
+                source: mapping.source.clone(),
+                is_logarithmic: false,
+                is_toggle: p.is_toggle,
+                step_count: p.step_count,
+            });
+        }
+        if let Some(inst_rc) = self.vst2_instances.borrow().get(&instance_id) {
             let inst = inst_rc.borrow();
             let p = inst.params.iter().find(|p| p.port_index == port_index)?;
             return Some(crate::midi::filter::ResolvedMappingEntry {

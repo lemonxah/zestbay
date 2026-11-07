@@ -6,4 +6,4 @@ Icon=io.github.lemonxah.ZestBay
 Terminal=false
 Type=Application
 Categories=AudioVideo;Audio;Mixer;
-Keywords=pipewire;patchbay;audio;routing;plugins;lv2;clap;vst3;
+Keywords=pipewire;patchbay;audio;routing;plugins;lv2;clap;vst2;vst3;
