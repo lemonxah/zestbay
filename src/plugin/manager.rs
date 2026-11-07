@@ -14,6 +14,7 @@ pub struct PluginManager {
     available_plugins: Vec<PluginInfo>,
     /// Currently active instances, keyed by instance ID.
     active_instances: HashMap<PluginInstanceId, PluginInstanceInfo>,
+    startup_complete: bool,
     /// The sample rate reported by PipeWire (set after PW init).
     pub sample_rate: f64,
 }
@@ -23,14 +24,34 @@ impl PluginManager {
         Self {
             available_plugins: Vec::new(),
             active_instances: HashMap::new(),
+            startup_complete: false,
             sample_rate: 48000.0,
         }
     }
 
     // ----- Catalog -----
 
+    pub fn startup_complete(&self) -> bool {
+        self.startup_complete
+    }
+
+    pub fn finish_startup(&mut self) {
+        self.startup_complete = true;
+    }
+
     /// Replace the entire catalog (called after scanning all formats).
     pub fn set_available_plugins(&mut self, plugins: Vec<PluginInfo>) {
+        // Backfill old saves and refresh paths for relocated plugins. Keep a
+        // directly restored descriptor if its library is outside search dirs.
+        for instance in self.active_instances.values_mut() {
+            if instance.format != PluginFormat::Lv2
+                && let Some(info) = plugins.iter().find(|p| {
+                    p.uri == instance.plugin_uri && p.format == instance.format
+                })
+            {
+                instance.scan_info = Some(info.clone());
+            }
+        }
         self.available_plugins = plugins;
     }
 

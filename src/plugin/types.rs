@@ -269,6 +269,8 @@ pub struct PluginInstanceInfo {
     pub stable_id: String,
     pub plugin_uri: String,
     pub format: PluginFormat,
+    /// Descriptor and library path for starting without a catalog scan.
+    pub scan_info: Option<PluginInfo>,
     pub display_name: String,
     pub pw_node_id: Option<u32>,
     pub parameters: Vec<ParameterValue>,

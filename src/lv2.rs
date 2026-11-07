@@ -10,7 +10,6 @@ pub mod ui_bridge_client;
 pub mod urid;
 pub mod worker;
 
-pub use host::Lv2Manager;
 pub use types::*;
 
 thread_local! {

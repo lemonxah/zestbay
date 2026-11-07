@@ -9,6 +9,7 @@ pub mod cpu_stats;
 pub mod manager;
 pub mod paths;
 pub mod sandbox;
+pub mod scan;
 pub mod types;
 
 pub use manager::PluginManager;

@@ -565,6 +565,7 @@ ZbWindow {
             }
 
             Row {
+                visible: !controller.plugins_scanning || mainWindow.width >= 1100
                 spacing: 14
                 Repeater {
                     model: [
@@ -591,6 +592,30 @@ ZbWindow {
             }
 
             Item { Layout.fillWidth: true }
+
+            Row {
+                visible: controller.plugins_scanning
+                spacing: 8
+                StatusText {
+                    text: controller.plugin_scan_progress < 0
+                          ? "Discovering plugins…"
+                          : "Discovering plugins… " + Math.floor(controller.plugin_scan_progress * 100) + "%"
+                }
+                Rectangle {
+                    visible: controller.plugin_scan_progress >= 0
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 72
+                    height: 4
+                    radius: 2
+                    color: Theme.borderPanel
+                    Rectangle {
+                        width: parent.width * Math.max(0, controller.plugin_scan_progress)
+                        height: parent.height
+                        radius: parent.radius
+                        color: Theme.accent
+                    }
+                }
+            }
 
             // CPU sparkline + readout; click for the CPU usage window.
             Item {

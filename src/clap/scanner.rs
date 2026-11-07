@@ -71,6 +71,11 @@ impl ScanCache {
 
 static CACHE: ScanCache = ScanCache::new();
 
+/// Lookup without starting discovery on the PipeWire thread.
+pub fn cached_plugin(uri: &str) -> Option<PluginInfo> {
+    CACHE.get(uri)
+}
+
 /// Look up a single plugin by URI.  Served from the cache of the last
 /// `scan_plugins()`; a miss rescans at most once per cooldown period.
 pub fn find_plugin(uri: &str) -> Option<PluginInfo> {
@@ -81,18 +86,16 @@ pub fn find_plugin(uri: &str) -> Option<PluginInfo> {
 
 /// Scan all standard directories and return a list of CLAP plugin infos.
 pub fn scan_plugins() -> Vec<PluginInfo> {
-    let mut plugins = Vec::new();
-    let dirs = expand_search_dirs();
+    scan_discovered(&discover_plugins(), &|| {})
+}
 
-    for dir in &dirs {
-        if !dir.is_dir() {
-            continue;
-        }
-        log::info!("CLAP: scanning {}", dir.display());
-        scan_directory(dir, &mut plugins);
-    }
+pub(crate) fn discover_plugins() -> Vec<PathBuf> {
+    crate::plugin::scan::discover(&expand_search_dirs(), "clap", true)
+}
 
-    plugins.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+pub(crate) fn scan_discovered(paths: &[PathBuf], progress: &(impl Fn() + Sync)) -> Vec<PluginInfo> {
+    let mut plugins = crate::plugin::scan::scan_libraries("clap", paths, progress);
+    plugins.sort_by_cached_key(|p| p.name.to_lowercase());
     log::info!("CLAP: found {} plugins total", plugins.len());
     CACHE.store(&plugins);
     plugins
@@ -102,69 +105,7 @@ fn expand_search_dirs() -> Vec<PathBuf> {
     crate::plugin::paths::search_dirs("CLAP_PATH", CLAP_SEARCH_DIRS, "clap", "CLAP")
 }
 
-fn scan_directory(dir: &Path, plugins: &mut Vec<PluginInfo>) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(e) => {
-            log::debug!("CLAP: cannot read {}: {}", dir.display(), e);
-            return;
-        }
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if path.extension().is_some_and(|e| e == "clap") {
-                sandboxed_scan_clap_file(&path, plugins);
-            } else {
-                scan_directory(&path, plugins);
-            }
-        } else if path.extension().is_some_and(|e| e == "clap") {
-            sandboxed_scan_clap_file(&path, plugins);
-        }
-    }
-}
-
-/// Run `scan_clap_file` inside a forked child process so that a segfault
-/// in the plugin's dlopen / init / factory code only kills the child.
-fn sandboxed_scan_clap_file(path: &Path, plugins: &mut Vec<PluginInfo>) {
-    use crate::plugin::sandbox::{SandboxResult, fork_scan};
-
-    let path_owned = path.to_path_buf();
-    let timeout = std::time::Duration::from_secs(10);
-
-    let result: SandboxResult<Vec<PluginInfo>> = fork_scan(
-        move || {
-            let mut found = Vec::new();
-            scan_clap_file(&path_owned, &mut found);
-            found
-        },
-        Some(timeout),
-    );
-
-    match result {
-        SandboxResult::Ok(found) => {
-            log::debug!("CLAP sandbox: {} scanned OK ({} plugins)", path.display(), found.len());
-            plugins.extend(found);
-        }
-        SandboxResult::Crashed { signal, description } => {
-            log::warn!(
-                "CLAP sandbox: {} crashed during scan (signal {:?}): {}",
-                path.display(), signal, description
-            );
-        }
-        SandboxResult::Timeout => {
-            log::warn!("CLAP sandbox: {} timed out during scan", path.display());
-        }
-        SandboxResult::ForkFailed(e) => {
-            log::error!("CLAP sandbox: fork failed for {}: {}", path.display(), e);
-            // Fallback: scan in-process (same as before sandboxing)
-            scan_clap_file(path, plugins);
-        }
-    }
-}
-
-fn scan_clap_file(path: &Path, plugins: &mut Vec<PluginInfo>) {
+pub(crate) fn scan_clap_file(path: &Path, plugins: &mut Vec<PluginInfo>) {
     let path_str = match path.to_str() {
         Some(s) => s,
         None => return,
