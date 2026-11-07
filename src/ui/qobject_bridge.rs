@@ -14,6 +14,8 @@ pub mod qobject {
         #[qproperty(i32, node_count)]
         #[qproperty(i32, link_count)]
         #[qproperty(QString, cpu_usage)]
+        #[qproperty(bool, plugins_scanning)]
+        #[qproperty(f64, plugin_scan_progress)]
         type AppController = super::AppControllerRust;
 
         #[qinvokable]
@@ -459,6 +461,10 @@ pub struct AppControllerRust {
     node_count: i32,
     link_count: i32,
     cpu_usage: QString,
+    plugins_scanning: bool,
+    plugin_scan_progress: f64,
+    plugin_scan_rx: Option<Receiver<crate::plugin::scan::ScanEvent>>,
+    pending_plugin_adds: Vec<PwCommand>,
 
     graph: Option<Arc<GraphState>>,
     event_rx: Option<Receiver<PwEvent>>,
@@ -575,6 +581,10 @@ impl Default for AppControllerRust {
             prefs: load_preferences(),
             tray_state: None,
             cpu_usage: QString::from("0.0%"),
+            plugins_scanning: false,
+            plugin_scan_progress: -1.0,
+            plugin_scan_rx: None,
+            pending_plugin_adds: Vec::new(),
             prev_cpu_ticks: 0,
             prev_cpu_time: None,
             cpu_avg: 0.0,
@@ -610,18 +620,15 @@ impl qobject::AppController {
 
         let graph = GraphState::new();
 
-        // Scan all plugin formats and populate the unified plugin manager
-        let lv2_scanner = crate::lv2::Lv2Manager::new();
-        let mut plugin_manager = PluginManager::new();
-        plugin_manager.extend_available_plugins(lv2_scanner.available_plugins().to_vec());
-
-        let clap_plugins = crate::clap::scanner::scan_plugins();
-        plugin_manager.extend_available_plugins(clap_plugins);
-
-        let vst3_plugins = crate::vst3::scanner::scan_plugins();
-        plugin_manager.extend_available_plugins(vst3_plugins);
-
-        plugin_manager.sort_catalog();
+        let plugin_manager = PluginManager::new();
+        self.as_mut().set_plugins_scanning(true);
+        match crate::plugin::scan::start() {
+            Ok(rx) => self.as_mut().rust_mut().plugin_scan_rx = Some(rx),
+            Err(e) => {
+                self.as_mut().set_plugins_scanning(false);
+                self.as_mut().error_occurred(QString::from(format!("Could not start plugin discovery: {e}").as_str()));
+            }
+        }
 
         let (event_rx, cmd_tx) = crate::pipewire::start(
             graph.clone(),
@@ -813,6 +820,12 @@ impl qobject::AppController {
         };
 
         let plugin_state = sp.decode_plugin_state();
+        let scan_info = sp.usable_scan_info().or_else(|| {
+            self.rust().plugin_manager.as_ref()
+                .and_then(|mgr| mgr.find_plugin_with_format(&sp.uri, plugin_format))
+                .filter(|info| info.format != crate::plugin::PluginFormat::Lv2)
+                .cloned()
+        });
 
         if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager {
             let info = crate::lv2::Lv2InstanceInfo {
@@ -820,6 +833,7 @@ impl qobject::AppController {
                 stable_id: sid.clone(),
                 plugin_uri: sp.uri.clone(),
                 format: plugin_format,
+                scan_info: scan_info.clone(),
                 display_name: sp.display_name.clone(),
                 pw_node_id: None,
                 parameters: restored_params,
@@ -831,23 +845,98 @@ impl qobject::AppController {
             mgr.register_instance(info);
         }
 
-        let format_str = sp.format.clone();
-        if let Some(ref tx) = self.rust().cmd_tx {
-            log::info!("Restoring plugin: {} ({}) [{}]", sp.display_name, sp.uri, format_str);
-            let _ = tx.send(PwCommand::AddPlugin {
-                plugin_uri: sp.uri,
-                instance_id,
-                display_name: sp.display_name,
-                format: format_str,
-                lv2_state: sp.lv2_state,
-                plugin_state,
-                stable_id: sid.clone(),
-            });
-        }
+        log::info!("Restoring plugin: {} ({}) [{}]", sp.display_name, sp.uri, sp.format);
+        self.as_mut().send_or_defer_plugin(PwCommand::AddPlugin {
+            plugin_uri: sp.uri,
+            instance_id,
+            display_name: sp.display_name,
+            format: sp.format,
+            scan_info,
+            lv2_state: sp.lv2_state,
+            plugin_state,
+            stable_id: sid.clone(),
+        });
         (instance_id, sid)
     }
 
+    fn send_or_defer_plugin(mut self: Pin<&mut Self>, command: PwCommand) {
+        if matches!(&command, PwCommand::AddPlugin { format, scan_info: None, .. } if format != "LV2")
+            && self.rust().plugins_scanning
+        {
+            self.as_mut().rust_mut().pending_plugin_adds.push(command);
+        } else if let Some(tx) = &self.rust().cmd_tx {
+            let _ = tx.send(command);
+        }
+    }
+
+    fn poll_plugin_scan(mut self: Pin<&mut Self>) {
+        use crate::plugin::scan::ScanEvent;
+        use std::sync::mpsc::TryRecvError;
+        loop {
+            let Some(rx) = &self.rust().plugin_scan_rx else { return };
+            match rx.try_recv() {
+                Ok(ScanEvent::Progress { completed, total }) => {
+                    // Workers may send progress out of order after incrementing.
+                    let progress = (completed as f64 / total.max(1) as f64)
+                        .min(0.99)
+                        .max(self.rust().plugin_scan_progress);
+                    self.as_mut().set_plugin_scan_progress(progress);
+                }
+                Ok(ScanEvent::Complete(plugins)) => {
+                    if let Some(mgr) = &mut self.as_mut().rust_mut().plugin_manager {
+                        mgr.set_available_plugins(plugins);
+                    }
+                    self.as_mut().rust_mut().plugin_scan_rx = None;
+                    self.as_mut().set_plugin_scan_progress(1.0);
+                    self.as_mut().set_plugins_scanning(false);
+                    let pending = std::mem::take(&mut self.as_mut().rust_mut().pending_plugin_adds);
+                    for mut command in pending {
+                        if let PwCommand::AddPlugin { instance_id, scan_info, .. } = &mut command {
+                            *scan_info = self.rust().plugin_manager.as_ref()
+                                .and_then(|mgr| mgr.get_instance(*instance_id))
+                                .and_then(|info| info.scan_info.clone());
+                        }
+                        self.as_mut().send_or_defer_plugin(command);
+                    }
+                    // Discovery time must not consume the restore timeout.
+                    if !self.rust().restore_instance_ids.is_empty() {
+                        self.as_mut().rust_mut().restore_started_at = Some(Instant::now());
+                    }
+                    self.as_mut().finish_plugin_startup();
+                    self.as_mut().sync_tray_plugins();
+                    self.as_mut().graph_changed();
+                    return;
+                }
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => {
+                    self.as_mut().rust_mut().plugin_scan_rx = None;
+                    self.as_mut().set_plugins_scanning(false);
+                    // Retain the original config if discovery could not finish.
+                    self.as_mut().error_occurred(QString::from("Plugin discovery stopped unexpectedly. Restart to try again; the saved setup has been preserved."));
+                    return;
+                }
+            }
+        }
+    }
+
+    fn finish_plugin_startup(mut self: Pin<&mut Self>) {
+        if self.rust().plugins_scanning
+            || self.rust().plugin_scan_progress < 1.0
+            || !self.rust().restore_instance_ids.is_empty()
+            || !self.rust().pending_plugin_adds.is_empty()
+        {
+            return;
+        }
+        if let Some(mgr) = &mut self.as_mut().rust_mut().plugin_manager {
+            mgr.finish_startup();
+        }
+        // Includes the path/descriptor backfill for older plugins.json files.
+        persist_active_plugins(self.rust().plugin_manager.as_ref());
+        self.as_mut().persist_midi();
+    }
+
     pub fn poll_events(mut self: Pin<&mut Self>) {
+        self.as_mut().poll_plugin_scan();
         if !self.rust().rules_loaded {
             self.as_mut().rust_mut().rules_loaded = true;
             let rules = load_rules();
@@ -1440,7 +1529,7 @@ impl qobject::AppController {
         // The restore completes when every plugin of the batch reported back
         // (PluginAdded, PluginSkipped or a fatal PluginError); this is a safety
         // cap, scaled with the batch since probes and adds run in sequence.
-        if !self.rust().restore_instance_ids.is_empty() {
+        if !self.rust().plugins_scanning && !self.rust().restore_instance_ids.is_empty() {
             if let Some(started) = self.rust().restore_started_at {
                 let cap = restore_safety_cap(self.rust().restore_batch_size);
                 if started.elapsed() > cap {
@@ -1455,7 +1544,7 @@ impl qobject::AppController {
                     self.as_mut().rust_mut().restore_started_at = None;
                     self.as_mut().rust_mut().links_retry_due = true;
                     remove_crash_marker();
-                    persist_active_plugins(self.rust().plugin_manager.as_ref());
+                    self.as_mut().finish_plugin_startup();
                 }
             }
         }
@@ -1500,6 +1589,7 @@ impl qobject::AppController {
             self.as_mut().rust_mut().restore_started_at = None;
             self.as_mut().rust_mut().links_retry_due = true;
             remove_crash_marker();
+            self.as_mut().finish_plugin_startup();
         }
     }
 
@@ -1643,7 +1733,8 @@ impl qobject::AppController {
     }
 
     fn links_persist_suppressed(&self) -> bool {
-        self.rust().pw_reconnecting
+        !self.rust().plugin_manager.as_ref().is_some_and(|mgr| mgr.startup_complete())
+            || self.rust().pw_reconnecting
             || self
                 .rust()
                 .links_suppressed_until
@@ -1720,7 +1811,7 @@ impl qobject::AppController {
                 .rust()
                 .plugin_manager
                 .as_ref()
-                .is_some_and(|mgr| !mgr.active_instances().is_empty())
+                .is_some_and(|mgr| mgr.startup_complete() && !mgr.active_instances().is_empty())
     }
 
     /// Periodically snapshot plugin state so a crash doesn't lose it.
@@ -2444,7 +2535,8 @@ impl qobject::AppController {
         if self.plugins_persistable() {
             self.as_mut().collect_plugin_states_blocking(Duration::from_secs(3));
         }
-        let restore_complete = self.rust().restore_instance_ids.is_empty();
+        let restore_complete = self.rust().restore_instance_ids.is_empty()
+            && self.rust().plugin_manager.as_ref().is_some_and(|mgr| mgr.startup_complete());
         remove_crash_marker();
         // While PipeWire is reconnecting the graph is empty/partial; links.json
         // already holds the last good state.
@@ -2753,6 +2845,10 @@ impl qobject::AppController {
         self.as_mut().rust_mut().next_instance_id += 1;
 
         let format_str = plugin_format.as_str().to_string();
+        let scan_info = self.rust().plugin_manager.as_ref()
+            .and_then(|mgr| mgr.find_plugin_with_format(&uri_str, plugin_format))
+            .filter(|info| info.format != crate::plugin::PluginFormat::Lv2)
+            .cloned();
 
         let stable_id = uuid::Uuid::new_v4().to_string();
         let stable_id_for_group = stable_id.clone();
@@ -2762,6 +2858,7 @@ impl qobject::AppController {
                 stable_id: stable_id.clone(),
                 plugin_uri: uri_str.clone(),
                 format: plugin_format,
+                scan_info: scan_info.clone(),
                 display_name: display_name.clone(),
                 pw_node_id: None,
                 parameters: initial_params,
@@ -2786,6 +2883,7 @@ impl qobject::AppController {
                 instance_id,
                 display_name: display_name.clone(),
                 format: format_str,
+                scan_info,
                 lv2_state: Vec::new(),
                 plugin_state: None,
                 stable_id,
@@ -3834,7 +3932,8 @@ impl qobject::AppController {
             .filter(|info| info.pw_node_id.is_some())
             .map(|info| {
                 let has_ui = mgr
-                    .find_plugin(&info.plugin_uri)
+                    .find_plugin_with_format(&info.plugin_uri, info.format)
+                    .or(info.scan_info.as_ref())
                     .map(|p| p.has_ui)
                     .unwrap_or(false);
                 crate::tray::PluginEntry {
@@ -4197,9 +4296,50 @@ struct SavedPlugin {
     /// CLAP/VST3 state blob, base64.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     plugin_state: Option<String>,
+    /// Optional discovery metadata, including CLAP/VST3 library location.
+    /// Older configs omit this and use background discovery on the first run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scan_info: Option<crate::plugin::PluginInfo>,
+}
+
+impl From<&crate::plugin::PluginInstanceInfo> for SavedPlugin {
+    fn from(info: &crate::plugin::PluginInstanceInfo) -> Self {
+        use base64::Engine;
+        Self {
+            stable_id: info.stable_id.clone(),
+            uri: info.plugin_uri.clone(),
+            display_name: info.display_name.clone(),
+            bypassed: info.bypassed,
+            parameters: info.parameters.iter().map(|p| SavedPluginParam {
+                port_index: p.port_index,
+                symbol: p.symbol.clone(),
+                value: p.value,
+            }).collect(),
+            format: info.format.as_str().to_string(),
+            scan_info: info.scan_info.clone(),
+            lv2_state: info.lv2_state.clone(),
+            plugin_state: info.plugin_state.as_ref()
+                .map(|blob| base64::engine::general_purpose::STANDARD.encode(blob)),
+        }
+    }
 }
 
 impl SavedPlugin {
+    fn usable_scan_info(&self) -> Option<crate::plugin::PluginInfo> {
+        let info = self.scan_info.as_ref()?;
+        if info.uri != self.uri || info.format.as_str() != self.format {
+            return None;
+        }
+        let path = std::path::Path::new(&info.library_path);
+        let exists = match info.format {
+            crate::plugin::PluginFormat::Clap => path.is_file(),
+            crate::plugin::PluginFormat::Vst3 => crate::vst3::scanner::find_bundle_binary(path)
+                .is_some_and(|binary| binary.is_file()),
+            crate::plugin::PluginFormat::Lv2 => false,
+        };
+        exists.then(|| info.clone())
+    }
+
     fn decode_plugin_state(&self) -> Option<Vec<u8>> {
         use base64::Engine;
         let encoded = self.plugin_state.as_ref()?;
@@ -4272,42 +4412,18 @@ fn restore_safety_cap(batch_size: usize) -> Duration {
 }
 
 fn persist_active_plugins(plugin_manager: Option<&PluginManager>) {
+    if !plugin_manager.is_some_and(|mgr| mgr.startup_complete()) {
+        return;
+    }
     if crate::PLUGINS_FROZEN.load(std::sync::atomic::Ordering::SeqCst) {
         log::info!("persist_active_plugins: skipped (plugins frozen in safe mode)");
         return;
     }
-    use base64::Engine;
-    let mut plugins: Vec<SavedPlugin> = if let Some(mgr) = plugin_manager {
-        mgr.active_instances()
-            .values()
-            .map(|info| {
-                let params: Vec<SavedPluginParam> = info
-                    .parameters
-                    .iter()
-                    .map(|p| SavedPluginParam {
-                        port_index: p.port_index,
-                        symbol: p.symbol.clone(),
-                        value: p.value,
-                    })
-                    .collect();
-                SavedPlugin {
-                    stable_id: info.stable_id.clone(),
-                    uri: info.plugin_uri.clone(),
-                    display_name: info.display_name.clone(),
-                    bypassed: info.bypassed,
-                    parameters: params,
-                    format: info.format.as_str().to_string(),
-                    lv2_state: info.lv2_state.clone(),
-                    plugin_state: info
-                        .plugin_state
-                        .as_ref()
-                        .map(|blob| base64::engine::general_purpose::STANDARD.encode(blob)),
-                }
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let mut plugins: Vec<SavedPlugin> = plugin_manager
+        .into_iter()
+        .flat_map(|mgr| mgr.active_instances().values())
+        .map(SavedPlugin::from)
+        .collect();
     plugins.sort_by(|a, b| a.stable_id.cmp(&b.stable_id));
     let json = serde_json::to_string_pretty(&plugins).unwrap_or_default();
     if write_config("plugins.json", json.as_bytes(), plugins.is_empty()) {
@@ -4407,6 +4523,9 @@ fn persist_midi_mappings(
     mappings: &[crate::midi::MidiCcMapping],
     plugin_manager: Option<&PluginManager>,
 ) {
+    if !plugin_manager.is_some_and(|mgr| mgr.startup_complete()) {
+        return;
+    }
     if crate::PLUGINS_FROZEN.load(std::sync::atomic::Ordering::SeqCst) {
         log::info!("persist_midi_mappings: skipped (plugins frozen in safe mode)");
         return;
@@ -4761,7 +4880,8 @@ fn node_to_json(
             {
                 let format_str = instance.format.as_str();
                 let has_ui = mgr
-                    .find_plugin(&instance.plugin_uri)
+                    .find_plugin_with_format(&instance.plugin_uri, instance.format)
+                    .or(instance.scan_info.as_ref())
                     .map(|p| p.has_ui)
                     .unwrap_or(false);
 
@@ -5120,6 +5240,7 @@ mod tests {
             format: "CLAP".into(),
             lv2_state: Vec::new(),
             plugin_state: Some(base64::engine::general_purpose::STANDARD.encode(&blob)),
+            scan_info: None,
         };
         let json = serde_json::to_string(&sp).unwrap();
         let back: SavedPlugin = serde_json::from_str(&json).unwrap();
@@ -5127,6 +5248,68 @@ mod tests {
         let legacy: SavedPlugin =
             serde_json::from_str(r#"{"uri":"u","display_name":"d"}"#).unwrap();
         assert_eq!(legacy.decode_plugin_state(), None);
+        assert!(legacy.scan_info.is_none());
+        assert!(legacy.usable_scan_info().is_none());
+    }
+
+    #[test]
+    fn old_config_gains_a_direct_start_descriptor_without_losing_state() {
+        use crate::plugin::{PluginCategory, PluginFormat, PluginInfo, PluginInstanceInfo};
+        let old: SavedPlugin = serde_json::from_str(r#"{
+            "stable_id":"stable", "uri":"test.instrument", "display_name":"My synth",
+            "format":"CLAP", "bypassed":true, "plugin_state":"AAEC/w==",
+            "parameters":[{"port_index":3,"symbol":"gain","value":0.7}]
+        }"#).unwrap();
+        assert!(old.usable_scan_info().is_none());
+        let library = std::env::temp_dir().join(format!("zestbay-{}.clap", uuid::Uuid::new_v4()));
+        std::fs::write(&library, "fixture").unwrap();
+        let discovered = PluginInfo {
+            uri: old.uri.clone(), name: "Synth".into(), format: PluginFormat::Clap,
+            category: PluginCategory::Instrument, author: None, ports: Vec::new(),
+            audio_inputs: 0, audio_outputs: 2, control_inputs: 0, control_outputs: 0,
+            required_features: Vec::new(), compatible: true, has_ui: true,
+            library_path: library.to_str().unwrap().into(),
+        };
+        let mut manager = PluginManager::new();
+        manager.register_instance(PluginInstanceInfo {
+            id: 1, stable_id: old.stable_id.clone(), plugin_uri: old.uri.clone(),
+            format: PluginFormat::Clap, scan_info: None, display_name: old.display_name.clone(),
+            pw_node_id: None, parameters: vec![crate::plugin::ParameterValue {
+                port_index: 3, symbol: "gain".into(), name: "Gain".into(), value: 0.7,
+                min: 0.0, max: 1.0, default: 0.5, is_toggle: false,
+            }], active: true, bypassed: old.bypassed, lv2_state: Vec::new(),
+            plugin_state: old.decode_plugin_state(),
+        });
+        assert!(!manager.startup_complete());
+        manager.set_available_plugins(vec![discovered.clone()]);
+        // Discovery alone must not allow an unfinished restore to be persisted.
+        assert!(!manager.startup_complete());
+        manager.finish_startup();
+        let saved = SavedPlugin::from(manager.get_instance(1).unwrap());
+        let json = serde_json::to_string(&saved).unwrap();
+        let next_start: SavedPlugin = serde_json::from_str(&json).unwrap();
+        let info = next_start.usable_scan_info().expect("next start can bypass discovery");
+        assert_eq!(info.library_path, discovered.library_path);
+        assert_eq!(info.category, PluginCategory::Instrument);
+        assert_eq!(next_start.stable_id, old.stable_id);
+        assert_eq!(next_start.decode_plugin_state(), old.decode_plugin_state());
+        assert!(next_start.bypassed);
+        assert_eq!(next_start.parameters[0].value, 0.7);
+
+        let mut mismatched = next_start.clone();
+        mismatched.uri = "another.plugin".into();
+        assert!(mismatched.usable_scan_info().is_none());
+        mismatched.uri = next_start.uri.clone();
+        mismatched.format = "VST3".into();
+        assert!(mismatched.usable_scan_info().is_none());
+
+        std::fs::remove_file(&library).unwrap();
+        assert!(next_start.usable_scan_info().is_none(), "missing paths must wait for discovery");
+        let mut relocated = discovered.clone();
+        relocated.library_path = "/new/location/synth.clap".into();
+        manager.set_available_plugins(vec![relocated.clone()]);
+        assert_eq!(SavedPlugin::from(manager.get_instance(1).unwrap()).scan_info.unwrap().library_path,
+            relocated.library_path);
     }
 
     #[test]

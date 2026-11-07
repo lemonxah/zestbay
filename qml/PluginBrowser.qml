@@ -30,6 +30,14 @@ ZbWindow {
 
     property bool addedPlugin: false
 
+    Connections {
+        target: controller
+        function onPlugins_scanningChanged() {
+            if (!controller.plugins_scanning && pluginBrowser.visible)
+                pluginBrowser.loadPlugins()
+        }
+    }
+
     onVisibleChanged: {
         if (!visible && !addedPlugin) cancelled()
     }
@@ -454,6 +462,7 @@ ZbWindow {
                           ? (pluginBrowser.templates.length === 0
                              ? "No saved subgraphs yet.\nRight-click a subgraph and choose Save as template\u2026"
                              : "No subgraphs match")
+                          : controller.plugins_scanning ? "Discovering plugins…"
                           : pluginBrowser.allPlugins.length === 0 ? "No plugins found" : "No plugins match the current filters"
                     horizontalAlignment: Text.AlignHCenter
                     font.family: Theme.fontSans

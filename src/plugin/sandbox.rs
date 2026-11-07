@@ -1,4 +1,4 @@
-//! Fork-based plugin sandbox ("cage") for crash isolation.
+//! Process-based plugin sandbox ("cage") for crash isolation.
 //!
 //! Plugins loaded via `dlopen` can segfault, which kills the entire process.
 //! `std::panic::catch_unwind` only catches Rust panics, not OS signals like
@@ -6,11 +6,12 @@
 //! runs in a short-lived child process.  If the child segfaults, the parent
 //! observes a non-zero exit status and continues running.
 //!
-//! Two main entry points:
+//! Catalog discovery uses [`exec_scan`] and instantiation safety checks use
+//! [`exec_probe_outcome`], both in fresh processes so they can run concurrently
+//! with Qt, PipeWire, and other scans. Lower-level fork helpers are also kept:
 //!
 //! - [`fork_scan`] — Run a closure in a forked child and return serialized
-//!   results via a pipe.  Used for plugin scanning where the result is plain
-//!   data (e.g. `Vec<PluginInfo>`).
+//!   results via a pipe, for callers that can safely run work after fork.
 //!
 //! - [`fork_probe`] — Run a closure in a forked child and report whether it
 //!   completed without crashing.  Used to "test" whether instantiating a
@@ -23,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-/// Outcome of a forked operation.
+/// Outcome of an isolated operation.
 #[derive(Debug)]
 pub enum SandboxResult<T> {
     /// The child completed successfully and returned data.
@@ -35,8 +36,86 @@ pub enum SandboxResult<T> {
     },
     /// The child timed out and was killed.
     Timeout,
-    /// The fork or pipe setup itself failed.
+    /// Process creation, pipe setup or waiting failed.
     ForkFailed(String),
+}
+
+/// Scan one library in a fresh process. Safe to call from worker threads:
+/// no plugin code runs between fork and exec in the multithreaded host.
+pub fn exec_scan(format: &str, path: &std::path::Path) -> SandboxResult<Vec<crate::plugin::PluginInfo>> {
+    use std::os::fd::AsRawFd;
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => return SandboxResult::ForkFailed(e.to_string()),
+    };
+    let mut child = match Command::new(exe)
+        .arg("--scan-plugin")
+        .arg(format)
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => return SandboxResult::ForkFailed(e.to_string()),
+    };
+    let stdout = child.stdout.take().expect("scanner stdout is piped");
+    let (result, data) = collect_child_output(
+        child.id() as i32,
+        stdout.as_raw_fd(),
+        Some(Instant::now() + Duration::from_secs(10)),
+    );
+    decode_scan_result(result, &data)
+}
+
+/// Headless scanner entry point. Reserve a private descriptor for the JSON
+/// result so plugins that print to stdout cannot corrupt the protocol.
+pub fn run_scan_main(args: &[String]) -> ! {
+    use std::os::fd::FromRawFd;
+    if args.len() != 2 {
+        crate::exit_now(2);
+    }
+    unsafe {
+        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+        if libc::getppid() == 1 { libc::_exit(1); }
+    }
+    let result_fd = unsafe { libc::fcntl(libc::STDOUT_FILENO, libc::F_DUPFD_CLOEXEC, 3) };
+    if result_fd < 0 || unsafe { libc::dup2(libc::STDERR_FILENO, libc::STDOUT_FILENO) } < 0 {
+        crate::exit_now(1);
+    }
+    let mut result = unsafe { std::fs::File::from_raw_fd(result_fd) };
+    let mut plugins = Vec::new();
+    let path = std::path::Path::new(&args[1]);
+    match args[0].as_str() {
+        "clap" => crate::clap::scanner::scan_clap_file(path, &mut plugins),
+        "vst3" => crate::vst3::scanner::scan_vst3_bundle(path, &mut plugins),
+        _ => crate::exit_now(2),
+    }
+    let ok = serde_json::to_writer(&mut result, &plugins).is_ok() && result.flush().is_ok();
+    // _exit avoids plugin atexit handlers; the OS closes the result pipe.
+    crate::exit_now(if ok { 0 } else { 1 });
+}
+
+fn decode_scan_result<T: for<'de> Deserialize<'de>>(result: WaitResult, data: &[u8]) -> SandboxResult<T> {
+    match result {
+        WaitResult::Exited(0) => match serde_json::from_slice(data) {
+            Ok(value) => SandboxResult::Ok(value),
+            Err(e) => SandboxResult::Crashed {
+                signal: None,
+                description: format!("invalid scanner output: {e}"),
+            },
+        },
+        WaitResult::Exited(code) => SandboxResult::Crashed {
+            signal: None,
+            description: format!("scanner exited with code {code}"),
+        },
+        WaitResult::Signaled(sig) => SandboxResult::Crashed {
+            signal: Some(sig),
+            description: signal_name(sig).to_string(),
+        },
+        WaitResult::Timeout => SandboxResult::Timeout,
+        WaitResult::Error(e) => SandboxResult::ForkFailed(e),
+    }
 }
 
 /// Run a closure in a forked child process and collect its serialized return

@@ -261,6 +261,12 @@ ZestBay scans for LV2, VST3 and CLAP plugins when it starts, so restart it
 after adding plugins. Where plugins go depends on which version you run
 (**About** shows *Install: Native* or *Install: Flatpak*).
 
+Discovery runs in the background, with progress in the status bar. CLAP and
+VST3 libraries are scanned in up to four isolated processes at a time. Saved
+plugins start directly from their stored descriptors and library paths; LV2
+plugins use their saved URIs. Older configs and missing paths fall back to
+discovery, then gain updated paths automatically for the next launch.
+
 ### Native version (distro package or built from source)
 
 The native version sees every plugin installed on your system.

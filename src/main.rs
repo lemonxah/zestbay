@@ -46,6 +46,12 @@ unsafe extern "C" {
 }
 
 fn main() {
+    // Scanning needs no Qt, X11, tray or PipeWire initialization.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|arg| arg == "--scan-plugin") {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+        plugin::sandbox::run_scan_main(&args[2..]);
+    }
     // Plugin UIs (LV2/CLAP/VST3 X11 editors) call Xlib from several threads;
     // Xlib must be put into thread-safe mode before any other Xlib call and
     // before any thread is spawned.

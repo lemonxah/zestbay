@@ -425,25 +425,8 @@ impl qobject::AppController {
     }
 
     fn saved_plugin_for(&self, stable_id: &str) -> Option<SavedPlugin> {
-        use base64::Engine;
         let info = self.rust().plugin_manager.as_ref()?.find_by_stable_id(stable_id)?;
-        Some(SavedPlugin {
-            stable_id: info.stable_id.clone(),
-            uri: info.plugin_uri.clone(),
-            display_name: info.display_name.clone(),
-            bypassed: info.bypassed,
-            parameters: info
-                .parameters
-                .iter()
-                .map(|p| SavedPluginParam { port_index: p.port_index, symbol: p.symbol.clone(), value: p.value })
-                .collect(),
-            format: info.format.as_str().to_string(),
-            lv2_state: info.lv2_state.clone(),
-            plugin_state: info
-                .plugin_state
-                .as_ref()
-                .map(|blob| base64::engine::general_purpose::STANDARD.encode(blob)),
-        })
+        Some(SavedPlugin::from(info))
     }
 
     /// A template of a live subgraph (call after collecting plugin states).

@@ -77,6 +77,7 @@ struct AddRequest {
     instance_id: u64,
     display_name: String,
     format: String,
+    scan_info: Option<crate::plugin::PluginInfo>,
     stable_id: String,
     lv2_state: Vec<StateEntry>,
     plugin_state: Option<Vec<u8>>,
@@ -146,6 +147,7 @@ struct PluginMeta {
     plugin_uri: String,
     display_name: String,
     format: String,
+    scan_info: Option<crate::plugin::PluginInfo>,
     stable_id: String,
 }
 
@@ -727,6 +729,7 @@ impl Host {
                 instance_id,
                 display_name,
                 format,
+                scan_info,
                 lv2_state,
                 plugin_state,
                 stable_id,
@@ -735,6 +738,7 @@ impl Host {
                 instance_id,
                 display_name,
                 format,
+                scan_info,
                 stable_id,
                 lv2_state,
                 plugin_state,
@@ -1177,11 +1181,18 @@ impl Host {
             };
             let uri = req.plugin_uri.clone();
             // CLAP/VST3: hand the probe the library path so the child doesn't scan.
-            let lib = match fmt {
-                "clap" => crate::clap::scanner::find_plugin(&uri).map(|i| i.library_path),
-                "vst3" => crate::vst3::scanner::find_plugin(&uri).map(|i| i.library_path),
+            let lib = req.scan_info.as_ref().map(|i| i.library_path.clone()).or_else(|| match fmt {
+                "clap" => crate::clap::scanner::cached_plugin(&uri).map(|i| i.library_path),
+                "vst3" => crate::vst3::scanner::cached_plugin(&uri).map(|i| i.library_path),
                 _ => None,
-            };
+            });
+            if fmt != "lv2" && lib.is_none() {
+                // Discovery already finished without finding this plugin.
+                // Instantiation will report it missing; don't make a probe
+                // start a second full scan just to reach the same verdict.
+                req.probe = ProbeStatus::Done(crate::plugin::sandbox::ProbeOutcome::Ok);
+                continue;
+            }
             let (tx, rx) = std::sync::mpsc::channel();
             let spawned = std::thread::Builder::new()
                 .name("zestbay-probe".into())
@@ -1257,6 +1268,7 @@ impl Host {
                 plugin_uri: req.plugin_uri.clone(),
                 display_name: req.display_name.clone(),
                 format: req.format.clone(),
+                scan_info: req.scan_info.clone(),
                 stable_id: req.stable_id.clone(),
             },
         );
@@ -1346,7 +1358,7 @@ impl Host {
     }
 
     fn instantiate_clap(&self, req: &AddRequest, sr: f64) -> Result<(), String> {
-        let info = crate::clap::scanner::find_plugin(&req.plugin_uri)
+        let info = req.scan_info.clone().or_else(|| crate::clap::scanner::cached_plugin(&req.plugin_uri))
             .ok_or_else(|| format!("CLAP plugin not found: {}", req.plugin_uri))?;
         // The saved state is loaded before activation (state-dependent ports).
         let inst = unsafe {
@@ -1392,7 +1404,7 @@ impl Host {
     }
 
     fn instantiate_vst3(&self, req: &AddRequest, sr: f64) -> Result<(), String> {
-        let info = crate::vst3::scanner::find_plugin(&req.plugin_uri)
+        let info = req.scan_info.clone().or_else(|| crate::vst3::scanner::cached_plugin(&req.plugin_uri))
             .ok_or_else(|| format!("VST3 plugin not found: {}", req.plugin_uri))?;
         // The saved state is restored before setup/activation.
         let inst = unsafe {
@@ -1525,6 +1537,7 @@ impl Host {
             instance_id,
             display_name: meta.display_name,
             format: meta.format,
+            scan_info: meta.scan_info,
             stable_id: meta.stable_id,
             lv2_state,
             plugin_state,

@@ -169,6 +169,8 @@ pub enum PwCommand {
         display_name: String,
         /// "LV2", "CLAP", or "VST3"
         format: String,
+        /// Saved/discovered descriptor, including the CLAP/VST3 library path.
+        scan_info: Option<crate::plugin::PluginInfo>,
         lv2_state: Vec<crate::lv2::state::StateEntry>,
         /// Opaque CLAP/VST3 state blob to restore after instantiation.
         plugin_state: Option<Vec<u8>>,

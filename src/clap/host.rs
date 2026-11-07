@@ -714,6 +714,7 @@ impl ClapPluginInstance {
 
     pub fn get_info(&self, pw_node_id: Option<u32>) -> PluginInstanceInfo {
         PluginInstanceInfo {
+            scan_info: None,
             id: self.id,
             stable_id: String::new(),
             plugin_uri: self.plugin_id.clone(),

@@ -22,6 +22,11 @@ const VST3_SEARCH_DIRS: &[&str] = &[
 
 static CACHE: crate::clap::scanner::ScanCache = crate::clap::scanner::ScanCache::new();
 
+/// Lookup without starting discovery on the PipeWire thread.
+pub fn cached_plugin(uri: &str) -> Option<PluginInfo> {
+    CACHE.get(uri)
+}
+
 /// Look up a single plugin by URI.  Served from the cache of the last
 /// `scan_plugins()`; a miss rescans at most once per cooldown period.
 pub fn find_plugin(uri: &str) -> Option<PluginInfo> {
@@ -32,18 +37,16 @@ pub fn find_plugin(uri: &str) -> Option<PluginInfo> {
 
 /// Scan all standard directories and return a list of VST3 plugin infos.
 pub fn scan_plugins() -> Vec<PluginInfo> {
-    let mut plugins = Vec::new();
-    let dirs = expand_search_dirs();
+    scan_discovered(&discover_plugins(), &|| {})
+}
 
-    for dir in &dirs {
-        if !dir.is_dir() {
-            continue;
-        }
-        log::info!("VST3: scanning {}", dir.display());
-        scan_directory(dir, &mut plugins);
-    }
+pub(crate) fn discover_plugins() -> Vec<PathBuf> {
+    crate::plugin::scan::discover(&expand_search_dirs(), "vst3", false)
+}
 
-    plugins.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+pub(crate) fn scan_discovered(paths: &[PathBuf], progress: &(impl Fn() + Sync)) -> Vec<PluginInfo> {
+    let mut plugins = crate::plugin::scan::scan_libraries("vst3", paths, progress);
+    plugins.sort_by_cached_key(|p| p.name.to_lowercase());
     log::info!("VST3: found {} plugins total", plugins.len());
     CACHE.store(&plugins);
     plugins
@@ -51,63 +54,6 @@ pub fn scan_plugins() -> Vec<PluginInfo> {
 
 fn expand_search_dirs() -> Vec<PathBuf> {
     crate::plugin::paths::search_dirs("VST3_PATH", VST3_SEARCH_DIRS, "vst3", "VST3")
-}
-
-fn scan_directory(dir: &Path, plugins: &mut Vec<PluginInfo>) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(e) => {
-            log::debug!("VST3: cannot read {}: {}", dir.display(), e);
-            return;
-        }
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if path.extension().is_some_and(|e| e == "vst3") {
-                sandboxed_scan_vst3_bundle(&path, plugins);
-            } else {
-                scan_directory(&path, plugins);
-            }
-        }
-    }
-}
-
-fn sandboxed_scan_vst3_bundle(bundle_path: &Path, plugins: &mut Vec<PluginInfo>) {
-    use crate::plugin::sandbox::{SandboxResult, fork_scan};
-
-    let path_owned = bundle_path.to_path_buf();
-    let timeout = std::time::Duration::from_secs(10);
-
-    let result: SandboxResult<Vec<PluginInfo>> = fork_scan(
-        move || {
-            let mut found = Vec::new();
-            scan_vst3_bundle(&path_owned, &mut found);
-            found
-        },
-        Some(timeout),
-    );
-
-    match result {
-        SandboxResult::Ok(found) => {
-            log::debug!("VST3 sandbox: {} scanned OK ({} plugins)", bundle_path.display(), found.len());
-            plugins.extend(found);
-        }
-        SandboxResult::Crashed { signal, description } => {
-            log::warn!(
-                "VST3 sandbox: {} crashed during scan (signal {:?}): {}",
-                bundle_path.display(), signal, description
-            );
-        }
-        SandboxResult::Timeout => {
-            log::warn!("VST3 sandbox: {} timed out during scan", bundle_path.display());
-        }
-        SandboxResult::ForkFailed(e) => {
-            log::error!("VST3 sandbox: fork failed for {}: {}", bundle_path.display(), e);
-            scan_vst3_bundle(bundle_path, plugins);
-        }
-    }
 }
 
 /// Known `Contents/<arch>-linux` directory names.
@@ -161,7 +107,7 @@ pub fn find_bundle_binary(bundle_path: &Path) -> Option<PathBuf> {
     None
 }
 
-fn scan_vst3_bundle(bundle_path: &Path, plugins: &mut Vec<PluginInfo>) {
+pub(crate) fn scan_vst3_bundle(bundle_path: &Path, plugins: &mut Vec<PluginInfo>) {
     let so_path = match find_bundle_binary(bundle_path) {
         Some(p) => p,
         None => {
