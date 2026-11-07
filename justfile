@@ -69,7 +69,11 @@ install: build
 release new_version msg="":
     just bump {{new_version}} {{quote(msg)}}
     git add Cargo.toml Cargo.lock pkg/zestbay/PKGBUILD pkg/rpm/zestbay.spec pkg/flatpak/io.github.lemonxah.ZestBay.metainfo.xml
-    git commit -m "v{{new_version}}{{ if msg != "" { ": " + msg } else { "" } }}"
+    if git diff --cached --quiet; then \
+        echo "Version bump already committed; continuing release"; \
+    else \
+        git commit -m "v{{new_version}}{{ if msg != "" { ": " + msg } else { "" } }}"; \
+    fi
     git tag -a "v{{new_version}}" -m "v{{new_version}}{{ if msg != "" { ": " + msg } else { "" } }}"
     git push && git push --tags
     gh release create "v{{new_version}}" --generate-notes
