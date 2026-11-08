@@ -22,19 +22,84 @@ Item {
         // Theme lives in the qml/ directory, not visible from here.
         Qt.createQmlObject('import QtQuick; import "' + qmlDir + '"; QtObject { Component.onCompleted: Theme.mode = "'
                            + mode + '" }', root)
-        var file = target === "main" ? "main.qml" : target + ".qml"
+        var isMain = target === "main" || target === "main-presets"
+        var file = isMain ? "main.qml" : target + ".qml"
         var c = Qt.createComponent(qmlDir + file)
         if (c.status !== Component.Ready) {
             console.warn(c.errorString())
             Qt.quit()
             return
         }
-        var w = target === "main" ? c.createObject(null) : c.createObject(null, { controller: controller })
+        var w = isMain ? c.createObject(null) : c.createObject(null, { controller: controller })
         if (target === "PluginParams") w.openForNode(30)
-        else if (target !== "main" && w.open) w.open()
+        else if (!isMain && w.open) w.open()
         w.visible = true
+        if (target === "main-presets") {
+            // The whole window with a plugin node's preset dropdown open.
+            presetShot.win = w
+            presetShot.start()
+            return
+        }
         grab.win = w
         grab.start()
+    }
+
+    function findByFunction(item, name) {
+        if (typeof item[name] === "function") return item
+        var kids = item.children
+        for (var i = 0; i < kids.length; i++) {
+            var r = findByFunction(kids[i], name)
+            if (r) return r
+        }
+        return null
+    }
+
+    Timer {
+        id: presetShot
+        property var win
+        interval: 2500
+        onTriggered: {
+            var graph = root.findByFunction(win.contentItem, "openPresetMenu")
+            if (!graph) { console.warn("no graph view found"); Qt.quit(); return }
+            graph.openPresetMenu(30)
+            presetMirror.graph = graph
+            presetMirror.win = win
+            presetMirror.start()
+        }
+    }
+
+    // Qt can't grab a popup (it lives in the window's popup layer), so move
+    // the open menu's own items into the graph view; the normal grab then
+    // includes them.
+    Timer {
+        id: presetMirror
+        property var graph
+        property var win
+        interval: 600
+        onTriggered: {
+            var menu = null
+            for (var i = 0; i < graph.data.length; i++) {
+                var o = graph.data[i]
+                if (o && typeof o.insertItem === "function" && o.opened) { menu = o; break }
+            }
+            if (!menu) { console.warn("no open menu found"); Qt.quit(); return }
+            // Move the menu's own items into the graph view (offscreen
+            // rendering has no shader effects to mirror them with).
+            var mx = menu.x, my = menu.y
+            var bg = menu.background, ct = menu.contentItem
+            var bw = menu.width, bh = menu.height
+            var cx = menu.leftPadding, cy = menu.topPadding
+            var cw = ct.width, ch = ct.height
+            bg.parent = graph
+            ct.parent = graph
+            bg.z = 100000
+            ct.z = 100001
+            bg.x = mx; bg.y = my; bg.width = bw; bg.height = bh
+            ct.x = mx + cx; ct.y = my + cy; ct.width = cw; ct.height = ch
+            grab.win = win
+            grab.interval = 500
+            grab.start()
+        }
     }
 
     Timer {

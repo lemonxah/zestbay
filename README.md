@@ -33,6 +33,10 @@ ZestBay is a visual audio routing tool for PipeWire on Linux. It lets you see ev
     <td><img src="docs/screenshots/parameters.png" alt="Plugin parameters with MIDI learn"></td>
     <td><img src="docs/screenshots/cpu-usage.png" alt="CPU usage"></td>
   </tr>
+  <tr>
+    <td><img src="docs/screenshots/presets.png" alt="Preset dropdown on a plugin node" width="320"></td>
+    <td valign="top"><strong>Plugin presets</strong><br>Every plugin node has a preset dropdown and a Save button. Save a plugin's settings once, then pick them on any other instance, or make one the default so new instances start from it. See <a href="#plugin-presets">Plugin Presets</a>.</td>
+  </tr>
 </table>
 
 <p align="center">
@@ -50,7 +54,11 @@ qpwgraph is a straightforward PipeWire graph editor. ZestBay goes further:
 
 - **LV2, VST2, VST3, and CLAP plugin hosting** -- Insert effects (EQ, compressor, reverb, etc.) directly into the PipeWire graph without needing a DAW or separate plugin host. ZestBay creates real PipeWire filter nodes with RT-safe DSP processing. Comprehensive LV2 extension support (URID, worker, state, log, options, buf-size, data-access, instance-access) means most LV2 plugins load without issues. VST2, VST3, and CLAP plugins are hosted with parameter, state, and native UI support.
 - **Native plugin UIs** -- Open the original plugin interfaces. LV2 UIs (GTK3, X11, Qt5, GTK2, GTK4) via suil, VST2, VST3, and CLAP UIs via embedded X11 windows. A persistent GTK thread manages LV2 plugin windows without the crash-on-reopen issues common in LV2 hosts.
+- **Plugin presets** -- Save a plugin's settings as named presets, pick them from a dropdown on the plugin node, and apply them to any other instance of that plugin instead of re-entering every value. One preset per plugin can be the default, so new instances start from it. For LV2 plugins a preset also keeps the plugin's saved state (for example the LSP Mixer's channel names), not just the knob positions. See [Plugin Presets](#plugin-presets).
 - **MIDI parameter control** -- Map hardware MIDI controllers to any plugin parameter with one-click learn. Continuous, toggle, and momentary modes with RT-safe processing.
+- **Crash-safe plugin loading** -- Every plugin is test-loaded in a separate process before it runs inside ZestBay, plugin discovery runs in the background so startup isn't held up, and if a restore still crashes the next start enters safe mode and offers the last known-good plugin set.
+- **Per-plugin CPU load** -- A CPU usage window shows each plugin's DSP load over time, so you can see which effect is costing you.
+- **Quick wiring** -- Drag a plugin onto a wire to insert it into that connection, and set a default node so app streams without a rule are routed there.
 - **Auto-connect rules with learning and blocking** -- Manually connect two ports and ZestBay creates a patchbay rule; disconnect them and the rule updates. Block rules keep a source from ever reaching a target.
 - **Subgraphs and virtual devices** -- Group a plugin chain into one block, reuse it as a template, offer it to apps as a microphone or speaker, and create virtual sinks and sources without editing PipeWire config.
 - **Full session persistence** -- Plugin instances, their parameters and state, bypass, wiring, MIDI mappings, subgraphs, virtual devices, layout, pins, viewport, window geometry, hidden nodes and rules all survive restarts.
@@ -62,12 +70,16 @@ Carla is a full-featured plugin host and JACK patchbay. The differences are abou
 
 - **PipeWire-native** -- ZestBay connects directly to PipeWire's native API, not through the JACK compatibility layer. Every PipeWire node (app streams, hardware devices, virtual sinks) appears naturally in the graph.
 - **Lightweight and focused** -- ZestBay is a patchbay first. There is no transport, no MIDI sequencing, no rack view. It hosts LV2, VST2, VST3, and CLAP plugins for inline effects processing with MIDI CC/note learn for hands-on parameter control from hardware controllers. If you need a full DAW-style plugin host environment with MIDI tracks and transport, use Carla. If you need persistent audio routing with inline effects and hardware knob control, ZestBay is simpler and faster to set up.
+- **Presets live on the node** -- Carla keeps plugin settings in its project files. In ZestBay your session is saved automatically, and each plugin node also has its own named presets next to its On / UI / Params buttons. They are stored once per plugin and shared by every instance of it, with an optional default for new instances, so setting up the fifth copy of a mixer or EQ is one click instead of re-entering its values.
+- **Hands-on recovery** -- A **Restart PipeWire** item in the menu restarts PipeWire, PipeWire-Pulse and WirePlumber when a device drops out or something wedges. ZestBay reconnects and restores its plugins and links by itself.
 - **No runtime dependencies beyond Qt6, PipeWire and the LV2 libraries** -- No Python. ZestBay ships its main binary and a small `zestbay-ui-bridge` helper that can run LV2 plugin UIs in a separate process.
 - **Rust** -- Memory-safe core with lock-free DSP-to-UI communication. The RT audio callback uses raw pointers only where PipeWire's filter API requires it.
 
 ### vs. Helvum, PatchMatrix, and other GTK patchbays
 
 - **LV2, VST2, VST3, and CLAP plugin hosting** -- Most PipeWire patchbays only visualize and connect. ZestBay can host plugins from all four plugin formats inline.
+- **Plugin presets, MIDI control and per-plugin CPU load** -- These only make sense once plugins are hosted: save and reuse a plugin's settings across instances (with an optional default for new ones), drive parameters from a hardware controller, and see what each plugin costs. See [Plugin Presets](#plugin-presets) and [MIDI Parameter Control](#midi-parameter-control).
+- **Subgraphs and virtual devices** -- Group a plugin chain into one reusable block, offer it to apps as a microphone or speaker, and create virtual sinks and sources from the UI.
 - **Auto-connect and block rules** -- Define patterns that automatically wire things up when nodes appear, or keep them apart. Other tools require manual reconnection every time.
 - **Qt6/QML** -- Native look and feel on KDE Plasma and other Qt-based desktops, with dark and light themes that follow the desktop.
 

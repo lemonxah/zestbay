@@ -1249,7 +1249,8 @@ Item {
 
         // Why the name shows a "*": the first difference from the saved preset.
         ZbMenuItem {
-            text: "Changed: " + (graphView.presetMenuChanges.length > 0 ? graphView.presetMenuChanges[0] : "")
+            // Just the parameter name (the values are in the log): the menu is narrow.
+            text: "Changed: " + (graphView.presetMenuChanges.length > 0 ? graphView.presetMenuChanges[0].split(": ")[0] : "")
                   + (graphView.presetMenuChanges.length > 1 ? "  (+" + (graphView.presetMenuChanges.length - 1) + " more)" : "")
             enabled: false
             visible: graphView.presetMenuChanges.length > 0
