@@ -1,5 +1,5 @@
 Name:           zestbay
-Version:        1.2.0
+Version:        1.2.1
 Release:        1%{?dist}
 Summary:        PipeWire patchbay and audio routing manager
 
