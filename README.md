@@ -201,13 +201,48 @@ Subgraph and virtual device files from older versions are upgraded when ZestBay 
 
 ## Installation
 
+### Ubuntu (PPA)
+
+ZestBay is available from a Launchpad PPA for Ubuntu 24.04 LTS and 26.04 LTS
+(and derivatives such as Linux Mint and Pop!_OS). Launchpad builds it against
+each release's own libraries, so it installs cleanly on both.
+
+```bash
+sudo add-apt-repository ppa:lemonxah/tools
+sudo apt update
+sudo apt install zestbay
+```
+
+Updates then arrive through the normal `apt upgrade`. To remove it:
+`sudo apt remove zestbay && sudo add-apt-repository --remove ppa:lemonxah/tools`.
+
+PPA page: <https://launchpad.net/~lemonxah/+archive/ubuntu/tools>
+
+### Debian
+
+Download the `.deb` for your release from the
+[latest release](https://github.com/lemonxah/zestbay/releases/latest)
+(`zestbay_<version>-debian12_amd64.deb` for Debian 12 "bookworm",
+`zestbay_<version>-debian13_amd64.deb` for Debian 13 "trixie") and install it
+with apt, which pulls in the dependencies:
+
+```bash
+sudo apt install ./zestbay_<version>-debian13_amd64.deb
+```
+
+The package is built per release, so use the one that matches your Debian
+version. It doesn't update through `apt upgrade`; download the new one for
+each release.
+
+### Other distributions
+
 - **Arch Linux**: ZestBay is in the official Arch Linux `extra` repository:
   `sudo pacman -S zestbay`. It is no longer on the AUR; if you installed the
   AUR package before, the `extra` package replaces it. The `pkg/zestbay/` and
   `pkg/zestbay-git/` PKGBUILDs in this repo are only for building a tagged
   release or the latest commit yourself.
 - **Flatpak**: `io.github.lemonxah.ZestBay` -- see [`pkg/flatpak/README.md`](pkg/flatpak/README.md) to build it locally or make a single-file bundle (`just flatpak`, `just flatpak-bundle`).
-- **Fedora/RPM, Debian, Nix**: packaging in `pkg/rpm/`, `pkg/deb/` and `pkg/nix/`.
+- **Fedora/RPM, Nix, and the Debian/PPA packaging**: in `pkg/rpm/`, `pkg/nix/` and `pkg/deb/` (plus `debian/` for the PPA).
 - **From source**: see below; `just install` builds and installs to `/usr`.
 
 ## Building from source

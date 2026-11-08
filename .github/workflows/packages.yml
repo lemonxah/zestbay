@@ -27,10 +27,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # A .deb works on the release it was built for and newer, but its
-        # library dependency names are fixed at build time (e.g. 24.04's
-        # libqt6gui6t64 doesn't exist on 26.04), so build one per release
-        image: ["ubuntu:24.04", "ubuntu:26.04"]
+        # Debian only: Ubuntu users get ZestBay from the Launchpad PPA
+        # (ppa:lemonxah/tools). A .deb's library dependency names are fixed
+        # at build time, so build one per Debian release.
+        image: ["debian:12", "debian:13"]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -47,20 +47,20 @@ jobs:
       - name: Build .deb
         run: pkg/deb/build-deb.sh --container "${{ matrix.image }}"
 
-      # Built on the oldest supported Ubuntu so they run on as many distros as possible
+      # Built on the oldest supported Debian (oldest glibc) so they run on as many distros as possible
       - name: Package the executables
-        if: matrix.image == 'ubuntu:24.04'
+        if: matrix.image == 'debian:12'
         run: |
           version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           dir="zestbay-${version}-x86_64-linux"
           mkdir "$dir"
-          install -m755 target/deb-ubuntu-24.04/release/zestbay target/deb-ubuntu-24.04/release/zestbay-ui-bridge "$dir/"
+          install -m755 target/deb-debian-12/release/zestbay target/deb-debian-12/release/zestbay-ui-bridge "$dir/"
           strip "$dir/zestbay" "$dir/zestbay-ui-bridge"
           cp LICENSE "$dir/"
           tar -czf "$dir.tar.gz" "$dir"
 
       - name: Upload the executables
-        if: matrix.image == 'ubuntu:24.04'
+        if: matrix.image == 'debian:12'
         uses: actions/upload-artifact@v7
         with:
           name: executables-x86_64-linux
