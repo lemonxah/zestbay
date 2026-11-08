@@ -12,6 +12,12 @@
   Built with Rust + Qt6/QML for a fast, native Linux desktop experience.
 </p>
 
+<p align="center">
+  <a href="https://lemonxah.github.io/zestbay/"><strong>Website</strong></a>
+  &middot; <a href="#installation">Install</a>
+  &middot; <a href="https://github.com/lemonxah/zestbay/releases/latest">Releases</a>
+</p>
+
 ---
 
 ## What is ZestBay?
@@ -242,6 +248,8 @@ Everything is saved to `~/.config/zestbay/` (`~/.var/app/io.github.lemonxah.Zest
 Subgraph and virtual device files from older versions are upgraded when ZestBay starts (the original is kept as `<file>.pre-upgrade`); a config file that can't be read is kept as `<file>.corrupt-<date>` and reported.
 
 ## Installation
+
+The [official website](https://lemonxah.github.io/zestbay/) has the same install steps with a short overview of the features.
 
 ### Ubuntu (PPA)
 
