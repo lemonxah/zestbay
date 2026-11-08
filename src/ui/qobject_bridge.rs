@@ -27,6 +27,12 @@ pub mod qobject {
         #[qinvokable]
         fn request_quit(self: Pin<&mut Self>);
 
+        /// Restart the user's PipeWire, PipeWire-Pulse and WirePlumber
+        /// services (systemd). Runs in the background; a failure is reported
+        /// through error_occurred.
+        #[qinvokable]
+        fn restart_pipewire(self: Pin<&mut Self>);
+
         #[qinvokable]
         fn get_nodes_json(self: Pin<&mut Self>) -> QString;
 
@@ -105,6 +111,37 @@ pub mod qobject {
 
         #[qinvokable]
         fn set_plugin_bypass(self: Pin<&mut Self>, node_id: u32, bypassed: bool);
+
+        /// Preset summary for every plugin node: {nodeId: {name, isDefault,
+        /// modified, count}}. `name` is the selected preset ("" for none).
+        #[qinvokable]
+        fn get_plugin_presets_all_json(self: Pin<&mut Self>) -> QString;
+
+        /// {presets: [names], selected, default} for one plugin node.
+        #[qinvokable]
+        fn get_plugin_presets_json(self: Pin<&mut Self>, node_id: u32) -> QString;
+
+        /// Apply the named preset's parameter values and select it.
+        #[qinvokable]
+        fn apply_plugin_preset(self: Pin<&mut Self>, node_id: u32, name: QString) -> bool;
+
+        /// Save the node's current parameters as a preset: a new one, or an
+        /// update if the name exists. The preset becomes the selected one.
+        #[qinvokable]
+        fn save_plugin_preset(self: Pin<&mut Self>, node_id: u32, name: QString) -> bool;
+
+        #[qinvokable]
+        fn delete_plugin_preset(self: Pin<&mut Self>, node_id: u32, name: QString);
+
+        /// Reset the plugin to its defaults (parameters and, for LV2, saved
+        /// state) and deselect its preset, ready to save as a new one.
+        #[qinvokable]
+        fn start_new_plugin_preset(self: Pin<&mut Self>, node_id: u32);
+
+        /// Make the named preset the plugin's default for new instances;
+        /// an empty name clears the default.
+        #[qinvokable]
+        fn set_default_plugin_preset(self: Pin<&mut Self>, node_id: u32, name: QString);
 
         #[qinvokable]
         fn get_active_plugins_json(self: Pin<&mut Self>) -> QString;
@@ -484,6 +521,12 @@ pub struct AppControllerRust {
     params_dirty: bool,
     params_dirty_since: Option<std::time::Instant>,
 
+    /// Per-plugin parameter presets (presets.json).
+    presets: crate::presets::PresetStore,
+    /// A preset just saved from an LV2 instance: (plugin URI, preset name)
+    /// to refresh with the fresh state snapshot that is on its way.
+    preset_state_refresh: std::collections::HashMap<u64, (String, String)>,
+
     /// Instance ids of the plugins restored from plugins.json at startup that
     /// have not reported back yet (added or failed).
     restore_instance_ids: std::collections::HashSet<u64>,
@@ -558,6 +601,8 @@ impl Default for AppControllerRust {
             rules_loaded: false,
             params_dirty: false,
             params_dirty_since: None,
+            presets: load_presets(),
+            preset_state_refresh: std::collections::HashMap::new(),
             restore_instance_ids: std::collections::HashSet::new(),
             restore_started_at: None,
             restore_batch_size: 0,
@@ -1785,6 +1830,13 @@ impl qobject::AppController {
         lv2_state: Vec<crate::lv2::state::StateEntry>,
         blob: Option<Vec<u8>>,
     ) {
+        // A preset was just saved from this plugin: keep the fresh snapshot.
+        if let Some((uri, name)) = self.as_mut().rust_mut().preset_state_refresh.remove(&instance_id)
+            && !lv2_state.is_empty()
+        {
+            self.as_mut().rust_mut().presets.set_lv2_state(&uri, &name, lv2_state.clone());
+            persist_presets(&self.rust().presets);
+        }
         let mut labels_changed = false;
         if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager
             && let Some(info) = mgr.get_instance_mut(instance_id)
@@ -2553,6 +2605,39 @@ impl qobject::AppController {
         }
     }
 
+    pub fn restart_pipewire(self: Pin<&mut Self>) {
+        std::thread::spawn(|| {
+            let mut cmd = if crate::plugin::paths::in_flatpak() {
+                // The sandbox can't reach the host's systemd directly.
+                let mut c = std::process::Command::new("flatpak-spawn");
+                c.args(["--host", "systemctl"]);
+                c
+            } else {
+                std::process::Command::new("systemctl")
+            };
+            cmd.args([
+                "--user",
+                "restart",
+                "pipewire.service",
+                "pipewire-pulse.service",
+                "wireplumber.service",
+            ]);
+            log::warn!("Restarting PipeWire (user request)");
+            match cmd.output() {
+                Ok(out) if out.status.success() => log::info!("PipeWire restarted"),
+                Ok(out) => push_config_error(format!(
+                    "Restarting PipeWire failed ({}): {}",
+                    out.status,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                )),
+                Err(e) => push_config_error(format!(
+                    "Could not run systemctl to restart PipeWire: {}",
+                    e
+                )),
+            }
+        });
+    }
+
     pub fn request_quit(mut self: Pin<&mut Self>) {
         log::info!("Quit requested");
         let frozen = crate::PLUGINS_FROZEN.load(std::sync::atomic::Ordering::SeqCst);
@@ -2865,6 +2950,25 @@ impl qobject::AppController {
             return QString::from("");
         };
 
+        // A new instance starts from the plugin's default preset, if it has one.
+        let mut initial_params = initial_params;
+        let default_preset = self.rust().presets.default_name(&uri_str).map(str::to_string);
+        let mut default_values: Vec<(usize, f32)> = Vec::new();
+        let mut default_state: Vec<crate::lv2::state::StateEntry> = Vec::new();
+        if let Some(ref name) = default_preset
+            && let Some(preset) = self.rust().presets.get(&uri_str, name)
+        {
+            if plugin_format == crate::plugin::PluginFormat::Lv2 {
+                default_state = preset.lv2_state.clone();
+            }
+            default_values = crate::presets::values_to_apply(preset, &initial_params);
+            for (port_index, value) in &default_values {
+                if let Some(p) = initial_params.iter_mut().find(|p| p.port_index == *port_index) {
+                    p.value = *value;
+                }
+            }
+        }
+
         let instance_id = self.rust().next_instance_id;
         self.as_mut().rust_mut().next_instance_id += 1;
 
@@ -2876,6 +2980,10 @@ impl qobject::AppController {
 
         let stable_id = uuid::Uuid::new_v4().to_string();
         let stable_id_for_group = stable_id.clone();
+        if let Some(ref name) = default_preset {
+            self.as_mut().rust_mut().presets.select(&stable_id, Some(name));
+            persist_presets(&self.rust().presets);
+        }
         if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager {
             let info = crate::lv2::Lv2InstanceInfo {
                 id: instance_id,
@@ -2888,7 +2996,7 @@ impl qobject::AppController {
                 parameters: initial_params,
                 active: true,
                 bypassed: false,
-                lv2_state: Vec::new(),
+                lv2_state: default_state.clone(),
                 plugin_state: None,
             };
             mgr.register_instance(info);
@@ -2908,10 +3016,19 @@ impl qobject::AppController {
                 display_name: display_name.clone(),
                 format: format_str,
                 scan_info,
-                lv2_state: Vec::new(),
+                lv2_state: default_state,
                 plugin_state: None,
                 stable_id,
             });
+            // The add is queued on the PipeWire thread; parameter commands
+            // sent now are folded into it and applied when it runs.
+            for (port_index, value) in default_values {
+                let _ = tx.send(PwCommand::SetPluginParameter {
+                    instance_id,
+                    port_index,
+                    value,
+                });
+            }
         }
 
         persist_active_plugins(self.rust().plugin_manager.as_ref());
@@ -3180,6 +3297,261 @@ impl qobject::AppController {
             }
             None => QString::from(""),
         }
+    }
+
+    /// (instance id, stable id, plugin URI) of the plugin behind a graph node.
+    fn preset_target(&self, node_id: u32) -> Option<(u64, String, String)> {
+        let mgr = self.rust().plugin_manager.as_ref()?;
+        mgr.active_instances()
+            .iter()
+            .find(|(_, info)| info.pw_node_id == Some(node_id))
+            .map(|(id, info)| (*id, info.stable_id.clone(), info.plugin_uri.clone()))
+    }
+
+    pub fn get_plugin_presets_all_json(self: Pin<&mut Self>) -> QString {
+        let mut out = serde_json::Map::new();
+        if let Some(mgr) = self.rust().plugin_manager.as_ref() {
+            let store = &self.rust().presets;
+            for info in mgr.active_instances().values() {
+                let Some(node_id) = info.pw_node_id else { continue };
+                let selected = store.selected_name(&info.stable_id, &info.plugin_uri);
+                let modified = selected
+                    .and_then(|n| store.get(&info.plugin_uri, n))
+                    .is_some_and(|p| crate::presets::is_modified(p, &info.parameters, &info.lv2_state));
+                out.insert(
+                    node_id.to_string(),
+                    serde_json::json!({
+                        "name": selected.unwrap_or(""),
+                        "isDefault": selected.is_some()
+                            && selected == store.default_name(&info.plugin_uri),
+                        "modified": modified,
+                        "count": store.names(&info.plugin_uri).len(),
+                    }),
+                );
+            }
+        }
+        QString::from(&serde_json::Value::Object(out).to_string())
+    }
+
+    pub fn get_plugin_presets_json(self: Pin<&mut Self>, node_id: u32) -> QString {
+        let Some((instance_id, stable_id, uri)) = self.preset_target(node_id) else {
+            return QString::from("{}");
+        };
+        let store = &self.rust().presets;
+        let selected = store.selected_name(&stable_id, &uri).unwrap_or("");
+        // What changed since the preset was applied or saved (the "*" marker).
+        let changes: Vec<String> = self
+            .rust()
+            .plugin_manager
+            .as_ref()
+            .and_then(|m| m.get_instance(instance_id))
+            .zip(store.get(&uri, selected))
+            .map(|(info, preset)| {
+                crate::presets::differences(preset, &info.parameters, &info.lv2_state)
+            })
+            .unwrap_or_default();
+        if !changes.is_empty() {
+            log::info!("Preset \"{}\" differs from the plugin: {}", selected, changes.join("; "));
+        }
+        QString::from(
+            &serde_json::json!({
+                "presets": store.names(&uri),
+                "selected": selected,
+                "default": store.default_name(&uri).unwrap_or(""),
+                "changes": changes,
+            })
+            .to_string(),
+        )
+    }
+
+    pub fn apply_plugin_preset(mut self: Pin<&mut Self>, node_id: u32, name: QString) -> bool {
+        let name = name.to_string();
+        let Some((instance_id, stable_id, uri)) = self.preset_target(node_id) else {
+            return false;
+        };
+        let (values, reload_state) = {
+            let Some(preset) = self.rust().presets.get(&uri, &name) else {
+                return false;
+            };
+            let Some(info) = self
+                .rust()
+                .plugin_manager
+                .as_ref()
+                .and_then(|m| m.get_instance(instance_id))
+            else {
+                return false;
+            };
+            let state = (info.format == crate::plugin::PluginFormat::Lv2
+                && crate::presets::state_differs(preset, &info.lv2_state))
+            .then(|| preset.lv2_state.clone());
+            (crate::presets::values_to_apply(preset, &info.parameters), state)
+        };
+        if let Some(state) = reload_state {
+            // The plugin's state (e.g. channel names) can only be restored
+            // before it starts, so it is re-created in place with the state
+            // and the preset's parameter values.
+            if let Some(ref tx) = self.rust().cmd_tx {
+                let _ = tx.send(PwCommand::ReloadPluginWithState {
+                    instance_id,
+                    lv2_state: state.clone(),
+                    params: values.clone(),
+                });
+            }
+            if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager {
+                if let Some(info) = mgr.get_instance_mut(instance_id) {
+                    info.lv2_state = state;
+                }
+                for (port_index, value) in &values {
+                    mgr.update_parameter(instance_id, *port_index, *value);
+                }
+            }
+        } else {
+            for (port_index, value) in values {
+                if let Some(ref tx) = self.rust().cmd_tx {
+                    let _ = tx.send(PwCommand::SetPluginParameter {
+                        instance_id,
+                        port_index,
+                        value,
+                    });
+                }
+                if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager {
+                    mgr.update_parameter(instance_id, port_index, value);
+                }
+            }
+        }
+        self.as_mut().rust_mut().presets.select(&stable_id, Some(&name));
+        persist_presets(&self.rust().presets);
+        self.as_mut().rust_mut().params_dirty = true;
+        if self.rust().params_dirty_since.is_none() {
+            self.as_mut().rust_mut().params_dirty_since = Some(Instant::now());
+        }
+        true
+    }
+
+    pub fn save_plugin_preset(mut self: Pin<&mut Self>, node_id: u32, name: QString) -> bool {
+        let name = name.to_string().trim().to_string();
+        if name.is_empty() {
+            return false;
+        }
+        let Some((instance_id, stable_id, uri)) = self.preset_target(node_id) else {
+            return false;
+        };
+        let (params, lv2_state, is_lv2) = match self
+            .rust()
+            .plugin_manager
+            .as_ref()
+            .and_then(|m| m.get_instance(instance_id))
+        {
+            Some(info) => (
+                info.parameters.clone(),
+                info.lv2_state.clone(),
+                info.format == crate::plugin::PluginFormat::Lv2,
+            ),
+            None => return false,
+        };
+        let existed = self
+            .as_mut()
+            .rust_mut()
+            .presets
+            .save(&uri, &name, &params, &lv2_state);
+        self.as_mut().rust_mut().presets.select(&stable_id, Some(&name));
+        persist_presets(&self.rust().presets);
+        // The state kept here can be up to a minute old; ask for a fresh
+        // snapshot and store it in the preset when it arrives.
+        if is_lv2
+            && let Some(ref tx) = self.rust().cmd_tx
+            && tx.send(PwCommand::RequestPluginStates).is_ok()
+        {
+            self.as_mut()
+                .rust_mut()
+                .preset_state_refresh
+                .insert(instance_id, (uri.clone(), name.clone()));
+        }
+        log::info!(
+            "{} preset \"{}\" for {} ({} parameters, {} state entries)",
+            if existed { "Updated" } else { "Saved" },
+            name,
+            uri,
+            params.len(),
+            lv2_state.len()
+        );
+        true
+    }
+
+    pub fn start_new_plugin_preset(mut self: Pin<&mut Self>, node_id: u32) {
+        let Some((instance_id, stable_id, _)) = self.preset_target(node_id) else {
+            return;
+        };
+        let (defaults, has_lv2_state) = match self
+            .rust()
+            .plugin_manager
+            .as_ref()
+            .and_then(|m| m.get_instance(instance_id))
+        {
+            Some(info) => (
+                info.parameters
+                    .iter()
+                    .map(|p| (p.port_index, p.default))
+                    .collect::<Vec<(usize, f32)>>(),
+                info.format == crate::plugin::PluginFormat::Lv2 && !info.lv2_state.is_empty(),
+            ),
+            None => return,
+        };
+        if has_lv2_state {
+            // Saved state (e.g. channel names) can only be dropped by
+            // re-creating the plugin without it.
+            if let Some(ref tx) = self.rust().cmd_tx {
+                let _ = tx.send(PwCommand::ReloadPluginWithState {
+                    instance_id,
+                    lv2_state: Vec::new(),
+                    params: defaults.clone(),
+                });
+            }
+            if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager
+                && let Some(info) = mgr.get_instance_mut(instance_id)
+            {
+                info.lv2_state.clear();
+            }
+        } else if let Some(ref tx) = self.rust().cmd_tx {
+            for (port_index, value) in &defaults {
+                let _ = tx.send(PwCommand::SetPluginParameter {
+                    instance_id,
+                    port_index: *port_index,
+                    value: *value,
+                });
+            }
+        }
+        if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager {
+            for (port_index, value) in &defaults {
+                mgr.update_parameter(instance_id, *port_index, *value);
+            }
+        }
+        self.as_mut().rust_mut().presets.select(&stable_id, None);
+        persist_presets(&self.rust().presets);
+        self.as_mut().rust_mut().params_dirty = true;
+        if self.rust().params_dirty_since.is_none() {
+            self.as_mut().rust_mut().params_dirty_since = Some(Instant::now());
+        }
+    }
+
+    pub fn delete_plugin_preset(mut self: Pin<&mut Self>, node_id: u32, name: QString) {
+        let Some((_, _, uri)) = self.preset_target(node_id) else {
+            return;
+        };
+        self.as_mut().rust_mut().presets.delete(&uri, &name.to_string());
+        persist_presets(&self.rust().presets);
+    }
+
+    pub fn set_default_plugin_preset(mut self: Pin<&mut Self>, node_id: u32, name: QString) {
+        let Some((_, _, uri)) = self.preset_target(node_id) else {
+            return;
+        };
+        let name = name.to_string();
+        self.as_mut()
+            .rust_mut()
+            .presets
+            .set_default(&uri, if name.is_empty() { None } else { Some(&name) });
+        persist_presets(&self.rust().presets);
     }
 
     pub fn get_active_plugins_json(self: Pin<&mut Self>) -> QString {
@@ -4423,6 +4795,18 @@ const LINK_SETTLE_AFTER_RECONNECT: Duration = Duration::from_secs(5);
 
 fn default_lv2_format_str() -> String {
     "LV2".to_string()
+}
+
+fn load_presets() -> crate::presets::PresetStore {
+    load_config::<crate::presets::PresetStore>("presets.json")
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+fn persist_presets(store: &crate::presets::PresetStore) {
+    let json = serde_json::to_string_pretty(store).unwrap_or_default();
+    write_config("presets.json", json.as_bytes(), store.is_empty());
 }
 
 fn load_saved_plugins() -> Result<Vec<SavedPlugin>, ()> {

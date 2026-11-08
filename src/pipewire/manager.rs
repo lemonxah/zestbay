@@ -661,6 +661,11 @@ impl Host {
                     }
                 }
             }
+            PwCommand::ReloadPluginWithState {
+                instance_id,
+                lv2_state,
+                params,
+            } => self.reload_plugin_with_state(instance_id, lv2_state, params),
             PwCommand::SetPluginBypass {
                 instance_id,
                 bypassed,
@@ -1850,6 +1855,38 @@ impl Host {
         req.sample_rate = Some(rate);
         let relinks = self.plugin_links(instance_id, true, now + RELINK_TIMEOUT_RELOAD);
 
+        self.remove_plugin(instance_id);
+        if self.add_plugin(&req) {
+            self.relinks
+                .borrow_mut()
+                .extend(relinks.into_iter().map(|(_, r)| r));
+        }
+    }
+
+    /// Re-create a live plugin in place with new LV2 state and parameter
+    /// values (applying a preset). A plugin whose add is still queued just
+    /// has its pending request patched.
+    fn reload_plugin_with_state(
+        &self,
+        instance_id: u64,
+        lv2_state: Vec<crate::lv2::state::StateEntry>,
+        params: Vec<(usize, f32)>,
+    ) {
+        let Some(mut req) = self.snapshot_plugin(instance_id) else {
+            self.patch_queued_add(instance_id, |req| {
+                req.lv2_state = lv2_state;
+                for (port_index, value) in params {
+                    upsert_param(&mut req.params, port_index, value);
+                }
+            });
+            return;
+        };
+        log::info!("Applying preset state to '{}' (instance {})", req.display_name, instance_id);
+        req.lv2_state = lv2_state;
+        for (port_index, value) in params {
+            upsert_param(&mut req.params, port_index, value);
+        }
+        let relinks = self.plugin_links(instance_id, true, Instant::now() + RELINK_TIMEOUT_RELOAD);
         self.remove_plugin(instance_id);
         if self.add_plugin(&req) {
             self.relinks
