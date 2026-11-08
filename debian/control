@@ -1,0 +1,46 @@
+Source: zestbay
+Section: sound
+Priority: optional
+Maintainer: Ryno Kotze <lemon.xah@gmail.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ rustc (>= 1.87) | rustc-1.91 | rustc-1.89,
+ cargo (>= 1.87) | cargo-1.91 | cargo-1.89,
+ build-essential,
+ pkgconf | pkg-config,
+ cmake,
+ clang,
+ libclang-dev,
+ libpipewire-0.3-dev,
+ qt6-base-dev,
+ qt6-base-private-dev,
+ qt6-declarative-dev,
+ qt6-declarative-private-dev,
+ liblilv-dev,
+ lv2-dev,
+ libsuil-dev,
+ libdbus-1-dev,
+ libx11-dev,
+ libgtk-3-dev,
+Standards-Version: 4.7.0
+Homepage: https://github.com/lemonxah/zestbay
+Rules-Requires-Root: no
+
+Package: zestbay
+Architecture: amd64 arm64
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+ pipewire (>= 0.3),
+ qml6-module-qtquick,
+ qml6-module-qtquick-controls,
+ qml6-module-qtquick-layouts,
+ qml6-module-qtquick-shapes,
+ qml6-module-qtquick-templates,
+ qml6-module-qtquick-window,
+ qml6-module-qtqml-models,
+ qml6-module-qtqml-workerscript,
+Description: PipeWire patchbay and audio routing manager
+ ZestBay is a PipeWire patchbay application with LV2, CLAP, and VST3
+ plugin hosting, MIDI mapping, and a visual node-graph editor for
+ routing audio and MIDI between applications and devices.

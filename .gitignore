@@ -7,3 +7,4 @@
 /pkg/deb/*.deb
 /pkg/deb/zestbay_*/
 /pkg/rpm/rpmbuild/
+/pkg/deb/ppa/

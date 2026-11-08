@@ -27,8 +27,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # A .deb works on the release it was built for and newer
-        image: ["ubuntu:24.04"]
+        # A .deb works on the release it was built for and newer, but its
+        # library dependency names are fixed at build time (e.g. 24.04's
+        # libqt6gui6t64 doesn't exist on 26.04), so build one per release
+        image: ["ubuntu:24.04", "ubuntu:26.04"]
     steps:
       - uses: actions/checkout@v7
         with:

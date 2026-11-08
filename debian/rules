@@ -1,0 +1,44 @@
+#!/usr/bin/make -f
+# Builds offline (Launchpad has no network): the crates are vendored into
+# vendor/ in the orig tarball by pkg/deb/build-ppa.sh.
+
+export DH_VERBOSE = 1
+export CARGO_HOME = $(CURDIR)/debian/cargo-home
+export CARGO_TARGET_DIR = $(CURDIR)/target
+
+# Edition 2024 needs Rust >= 1.85. Use the newest versioned toolchain
+# (rust-1.NN) if installed, otherwise the default one.
+RUST_BIN := $(lastword $(sort $(wildcard /usr/lib/rust-1.*/bin)))
+ifneq ($(RUST_BIN),)
+export PATH := $(RUST_BIN):$(PATH)
+endif
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	mkdir -p $(CARGO_HOME)
+	printf '%s\n' \
+	  '[source.crates-io]' 'replace-with = "vendored-sources"' \
+	  '[source.vendored-sources]' 'directory = "$(CURDIR)/vendor"' \
+	  > $(CARGO_HOME)/config.toml
+
+override_dh_auto_build:
+	cargo --version
+	cargo build --workspace --release --offline --locked
+
+override_dh_auto_test:
+
+override_dh_auto_install:
+	install -Dm755 target/release/zestbay debian/zestbay/usr/bin/zestbay
+	install -Dm755 target/release/zestbay-ui-bridge debian/zestbay/usr/lib/zestbay/zestbay-ui-bridge
+	install -Dm644 zestbay.desktop debian/zestbay/usr/share/applications/zestbay.desktop
+	install -Dm644 images/logo/zestbay-launcher.svg debian/zestbay/usr/share/icons/hicolor/scalable/apps/zestbay.svg
+	install -Dm644 images/zesticon.png debian/zestbay/usr/share/icons/hicolor/256x256/apps/zestbay.png
+	install -Dm644 images/zesttray.png debian/zestbay/usr/share/icons/hicolor/256x256/apps/zestbay-tray.png
+
+# Rust binaries: dwz has nothing useful to do and can fail on them
+override_dh_dwz:
+
+override_dh_auto_clean:
+	rm -rf $(CARGO_HOME) target
