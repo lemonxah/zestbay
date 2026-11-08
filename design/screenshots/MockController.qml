@@ -12,6 +12,9 @@ QtObject {
     property int node_count: nodes.length
     property int link_count: links.length
     property string cpu_usage: "1.4%"
+    // Background plugin scan (status bar): finished.
+    property bool plugins_scanning: false
+    property real plugin_scan_progress: -1
     signal graph_changed()
     signal error_occurred(string message)
     signal show_window_requested()
@@ -149,6 +152,41 @@ QtObject {
         // 600 samples at the 100 ms poll = the CPU chart's full 60 s.
         for (var i = 0; i < 600; i++) a.push(0.9 + Math.sin(i / 7) * 0.35 + Math.sin(i / 2.3) * 0.12 + (i % 37 === 0 ? 4 : 0))
         return a })()
+
+    // ---- Presets (the preset row on plugin nodes) ------------------------
+    // The "main-presets" shot shows the mixer with a changed value so the
+    // dropdown's "Changed:" line is visible.
+    readonly property bool presetsShot: Qt.application.arguments.indexOf("main-presets") >= 0
+    property var presetNames: ({
+        10: ["Concert Grand", "Studio Close", "Upright"],
+        30: ["Podcast", "Stream mix"],
+        11: ["Voice gate"]
+    })
+    property var presetSelected: ({
+        10: { name: "Concert Grand", isDefault: true },
+        30: { name: "Stream mix", isDefault: true },
+        11: { name: "Voice gate", isDefault: false }
+    })
+    function get_plugin_presets_all_json() {
+        var out = {}
+        for (var id in presetSelected) {
+            out[id] = { name: presetSelected[id].name, isDefault: presetSelected[id].isDefault,
+                        modified: presetsShot && id === "30", count: presetNames[id].length }
+        }
+        return JSON.stringify(out)
+    }
+    function get_plugin_presets_json(id) {
+        var sel = presetSelected[id] || { name: "", isDefault: false }
+        var def = ""
+        if (presetSelected[id] && presetSelected[id].isDefault) def = sel.name
+        return JSON.stringify({ presets: presetNames[id] || [], selected: sel.name, "default": def,
+                                changes: presetsShot && id === 30 ? ["Channel 1 gain: 0.800 \u2192 0.950"] : [] })
+    }
+    function apply_plugin_preset(id, name) { return true }
+    function save_plugin_preset(id, name) { return true }
+    function delete_plugin_preset(id, name) {}
+    function set_default_plugin_preset(id, name) {}
+    function start_new_plugin_preset(id) {}
 
     // ---- API ------------------------------------------------------------
     property Timer _kick: Timer { interval: 200; running: true; onTriggered: mock.graph_changed() }
