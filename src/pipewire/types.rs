@@ -212,6 +212,14 @@ pub enum PwCommand {
     RemoveMidiMappingsForDevice {
         device_name: String,
     },
+    /// Re-create a live plugin in place (same instance id, name and links)
+    /// with `lv2_state` restored before it starts and `params` applied on
+    /// top. Used to apply a preset that carries LV2 state.
+    ReloadPluginWithState {
+        instance_id: u64,
+        lv2_state: Vec<crate::lv2::state::StateEntry>,
+        params: Vec<(usize, f32)>,
+    },
     /// Ask the PipeWire thread to snapshot the state of every live plugin.
     /// Replies with one `PluginStateSaved` per plugin, then `PluginStatesDone`.
     RequestPluginStates,

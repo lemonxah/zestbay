@@ -5,6 +5,7 @@ mod midi;
 mod patchbay;
 mod pipewire;
 mod plugin;
+mod presets;
 mod subgraph;
 mod tray;
 mod ui;

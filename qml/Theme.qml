@@ -174,6 +174,7 @@ QtObject {
     readonly property int nodePortsBottom: 8
     readonly property int nodeFooter: 34
     readonly property int nodeFooterButton: 22
+    readonly property int nodePresetRow: 30     // plugin cards: preset selector above the footer
     readonly property int nodePin: 10
     readonly property int nodePinHover: 12
     readonly property int nodeChip: 18

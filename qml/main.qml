@@ -179,6 +179,24 @@ ZbWindow {
     }
 
     ZbDialog {
+        id: restartPipewireDialog
+        title: "Restart PipeWire?"
+        primaryText: "Restart"
+        secondaryText: "Cancel"
+        width: Math.min(mainWindow.width * 0.6, 460)
+
+        Text {
+            width: parent ? parent.width : 400
+            wrapMode: Text.WordWrap
+            font.family: Theme.fontSans
+            font.pixelSize: Theme.sizeBody
+            color: Theme.textPrimary
+            text: "This restarts PipeWire, PipeWire-Pulse and WirePlumber. All audio stops for a few seconds and some applications may need to reconnect or be restarted. ZestBay reconnects and restores its plugins and links by itself."
+        }
+        onAccepted: controller.restart_pipewire()
+    }
+
+    ZbDialog {
         id: crashRecoveryDialog
         title: "Crash recovery"
         primaryText: "Restore"
@@ -470,6 +488,11 @@ ZbWindow {
                     ZbMenuItem {
                         text: "CPU usage…"
                         onTriggered: cpuOverlayDialog.open()
+                    }
+                    ZbMenuSeparator {}
+                    ZbMenuItem {
+                        text: "Restart PipeWire\u2026"
+                        onTriggered: restartPipewireDialog.open()
                     }
                     ZbMenuSeparator {}
                     ZbMenuItem {

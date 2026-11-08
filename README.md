@@ -106,8 +106,38 @@ Carla is a full-featured plugin host and JACK patchbay. The differences are abou
 - Plugin state (parameters, bypass, LV2 state, VST2/VST3/CLAP state, connections) persisted across sessions
 - **Persistent LSP input names**: rename channels in an LSP Mixer LV2 editor and the names appear on the corresponding node input ports within about a second. Names are saved with the plugin state and restored after restarting ZestBay. Stereo channels show L/R suffixes; routing keeps its stable port identifiers.
 - **Crash protection**: each plugin is test-loaded in a separate process before it runs in ZestBay, so a crashing plugin is skipped instead of taking the app down. If a restore still crashes, the next start enters safe mode and offers the last known-good plugin set
+- **Presets** per plugin: save a plugin's settings once and reuse them on any other instance (see [Plugin Presets](#plugin-presets))
 - **CPU usage** window: per-plugin DSP load over time
 - Optional "Let idle devices sleep" (passive effects) so a device linked only through plugins can suspend
+
+### Plugin Presets
+
+A preset is a named snapshot of one plugin's settings. Set a plugin up once, save it as a preset, and from then on every other instance of that plugin, in this session or a later one, can get the same settings from the dropdown instead of you dialing every value in again. Typical uses: several LSP mixers or compressors that should start the same, a favourite EQ curve, or a few alternative setups of one plugin to switch between.
+
+Every plugin node has a preset row above the **On / UI / Params** buttons: a dropdown showing the selected preset, and a **Save** button.
+
+**Using presets**
+1. Set the plugin up the way you want it (in its own window or in **Params**).
+2. Press **Save**, type a name, and press **Save as new preset**. The new preset is now selected on that node.
+3. Add another instance of the plugin (or open a different one) and pick the preset from its dropdown. All the values are applied at once.
+
+**The dropdown**
+- Pick a preset from the list to apply it to this plugin. The selected one is checked.
+- **New preset (reset to defaults)** puts the plugin back to the plugin's own defaults, including its saved state, and deselects the preset. Set it up again and press **Save** to make a new one.
+- **Set "name" as default** makes the selected preset the plugin's default: a new instance of that plugin starts from it right away (marked with a `★` in the list). **Clear default** undoes that. Plugins restored when ZestBay starts keep their own saved settings, not the default.
+- **Delete "name"** removes the selected preset.
+
+**Saving**
+- Typing a new name in **Save** creates a new preset. Typing the name of an existing preset replaces it (the button then reads **Replace preset**).
+- When a preset is selected, **Update "name" with the current settings** in the Save dialog overwrites it directly.
+- A `*` after the preset name means the plugin's settings no longer match the preset, because you changed a value or moved a mapped MIDI control. Open the dropdown to see what changed (a greyed-out "Changed: ..." line). Save to update the preset, or pick it again to go back to it.
+
+**What a preset contains**
+- All the plugin's parameter values.
+- For LV2 plugins, the plugin's saved state too, which is where things that aren't ordinary parameters live, such as the **LSP Mixer's channel names**. Applying a preset with state re-creates the plugin in place (same name, same links), with a brief audio gap.
+- CLAP, VST3 and VST2 presets hold parameter values only.
+
+Presets are kept per plugin, so a preset made for one plugin never shows up on another, and every instance of that plugin shares the same list. They are stored in `~/.config/zestbay/presets.json` (under `~/.var/app/io.github.lemonxah.ZestBay/config/zestbay/` for the Flatpak). To use your presets on another machine, copy that file.
 
 ### MIDI Parameter Control
 - Map any MIDI CC or note message to any plugin parameter across all plugin formats (LV2, VST2, VST3, CLAP)

@@ -59,7 +59,7 @@ pub struct LV2_State_Interface {
     ) -> LV2_State_Status,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct StateEntry {
     pub key_uri: String,
     pub type_uri: String,

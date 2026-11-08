@@ -180,6 +180,15 @@ Item {
     // Hover state (canvas repaint + pin tooltip).
     property int hoveredPortId: -1
     property int hoveredLinkId: -1
+    // Preset selector on plugin cards: nodeId -> {name, isDefault, modified, count}
+    property var presetInfo: ({})
+    property int presetMenuNodeId: -1
+    property var presetMenuNames: []
+    property string presetMenuSelected: ""
+    property string presetMenuDefault: ""
+    property var presetMenuChanges: []
+    property var presetSaveNames: []
+    property int presetSaveNodeId: -1
     property string hoveredButton: ""   // "<nodeId>:<key>" for footer buttons / toggle row
 
     // Redraw graph when system theme changes
@@ -348,6 +357,7 @@ Item {
             nodes = []
             links = []
         }
+        refreshPresetInfo()
         try {
             blockedPairs = JSON.parse(controller.get_blocked_pairs_json())
         } catch(e) {
@@ -1199,6 +1209,133 @@ Item {
         }
     }
 
+    // Preset selector: pick a preset, make one the default, or delete it.
+    ZbMenu {
+        id: presetMenu
+
+        Instantiator {
+            model: graphView.presetMenuNames
+            delegate: ZbMenuItem {
+                required property var modelData
+                text: (modelData === graphView.presetMenuDefault ? "\u2605 " : "") + modelData
+                selected: modelData === graphView.presetMenuSelected
+                onTriggered: {
+                    controller.apply_plugin_preset(graphView.presetMenuNodeId, modelData)
+                    graphView.presetChanged()
+                }
+            }
+            onObjectAdded: (index, object) => presetMenu.insertItem(index, object)
+            onObjectRemoved: (index, object) => presetMenu.removeItem(object)
+        }
+
+        ZbMenuItem {
+            text: "No presets saved yet"
+            enabled: false
+            visible: graphView.presetMenuNames.length === 0
+            height: visible ? implicitHeight : 0
+        }
+
+        ZbMenuSeparator {}
+
+        ZbMenuItem {
+            text: "New preset (reset to defaults)"
+            onTriggered: {
+                controller.start_new_plugin_preset(graphView.presetMenuNodeId)
+                graphView.presetChanged()
+            }
+        }
+
+        ZbMenuSeparator {}
+
+        // Why the name shows a "*": the first difference from the saved preset.
+        ZbMenuItem {
+            text: "Changed: " + (graphView.presetMenuChanges.length > 0 ? graphView.presetMenuChanges[0] : "")
+                  + (graphView.presetMenuChanges.length > 1 ? "  (+" + (graphView.presetMenuChanges.length - 1) + " more)" : "")
+            enabled: false
+            visible: graphView.presetMenuChanges.length > 0
+            height: visible ? implicitHeight : 0
+        }
+
+        ZbMenuItem {
+            text: "Set \u201c" + graphView.presetMenuSelected + "\u201d as default"
+            enabled: graphView.presetMenuSelected !== ""
+                     && graphView.presetMenuSelected !== graphView.presetMenuDefault
+            onTriggered: {
+                controller.set_default_plugin_preset(graphView.presetMenuNodeId, graphView.presetMenuSelected)
+                graphView.presetChanged()
+            }
+        }
+
+        ZbMenuItem {
+            text: "Clear default"
+            enabled: graphView.presetMenuDefault !== ""
+            onTriggered: {
+                controller.set_default_plugin_preset(graphView.presetMenuNodeId, "")
+                graphView.presetChanged()
+            }
+        }
+
+        ZbMenuItem {
+            text: "Delete \u201c" + graphView.presetMenuSelected + "\u201d"
+            destructive: true
+            enabled: graphView.presetMenuSelected !== ""
+            onTriggered: {
+                controller.delete_plugin_preset(graphView.presetMenuNodeId, graphView.presetMenuSelected)
+                graphView.presetChanged()
+            }
+        }
+    }
+
+    // Save the plugin's current settings as a new preset, or over an existing one.
+    ZbDialog {
+        id: presetSaveDialog
+        // The plugin's currently selected preset ("" for none), offered as an update target.
+        property string selectedName: ""
+        readonly property string trimmed: presetNameField.text.trim()
+        readonly property bool exists: graphView.presetSaveNames.indexOf(trimmed) >= 0
+        title: "Save preset"
+        primaryText: exists ? "Replace preset" : "Save as new preset"
+        secondaryText: "Cancel"
+        width: 380
+        primaryEnabled: trimmed.length > 0
+
+        Column {
+            width: parent ? parent.width : 320
+            spacing: 8
+            ZbTextField {
+                id: presetNameField
+                width: parent.width
+                placeholderText: "New preset name"
+                onAccepted: if (presetSaveDialog.primaryEnabled) presetSaveDialog.accept()
+            }
+            Text {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.sizeCaption
+                color: Theme.textMuted
+                text: presetSaveDialog.exists
+                      ? "A preset with this name exists; saving replaces its values with the current settings."
+                      : "Saves the current parameter values as a new preset for this plugin."
+            }
+            ZbButton {
+                visible: presetSaveDialog.selectedName !== ""
+                text: "Update \u201c" + presetSaveDialog.selectedName + "\u201d with the current settings"
+                onClicked: {
+                    controller.save_plugin_preset(graphView.presetSaveNodeId, presetSaveDialog.selectedName)
+                    graphView.presetChanged()
+                    presetSaveDialog.close()
+                }
+            }
+        }
+        onAboutToShow: presetNameField.text = ""
+        onOpened: presetNameField.forceActiveFocus()
+        onAccepted: {
+            controller.save_plugin_preset(graphView.presetSaveNodeId, trimmed)
+            graphView.presetChanged()
+        }
+    }
+
     property string templateSubgraphId: ""
     ZbDialog {
         id: templateNameDialog
@@ -1572,6 +1709,7 @@ Item {
               + Theme.nodePortRow * (rows + (expandable ? 1 : 0))
               + Theme.nodePortsBottom + 2
         if (node.type === "Plugin" || node.type === "Subgraph") h += Theme.nodeFooter
+        if (node.type === "Plugin") h += Theme.nodePresetRow
         return { inputs: visIn, outputs: visOut, rows: rows, expandable: expandable,
                  expanded: expanded, hiddenIn: hiddenIn, hiddenOut: hiddenOut, height: h }
     }
@@ -1800,6 +1938,61 @@ Item {
     // Plugin footer buttons (On / UI / Params): canvas rects for node n.
     // The three buttons share the card width (10 px margins, 6 px gaps),
     // in proportion to their content so "Params" stays the widest.
+    function refreshPresetInfo() {
+        try {
+            presetInfo = JSON.parse(controller.get_plugin_presets_all_json())
+        } catch(e) {
+            presetInfo = {}
+        }
+    }
+
+    // The preset selector row of a plugin card, between the ports and the
+    // footer: a name button (opens the preset menu) and a Save button.
+    function presetRects(n, nx, ny, nh) {
+        var margin = 10
+        var gap = 6
+        var saveW = 44
+        var h = Theme.nodeFooterButton
+        var w = getNodeWidth(n.id)
+        var y = ny + nh - Theme.nodeFooter - Theme.nodePresetRow + (Theme.nodePresetRow - h) / 2
+        return { name: { x: nx + margin, y: y, w: w - 2 * margin - gap - saveW, h: h },
+                 save: { x: nx + w - margin - saveW, y: y, w: saveW, h: h } }
+    }
+
+    function inRect(c, r) {
+        return c.x >= r.x && c.x <= r.x + r.w && c.y >= r.y && c.y <= r.y + r.h
+    }
+
+    function openPresetMenu(nodeId) {
+        var info = {}
+        try { info = JSON.parse(controller.get_plugin_presets_json(nodeId)) } catch(e) {}
+        presetMenuNodeId = nodeId
+        presetMenuNames = info.presets || []
+        presetMenuSelected = info.selected || ""
+        presetMenuDefault = info["default"] || ""
+        presetMenuChanges = info.changes || []
+        var pos = nodePositions[nodeId]
+        var n = findNodeData(nodeId)
+        if (!pos || !n) return
+        var r = presetRects(n, pos.x, pos.y, calculateNodeHeight(n)).name
+        var sp = toScreen(r.x, r.y + r.h)
+        presetMenu.popup(sp.x, sp.y + 2)
+    }
+
+    function openPresetSave(nodeId) {
+        var info = {}
+        try { info = JSON.parse(controller.get_plugin_presets_json(nodeId)) } catch(e) {}
+        presetSaveNodeId = nodeId
+        presetSaveNames = info.presets || []
+        presetSaveDialog.selectedName = info.selected || ""
+        presetSaveDialog.open()
+    }
+
+    function presetChanged() {
+        refreshPresetInfo()
+        canvas.requestPaint()
+    }
+
     function footerButtons(n, nx, ny, nh) {
         var y = ny + nh - Theme.nodeFooter + (Theme.nodeFooter - Theme.nodeFooterButton) / 2
         var base = n.type === "Subgraph" ? [{ key: "open", w: 1 }]
@@ -1860,6 +2053,11 @@ Item {
         if (tr && c.x >= tr.x && c.x <= tr.x + tr.w && c.y >= tr.y && c.y <= tr.y + tr.h)
             return { button: "toggle", nodeId: n.id }
         if (n.type !== "Plugin" && n.type !== "Subgraph") return null
+        if (n.type === "Plugin") {
+            var pr = presetRects(n, pos.x, pos.y, calculateNodeHeight(n))
+            if (inRect(c, pr.name)) return { button: "preset", nodeId: n.id }
+            if (inRect(c, pr.save)) return { button: "presetsave", nodeId: n.id }
+        }
         var btns = footerButtons(n, pos.x, pos.y, calculateNodeHeight(n))
         for (var i = 0; i < btns.length; i++) {
             var b = btns[i]
@@ -2363,6 +2561,42 @@ Item {
             ctx.fillText(openTxt, ox + 18, ob.y + ob.h / 2 + 0.5)
         }
 
+        // Plugin preset row: selected preset (menu) and Save.
+        if (isPlugin) {
+            var pinfo = presetInfo[node.id] || { name: "", isDefault: false, modified: false, count: 0 }
+            var prr = presetRects(node, nx, ny, nh)
+            var hoverName = hoveredButton === node.id + ":preset"
+            var hoverSave = hoveredButton === node.id + ":presetsave"
+            roundRectPath(ctx, prr.name.x, prr.name.y, prr.name.w, prr.name.h, Theme.radiusSmall)
+            ctx.fillStyle = "" + (hoverName ? Theme.borderStrong : Theme.bgSubtle)
+            ctx.fill()
+            var hasName = pinfo.name !== ""
+            var label = hasName ? (pinfo.isDefault ? "\u2605 " : "") + pinfo.name + (pinfo.modified ? " *" : "")
+                                : (pinfo.count > 0 ? "Preset\u2026" : "No presets")
+            ctx.font = fontSpec(500, 11, false)
+            ctx.fillStyle = "" + (hasName ? Theme.textPrimary : Theme.textMuted)
+            ctx.textAlign = "left"
+            ctx.textBaseline = "middle"
+            ctx.fillText(elide(ctx, label, prr.name.w - 12 - 18), prr.name.x + 8, prr.name.y + prr.name.h / 2 + 0.5)
+            // chevron
+            var chx = prr.name.x + prr.name.w - 12
+            var chy = prr.name.y + prr.name.h / 2
+            ctx.beginPath()
+            ctx.moveTo(chx - 3.5, chy - 1.5)
+            ctx.lineTo(chx, chy + 2)
+            ctx.lineTo(chx + 3.5, chy - 1.5)
+            ctx.strokeStyle = "" + Theme.textIcon
+            ctx.lineWidth = 1.5
+            ctx.stroke()
+            roundRectPath(ctx, prr.save.x, prr.save.y, prr.save.w, prr.save.h, Theme.radiusSmall)
+            ctx.fillStyle = "" + (hoverSave ? Theme.borderStrong : Theme.bgSubtle)
+            ctx.fill()
+            ctx.font = fontSpec(500, 11, false)
+            ctx.fillStyle = "" + Theme.textIcon
+            ctx.textAlign = "center"
+            ctx.fillText("Save", prr.save.x + prr.save.w / 2, prr.save.y + prr.save.h / 2 + 0.5)
+        }
+
         // Plugin footer: On / UI / Params; hairline above.
         if (isPlugin) {
             ctx.fillStyle = "" + Theme.borderHairline
@@ -2586,6 +2820,10 @@ Item {
                         controller.open_plugin_ui(btnHit.nodeId)
                     } else if (btnHit.button === "params") {
                         graphView.openPluginParams(btnHit.nodeId)
+                    } else if (btnHit.button === "preset") {
+                        openPresetMenu(btnHit.nodeId)
+                    } else if (btnHit.button === "presetsave") {
+                        openPresetSave(btnHit.nodeId)
                     } else if (btnHit.button === "open") {
                         enterSubgraph(btnHit.subgraphId)
                     }
