@@ -556,6 +556,14 @@ impl Host {
                 if let Some(node) = parse_node(global) {
                     // PluginAdded is sent once per instantiation by the
                     // plugin's filter (drain_events), not from here.
+
+                    // filter out nodes with no names by default
+                    let hide = crate::pipewire::HIDE_UNNAMED_NODES
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    if hide && node.name.is_empty() {
+                        return;
+                    }
+
                     self.graph.insert_node(node.clone());
                     let _ = self.event_tx.send(PwEvent::NodeChanged(node));
                     self.changes_pending.set(true);
@@ -655,14 +663,17 @@ impl Host {
                     };
                 match applied {
                     Some(Some(value)) => {
-                        if let Some(prev) = self.reported_params.borrow_mut().get_mut(&instance_id) {
+                        if let Some(prev) = self.reported_params.borrow_mut().get_mut(&instance_id)
+                        {
                             upsert_param(prev, port_index, value);
                         }
-                        let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::ParameterChanged {
-                            instance_id,
-                            port_index,
-                            value,
-                        }));
+                        let _ =
+                            self.event_tx
+                                .send(PwEvent::Plugin(PluginEvent::ParameterChanged {
+                                    instance_id,
+                                    port_index,
+                                    value,
+                                }));
                     }
                     Some(None) => {}
                     // Not instantiated yet (e.g. replayed after a reconnect):
@@ -715,14 +726,18 @@ impl Host {
                 } else if let Some(filter) = self.ladspa_filters.borrow().get(&instance_id) {
                     filter.set_learn_mode(true);
                 }
-                let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::MidiLearnStarted {
-                    instance_id,
-                    port_index,
-                }));
+                let _ = self
+                    .event_tx
+                    .send(PwEvent::Plugin(PluginEvent::MidiLearnStarted {
+                        instance_id,
+                        port_index,
+                    }));
             }
             PwCommand::CancelMidiLearn => {
                 self.set_learn_mode_all(false);
-                let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::MidiLearnCancelled));
+                let _ = self
+                    .event_tx
+                    .send(PwEvent::Plugin(PluginEvent::MidiLearnCancelled));
             }
             PwCommand::AddMidiMapping(mapping) => self.add_midi_mapping(mapping),
             PwCommand::RemoveMidiMapping(source) => {
@@ -866,14 +881,16 @@ impl Host {
         let _ = self
             .event_tx
             .send(PwEvent::Plugin(PluginEvent::PluginSkipped { instance_id }));
-        let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
-            instance_id: Some(instance_id),
-            message: format!(
-                "{}. It was skipped for this session; its saved settings are kept.",
-                reason
-            ),
-            fatal: false,
-        }));
+        let _ = self
+            .event_tx
+            .send(PwEvent::Plugin(PluginEvent::PluginError {
+                instance_id: Some(instance_id),
+                message: format!(
+                    "{}. It was skipped for this session; its saved settings are kept.",
+                    reason
+                ),
+                fatal: false,
+            }));
     }
 
     fn handle_op(&self, op: InternalOp) {
@@ -887,7 +904,10 @@ impl Host {
                 requested.retain(|_, at| now.duration_since(*at) < LINK_REQUEST_GRACE);
                 let ports = (output_port_id, input_port_id);
                 if requested.contains_key(&ports)
-                    || self.graph.find_link(output_port_id, input_port_id).is_some()
+                    || self
+                        .graph
+                        .find_link(output_port_id, input_port_id)
+                        .is_some()
                 {
                     log::debug!(
                         "Link {} -> {} already exists or is pending; not creating it again",
@@ -910,7 +930,10 @@ impl Host {
                     .borrow_mut()
                     .remove(&(output_port_id, input_port_id));
                 match self.graph.get_link(link_id) {
-                    Some(l) if l.output_port_id == output_port_id && l.input_port_id == input_port_id => {
+                    Some(l)
+                        if l.output_port_id == output_port_id
+                            && l.input_port_id == input_port_id =>
+                    {
                         self.registry.destroy_global(link_id);
                     }
                     Some(_) => log::warn!(
@@ -931,16 +954,21 @@ impl Host {
                         req.plugin_uri,
                         outcome.describe()
                     );
-                    if matches!(outcome, crate::plugin::sandbox::ProbeOutcome::Crashed { .. }) {
-                        let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
-                            instance_id: Some(req.instance_id),
-                            message: format!(
-                                "Plugin '{}' {}. It has been blocked to protect ZestBay.",
-                                req.display_name,
-                                outcome.describe()
-                            ),
-                            fatal: true,
-                        }));
+                    if matches!(
+                        outcome,
+                        crate::plugin::sandbox::ProbeOutcome::Crashed { .. }
+                    ) {
+                        let _ = self
+                            .event_tx
+                            .send(PwEvent::Plugin(PluginEvent::PluginError {
+                                instance_id: Some(req.instance_id),
+                                message: format!(
+                                    "Plugin '{}' {}. It has been blocked to protect ZestBay.",
+                                    req.display_name,
+                                    outcome.describe()
+                                ),
+                                fatal: true,
+                            }));
                     } else {
                         // Timeouts and load failures may be transient.
                         self.skip_plugin(req.instance_id, &format!("It {}", outcome.describe()));
@@ -994,11 +1022,13 @@ impl Host {
                 if crate::lv2::atom_state::is_lsp_mixer(&inst.plugin_uri)
                     && let Some(lv2_state) = unsafe { inst.save_state() }
                 {
-                    let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::PluginStateSaved {
-                        instance_id,
-                        lv2_state,
-                        blob: None,
-                    }));
+                    let _ = self
+                        .event_tx
+                        .send(PwEvent::Plugin(PluginEvent::PluginStateSaved {
+                            instance_id,
+                            lv2_state,
+                            blob: None,
+                        }));
                 }
             }
         }
@@ -1159,16 +1189,21 @@ impl Host {
                 name,
                 instance_id
             );
-            let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
-                instance_id: Some(instance_id),
-                message: "It keeps changing its audio layout right after being reloaded. \
+            let _ = self
+                .event_tx
+                .send(PwEvent::Plugin(PluginEvent::PluginError {
+                    instance_id: Some(instance_id),
+                    message: "It keeps changing its audio layout right after being reloaded. \
                           It has been silenced; remove and re-add it to try again."
-                    .to_string(),
-                fatal: false,
-            }));
+                        .to_string(),
+                    fatal: false,
+                }));
             return;
         }
-        log::info!("Instance {} needs a reload after a failed restart", instance_id);
+        log::info!(
+            "Instance {} needs a reload after a failed restart",
+            instance_id
+        );
         self.reload_plugin(instance_id, self.current_rate(), now);
     }
 
@@ -1205,11 +1240,13 @@ impl Host {
                 continue;
             };
             for (port_index, value) in diff_params(prev, &values) {
-                let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::ParameterChanged {
-                    instance_id,
-                    port_index,
-                    value,
-                }));
+                let _ = self
+                    .event_tx
+                    .send(PwEvent::Plugin(PluginEvent::ParameterChanged {
+                        instance_id,
+                        port_index,
+                        value,
+                    }));
             }
         }
     }
@@ -1224,7 +1261,10 @@ impl Host {
             zombies.into_iter().partition(|z| z.pending.is_done());
         self.lv2_zombies.borrow_mut().extend(keep);
         if !done.is_empty() {
-            log::info!("Freeing {} LV2 instance(s) whose UI has now closed", done.len());
+            log::info!(
+                "Freeing {} LV2 instance(s) whose UI has now closed",
+                done.len()
+            );
         }
         drop(done);
     }
@@ -1276,13 +1316,17 @@ impl Host {
             };
             let uri = req.plugin_uri.clone();
             // CLAP/VST3: hand the probe the library path so the child doesn't scan.
-            let lib = req.scan_info.as_ref().map(|i| i.library_path.clone()).or_else(|| match fmt {
-                "clap" => crate::clap::scanner::cached_plugin(&uri).map(|i| i.library_path),
-                "vst3" => crate::vst3::scanner::cached_plugin(&uri).map(|i| i.library_path),
-                "vst2" => crate::vst2::scanner::cached_plugin(&uri).map(|i| i.library_path),
-                "ladspa" => crate::ladspa::scanner::cached_plugin(&uri).map(|i| i.library_path),
-                _ => None,
-            });
+            let lib = req
+                .scan_info
+                .as_ref()
+                .map(|i| i.library_path.clone())
+                .or_else(|| match fmt {
+                    "clap" => crate::clap::scanner::cached_plugin(&uri).map(|i| i.library_path),
+                    "vst3" => crate::vst3::scanner::cached_plugin(&uri).map(|i| i.library_path),
+                    "vst2" => crate::vst2::scanner::cached_plugin(&uri).map(|i| i.library_path),
+                    "ladspa" => crate::ladspa::scanner::cached_plugin(&uri).map(|i| i.library_path),
+                    _ => None,
+                });
             if fmt != "lv2" && lib.is_none() {
                 // Discovery already finished without finding this plugin.
                 // Instantiation will report it missing; don't make a probe
@@ -1325,15 +1369,14 @@ impl Host {
     /// (non-fatal) and false is returned.
     fn add_plugin(&self, req: &AddRequest) -> bool {
         let sr = req.sample_rate.unwrap_or_else(|| self.current_rate()) as f64;
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            match req.format.as_str() {
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match req.format.as_str() {
                 "CLAP" => self.instantiate_clap(req, sr),
                 "VST3" => self.instantiate_vst3(req, sr),
                 "VST2" => self.instantiate_vst2(req, sr),
                 "LADSPA" => self.instantiate_ladspa(req, sr),
                 _ => self.instantiate_lv2(req, sr),
-            }
-        }));
+            }));
 
         let error = match result {
             Ok(Ok(())) => None,
@@ -1346,7 +1389,10 @@ impl Host {
                 } else {
                     "unknown panic".to_string()
                 };
-                Some(format!("Plugin panicked during instantiation: {}", panic_msg))
+                Some(format!(
+                    "Plugin panicked during instantiation: {}",
+                    panic_msg
+                ))
             }
         };
         if let Some(message) = error {
@@ -1463,12 +1509,17 @@ impl Host {
         self.lv2_instances
             .borrow_mut()
             .insert(req.instance_id, instance_rc);
-        self.lv2_filters.borrow_mut().insert(req.instance_id, filter);
+        self.lv2_filters
+            .borrow_mut()
+            .insert(req.instance_id, filter);
         Ok(())
     }
 
     fn instantiate_clap(&self, req: &AddRequest, sr: f64) -> Result<(), String> {
-        let info = req.scan_info.clone().or_else(|| crate::clap::scanner::cached_plugin(&req.plugin_uri))
+        let info = req
+            .scan_info
+            .clone()
+            .or_else(|| crate::clap::scanner::cached_plugin(&req.plugin_uri))
             .ok_or_else(|| format!("CLAP plugin not found: {}", req.plugin_uri))?;
         // The saved state is loaded before activation (state-dependent ports).
         let inst = unsafe {
@@ -1509,12 +1560,17 @@ impl Host {
         self.clap_instances
             .borrow_mut()
             .insert(req.instance_id, instance_rc);
-        self.clap_filters.borrow_mut().insert(req.instance_id, filter);
+        self.clap_filters
+            .borrow_mut()
+            .insert(req.instance_id, filter);
         Ok(())
     }
 
     fn instantiate_vst3(&self, req: &AddRequest, sr: f64) -> Result<(), String> {
-        let info = req.scan_info.clone().or_else(|| crate::vst3::scanner::cached_plugin(&req.plugin_uri))
+        let info = req
+            .scan_info
+            .clone()
+            .or_else(|| crate::vst3::scanner::cached_plugin(&req.plugin_uri))
             .ok_or_else(|| format!("VST3 plugin not found: {}", req.plugin_uri))?;
         // The saved state is restored before setup/activation.
         let inst = unsafe {
@@ -1555,12 +1611,17 @@ impl Host {
         self.vst3_instances
             .borrow_mut()
             .insert(req.instance_id, instance_rc);
-        self.vst3_filters.borrow_mut().insert(req.instance_id, filter);
+        self.vst3_filters
+            .borrow_mut()
+            .insert(req.instance_id, filter);
         Ok(())
     }
 
     fn instantiate_vst2(&self, req: &AddRequest, sr: f64) -> Result<(), String> {
-        let info = req.scan_info.clone().or_else(|| crate::vst2::scanner::cached_plugin(&req.plugin_uri))
+        let info = req
+            .scan_info
+            .clone()
+            .or_else(|| crate::vst2::scanner::cached_plugin(&req.plugin_uri))
             .ok_or_else(|| format!("VST2 plugin not found: {}", req.plugin_uri))?;
         // The saved state is restored before setup/activation.
         let inst = unsafe {
@@ -1601,7 +1662,9 @@ impl Host {
         self.vst2_instances
             .borrow_mut()
             .insert(req.instance_id, instance_rc);
-        self.vst2_filters.borrow_mut().insert(req.instance_id, filter);
+        self.vst2_filters
+            .borrow_mut()
+            .insert(req.instance_id, filter);
         Ok(())
     }
 
@@ -2051,7 +2114,11 @@ impl Host {
             });
             return;
         };
-        log::info!("Applying preset state to '{}' (instance {})", req.display_name, instance_id);
+        log::info!(
+            "Applying preset state to '{}' (instance {})",
+            req.display_name,
+            instance_id
+        );
         req.lv2_state = lv2_state;
         for (port_index, value) in params {
             upsert_param(&mut req.params, port_index, value);
@@ -2122,7 +2189,9 @@ impl Host {
             if removed.contains(&id) {
                 let _ = self
                     .event_tx
-                    .send(PwEvent::Plugin(PluginEvent::PluginRemoved { instance_id: id }));
+                    .send(PwEvent::Plugin(PluginEvent::PluginRemoved {
+                        instance_id: id,
+                    }));
             }
         }
         (plugins, relinks)
@@ -2150,11 +2219,13 @@ impl Host {
             } else {
                 Vec::new()
             };
-            let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::PluginStateSaved {
-                instance_id,
-                lv2_state,
-                blob: None,
-            }));
+            let _ = self
+                .event_tx
+                .send(PwEvent::Plugin(PluginEvent::PluginStateSaved {
+                    instance_id,
+                    lv2_state,
+                    blob: None,
+                }));
         }
         let blobs: Vec<(u64, Option<Vec<u8>>)> = self
             .clap_instances
@@ -2178,11 +2249,13 @@ impl Host {
             if blob.is_none() {
                 continue;
             }
-            let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::PluginStateSaved {
-                instance_id,
-                lv2_state: Vec::new(),
-                blob,
-            }));
+            let _ = self
+                .event_tx
+                .send(PwEvent::Plugin(PluginEvent::PluginStateSaved {
+                    instance_id,
+                    lv2_state: Vec::new(),
+                    blob,
+                }));
         }
         let _ = self
             .event_tx
@@ -2377,7 +2450,10 @@ impl Host {
 
         if let Some(inst_rc) = self.lv2_instances.borrow().get(&instance_id) {
             let inst = inst_rc.borrow();
-            let cp = inst.control_inputs.iter().find(|cp| cp.index == port_index)?;
+            let cp = inst
+                .control_inputs
+                .iter()
+                .find(|cp| cp.index == port_index)?;
             return Some(crate::midi::filter::ResolvedMappingEntry {
                 port_updates: inst.port_updates.clone(),
                 port_index,
@@ -2472,21 +2548,45 @@ impl Host {
 /// Subgraph tag and virtual device id of a node ZestBay created, from its
 /// `node.name` (`zestbay.subgraph.<id>.in[.int]`, `zestbay.subgraph.<id>.out[.int]`,
 /// `zestbay.vdev.<id>[.in|.out]`). A device edge has a device media class.
-pub(crate) fn owned_node_tags(node_name: &str, media_class: &str) -> (Option<SubgraphTag>, Option<String>) {
+pub(crate) fn owned_node_tags(
+    node_name: &str,
+    media_class: &str,
+) -> (Option<SubgraphTag>, Option<String>) {
     if let Some(rest) = node_name.strip_prefix("zestbay.subgraph.") {
         let (id, suffix) = rest.split_once('.').unwrap_or((rest, ""));
         let device = media_class == "Audio/Sink" || media_class == "Audio/Source";
         let (role, side) = match suffix {
-            "in" => (SubgraphRole::In, if device { SubgraphSide::External } else { SubgraphSide::Both }),
+            "in" => (
+                SubgraphRole::In,
+                if device {
+                    SubgraphSide::External
+                } else {
+                    SubgraphSide::Both
+                },
+            ),
             "in.int" => (SubgraphRole::In, SubgraphSide::Internal),
-            "out" => (SubgraphRole::Out, if device { SubgraphSide::External } else { SubgraphSide::Both }),
+            "out" => (
+                SubgraphRole::Out,
+                if device {
+                    SubgraphSide::External
+                } else {
+                    SubgraphSide::Both
+                },
+            ),
             "out.int" => (SubgraphRole::Out, SubgraphSide::Internal),
             _ => return (None, None),
         };
         if id.is_empty() {
             return (None, None);
         }
-        return (Some(SubgraphTag { id: id.to_string(), role, side }), None);
+        return (
+            Some(SubgraphTag {
+                id: id.to_string(),
+                role,
+                side,
+            }),
+            None,
+        );
     }
     if let Some(rest) = node_name.strip_prefix("zestbay.vdev.") {
         let id = rest.split('.').next().unwrap_or("");
@@ -2775,8 +2875,8 @@ fn upsert_param(params: &mut Vec<(usize, f32)>, port_index: usize, value: f32) {
 /// Values in `current` that differ from `reported`, which is updated to
 /// `current`.  If the port list changed, `reported` is just reset.
 fn diff_params(reported: &mut Vec<(usize, f32)>, current: &[(usize, f32)]) -> Vec<(usize, f32)> {
-    let same_ports = reported.len() == current.len()
-        && reported.iter().zip(current).all(|(a, b)| a.0 == b.0);
+    let same_ports =
+        reported.len() == current.len() && reported.iter().zip(current).all(|(a, b)| a.0 == b.0);
     if !same_ports {
         *reported = current.to_vec();
         return Vec::new();
@@ -2882,17 +2982,43 @@ mod owned_tag_tests {
     #[test]
     fn owned_tags_from_node_names() {
         let (t, v) = owned_node_tags("zestbay.subgraph.sg-1a.in", "");
-        assert_eq!(t, Some(SubgraphTag { id: "sg-1a".into(), role: SubgraphRole::In, side: SubgraphSide::Both }));
+        assert_eq!(
+            t,
+            Some(SubgraphTag {
+                id: "sg-1a".into(),
+                role: SubgraphRole::In,
+                side: SubgraphSide::Both
+            })
+        );
         assert!(v.is_none());
         let (t, _) = owned_node_tags("zestbay.subgraph.sg-1a.in", "Audio/Sink");
         assert_eq!(t.unwrap().side, SubgraphSide::External);
         let (t, _) = owned_node_tags("zestbay.subgraph.sg-1a.out.int", "Stream/Input/Audio");
         let t = t.unwrap();
-        assert_eq!((t.role, t.side), (SubgraphRole::Out, SubgraphSide::Internal));
-        assert_eq!(owned_node_tags("zestbay.vdev.vd-9.out", "Stream/Output/Audio").1.as_deref(), Some("vd-9"));
-        assert_eq!(owned_node_tags("zestbay.vdev.vd-9", "Audio/Sink").1.as_deref(), Some("vd-9"));
-        assert_eq!(owned_node_tags("alsa_output.pci", "Audio/Sink"), (None, None));
-        assert_eq!(owned_node_tags("zestbay.subgraph.sg-1.weird", ""), (None, None));
+        assert_eq!(
+            (t.role, t.side),
+            (SubgraphRole::Out, SubgraphSide::Internal)
+        );
+        assert_eq!(
+            owned_node_tags("zestbay.vdev.vd-9.out", "Stream/Output/Audio")
+                .1
+                .as_deref(),
+            Some("vd-9")
+        );
+        assert_eq!(
+            owned_node_tags("zestbay.vdev.vd-9", "Audio/Sink")
+                .1
+                .as_deref(),
+            Some("vd-9")
+        );
+        assert_eq!(
+            owned_node_tags("alsa_output.pci", "Audio/Sink"),
+            (None, None)
+        );
+        assert_eq!(
+            owned_node_tags("zestbay.subgraph.sg-1.weird", ""),
+            (None, None)
+        );
     }
 }
 
@@ -2943,7 +3069,10 @@ mod tests {
     fn diff_params_reports_only_changes() {
         let mut reported = vec![(0, 0.5), (1, 1.0)];
         assert!(diff_params(&mut reported, &[(0, 0.5), (1, 1.0)]).is_empty());
-        assert_eq!(diff_params(&mut reported, &[(0, 0.25), (1, 1.0)]), vec![(0, 0.25)]);
+        assert_eq!(
+            diff_params(&mut reported, &[(0, 0.25), (1, 1.0)]),
+            vec![(0, 0.25)]
+        );
         assert_eq!(reported, vec![(0, 0.25), (1, 1.0)]);
         assert!(diff_params(&mut reported, &[(0, 0.25), (1, 1.0)]).is_empty());
     }
@@ -2966,9 +3095,15 @@ mod tests {
     #[test]
     fn same_node_links_need_distinct_port_groups() {
         assert!(!is_allowed_same_node_link(&port(None), &port(None)));
-        assert!(!is_allowed_same_node_link(&port(Some("a")), &port(Some("a"))));
+        assert!(!is_allowed_same_node_link(
+            &port(Some("a")),
+            &port(Some("a"))
+        ));
         assert!(!is_allowed_same_node_link(&port(Some("a")), &port(None)));
-        assert!(is_allowed_same_node_link(&port(Some("a")), &port(Some("b"))));
+        assert!(is_allowed_same_node_link(
+            &port(Some("a")),
+            &port(Some("b"))
+        ));
     }
 
     #[test]
@@ -2987,8 +3122,14 @@ mod tests {
             port_media_type(Some("32 bit float mono audio"), "midi_in", none),
             Some(MediaType::Audio)
         );
-        assert_eq!(port_media_type(None, "midi_in", audio), Some(MediaType::Midi));
-        assert_eq!(port_media_type(None, "in_FL", audio), Some(MediaType::Audio));
+        assert_eq!(
+            port_media_type(None, "midi_in", audio),
+            Some(MediaType::Midi)
+        );
+        assert_eq!(
+            port_media_type(None, "in_FL", audio),
+            Some(MediaType::Audio)
+        );
         assert_eq!(port_media_type(None, "in_FL", none), None);
     }
 }
