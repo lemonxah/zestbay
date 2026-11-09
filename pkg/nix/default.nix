@@ -13,6 +13,7 @@
   gtk3,
   xorg,
   dbus,
+  ladspa-header,
   copyDesktopItems,
   makeDesktopItem,
 }:
@@ -70,6 +71,10 @@ rustPlatform.buildRustPackage {
     xorg.libX11
     dbus
   ];
+
+  # The LADSPA tests compile a fixture plugin (src/ladspa/test_plugin.c)
+  # against the system ladspa.h
+  checkInputs = [ ladspa-header ];
 
   env = {
     LIBCLANG_PATH = "${clang.cc.lib}/lib";
