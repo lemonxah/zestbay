@@ -1,0 +1,78 @@
+name: RPM packages
+
+# Builds the .rpm. On a published release the file is attached to it; a
+# manual run attaches it to the release named in "tag", or with no tag just
+# keeps it as a run artifact.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and attach the .rpm to (e.g. v1.1.2); empty builds the selected branch without attaching"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  # The tag being built: the published release, or the one given on a manual run
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  rpm:
+    name: .rpm (${{ matrix.image }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # An .rpm only works on the Fedora release it was built for
+        image: ["fedora:latest"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG || github.ref }}
+
+      # Packaging (pkg/) comes from the branch running the workflow, so an
+      # existing tag is built from its own source with the current packaging
+      - name: Use this branch's packaging
+        if: env.TAG != ''
+        run: |
+          git fetch --depth=1 origin "$GITHUB_SHA"
+          git checkout "$GITHUB_SHA" -- pkg/
+
+      - name: Build .rpm
+        run: pkg/rpm/build-rpm.sh --container "${{ matrix.image }}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rpm-${{ strategy.job-index }}
+          # Just the package, not the debuginfo/debugsource ones rpmbuild also makes
+          # No wildcard in the directory part, or the artifact keeps an x86_64/ folder
+          path: pkg/rpm/rpmbuild/RPMS/x86_64/zestbay-[0-9]*.rpm
+          if-no-files-found: error
+
+  publish:
+    name: Attach .rpm to release
+    needs: rpm
+    if: github.event_name == 'release' || inputs.tag != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Upload release assets
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Flatten, in case an artifact kept a sub-folder
+          find . -mindepth 2 -type f -exec mv -t . {} +
+          find . -mindepth 1 -type d -empty -delete
+          sha256sum -- * > SHA256SUMS.rpm
+          gh release upload "$TAG" ./* --clobber --repo "$GITHUB_REPOSITORY"
