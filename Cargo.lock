@@ -2120,7 +2120,7 @@ dependencies = [
 
 [[package]]
 name = "zestbay"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "base64",
  "clap-sys",
