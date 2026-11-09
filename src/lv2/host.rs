@@ -4,8 +4,6 @@ use std::os::raw::c_char;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use lilv::World;
-
 use super::log::{Lv2LogSetup, RtScope};
 use super::options::{Lv2OptionsSetup, MAX_BLOCK_LENGTH, SEQUENCE_SIZE};
 use super::state::{LV2_State_Interface, Lv2StatePathSetup, StateEntry, LV2_STATE__INTERFACE};
@@ -249,6 +247,7 @@ impl AtomBuf {
 }
 
 pub struct Lv2PluginInstance {
+    #[allow(dead_code)] // held for ownership/diagnostics; not read
     pub id: PluginInstanceId,
     // NOTE: field order is drop order.  `instance` must be dropped (plugin
     // deactivated + freed) before the feature data and port buffers it
@@ -272,12 +271,14 @@ pub struct Lv2PluginInstance {
     dummy_audio_out: Box<[f32]>,
     _dummy_ports: Vec<Box<[u64]>>,
     pub plugin_uri: String,
+    #[allow(dead_code)] // held for ownership/diagnostics; not read
     pub display_name: String,
     pub audio_input_indices: Vec<usize>,
     pub audio_output_indices: Vec<usize>,
     /// Control port metadata.  `value` is the value at instantiation; the
     /// live value is in `port_updates` (see `control_input_values()`).
     pub control_inputs: Vec<ControlPort>,
+    #[allow(dead_code)] // held for ownership/diagnostics; not read
     pub control_outputs: Vec<ControlPort>,
     pub atom_in_bufs: Vec<AtomBuf>,
     pub atom_out_bufs: Vec<AtomBuf>,
@@ -340,16 +341,16 @@ impl Lv2PluginInstance {
         let options_feature = options_setup.make_feature();
         let buf_size_features = options_setup.make_buf_size_features();
 
-        let needs_worker = plugin_info
+        let worker_required = plugin_info
             .required_features
             .iter()
             .any(|f| f == "http://lv2plug.in/ns/ext/worker#schedule");
 
-        let worker_setup = if needs_worker {
-            Some(Lv2WorkerSetup::new())
-        } else {
-            None
-        };
+        // Offer the schedule feature to every plugin: plugins that list it as
+        // an optional feature would otherwise silently run without their
+        // worker. Setup is cheap (rings only); the worker thread is spawned
+        // only if the plugin actually exposes the worker interface.
+        let worker_setup = Some(Lv2WorkerSetup::new());
 
         let state_path_setup = Lv2StatePathSetup::new(&plugin_info.uri, &format!("instance-{}", id));
         let path_features = state_path_setup.make_features();
@@ -586,14 +587,14 @@ impl Lv2PluginInstance {
         // Activate the worker if needed: get the instance handle and worker
         // interface BEFORE activation (extension_data is available on the
         // un-activated instance).
-        let lv2_handle = instance.handle() as *mut c_void;
+        let lv2_handle = instance.handle();
 
         // lv2_raw 0.2 declares `extension_data` as non-nullable
         // `extern "C" fn(...)`, but the LV2 C spec allows it to be NULL
         // ("If a plugin does not support any extension data, this field
         // may be NULL").  Reading a null through a non-nullable fn type
         // is UB, so we read the raw pointer value first.
-        let has_extension_data = instance.descriptor().map_or(false, |d| {
+        let has_extension_data = instance.descriptor().is_some_and(|d| {
             let raw: *const () =
                 unsafe { *(std::ptr::addr_of!(d.extension_data) as *const *const ()) };
             !raw.is_null()
@@ -625,10 +626,12 @@ impl Lv2PluginInstance {
                     Some(unsafe { ws.activate(lv2_handle, iface_ptr.as_ptr()) })
                 }
                 None => {
-                    log::warn!(
-                        "LV2 worker: plugin '{}' requires worker but provides no interface",
-                        plugin_info.name
-                    );
+                    if worker_required {
+                        log::warn!(
+                            "LV2 worker: plugin '{}' requires worker but provides no interface",
+                            plugin_info.name
+                        );
+                    }
                     // Keep the schedule feature data alive: the plugin may
                     // have stored a pointer to it.  Requests are never processed.
                     unused_worker_setup = Some(ws);
@@ -698,23 +701,6 @@ impl Lv2PluginInstance {
         })
     }
 
-    pub unsafe fn reconnect_control_ports(&mut self) {
-        for (cp, mem) in self.control_inputs.iter().zip(self.control_in_mem.iter_mut()) {
-            unsafe {
-                self.instance
-                    .instance_mut()
-                    .connect_port_mut(cp.index, mem as *mut f32);
-            }
-        }
-        for (cp, mem) in self.control_outputs.iter().zip(self.control_out_mem.iter_mut()) {
-            unsafe {
-                self.instance
-                    .instance_mut()
-                    .connect_port_mut(cp.index, mem as *mut f32);
-            }
-        }
-    }
-
     /// Run one block.  RT-safe: no allocation, locking or I/O.
     /// `sample_count` must not exceed `MAX_BLOCK_LENGTH` (it is clamped).
     pub unsafe fn process(
@@ -755,7 +741,12 @@ impl Lv2PluginInstance {
             .iter_mut()
             .zip(self.port_updates.control_inputs.iter())
         {
-            *mem = slot.value.load();
+            // A non-finite value (e.g. a MIDI mapping over a port with unset
+            // ranges) must not reach the plugin; keep the last good one.
+            let value = slot.value.load();
+            if value.is_finite() {
+                *mem = value;
+            }
         }
 
         // Prepare atom input buffers (UI → plugin communication + MIDI events)
@@ -859,32 +850,6 @@ impl Lv2PluginInstance {
         }
     }
 
-    pub fn set_parameter_by_symbol(&self, symbol: &str, value: f32) {
-        if value.is_nan() {
-            return;
-        }
-        if let Some(idx) = self
-            .control_inputs
-            .iter()
-            .position(|cp| cp.symbol == symbol)
-        {
-            let cp = &self.control_inputs[idx];
-            let clamped = safe_clamp(value, cp.min, cp.max);
-            if let Some(slot) = self.control_input_slot(idx) {
-                slot.value.store(clamped);
-            }
-        }
-    }
-
-    /// Current control input values `(port_index, value)` from the shared slots.
-    pub fn control_input_values(&self) -> Vec<(usize, f32)> {
-        self.port_updates
-            .control_inputs
-            .iter()
-            .map(|s| (s.port_index, s.value.load()))
-            .collect()
-    }
-
     /// Scope makePath/mapPath files to this persistent instance identity.
     /// Must be called before `restore_state`.
     pub fn set_state_scope(&mut self, stable_id: &str) {
@@ -919,23 +884,6 @@ impl Lv2PluginInstance {
                 is_toggle: cp.is_toggle,
             })
             .collect()
-    }
-
-    pub fn get_info(&self, pw_node_id: Option<u32>) -> Lv2InstanceInfo {
-        Lv2InstanceInfo {
-            scan_info: None,
-            id: self.id,
-            stable_id: String::new(),
-            plugin_uri: self.plugin_uri.clone(),
-            format: PluginFormat::Lv2,
-            display_name: self.display_name.clone(),
-            pw_node_id,
-            parameters: self.get_parameters(),
-            active: true,
-            bypassed: self.is_bypassed(),
-            lv2_state: Vec::new(),
-            plugin_state: None,
-        }
     }
 
     pub fn lv2_handle_ptr(&self) -> *mut c_void {
@@ -990,122 +938,6 @@ impl Drop for Lv2PluginInstance {
         if let Ok(mut rates) = handle_sample_rates().lock() {
             rates.remove(&(self.lv2_handle as usize));
         }
-    }
-}
-
-pub struct Lv2Manager {
-    world: World,
-    available_plugins: Vec<Lv2PluginInfo>,
-    active_instances: HashMap<PluginInstanceId, Lv2InstanceInfo>,
-    pub sample_rate: f64,
-}
-
-impl Lv2Manager {
-    pub fn new() -> Self {
-        let world = World::with_load_all();
-        let available_plugins = super::scanner::scan_plugins_with_world(&world);
-
-        log::info!("LV2: Found {} plugins", available_plugins.len());
-
-        Self {
-            world,
-            available_plugins,
-            active_instances: HashMap::new(),
-            sample_rate: 48000.0,
-        }
-    }
-
-    pub fn available_plugins(&self) -> &[Lv2PluginInfo] {
-        &self.available_plugins
-    }
-
-    pub fn rescan(&mut self) {
-        self.available_plugins = super::scanner::scan_plugins_with_world(&self.world);
-        log::info!(
-            "LV2: Rescanned, found {} plugins",
-            self.available_plugins.len()
-        );
-    }
-
-    pub fn find_plugin(&self, uri: &str) -> Option<&Lv2PluginInfo> {
-        self.available_plugins.iter().find(|p| p.uri == uri)
-    }
-
-    pub fn world(&self) -> &World {
-        &self.world
-    }
-
-    pub fn register_instance(&mut self, info: Lv2InstanceInfo) {
-        self.active_instances.insert(info.id, info);
-    }
-
-    pub fn set_instance_pw_node_id(&mut self, instance_id: PluginInstanceId, pw_node_id: u32) {
-        if let Some(info) = self.active_instances.get_mut(&instance_id) {
-            info.pw_node_id = Some(pw_node_id);
-        }
-    }
-
-    pub fn remove_instance(&mut self, instance_id: PluginInstanceId) {
-        self.active_instances.remove(&instance_id);
-    }
-
-    pub fn update_parameter(
-        &mut self,
-        instance_id: PluginInstanceId,
-        port_index: usize,
-        value: f32,
-    ) {
-        if let Some(info) = self.active_instances.get_mut(&instance_id) {
-            if let Some(param) = info
-                .parameters
-                .iter_mut()
-                .find(|p| p.port_index == port_index)
-            {
-                param.value = value;
-            } else {
-                info.parameters.push(super::types::Lv2ParameterValue {
-                    port_index,
-                    symbol: String::new(),
-                    name: String::new(),
-                    value,
-                    min: 0.0,
-                    max: 1.0,
-                    default: 0.0,
-                    is_toggle: false,
-                });
-            }
-        }
-    }
-
-    pub fn active_instances(&self) -> &HashMap<PluginInstanceId, Lv2InstanceInfo> {
-        &self.active_instances
-    }
-
-    pub fn get_instance(&self, id: PluginInstanceId) -> Option<&Lv2InstanceInfo> {
-        self.active_instances.get(&id)
-    }
-
-    pub fn get_instance_mut(&mut self, id: PluginInstanceId) -> Option<&mut Lv2InstanceInfo> {
-        self.active_instances.get_mut(&id)
-    }
-
-    pub fn find_by_stable_id(&self, stable_id: &str) -> Option<&Lv2InstanceInfo> {
-        self.active_instances
-            .values()
-            .find(|info| info.stable_id == stable_id)
-    }
-
-    pub fn find_by_stable_id_mut(&mut self, stable_id: &str) -> Option<&mut Lv2InstanceInfo> {
-        self.active_instances
-            .values_mut()
-            .find(|info| info.stable_id == stable_id)
-    }
-
-    pub fn instance_id_for_stable_id(&self, stable_id: &str) -> Option<PluginInstanceId> {
-        self.active_instances
-            .iter()
-            .find(|(_, info)| info.stable_id == stable_id)
-            .map(|(id, _)| *id)
     }
 }
 

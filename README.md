@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <strong>A PipeWire patchbay and audio routing manager with integrated LV2, VST2, VST3, and CLAP plugin hosting.</strong>
+  <strong>A PipeWire patchbay and audio routing manager with integrated LV2, LADSPA, VST2, VST3, and CLAP plugin hosting.</strong>
 </p>
 
 <p align="center">
@@ -22,7 +22,7 @@
 
 ## What is ZestBay?
 
-ZestBay is a visual audio routing tool for PipeWire on Linux. It lets you see every audio node in your system (applications, hardware devices, virtual sinks), connect and disconnect ports with drag-and-drop, host LV2, VST2, VST3, and CLAP effects plugins inline, define patchbay rules that automatically restore your routing (or keep things apart) whenever devices or apps appear, group plugin chains into reusable subgraphs, and create virtual devices.
+ZestBay is a visual audio routing tool for PipeWire on Linux. It lets you see every audio node in your system (applications, hardware devices, virtual sinks), connect and disconnect ports with drag-and-drop, host LV2, LADSPA, VST2, VST3, and CLAP effects plugins inline, define patchbay rules that automatically restore your routing (or keep things apart) whenever devices or apps appear, group plugin chains into reusable subgraphs, and create virtual devices.
 
 ## Screenshots
 
@@ -58,7 +58,7 @@ ZestBay is a visual audio routing tool for PipeWire on Linux. It lets you see ev
 
 qpwgraph is a straightforward PipeWire graph editor. ZestBay goes further:
 
-- **LV2, VST2, VST3, and CLAP plugin hosting** -- Insert effects (EQ, compressor, reverb, etc.) directly into the PipeWire graph without needing a DAW or separate plugin host. ZestBay creates real PipeWire filter nodes with RT-safe DSP processing. Comprehensive LV2 extension support (URID, worker, state, log, options, buf-size, data-access, instance-access) means most LV2 plugins load without issues. VST2, VST3, and CLAP plugins are hosted with parameter, state, and native UI support.
+- **LV2, LADSPA, VST2, VST3, and CLAP plugin hosting** -- Insert effects (EQ, compressor, reverb, etc.) directly into the PipeWire graph without needing a DAW or separate plugin host. ZestBay creates real PipeWire filter nodes with RT-safe DSP processing. Comprehensive LV2 extension support (URID, worker, state, log, options, buf-size, data-access, instance-access) means most LV2 plugins load without issues. VST2, VST3, and CLAP plugins are hosted with parameter, state, and native UI support. LADSPA plugins are hosted with parameters and bypass (the format has no UI or state API).
 - **Native plugin UIs** -- Open the original plugin interfaces. LV2 UIs (GTK3, X11, Qt5, GTK2, GTK4) via suil, VST2, VST3, and CLAP UIs via embedded X11 windows. A persistent GTK thread manages LV2 plugin windows without the crash-on-reopen issues common in LV2 hosts.
 - **Plugin presets** -- Save a plugin's settings as named presets, pick them from a dropdown on the plugin node, and apply them to any other instance of that plugin instead of re-entering every value. One preset per plugin can be the default, so new instances start from it. For LV2 plugins a preset also keeps the plugin's saved state (for example the LSP Mixer's channel names), not just the knob positions. See [Plugin Presets](#plugin-presets).
 - **MIDI parameter control** -- Map hardware MIDI controllers to any plugin parameter with one-click learn. Continuous, toggle, and momentary modes with RT-safe processing.
@@ -75,7 +75,7 @@ qpwgraph is a straightforward PipeWire graph editor. ZestBay goes further:
 Carla is a full-featured plugin host and JACK patchbay. The differences are about scope and integration:
 
 - **PipeWire-native** -- ZestBay connects directly to PipeWire's native API, not through the JACK compatibility layer. Every PipeWire node (app streams, hardware devices, virtual sinks) appears naturally in the graph.
-- **Lightweight and focused** -- ZestBay is a patchbay first. There is no transport, no MIDI sequencing, no rack view. It hosts LV2, VST2, VST3, and CLAP plugins for inline effects processing with MIDI CC/note learn for hands-on parameter control from hardware controllers. If you need a full DAW-style plugin host environment with MIDI tracks and transport, use Carla. If you need persistent audio routing with inline effects and hardware knob control, ZestBay is simpler and faster to set up.
+- **Lightweight and focused** -- ZestBay is a patchbay first. There is no transport, no MIDI sequencing, no rack view. It hosts LV2, LADSPA, VST2, VST3, and CLAP plugins for inline effects processing with MIDI CC/note learn for hands-on parameter control from hardware controllers. If you need a full DAW-style plugin host environment with MIDI tracks and transport, use Carla. If you need persistent audio routing with inline effects and hardware knob control, ZestBay is simpler and faster to set up.
 - **Presets live on the node** -- Carla keeps plugin settings in its project files. In ZestBay your session is saved automatically, and each plugin node also has its own named presets next to its On / UI / Params buttons. They are stored once per plugin and shared by every instance of it, with an optional default for new instances, so setting up the fifth copy of a mixer or EQ is one click instead of re-entering its values.
 - **Hands-on recovery** -- A **Restart PipeWire** item in the menu restarts PipeWire, PipeWire-Pulse and WirePlumber when a device drops out or something wedges. ZestBay reconnects and restores its plugins and links by itself.
 - **No runtime dependencies beyond Qt6, PipeWire and the LV2 libraries** -- No Python. ZestBay ships its main binary and a small `zestbay-ui-bridge` helper that can run LV2 plugin UIs in a separate process.
@@ -83,7 +83,7 @@ Carla is a full-featured plugin host and JACK patchbay. The differences are abou
 
 ### vs. Helvum, PatchMatrix, and other GTK patchbays
 
-- **LV2, VST2, VST3, and CLAP plugin hosting** -- Most PipeWire patchbays only visualize and connect. ZestBay can host plugins from all four plugin formats inline.
+- **LV2, VST2, VST3, and CLAP plugin hosting** -- Most PipeWire patchbays only visualize and connect. ZestBay can host plugins from all five plugin formats inline.
 - **Plugin presets, MIDI control and per-plugin CPU load** -- These only make sense once plugins are hosted: save and reuse a plugin's settings across instances (with an optional default for new ones), drive parameters from a hardware controller, and see what each plugin costs. See [Plugin Presets](#plugin-presets) and [MIDI Parameter Control](#midi-parameter-control).
 - **Subgraphs and virtual devices** -- Group a plugin chain into one reusable block, offer it to apps as a microphone or speaker, and create virtual sinks and sources from the UI.
 - **Auto-connect and block rules** -- Define patterns that automatically wire things up when nodes appear, or keep them apart. Other tools require manual reconnection every time.
@@ -107,7 +107,7 @@ Carla is a full-featured plugin host and JACK patchbay. The differences are abou
 - Dark and light themes, or follow the desktop
 - Status bar with node/link counts, a CPU sparkline and the rules state
 
-### Plugin Hosting (LV2, VST2, VST3, CLAP)
+### Plugin Hosting (LV2, LADSPA, VST2, VST3, CLAP)
 - Browse, search, and filter all installed plugins by name, author, category, format or URI/ID; hide incompatible ones
 - **Faster startup**: saved plugins can restore without waiting for discovery, while plugin scanning runs in the background with up to four isolated scan processes at a time for VST2, VST3, and CLAP
 - One-click instantiation as real PipeWire filter nodes with RT-safe audio processing
@@ -152,13 +152,13 @@ Every plugin node has a preset row above the **On / UI / Params** buttons: a dro
 
 **What a preset contains**
 - All the plugin's parameter values.
-- For LV2 plugins, the plugin's saved state too, which is where things that aren't ordinary parameters live, such as the **LSP Mixer's channel names**. Applying a preset with state re-creates the plugin in place (same name, same links), with a brief audio gap.
+- For LV2 plugins, the plugin's saved state too, which is where things that aren't ordinary parameters live, such as the **LSP Mixer's channel names**. Applying a preset with state re-creates the plugin in place (same name, same links), with a brief audio gap. Files the plugin keeps for its state (written through the LV2 state path features) are copied into the preset and into the target instance when the preset is applied. Those per-instance state folders under `~/.config/zestbay/plugin-state/` are not deleted when a plugin is removed.
 - CLAP, VST3 and VST2 presets hold parameter values only.
 
 Presets are kept per plugin, so a preset made for one plugin never shows up on another, and every instance of that plugin shares the same list. They are stored in `~/.config/zestbay/presets.json` (under `~/.var/app/io.github.lemonxah.ZestBay/config/zestbay/` for the Flatpak). To use your presets on another machine, copy that file.
 
 ### MIDI Parameter Control
-- Map any MIDI CC or note message to any plugin parameter across all plugin formats (LV2, VST2, VST3, CLAP)
+- Map any MIDI CC or note message to any plugin parameter across all plugin formats (LV2, LADSPA, VST2, VST3, CLAP)
 - **MIDI Learn**: click Learn on a parameter, move a knob or press a key on your controller, done
 - Three mapping modes:
   - **Continuous**: CC 0-127 mapped linearly (or logarithmically for log-scale parameters) to the parameter range
@@ -229,7 +229,7 @@ Everything is saved to `~/.config/zestbay/` (`~/.var/app/io.github.lemonxah.Zest
 | File | Contents |
 |------|----------|
 | `preferences.json` | All user settings |
-| `plugins.json` | Active plugin instances (LV2, VST2, VST3, CLAP) with parameters and state, including custom LSP Mixer input names |
+| `plugins.json` | Active plugin instances (LV2, LADSPA, VST2, VST3, CLAP) with parameters and state, including custom LSP Mixer input names |
 | `plugins.known_good.json` | Last plugin set that loaded cleanly (crash recovery) |
 | `links.json` | Connections of plugins, subgraphs and virtual devices |
 | `rules.json` | Patchbay connect and block rules |
@@ -345,7 +345,7 @@ Command-line options:
 
 ## Installing plugins
 
-ZestBay scans for LV2, VST2, VST3 and CLAP plugins when it starts, so restart it
+ZestBay scans for LV2, LADSPA, VST2, VST3 and CLAP plugins when it starts, so restart it
 after adding plugins. Where plugins go depends on which version you run
 (**About** shows *Install: Native* or *Install: Flatpak*).
 
@@ -369,17 +369,28 @@ The native version sees every plugin installed on your system.
 | Format | Your plugins | System-wide |
 |---|---|---|
 | LV2 | `~/.lv2/` | `/usr/lib/lv2/`, `/usr/local/lib/lv2/` |
+| LADSPA | `~/.ladspa/` | `/usr/lib/ladspa/`, `/usr/local/lib/ladspa/`, `/usr/lib64/ladspa/` |
 | VST2 | `~/.vst/`, `~/.vst2/` | `/usr/lib/vst/`, `/usr/local/lib/vst/` (also `vst2` and `lib64` variants) |
 | VST3 | `~/.vst3/` | `/usr/lib/vst3/`, `/usr/local/lib/vst3/`, `/usr/lib64/vst3/` |
 | CLAP | `~/.clap/` | `/usr/lib/clap/`, `/usr/local/lib/clap/`, `/usr/lib64/clap/` |
 
-Other folders can be added with `VST_PATH` (VST2) / `VST3_PATH` / `CLAP_PATH` (colon-separated,
+Other folders can be added with `LADSPA_PATH` (LADSPA) / `VST_PATH` (VST2) / `VST3_PATH` / `CLAP_PATH` (colon-separated,
 searched first). `LV2_PATH` *replaces* the LV2 search path, so include the
 defaults you still want:
 
 ```sh
 LV2_PATH="$HOME/.lv2:/usr/lib/lv2:/opt/my-plugins/lv2" zestbay
 ```
+
+### LADSPA compatibility
+
+LADSPA `.so` libraries are scanned in isolated subprocesses. Every plugin in a
+library is listed (many classic effects, such as SWH, TAP and CAPS, exist only
+as LADSPA). Audio and control ports, port ranges (including sample-rate
+scaled, logarithmic, integer and toggled controls), bypass and MIDI CC learn
+are supported; control output ports are read back. LADSPA has no UI, MIDI or
+state API, so a plugin's settings are saved as parameter values and its
+controls appear in ZestBay's own parameter panel.
 
 ### VST2 compatibility
 

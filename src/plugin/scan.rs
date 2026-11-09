@@ -21,8 +21,9 @@ pub fn start() -> std::io::Result<Receiver<ScanEvent>> {
             let clap = crate::clap::scanner::discover_plugins();
             let vst2 = crate::vst2::scanner::discover_plugins();
             let vst3 = crate::vst3::scanner::discover_plugins();
+            let ladspa = crate::ladspa::scanner::discover_plugins();
             // One step for LV2's metadata catalog, then one per native library.
-            let total = 1 + clap.len() + vst3.len() + vst2.len();
+            let total = 1 + clap.len() + vst3.len() + vst2.len() + ladspa.len();
             let completed = AtomicUsize::new(0);
             let _ = tx.send(ScanEvent::Progress {
                 completed: 0,
@@ -37,6 +38,7 @@ pub fn start() -> std::io::Result<Receiver<ScanEvent>> {
             plugins.extend(crate::clap::scanner::scan_discovered(&clap, &progress));
             plugins.extend(crate::vst3::scanner::scan_discovered(&vst3, &progress));
             plugins.extend(crate::vst2::scanner::scan_discovered(&vst2, &progress));
+            plugins.extend(crate::ladspa::scanner::scan_discovered(&ladspa, &progress));
             plugins.sort_by_cached_key(|p| p.name.to_lowercase());
             log::info!(
                 "Plugin catalog: {} plugins in {:?}",

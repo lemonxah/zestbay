@@ -14,23 +14,19 @@ use crate::plugin::types::PluginInstanceId;
 // Mapping mode (toggle vs. momentary for button-type controls)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum MidiMessageType {
+    #[default]
     Cc,
     Note,
 }
 
-impl Default for MidiMessageType {
-    fn default() -> Self {
-        Self::Cc
-    }
-}
-
 /// How a MIDI CC value is interpreted when the target parameter is boolean-ish.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum MappingMode {
     /// Continuous: CC 0-127 is mapped linearly to [min, max].
     /// This is the default for sliders / knobs.
+    #[default]
     Continuous,
     /// Toggle: each "press" flips the parameter on/off.  A press is a CC
     /// going from <= 63 to > 63, or a note-on (any velocity > 0) after a
@@ -39,12 +35,6 @@ pub enum MappingMode {
     /// Momentary: CC > 63 / note-on = on, CC <= 63 / note-off = off.
     /// The parameter follows the button state exactly.
     Momentary,
-}
-
-impl Default for MappingMode {
-    fn default() -> Self {
-        Self::Continuous
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -99,38 +89,32 @@ pub struct MidiMappingTable {
 }
 
 impl MidiMappingTable {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::default()
     }
+
 
     /// Insert a mapping.  Returns `Some(old_mapping)` if the source was already bound.
     pub fn insert(&mut self, mapping: MidiCcMapping) -> Option<MidiCcMapping> {
         self.by_source.insert(mapping.source.clone(), mapping)
     }
 
-    /// Remove the mapping for a given source.
-    pub fn remove(&mut self, source: &MidiCcSource) -> Option<MidiCcMapping> {
-        self.by_source.remove(source)
-    }
-
-    /// Remove all mappings that target a specific plugin instance.
+    #[cfg(test)]
     pub fn remove_by_instance(&mut self, instance_id: PluginInstanceId) {
         self.by_source
             .retain(|_, m| m.target.instance_id != instance_id);
     }
 
+    #[cfg(test)]
     pub fn remove_by_device(&mut self, device_name: &str) {
         self.by_source
             .retain(|source, _| source.device_name != device_name);
     }
 
-    /// Lookup by source (used in the RT callback).
-    pub fn get(&self, source: &MidiCcSource) -> Option<&MidiCcMapping> {
-        self.by_source.get(source)
-    }
-
     /// Lookup by source, but with wildcard channel matching.
     /// First tries exact match, then tries `channel: None` (any-channel mapping).
+    #[cfg(test)]
     pub fn get_with_wildcard(
         &self,
         device_name: &str,
@@ -156,23 +140,15 @@ impl MidiMappingTable {
         self.by_source.get(&wildcard)
     }
 
-    /// Find an existing mapping for a target (instance_id + port_index).
-    pub fn find_by_target(&self, target: &MidiCcTarget) -> Option<&MidiCcMapping> {
-        self.by_source.values().find(|m| m.target == *target)
-    }
-
     /// Check if a source is already mapped.  Returns the label of the existing
     /// mapping's target if so.
+    #[cfg(test)]
     pub fn conflict_check(&self, source: &MidiCcSource) -> Option<&str> {
         self.by_source.get(source).map(|m| m.label.as_str())
     }
 
-    /// All mappings (for persistence / UI).
-    pub fn all_mappings(&self) -> Vec<&MidiCcMapping> {
-        self.by_source.values().collect()
-    }
-
     /// Build from a list of mappings (for loading from persistence).
+    #[cfg(test)]
     pub fn from_mappings(mappings: Vec<MidiCcMapping>) -> Self {
         let mut table = Self::new();
         for m in mappings {
@@ -180,15 +156,26 @@ impl MidiMappingTable {
         }
         table
     }
-}
 
-// ---------------------------------------------------------------------------
-// Persistence wrapper
-// ---------------------------------------------------------------------------
+    /// Remove the mapping for a given source.
+    pub fn remove(&mut self, source: &MidiCcSource) -> Option<MidiCcMapping> {
+        self.by_source.remove(source)
+    }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SavedMidiMappings {
-    pub mappings: Vec<MidiCcMapping>,
+    /// Lookup by source (used in the RT callback).
+    pub fn get(&self, source: &MidiCcSource) -> Option<&MidiCcMapping> {
+        self.by_source.get(source)
+    }
+
+    /// Find an existing mapping for a target (instance_id + port_index).
+    pub fn find_by_target(&self, target: &MidiCcTarget) -> Option<&MidiCcMapping> {
+        self.by_source.values().find(|m| m.target == *target)
+    }
+
+    /// All mappings (for persistence / UI).
+    pub fn all_mappings(&self) -> Vec<&MidiCcMapping> {
+        self.by_source.values().collect()
+    }
 }
 
 #[cfg(test)]

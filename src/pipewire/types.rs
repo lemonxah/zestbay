@@ -22,12 +22,14 @@ pub enum NodeType {
 }
 
 impl NodeType {
+    #[cfg(test)]
     pub fn has_outputs(&self) -> bool {
         matches!(
             self,
             NodeType::Source | NodeType::StreamOutput | NodeType::Duplex | NodeType::Plugin
         )
     }
+
 
     pub fn has_inputs(&self) -> bool {
         matches!(
@@ -154,6 +156,7 @@ pub enum PwEvent {
 }
 
 #[allow(dead_code)]
+#[allow(clippy::large_enum_variant)] // AddPlugin carries the full PluginInfo; commands are short-lived and boxing would touch every construction site
 #[derive(Debug, Clone)]
 pub enum PwCommand {
     Connect {
@@ -279,6 +282,13 @@ pub enum PluginEvent {
         port_index: usize,
         value: f32,
     },
+    /// The running instance's parameter list (names, ranges, defaults and
+    /// current values).  Sent after every successful instantiation, before
+    /// `PluginAdded`.
+    ParametersDescribed {
+        instance_id: u64,
+        params: Vec<crate::plugin::types::ParameterValue>,
+    },
     PluginUiOpened {
         instance_id: u64,
     },
@@ -324,6 +334,3 @@ pub enum PluginEvent {
     /// Sent after all `PluginStateSaved` replies to a `RequestPluginStates`.
     PluginStatesDone,
 }
-
-/// Backward-compatible alias for `PluginEvent`.
-pub type Lv2Event = PluginEvent;

@@ -27,8 +27,10 @@ pub struct FilterConfig {
     pub display_name: String,
     pub audio_inputs: usize,
     pub audio_outputs: usize,
+    #[allow(dead_code)] // set by callers; not yet consumed by the filter
     pub sample_rate: u32,
     pub has_midi_in: bool,
+    #[allow(dead_code)] // set by callers; not yet consumed by the filter
     pub has_midi_out: bool,
 }
 
@@ -274,15 +276,6 @@ impl Lv2FilterNode {
 
     pub fn set_learn_mode(&self, enabled: bool) {
         self.main.set_learn_mode(enabled);
-    }
-
-    pub fn disconnect(&mut self) {
-        self.main.set_shutting_down();
-        if !self.filter.is_null() {
-            unsafe {
-                pipewire::sys::pw_filter_disconnect(self.filter);
-            }
-        }
     }
 }
 

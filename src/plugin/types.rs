@@ -18,6 +18,7 @@ pub enum PluginFormat {
     Clap,
     Vst2,
     Vst3,
+    Ladspa,
 }
 
 impl PluginFormat {
@@ -27,6 +28,7 @@ impl PluginFormat {
             Self::Clap => "CLAP",
             Self::Vst2 => "VST2",
             Self::Vst3 => "VST3",
+            Self::Ladspa => "LADSPA",
         }
     }
 }
@@ -55,14 +57,17 @@ pub enum PluginPortType {
 }
 
 impl PluginPortType {
+    #[cfg(test)]
     pub fn is_audio(&self) -> bool {
         matches!(self, Self::AudioInput | Self::AudioOutput)
     }
 
+    #[cfg(test)]
     pub fn is_control(&self) -> bool {
         matches!(self, Self::ControlInput | Self::ControlOutput)
     }
 
+    #[cfg(test)]
     pub fn is_input(&self) -> bool {
         matches!(
             self,
@@ -70,6 +75,7 @@ impl PluginPortType {
         )
     }
 
+    #[cfg(test)]
     pub fn is_output(&self) -> bool {
         matches!(
             self,
@@ -232,14 +238,17 @@ pub struct PluginInfo {
 }
 
 impl PluginInfo {
+    #[cfg(test)]
     pub fn is_effect(&self) -> bool {
         self.audio_inputs > 0 && self.audio_outputs > 0
     }
 
+    #[cfg(test)]
     pub fn is_instrument(&self) -> bool {
         self.audio_inputs == 0 && self.audio_outputs > 0
     }
 
+    #[cfg(test)]
     pub fn is_analyser(&self) -> bool {
         self.audio_inputs > 0 && self.audio_outputs == 0
     }
@@ -285,46 +294,6 @@ pub struct PluginInstanceInfo {
 }
 
 // ---------------------------------------------------------------------------
-// Persistence types
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SavedPluginInstance {
-    pub plugin_uri: String,
-    pub display_name: String,
-    pub bypassed: bool,
-    pub parameters: Vec<SavedParameter>,
-    /// Optional: "LV2", "CLAP", "VST3".  Defaults to LV2 for backwards compat.
-    #[serde(default = "default_lv2_format")]
-    pub format: String,
-}
-
-fn default_lv2_format() -> String {
-    "LV2".to_string()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SavedParameter {
-    pub port_index: usize,
-    pub symbol: String,
-    pub value: f32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SavedPluginLink {
-    pub output_node_name: String,
-    pub output_port_name: String,
-    pub input_node_name: String,
-    pub input_port_name: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SavedSession {
-    pub plugins: Vec<SavedPluginInstance>,
-    pub links: Vec<SavedPluginLink>,
-}
-
-// ---------------------------------------------------------------------------
 // Lock-free port synchronisation primitives (shared between RT and UI threads)
 // ---------------------------------------------------------------------------
 
@@ -340,6 +309,18 @@ impl AtomicF32 {
     }
     pub fn store(&self, val: f32) {
         self.0.store(val.to_bits(), Ordering::Relaxed);
+    }
+    /// Store `new` only if the value is still bit-for-bit `current`.
+    /// Returns whether it was stored.
+    pub fn replace_if(&self, current: f32, new: f32) -> bool {
+        self.0
+            .compare_exchange(
+                current.to_bits(),
+                new.to_bits(),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .is_ok()
     }
 }
 
@@ -428,7 +409,6 @@ impl MsgConsumer {
             header[i] = *byte;
         }
         let len = u32::from_ne_bytes(header) as usize;
-        drop(chunk);
         if self.0.slots() >= MSG_HEADER + len {
             Some(len)
         } else {
@@ -584,6 +564,7 @@ pub struct PortUpdates {
 }
 
 impl PortUpdates {
+    #[cfg(test)]
     pub fn snapshot_all(&self) -> Vec<(usize, f32)> {
         self.control_inputs
             .iter()
@@ -941,22 +922,5 @@ mod tests {
         assert!(info.is_analyser());
         assert!(!info.is_effect());
         assert!(!info.is_instrument());
-    }
-
-    // ---- SavedPluginInstance default format ----
-
-    #[test]
-    fn saved_plugin_instance_default_format_is_lv2() {
-        let json =
-            r#"{"plugin_uri":"test","display_name":"Test","bypassed":false,"parameters":[]}"#;
-        let saved: SavedPluginInstance = serde_json::from_str(json).unwrap();
-        assert_eq!(saved.format, "LV2");
-    }
-
-    #[test]
-    fn saved_plugin_instance_explicit_format() {
-        let json = r#"{"plugin_uri":"test","display_name":"Test","bypassed":false,"parameters":[],"format":"VST3"}"#;
-        let saved: SavedPluginInstance = serde_json::from_str(json).unwrap();
-        assert_eq!(saved.format, "VST3");
     }
 }

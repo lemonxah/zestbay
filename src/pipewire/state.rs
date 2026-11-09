@@ -115,6 +115,15 @@ impl GraphState {
         self.nodes.read().get(&id).cloned()
     }
 
+    /// Id of a node with this name, without cloning the node list.
+    pub fn find_node_id_by_name(&self, name: &str) -> Option<ObjectId> {
+        self.nodes
+            .read()
+            .values()
+            .find(|n| n.name == name)
+            .map(|n| n.id)
+    }
+
     pub fn get_all_nodes(&self) -> Vec<Node> {
         self.nodes.read().values().cloned().collect()
     }

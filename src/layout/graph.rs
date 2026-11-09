@@ -18,6 +18,7 @@ pub struct LayoutNode {
     /// Original PipeWire node ID (or virtual bridge sub-node ID).
     pub id: NodeId,
     /// Display name.
+    #[allow(dead_code)] // informational; only set by builders
     pub name: String,
     /// Node kind — used for determining default flow direction.
     pub kind: LayoutNodeKind,
@@ -55,47 +56,11 @@ pub enum LayoutNodeKind {
     Unknown,
 }
 
-/// A port (socket) on a layout node.
-#[derive(Debug, Clone)]
-pub struct LayoutPort {
-    /// Original PipeWire port ID.
-    pub id: PortId,
-    /// Node this port belongs to (index into graph's node vec).
-    pub node_idx: usize,
-    /// Index of this port among its direction group on the node (0-based).
-    pub port_index: usize,
-    /// Whether this is an output (true) or input (false) port.
-    pub is_output: bool,
-}
-
-impl LayoutPort {
-    /// Get the x position of this port given the node's position and width.
-    pub fn x(&self, node: &LayoutNode) -> f64 {
-        if self.is_output {
-            node.x + node.width
-        } else {
-            node.x
-        }
-    }
-
-    /// Get the y position of this port given the node's y position and layout constants.
-    pub fn y(
-        &self,
-        node: &LayoutNode,
-        header_height: f64,
-        padding: f64,
-        port_height: f64,
-        port_spacing: f64,
-    ) -> f64 {
-        let base_y = node.y + header_height + padding;
-        base_y + self.port_index as f64 * (port_height + port_spacing) + port_height / 2.0
-    }
-}
-
 /// A directed edge in the layout graph.
 #[derive(Debug, Clone)]
 pub struct LayoutEdge {
     /// Original PipeWire link ID (0 for dummy edges).
+    #[allow(dead_code)] // informational; only set by builders
     pub id: EdgeId,
     /// Source node index.
     pub from_node: usize,
@@ -132,6 +97,7 @@ impl Default for LayoutConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // only Balanced is used; the other directions are part of the algorithm's API
 pub enum LayoutDirection {
     RightDown,
     RightUp,

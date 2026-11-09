@@ -36,6 +36,9 @@ struct ClapGuiState {
     pending_size: Option<(u32, u32)>,
     /// The plugin reported its GUI closed (`clap_host_gui.closed`).
     close_requested: bool,
+    /// The plugin reported `closed(was_destroyed = true)`: it already
+    /// destroyed its GUI, so the host must not hide/destroy it again.
+    plugin_destroyed: bool,
 }
 
 unsafe impl Send for ClapGuiState {}
@@ -316,11 +319,11 @@ pub unsafe fn open_clap_gui(
 
         let mut width: u32 = 800;
         let mut height: u32 = 600;
-        if let Some(get_size) = gui.get_size {
-            if !get_size(plugin_ptr, &mut width, &mut height) {
-                width = 800;
-                height = 600;
-            }
+        if let Some(get_size) = gui.get_size
+            && !get_size(plugin_ptr, &mut width, &mut height)
+        {
+            width = 800;
+            height = 600;
         }
         log::info!(
             "CLAP embedded GUI size: {}x{} (instance {})",
@@ -347,6 +350,7 @@ pub unsafe fn open_clap_gui(
                     event_tx: event_tx.clone(),
                     pending_size: None,
                     close_requested: false,
+                    plugin_destroyed: false,
                 },
             );
         });
@@ -392,10 +396,8 @@ unsafe fn destroy_plugin_gui(
     hide: bool,
 ) {
     unsafe {
-        if hide {
-            if let Some(hide_fn) = gui.hide {
-                hide_fn(plugin);
-            }
+        if hide && let Some(hide_fn) = gui.hide {
+            hide_fn(plugin);
         }
         if let Some(destroy_fn) = gui.destroy {
             destroy_fn(plugin);
@@ -406,8 +408,10 @@ unsafe fn destroy_plugin_gui(
 /// Destroy the plugin GUI, then the host window.  The state must already
 /// be removed from the registry.
 unsafe fn teardown(state: ClapGuiState) {
-    unsafe {
-        destroy_plugin_gui(state.plugin, &*state.gui_ext, true);
+    if !state.plugin_destroyed {
+        unsafe {
+            destroy_plugin_gui(state.plugin, &*state.gui_ext, true);
+        }
     }
     drop(state.window);
 }
@@ -524,6 +528,7 @@ unsafe extern "C" fn host_gui_closed(host: *const clap_sys::host::clap_host, was
     with_guis(|m| {
         if let Some(s) = m.values_mut().find(|s| std::ptr::eq(s.plugin, plugin)) {
             s.close_requested = true;
+            s.plugin_destroyed |= was_destroyed;
         }
     });
 }

@@ -7,7 +7,7 @@ use std::ffi::{CStr, CString, c_void};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::abi::{self, eff, *};
 use crate::clap::threading::{self, RtGate};
@@ -16,6 +16,9 @@ use crate::midi::rt::MAX_BLOCK;
 use crate::plugin::types::*;
 
 const MAX_STATE: usize = 64 * 1024 * 1024;
+/// How long the audio thread must have been quiet before the main thread
+/// suspends it to apply parameters itself (same as the CLAP host).
+const RT_IDLE_BEFORE_FLUSH: Duration = Duration::from_millis(500);
 
 thread_local! {
     // During VSTPluginMain the plugin can call the host with a null effect.
@@ -83,18 +86,18 @@ unsafe extern "C" fn host_callback(
     match opcode {
         0 => {
             // audioMasterAutomate, including edits from the native GUI
-            if opt.is_finite() && index >= 0 {
-                if let Some(slot) = data
+            if opt.is_finite()
+                && index >= 0
+                && let Some(slot) = data
                     .slots
                     .get()
                     .and_then(|s| s.control_inputs.get(index as usize))
-                {
-                    let value = opt.clamp(0.0, 1.0);
-                    if let Some(applied) = data.applied.get().and_then(|a| a.get(index as usize)) {
-                        applied.store(value);
-                    }
-                    slot.value.store(value);
+            {
+                let value = opt.clamp(0.0, 1.0);
+                if let Some(applied) = data.applied.get().and_then(|a| a.get(index as usize)) {
+                    applied.store(value);
                 }
+                slot.value.store(value);
             }
             0
         }
@@ -383,6 +386,10 @@ pub struct Vst2PluginInstance {
     bypassed: AtomicBool,
     params_dirty: AtomicBool,
     parked: Cell<bool>,
+    // Main thread: the last sample position seen and when it last moved,
+    // to tell whether the audio thread is processing this plugin.
+    seen_position: Cell<u64>,
+    position_moved: Cell<Instant>,
     // Accessed only by the audio callback, or main while the gate is suspended.
     audio: UnsafeCell<AudioState>,
 }
@@ -406,10 +413,17 @@ impl Vst2PluginInstance {
             return None;
         }
         let defaults = loaded.parameters();
-        if let Some(blob) = state {
-            if !restore_state(&loaded, blob) {
-                return None;
-            }
+        // Deliberately fatal: a plugin that loaded with defaults would have
+        // its saved state overwritten by the next autosave.  Skipped, the
+        // saved state stays on disk until it can be restored.
+        if let Some(blob) = state
+            && !restore_state(&loaded, blob)
+        {
+            log::warn!(
+                "VST2: saved state for '{}' could not be restored; not loading it",
+                info.name
+            );
+            return None;
         }
         if !loaded.valid_counts() {
             return None;
@@ -461,6 +475,13 @@ impl Vst2PluginInstance {
             bypassed: AtomicBool::new(false),
             params_dirty: AtomicBool::new(false),
             parked: Cell::new(false),
+            seen_position: Cell::new(0),
+            // Starts "quiet" so changes made before the first block are applied.
+            position_moved: Cell::new(
+                Instant::now()
+                    .checked_sub(RT_IDLE_BEFORE_FLUSH)
+                    .unwrap_or_else(Instant::now),
+            ),
             audio: UnsafeCell::new(AudioState::new(inputs, outputs)),
         })
     }
@@ -470,11 +491,11 @@ impl Vst2PluginInstance {
     }
 
     pub fn set_parameter(&self, port_index: usize, value: f32) {
-        if value.is_finite() {
-            if let Some(slot) = self.port_updates.control_inputs.get(port_index) {
-                slot.value.store(value.clamp(0.0, 1.0));
-                self.params_dirty.store(true, Ordering::Release);
-            }
+        if value.is_finite()
+            && let Some(slot) = self.port_updates.control_inputs.get(port_index)
+        {
+            slot.value.store(value.clamp(0.0, 1.0));
+            self.params_dirty.store(true, Ordering::Release);
         }
     }
 
@@ -636,14 +657,54 @@ impl Vst2PluginInstance {
         }
     }
 
+    /// Whether the audio thread has processed this plugin recently.
+    fn audio_running(&self) -> bool {
+        let position = self.loaded.host.position.load(Ordering::Relaxed);
+        if position != self.seen_position.get() {
+            self.seen_position.set(position);
+            self.position_moved.set(Instant::now());
+        }
+        self.position_moved.get().elapsed() < RT_IDLE_BEFORE_FLUSH
+    }
+
+    /// Copy the plugin's own parameter values (after `updateDisplay`) into
+    /// the shared slots without excluding the audio thread.  A slot with a
+    /// host change still pending is left alone, and a concurrent write wins.
+    /// The audio thread then re-applies each published value, which is a
+    /// no-op for the plugin.
+    fn publish_plugin_values(&self) {
+        let Some(applied) = self.loaded.host.applied.get() else {
+            return;
+        };
+        for (i, slot) in self.port_updates.control_inputs.iter().enumerate() {
+            let current = slot.value.load();
+            if current.to_bits() != applied[i].load().to_bits() {
+                continue;
+            }
+            let value = self.loaded.parameter(i as i32);
+            if value.is_finite() && value != current {
+                slot.value.replace_if(current, value);
+            }
+        }
+    }
+
     /// Main-thread flushing also handles knobs when PipeWire is idle.
     pub fn idle(&self) {
         if self.parked.get() || self.needs_restart() {
             return;
         }
+        let audio_running = self.audio_running();
         if !self.params_dirty.load(Ordering::Acquire)
             && !self.loaded.host.refresh.load(Ordering::Acquire)
         {
+            return;
+        }
+        if audio_running {
+            // The audio thread applies host changes at the start of every
+            // block; suspending it here would drop that block.
+            if self.loaded.host.refresh.swap(false, Ordering::AcqRel) {
+                self.publish_plugin_values();
+            }
             return;
         }
         if !self.gate.suspend(Duration::from_millis(2)) {
@@ -702,14 +763,16 @@ impl Vst2PluginInstance {
         if !already_suspended && !self.gate.suspend(Duration::from_secs(1)) {
             return None;
         }
-        let result = self.save_suspended();
+        let captured = self.capture_suspended();
         if !already_suspended {
             self.gate.resume();
         }
-        result
+        // Encoding a large chunk takes far longer than fetching it; it runs
+        // after audio has resumed.
+        serde_json::to_vec(&captured?).ok()
     }
 
-    fn save_suspended(&self) -> Option<Vec<u8>> {
+    fn capture_suspended(&self) -> Option<SavedState> {
         if !self.loaded.valid_counts() {
             return None;
         }
@@ -742,7 +805,7 @@ impl Vst2PluginInstance {
             } else {
                 None
             };
-            serde_json::to_vec(&SavedState {
+            Some(SavedState {
                 version: 1,
                 unique_id: (*raw).unique_id,
                 program,
@@ -751,7 +814,6 @@ impl Vst2PluginInstance {
                     .map(|i| self.loaded.parameter(i))
                     .collect(),
             })
-            .ok()
         }
     }
 }
@@ -794,10 +856,11 @@ fn restore_state(loaded: &LoadedEffect, blob: &[u8]) -> bool {
                 0.0,
             );
         } else {
-            if let Some(program) = state.program {
-                if program >= 0 && program < (*raw).num_programs {
-                    command(raw, eff::SET_PROGRAM, program as isize);
-                }
+            if let Some(program) = state.program
+                && program >= 0
+                && program < (*raw).num_programs
+            {
+                command(raw, eff::SET_PROGRAM, program as isize);
             }
             if let Some(set) = (*raw).set_parameter {
                 for (i, value) in state

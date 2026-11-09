@@ -94,10 +94,10 @@ pub(crate) fn scan_vst2_file(path: &Path, plugins: &mut Vec<PluginInfo>) {
             }
             drop(root);
             for id in children {
-                if let Some(child) = LoadedEffect::open(path, id, 48000.0) {
-                    if (*child.raw).unique_id == id {
-                        plugins.push(describe(path, &child));
-                    }
+                if let Some(child) = LoadedEffect::open(path, id, 48000.0)
+                    && (*child.raw).unique_id == id
+                {
+                    plugins.push(describe(path, &child));
                 }
             }
         } else {

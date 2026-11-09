@@ -13,10 +13,10 @@ fn padded(n: usize) -> Option<usize> {
 
 pub fn references(data: &[u8], ty: &str, mapper: &UridMapper) -> Vec<(usize, String)> {
     fn reference(data: &[u8], at: usize, mapper: &UridMapper, out: &mut Vec<(usize, String)>) {
-        if let Some(id) = word(data, at).filter(|id| *id != 0) {
-            if let Some(uri) = mapper.unmap(id) {
-                out.push((at, uri));
-            }
+        if let Some(id) = word(data, at).filter(|id| *id != 0)
+            && let Some(uri) = mapper.unmap(id)
+        {
+            out.push((at, uri));
         }
     }
     fn body(
@@ -33,10 +33,8 @@ pub fn references(data: &[u8], ty: &str, mapper: &UridMapper) -> Vec<(usize, Str
         }
         let object = matches!(ty.strip_prefix(ATOM), Some("Object" | "Blank" | "Resource"));
         let tuple = ty == format!("{ATOM}Tuple");
-        if ty == format!("{ATOM}URID") {
-            if end - start >= 4 {
-                reference(data, start, mapper, out);
-            }
+        if ty == format!("{ATOM}URID") && end - start >= 4 {
+            reference(data, start, mapper, out);
         }
         if !object && !tuple {
             return Some(());
@@ -126,7 +124,7 @@ pub fn port_label(uri: &str, entries: &[StateEntry], port: &str) -> Option<Strin
         let mixer_channel = index / channels;
         let side = if !stereo {
             ""
-        } else if index % 2 == 0 {
+        } else if index.is_multiple_of(2) {
             "l"
         } else {
             "r"
@@ -227,7 +225,7 @@ mod tests {
             word(out, mapper.map(&format!("{ATOM}String")));
             out.extend(value.as_bytes());
             out.push(0);
-            while out.len() % 8 != 0 {
+            while !out.len().is_multiple_of(8) {
                 out.push(0);
             }
         }
@@ -267,18 +265,19 @@ mod tests {
         let entry = fixture(&mapper);
         let json = serde_json::to_string(&entry).unwrap();
         let saved: StateEntry = serde_json::from_str(&json).unwrap();
+        let saved_slice = std::slice::from_ref(&saved);
         let uri = "http://lsp-plug.in/plugins/lv2/mixer_x4_stereo";
         assert_eq!(
-            port_label(uri, &[saved.clone()], "input_2").as_deref(),
+            port_label(uri, saved_slice, "input_2").as_deref(),
             Some("Vocals 🎤 L")
         );
         assert_eq!(
-            port_label(uri, &[saved.clone()], "input_3").as_deref(),
+            port_label(uri, saved_slice, "input_3").as_deref(),
             Some("Vocals 🎤 R")
         );
-        assert!(port_label(uri, &[saved.clone()], "input_0").is_none());
-        assert!(port_label(uri, &[saved.clone()], "output_0").is_none());
-        assert!(port_label("urn:unrelated", &[saved.clone()], "input_2").is_none());
+        assert!(port_label(uri, saved_slice, "input_0").is_none());
+        assert!(port_label(uri, saved_slice, "output_0").is_none());
+        assert!(port_label("urn:unrelated", saved_slice, "input_2").is_none());
         let next = UridMapper::new();
         next.map("urn:allocated-before-plugin");
         let restored = restored_bytes(&saved, &next);

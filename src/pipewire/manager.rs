@@ -344,6 +344,8 @@ fn run_pipewire_thread(
         vst2_instances: RefCell::new(HashMap::new()),
         vst3_filters: RefCell::new(HashMap::new()),
         vst2_filters: RefCell::new(HashMap::new()),
+        ladspa_instances: RefCell::new(HashMap::new()),
+        ladspa_filters: RefCell::new(HashMap::new()),
         meta: RefCell::new(HashMap::new()),
         midi_mapping_table: RefCell::new(std::mem::take(&mut carry.midi_mappings)),
         pending_ops: RefCell::new(VecDeque::new()),
@@ -354,6 +356,7 @@ fn run_pipewire_thread(
         silenced: RefCell::new(HashSet::new()),
         lv2_zombies: RefCell::new(std::mem::take(&mut carry.lv2_zombies)),
         reported_params: RefCell::new(HashMap::new()),
+        last_lv2_state: RefCell::new(HashMap::new()),
         last_param_report: Cell::new(Instant::now()),
         last_label_report: Cell::new(Instant::now()),
         last_op_time: Cell::new(Instant::now() - Duration::from_secs(1)),
@@ -506,6 +509,8 @@ struct Host {
     vst2_instances: InstanceMap<crate::vst2::host::Vst2PluginInstance>,
     vst3_filters: RefCell<HashMap<u64, crate::vst3::filter::Vst3FilterNode>>,
     vst2_filters: RefCell<HashMap<u64, crate::vst2::filter::Vst2FilterNode>>,
+    ladspa_instances: InstanceMap<crate::ladspa::host::LadspaPluginInstance>,
+    ladspa_filters: RefCell<HashMap<u64, crate::ladspa::filter::LadspaFilterNode>>,
     meta: RefCell<HashMap<u64, PluginMeta>>,
 
     midi_mapping_table: RefCell<crate::midi::MidiMappingTable>,
@@ -521,6 +526,10 @@ struct Host {
     lv2_zombies: RefCell<Vec<Lv2Zombie>>,
     /// Parameter values last reported to the UI, per instance.
     reported_params: RefCell<HashMap<u64, Vec<(usize, f32)>>>,
+    /// Last LV2 state that saved successfully per instance. A plugin whose
+    /// save fails during a reload falls back to this instead of coming back
+    /// with its state wiped.
+    last_lv2_state: RefCell<HashMap<u64, Vec<crate::lv2::state::StateEntry>>>,
     last_param_report: Cell<Instant>,
     last_label_report: Cell<Instant>,
     last_op_time: Cell<Instant>,
@@ -637,6 +646,10 @@ impl Host {
                         let inst = inst.borrow();
                         inst.set_parameter(port_index, value);
                         Some(slot_value(&inst.port_updates, port_index))
+                    } else if let Some(inst) = self.ladspa_instances.borrow().get(&instance_id) {
+                        let inst = inst.borrow();
+                        inst.set_parameter(port_index, value);
+                        Some(slot_value(&inst.port_updates, port_index))
                     } else {
                         None
                     };
@@ -678,6 +691,8 @@ impl Host {
                     inst.borrow_mut().set_bypassed(bypassed);
                 } else if let Some(inst) = self.vst2_instances.borrow().get(&instance_id) {
                     inst.borrow().set_bypassed(bypassed);
+                } else if let Some(inst) = self.ladspa_instances.borrow().get(&instance_id) {
+                    inst.borrow().set_bypassed(bypassed);
                 } else {
                     self.patch_queued_add(instance_id, |req| req.bypassed = bypassed);
                 }
@@ -696,6 +711,8 @@ impl Host {
                 } else if let Some(filter) = self.vst3_filters.borrow().get(&instance_id) {
                     filter.set_learn_mode(true);
                 } else if let Some(filter) = self.vst2_filters.borrow().get(&instance_id) {
+                    filter.set_learn_mode(true);
+                } else if let Some(filter) = self.ladspa_filters.borrow().get(&instance_id) {
                     filter.set_learn_mode(true);
                 }
                 let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::MidiLearnStarted {
@@ -823,6 +840,9 @@ impl Host {
         for filter in self.vst2_filters.borrow().values() {
             filter.set_learn_mode(enabled);
         }
+        for filter in self.ladspa_filters.borrow().values() {
+            filter.set_learn_mode(enabled);
+        }
     }
 
     /// Apply `f` to the queued (not yet instantiated) add of `instance_id`,
@@ -944,7 +964,11 @@ impl Host {
             InternalOp::OpenPluginUI { instance_id } => self.open_plugin_ui(instance_id),
             InternalOp::ClosePluginUI { instance_id } => {
                 // The instance stays alive, so an unconfirmed close is harmless.
-                let _ = crate::lv2::ui::close_plugin_ui(instance_id);
+                // The LV2 close waits for the GTK thread; skip it for
+                // instances that cannot have an LV2 window.
+                if !self.is_non_lv2_instance(instance_id) {
+                    let _ = crate::lv2::ui::close_plugin_ui(instance_id);
+                }
                 crate::clap::ui::close_clap_gui(instance_id, &self.event_tx);
                 crate::vst3::ui::close_vst3_gui(instance_id, &self.event_tx);
                 crate::vst2::ui::close_vst2_gui(instance_id, &self.event_tx);
@@ -967,14 +991,14 @@ impl Host {
             self.last_label_report.set(now);
             for (&instance_id, instance) in self.lv2_instances.borrow().iter() {
                 let inst = instance.borrow();
-                if crate::lv2::atom_state::is_lsp_mixer(&inst.plugin_uri) {
-                    if let Some(lv2_state) = unsafe { inst.save_state() } {
-                        let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::PluginStateSaved {
-                            instance_id,
-                            lv2_state,
-                            blob: None,
-                        }));
-                    }
+                if crate::lv2::atom_state::is_lsp_mixer(&inst.plugin_uri)
+                    && let Some(lv2_state) = unsafe { inst.save_state() }
+                {
+                    let _ = self.event_tx.send(PwEvent::Plugin(PluginEvent::PluginStateSaved {
+                        instance_id,
+                        lv2_state,
+                        blob: None,
+                    }));
                 }
             }
         }
@@ -1169,6 +1193,9 @@ impl Host {
         for (id, inst) in self.vst2_instances.borrow().iter() {
             current.push((*id, slot_values(&inst.borrow().port_updates)));
         }
+        for (id, inst) in self.ladspa_instances.borrow().iter() {
+            current.push((*id, slot_values(&inst.borrow().port_updates)));
+        }
 
         let mut reported = self.reported_params.borrow_mut();
         for (instance_id, values) in current {
@@ -1215,6 +1242,9 @@ impl Host {
         for filter in self.vst2_filters.borrow().values() {
             filter.drain_events(&self.event_tx);
         }
+        for filter in self.ladspa_filters.borrow().values() {
+            filter.drain_events(&self.event_tx);
+        }
     }
 
     /// Start sandbox probes for queued adds (on worker threads so the
@@ -1241,6 +1271,7 @@ impl Host {
                 "CLAP" => ("clap", 0),
                 "VST3" => ("vst3", 0),
                 "VST2" => ("vst2", 0),
+                "LADSPA" => ("ladspa", 0),
                 _ => ("lv2", quantum),
             };
             let uri = req.plugin_uri.clone();
@@ -1249,6 +1280,7 @@ impl Host {
                 "clap" => crate::clap::scanner::cached_plugin(&uri).map(|i| i.library_path),
                 "vst3" => crate::vst3::scanner::cached_plugin(&uri).map(|i| i.library_path),
                 "vst2" => crate::vst2::scanner::cached_plugin(&uri).map(|i| i.library_path),
+                "ladspa" => crate::ladspa::scanner::cached_plugin(&uri).map(|i| i.library_path),
                 _ => None,
             });
             if fmt != "lv2" && lib.is_none() {
@@ -1298,6 +1330,7 @@ impl Host {
                 "CLAP" => self.instantiate_clap(req, sr),
                 "VST3" => self.instantiate_vst3(req, sr),
                 "VST2" => self.instantiate_vst2(req, sr),
+                "LADSPA" => self.instantiate_ladspa(req, sr),
                 _ => self.instantiate_lv2(req, sr),
             }
         }));
@@ -1338,6 +1371,17 @@ impl Host {
                 stable_id: req.stable_id.clone(),
             },
         );
+        // The UI has no other source for names, ranges and defaults: the
+        // catalog may still be scanning, and CLAP/VST3 only expose their
+        // parameters on a live instance.
+        if let Some(params) = self.instance_parameters(req.instance_id) {
+            let _ = self
+                .event_tx
+                .send(PwEvent::Plugin(PluginEvent::ParametersDescribed {
+                    instance_id: req.instance_id,
+                    params,
+                }));
+        }
         // New filters start without resolved mappings; mappings restored
         // before the plugin existed take effect now.
         self.rebuild_resolved_mappings();
@@ -1561,6 +1605,56 @@ impl Host {
         Ok(())
     }
 
+    fn instantiate_ladspa(&self, req: &AddRequest, sr: f64) -> Result<(), String> {
+        let info = req
+            .scan_info
+            .clone()
+            .or_else(|| crate::ladspa::scanner::cached_plugin(&req.plugin_uri))
+            .ok_or_else(|| format!("LADSPA plugin not found: {}", req.plugin_uri))?;
+        let inst = unsafe {
+            crate::ladspa::host::LadspaPluginInstance::new(
+                &info.library_path,
+                &req.plugin_uri,
+                &info,
+                sr,
+                None,
+            )
+        }
+        .ok_or_else(|| format!("Failed to instantiate LADSPA plugin: {}", req.plugin_uri))?;
+
+        for &(port_index, value) in &req.params {
+            inst.set_parameter(port_index, value);
+        }
+        if req.bypassed {
+            inst.set_bypassed(true);
+        }
+
+        let filter_config = crate::ladspa::filter::FilterConfig {
+            instance_id: req.instance_id,
+            display_name: req.display_name.clone(),
+            audio_inputs: inst.audio_input_channels,
+            audio_outputs: inst.audio_output_channels,
+            has_midi_in: inst.has_midi_in,
+            has_midi_out: inst.has_midi_out,
+        };
+        let instance_rc = Rc::new(RefCell::new(inst));
+        let filter = crate::ladspa::filter::LadspaFilterNode::new(
+            &self.core,
+            filter_config,
+            instance_rc.clone(),
+            self.event_tx.clone(),
+        )
+        .map_err(|e| format!("Failed to create LADSPA filter node: {}", e))?;
+
+        self.ladspa_instances
+            .borrow_mut()
+            .insert(req.instance_id, instance_rc);
+        self.ladspa_filters
+            .borrow_mut()
+            .insert(req.instance_id, filter);
+        Ok(())
+    }
+
     /// Tear down one plugin: close its UI (blocks until closed), destroy the
     /// filter (stops processing), then drop the instance. Emits nothing.
     fn remove_plugin(&self, instance_id: u64) -> bool {
@@ -1606,22 +1700,88 @@ impl Host {
             let inst = self.vst2_instances.borrow_mut().remove(&instance_id);
             drop(inst);
             true
+        } else if self.ladspa_instances.borrow().contains_key(&instance_id) {
+            let filter = self.ladspa_filters.borrow_mut().remove(&instance_id);
+            drop(filter);
+            let inst = self.ladspa_instances.borrow_mut().remove(&instance_id);
+            drop(inst);
+            true
         } else {
             false
         };
         self.meta.borrow_mut().remove(&instance_id);
         self.reported_params.borrow_mut().remove(&instance_id);
+        self.last_lv2_state.borrow_mut().remove(&instance_id);
         found
     }
 
     /// Capture everything needed to re-create a live plugin as it is now.
+    /// True for a running CLAP, VST3, VST2 or LADSPA instance.
+    fn is_non_lv2_instance(&self, instance_id: u64) -> bool {
+        self.clap_instances.borrow().contains_key(&instance_id)
+            || self.vst3_instances.borrow().contains_key(&instance_id)
+            || self.vst2_instances.borrow().contains_key(&instance_id)
+            || self.ladspa_instances.borrow().contains_key(&instance_id)
+    }
+
+    /// `remove_plugin` forgets the last good LV2 state; a reload restores
+    /// it, so a plugin whose `save` keeps failing survives further reloads.
+    fn remember_lv2_state(&self, req: &AddRequest) {
+        if !req.lv2_state.is_empty() {
+            self.last_lv2_state
+                .borrow_mut()
+                .insert(req.instance_id, req.lv2_state.clone());
+        }
+    }
+
+    /// The parameter list of a running instance of any format.
+    fn instance_parameters(
+        &self,
+        instance_id: u64,
+    ) -> Option<Vec<crate::plugin::types::ParameterValue>> {
+        if let Some(inst) = self.lv2_instances.borrow().get(&instance_id) {
+            return Some(inst.borrow().get_parameters());
+        }
+        if let Some(inst) = self.clap_instances.borrow().get(&instance_id) {
+            return Some(inst.borrow().get_parameters());
+        }
+        if let Some(inst) = self.vst3_instances.borrow().get(&instance_id) {
+            return Some(inst.borrow().get_parameters());
+        }
+        if let Some(inst) = self.vst2_instances.borrow().get(&instance_id) {
+            return Some(inst.borrow().get_parameters());
+        }
+        self.ladspa_instances
+            .borrow()
+            .get(&instance_id)
+            .map(|inst| inst.borrow().get_parameters())
+    }
+
     fn snapshot_plugin(&self, instance_id: u64) -> Option<AddRequest> {
         let meta = self.meta.borrow().get(&instance_id).cloned()?;
         let (lv2_state, plugin_state, params, bypassed) =
             if let Some(inst) = self.lv2_instances.borrow().get(&instance_id) {
                 let inst = inst.borrow();
                 let state = if inst.has_state_interface() {
-                    unsafe { inst.save_state() }.unwrap_or_default()
+                    match unsafe { inst.save_state() } {
+                        Some(state) => {
+                            self.last_lv2_state
+                                .borrow_mut()
+                                .insert(instance_id, state.clone());
+                            state
+                        }
+                        None => {
+                            log::warn!(
+                                "LV2 state save failed for instance {}; keeping last good state",
+                                instance_id
+                            );
+                            self.last_lv2_state
+                                .borrow()
+                                .get(&instance_id)
+                                .cloned()
+                                .unwrap_or_default()
+                        }
+                    }
                 } else {
                     Vec::new()
                 };
@@ -1656,7 +1816,16 @@ impl Host {
                     .collect();
                 (Vec::new(), inst.get_state(), params, inst.is_bypassed())
             } else {
-                return None;
+                let ladspa_instances = self.ladspa_instances.borrow();
+                let inst = ladspa_instances.get(&instance_id)?;
+                let inst = inst.borrow();
+                let params = inst
+                    .get_parameters()
+                    .iter()
+                    .map(|p| (p.port_index, p.value))
+                    .collect();
+                // LADSPA has no state API: parameters are the whole state.
+                (Vec::new(), None, params, inst.is_bypassed())
             };
 
         Some(AddRequest {
@@ -1686,7 +1855,7 @@ impl Host {
         } else if let Some(f) = self.vst2_filters.borrow().get(&instance_id) {
             f.node_id()
         } else {
-            return None;
+            self.ladspa_filters.borrow().get(&instance_id)?.node_id()
         };
         (id != 0 && id != u32::MAX).then_some(id)
     }
@@ -1739,13 +1908,8 @@ impl Host {
             Some(iid) => self.plugin_node_id(iid)?,
             None => match self.graph.get_node(end.node_id) {
                 Some(n) if n.name == end.node_name => n.id,
-                _ => {
-                    self.graph
-                        .get_all_nodes()
-                        .into_iter()
-                        .find(|n| n.name == end.node_name)?
-                        .id
-                }
+                // Runs every tick while a relink is pending.
+                _ => self.graph.find_node_id_by_name(&end.node_name)?,
             },
         };
         let ports = match direction {
@@ -1828,6 +1992,11 @@ impl Host {
                 check(*id, f.graph_rate(), inst.borrow().sample_rate);
             }
         }
+        for (id, f) in self.ladspa_filters.borrow().iter() {
+            if let Some(inst) = self.ladspa_instances.borrow().get(id) {
+                check(*id, f.graph_rate(), inst.borrow().sample_rate);
+            }
+        }
 
         for (id, rate) in mismatched {
             if let Some(last) = self.last_reload.borrow().get(&id)
@@ -1857,6 +2026,7 @@ impl Host {
 
         self.remove_plugin(instance_id);
         if self.add_plugin(&req) {
+            self.remember_lv2_state(&req);
             self.relinks
                 .borrow_mut()
                 .extend(relinks.into_iter().map(|(_, r)| r));
@@ -1889,6 +2059,7 @@ impl Host {
         let relinks = self.plugin_links(instance_id, true, Instant::now() + RELINK_TIMEOUT_RELOAD);
         self.remove_plugin(instance_id);
         if self.add_plugin(&req) {
+            self.remember_lv2_state(&req);
             self.relinks
                 .borrow_mut()
                 .extend(relinks.into_iter().map(|(_, r)| r));
@@ -1965,7 +2136,12 @@ impl Host {
             let inst = inst.borrow();
             let lv2_state = if inst.has_state_interface() {
                 match unsafe { inst.save_state() } {
-                    Some(state) => state,
+                    Some(state) => {
+                        self.last_lv2_state
+                            .borrow_mut()
+                            .insert(instance_id, state.clone());
+                        state
+                    }
                     None => {
                         log::warn!("LV2 state save failed for instance {}", instance_id);
                         continue;
@@ -2187,6 +2363,9 @@ impl Host {
         for (id, filter) in self.vst2_filters.borrow().iter() {
             filter.update_mappings(resolved_for(id));
         }
+        for (id, filter) in self.ladspa_filters.borrow().iter() {
+            filter.update_mappings(resolved_for(id));
+        }
     }
 
     fn resolve_mapping_entry(
@@ -2261,6 +2440,23 @@ impl Host {
                 is_logarithmic: false,
                 is_toggle: p.is_toggle,
                 step_count: p.step_count,
+            });
+        }
+
+        if let Some(inst_rc) = self.ladspa_instances.borrow().get(&instance_id) {
+            let inst = inst_rc.borrow();
+            let p = inst.params.iter().find(|p| p.port_index == port_index)?;
+            return Some(crate::midi::filter::ResolvedMappingEntry {
+                port_updates: inst.port_updates.clone(),
+                port_index,
+                instance_id,
+                min: p.meta.min,
+                max: p.meta.max,
+                mode: mapping.mode,
+                source: mapping.source.clone(),
+                is_logarithmic: p.meta.logarithmic && p.meta.min > 0.0 && p.meta.max > p.meta.min,
+                is_toggle: p.meta.toggled,
+                step_count: p.meta.steps,
             });
         }
 

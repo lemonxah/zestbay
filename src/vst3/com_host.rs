@@ -131,12 +131,27 @@ unsafe extern "system" fn host_app_get_name(
 
 unsafe extern "system" fn host_app_create_instance(
     _this: *mut IHostApplication,
-    _cid: *mut TUID,
-    _iid: *mut TUID,
-    _obj: *mut *mut c_void,
+    cid: *mut TUID,
+    iid: *mut TUID,
+    obj: *mut *mut c_void,
 ) -> tresult {
-    // We don't support creating instances via the host application.
-    kNotImplemented
+    unsafe {
+        if obj.is_null() {
+            return kInvalidArgument;
+        }
+        // Plugins ask for IMessage / IAttributeList to talk to their own
+        // controller or component over IConnectionPoint.
+        match super::message::create_instance(cid, iid) {
+            Some(instance) => {
+                *obj = instance;
+                kResultOk
+            }
+            None => {
+                *obj = std::ptr::null_mut();
+                kNotImplemented
+            }
+        }
+    }
 }
 
 /// Allocate a new HostApplication (ref_count starts at 1).
@@ -304,13 +319,13 @@ unsafe extern "system" fn host_ch_perform_edit(
 ) -> tresult {
     unsafe {
         let shared = &(*(this as *mut HostComponentHandler)).shared;
-        if let Some(idx) = shared.index_of(id) {
-            if let Some(slot) = shared.port_updates.control_inputs.get(idx) {
-                let v = value_normalized.clamp(0.0, 1.0) as f32;
-                // The controller already holds this value; don't echo it back.
-                shared.controller_bits[idx].store(v.to_bits(), Ordering::Relaxed);
-                slot.value.store(v);
-            }
+        if let Some(idx) = shared.index_of(id)
+            && let Some(slot) = shared.port_updates.control_inputs.get(idx)
+        {
+            let v = value_normalized.clamp(0.0, 1.0) as f32;
+            // The controller already holds this value; don't echo it back.
+            shared.controller_bits[idx].store(v.to_bits(), Ordering::Relaxed);
+            slot.value.store(v);
         }
         kResultOk
     }
@@ -1070,7 +1085,7 @@ mod tests {
                 2,
                 &mut written,
             );
-            assert_eq!((&(*ms).data).len(), 12);
+            assert_eq!((*ms).data.len(), 12);
             assert_eq!((&(*ms).data)[10], b'X');
             assert_eq!((&(*ms).data)[11], b'Y');
             // Gap should be zeroed

@@ -35,7 +35,7 @@ pub fn app_plugin_dir(format: &str) -> Option<PathBuf> {
 
 /// Create the app's plugin folders (Flatpak only) so they're easy to find.
 pub fn ensure_app_plugin_dirs() {
-    for format in ["lv2", "vst", "vst3", "clap"] {
+    for format in ["lv2", "vst", "vst3", "clap", "ladspa"] {
         if let Some(dir) = app_plugin_dir(format)
             && let Err(e) = std::fs::create_dir_all(&dir)
         {

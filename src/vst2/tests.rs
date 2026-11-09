@@ -182,6 +182,39 @@ fn invalid_layout_and_identity_are_rejected() {
 }
 
 #[test]
+fn idle_leaves_running_audio_alone() {
+    let fixture = Fixture::new(&[]);
+    let info = fixture.scan().remove(0);
+    let inst = fixture.load(&info, None);
+    let input = [1.0f32; 8];
+    let mut output = [0.0f32; 8];
+    let mut run = |inst: &Vst2PluginInstance| {
+        unsafe {
+            inst.process(&[&input], &mut [&mut output], 8, &[]);
+        }
+        output
+    };
+    run(&inst);
+    // The plugin changes a value itself and asks for a display update while
+    // audio is running: the value is published without suspending audio.
+    unsafe {
+        abi::dispatch(inst.effect_ptr(), 1002, 0, 0, std::ptr::null_mut(), 0.4);
+    }
+    inst.idle();
+    assert_eq!(inst.get_parameters()[0].value, 0.4);
+    assert_eq!(run(&inst), [0.4; 8]);
+    // A host edit that has not reached the plugin yet wins over the
+    // plugin's own value, as it does when audio is idle.
+    inst.set_parameter(0, 0.2);
+    unsafe {
+        abi::dispatch(inst.effect_ptr(), 1002, 0, 0, std::ptr::null_mut(), 0.9);
+    }
+    inst.idle();
+    assert_eq!(inst.get_parameters()[0].value, 0.2);
+    assert_eq!(run(&inst), [0.2; 8]);
+}
+
+#[test]
 fn host_callbacks_sync_gui_edits_and_park_changed_layouts() {
     let fixture = Fixture::new(&[]);
     let info = fixture.scan().remove(0);

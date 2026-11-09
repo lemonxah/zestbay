@@ -104,6 +104,8 @@ ZbWindow {
             paramModel.clear()
             paramPorts = []
             filterField.text = ""
+            // A different plugin: don't follow the previous instance.
+            instanceId = -1
         }
         pluginNodeId = nodeId
         loadParams()
@@ -116,6 +118,15 @@ ZbWindow {
         if (pluginNodeId < 0) return
         try {
             var data = JSON.parse(controller.get_plugin_params_json(pluginNodeId))
+            // A reload (preset with state, sample-rate change) moves the
+            // plugin to a new node; follow the instance there.
+            if (instanceId >= 0 && (!data || !data.parameters || data.instanceId !== instanceId)) {
+                var moved = controller.plugin_node_for_instance(instanceId)
+                if (moved >= 0 && moved !== pluginNodeId) {
+                    pluginNodeId = moved
+                    data = JSON.parse(controller.get_plugin_params_json(pluginNodeId))
+                }
+            }
             if (!data || !data.parameters) return
             pluginName = data.displayName || ""
             pluginUri = data.pluginUri || ""

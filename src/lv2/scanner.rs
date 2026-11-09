@@ -228,7 +228,7 @@ pub fn scan_plugins_with_world(world: &World) -> Vec<Lv2PluginInfo> {
         });
     }
 
-    plugins.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    plugins.sort_by_key(|p| p.name.to_lowercase());
     plugins
 }
 

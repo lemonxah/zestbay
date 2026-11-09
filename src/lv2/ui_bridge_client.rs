@@ -208,8 +208,16 @@ impl UiBridgeClient {
             return false;
         }
         if self.is_open(instance_id) {
-            log::info!("UI bridge: re-opening UI for instance {}", instance_id);
-            self.close_ui(instance_id);
+            // The bridge answers a Close with Closed{id}; closing and
+            // re-registering here would let that reply remove the fresh
+            // entry and report the new window as closed. A window the
+            // bridge closed itself has already been unregistered by its
+            // Closed message, so "open" here means it really is open.
+            log::info!(
+                "UI bridge: UI for instance {} is already open",
+                instance_id
+            );
+            return true;
         }
 
         let urid_map: Vec<(String, u32)> = urid_mapper.snapshot();

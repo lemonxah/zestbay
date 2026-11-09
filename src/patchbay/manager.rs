@@ -542,17 +542,15 @@ impl PatchbayManager {
                     for source_port in &output_ports {
                         if let Some(target_port) =
                             self.find_matching_port(source_port, &target_ports)
-                        {
-                            if self
+                            && self
                                 .graph
                                 .find_link(source_port.id, target_port.id)
                                 .is_none()
-                            {
-                                commands.push(PwCommand::Connect {
-                                    output_port_id: source_port.id,
-                                    input_port_id: target_port.id,
-                                });
-                            }
+                        {
+                            commands.push(PwCommand::Connect {
+                                output_port_id: source_port.id,
+                                input_port_id: target_port.id,
+                            });
                         }
                     }
                 }
@@ -648,10 +646,9 @@ impl PatchbayManager {
                     // Skip media type mismatches (e.g. Midi → Audio)
                     if let (Some(out_mt), Some(in_mt)) =
                         (out_port.media_type, in_port.media_type)
+                        && out_mt != in_mt
                     {
-                        if out_mt != in_mt {
-                            continue;
-                        }
+                        continue;
                     }
                     if self.graph.find_link(out_port.id, in_port.id).is_none() {
                         commands.push(PwCommand::Connect {
@@ -814,10 +811,7 @@ impl PatchbayManager {
         {
             return false;
         }
-        match node.media_type {
-            Some(MediaType::Video) => false,
-            _ => true,
-        }
+        !matches!(node.media_type, Some(MediaType::Video))
     }
 
     /// Whether rule enforcement should destroy `link`.
