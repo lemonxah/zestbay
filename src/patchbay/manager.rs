@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::rules::{pattern_matches, AutoConnectRule, PortMapping, RuleAction};
+use super::rules::{AutoConnectRule, PortMapping, RuleAction, pattern_matches};
 use crate::pipewire::{GraphState, Link, MediaType, Node, NodeType, ObjectId, Port, PwCommand};
 
 /// How many times the same (output port, input port) pair may be destroyed by
@@ -18,6 +18,7 @@ pub struct PatchbayManager {
     /// Exclusive mode: links from a ruled source that no rule allows are
     /// disconnected. Off, rules only ever add links and nothing is removed.
     pub exclusive: bool,
+    pub hide_unnamed: bool,
     pub rules_dirty: bool,
     /// Display name of the default target node. When a source node has no
     /// matching rules, its output ports will be connected to this node instead.
@@ -34,6 +35,7 @@ impl PatchbayManager {
             rules: Vec::new(),
             enabled: true,
             exclusive: true,
+            hide_unnamed: true,
             rules_dirty: false,
             default_target: None,
             recent_destroys: HashMap::new(),
@@ -258,17 +260,21 @@ impl PatchbayManager {
     /// enabled block rule, for drawing. Only ready nodes that have outputs
     /// (source) and inputs (target) are listed.
     pub fn blocked_pairs(&self) -> Vec<(ObjectId, ObjectId, String)> {
-        let blocks: Vec<&AutoConnectRule> =
-            self.rules.iter().filter(|r| r.enabled && r.is_block()).collect();
+        let blocks: Vec<&AutoConnectRule> = self
+            .rules
+            .iter()
+            .filter(|r| r.enabled && r.is_block())
+            .collect();
         if blocks.is_empty() {
             return Vec::new();
         }
         let nodes = self.graph.get_all_nodes();
         let mut pairs = Vec::new();
         for rule in blocks {
-            for source in nodes.iter().filter(|n| {
-                n.ready && rule.matches_source(n.display_name(), n.node_type)
-            }) {
+            for source in nodes
+                .iter()
+                .filter(|n| n.ready && rule.matches_source(n.display_name(), n.node_type))
+            {
                 if self.graph.get_output_ports(source.id).is_empty() {
                     continue;
                 }
@@ -280,7 +286,10 @@ impl PatchbayManager {
                     if self.graph.get_input_ports(target.id).is_empty() {
                         continue;
                     }
-                    if !pairs.iter().any(|(s, t, _)| *s == source.id && *t == target.id) {
+                    if !pairs
+                        .iter()
+                        .any(|(s, t, _)| *s == source.id && *t == target.id)
+                    {
                         pairs.push((source.id, target.id, rule.id.clone()));
                     }
                 }
@@ -297,9 +306,10 @@ impl PatchbayManager {
         ) else {
             return false;
         };
-        let (Some(source), Some(target)) =
-            (self.graph.get_node(out.node_id), self.graph.get_node(inp.node_id))
-        else {
+        let (Some(source), Some(target)) = (
+            self.graph.get_node(out.node_id),
+            self.graph.get_node(inp.node_id),
+        ) else {
             return false;
         };
         self.is_blocked(&source, &target, &out, &inp)
@@ -350,8 +360,12 @@ impl PatchbayManager {
         }
 
         // Block rules aren't connections; keep them.
-        let mut rules: Vec<AutoConnectRule> =
-            self.rules.iter().filter(|r| r.is_block()).cloned().collect();
+        let mut rules: Vec<AutoConnectRule> = self
+            .rules
+            .iter()
+            .filter(|r| r.is_block())
+            .cloned()
+            .collect();
         rules.extend(rule_map.into_values());
         self.rules = rules;
         self.rules_dirty = true;
@@ -363,7 +377,12 @@ impl PatchbayManager {
     /// through `map.ports`, heuristic rules to each node in `map.nodes`.
     /// Rules whose other end is in `skip` (both ends inside the subgraph)
     /// are left alone. Returns whether anything changed.
-    pub fn remap_rules(&mut self, map: &EndpointMap, targets: bool, skip: &HashSet<String>) -> bool {
+    pub fn remap_rules(
+        &mut self,
+        map: &EndpointMap,
+        targets: bool,
+        skip: &HashSet<String>,
+    ) -> bool {
         let mut out: Vec<AutoConnectRule> = Vec::with_capacity(self.rules.len());
         let mut changed = false;
         for rule in std::mem::take(&mut self.rules) {
@@ -416,14 +435,24 @@ impl PatchbayManager {
             let mut by_node: BTreeMap<String, Vec<PortMapping>> = BTreeMap::new();
             let mut keep: Vec<PortMapping> = Vec::new();
             for m in &rule.port_mappings {
-                let port = if targets { &m.input_port_name } else { &m.output_port_name };
+                let port = if targets {
+                    &m.input_port_name
+                } else {
+                    &m.output_port_name
+                };
                 match map.ports.get(&(node.clone(), port.clone())) {
                     Some(dests) => {
                         for (n, p) in dests {
                             let pm = if targets {
-                                PortMapping { output_port_name: m.output_port_name.clone(), input_port_name: p.clone() }
+                                PortMapping {
+                                    output_port_name: m.output_port_name.clone(),
+                                    input_port_name: p.clone(),
+                                }
                             } else {
-                                PortMapping { output_port_name: p.clone(), input_port_name: m.input_port_name.clone() }
+                                PortMapping {
+                                    output_port_name: p.clone(),
+                                    input_port_name: m.input_port_name.clone(),
+                                }
                             };
                             let list = by_node.entry(n.clone()).or_default();
                             if !list.contains(&pm) {
@@ -526,7 +555,9 @@ impl PatchbayManager {
                 .rules
                 .iter()
                 .filter(|r| {
-                    r.enabled && !r.is_block() && r.matches_source(node.display_name(), node.node_type)
+                    r.enabled
+                        && !r.is_block()
+                        && r.matches_source(node.display_name(), node.node_type)
                 })
                 .collect();
 
@@ -644,8 +675,7 @@ impl PatchbayManager {
 
                 if let (Some(out_port), Some(in_port)) = (out_port, in_port) {
                     // Skip media type mismatches (e.g. Midi → Audio)
-                    if let (Some(out_mt), Some(in_mt)) =
-                        (out_port.media_type, in_port.media_type)
+                    if let (Some(out_mt), Some(in_mt)) = (out_port.media_type, in_port.media_type)
                         && out_mt != in_mt
                     {
                         continue;
@@ -678,7 +708,9 @@ impl PatchbayManager {
         }
 
         if let Some(ref channel) = source.channel
-            && let Some(target) = compatible.iter().find(|p| p.channel.as_ref() == Some(channel))
+            && let Some(target) = compatible
+                .iter()
+                .find(|p| p.channel.as_ref() == Some(channel))
         {
             return Some(target);
         }
@@ -715,8 +747,9 @@ impl PatchbayManager {
         if let Some(target_id) = rule.target_node_id
             && target_id != exclude_node_id
             && let Some(node) = nodes.iter().find(|n| n.id == target_id && n.ready)
-            && node.node_type.map(|t| t.has_inputs()).unwrap_or(false) {
-                return Some(node);
+            && node.node_type.map(|t| t.has_inputs()).unwrap_or(false)
+        {
+            return Some(node);
         }
 
         nodes.iter().find(|n| {
@@ -740,15 +773,15 @@ impl PatchbayManager {
             }
 
             // Find a target node for this rule
-            let target = nodes.iter().find(|n| {
-                n.ready && rule.matches_target(n.display_name(), n.node_type, n.id)
-            });
+            let target = nodes
+                .iter()
+                .find(|n| n.ready && rule.matches_target(n.display_name(), n.node_type, n.id));
             let Some(target) = target else { continue };
 
             // Find a source node
-            let source = nodes.iter().find(|n| {
-                n.ready && rule.matches_source(n.display_name(), n.node_type)
-            });
+            let source = nodes
+                .iter()
+                .find(|n| n.ready && rule.matches_source(n.display_name(), n.node_type));
             let Some(source) = source else { continue };
 
             let source_ports = self.graph.get_output_ports(source.id);
@@ -763,7 +796,10 @@ impl PatchbayManager {
                         (Some(a), Some(b)) if a != b => {
                             log::info!(
                                 "Removing incompatible port mapping: {} ({:?}) -> {} ({:?})",
-                                m.output_port_name, a, m.input_port_name, b,
+                                m.output_port_name,
+                                a,
+                                m.input_port_name,
+                                b,
                             );
                             false
                         }
@@ -797,8 +833,14 @@ impl PatchbayManager {
     /// them nor remove them.
     fn is_subgraph_internal(source: &Node, target: &Node) -> bool {
         use crate::pipewire::SubgraphRole;
-        source.subgraph.as_ref().is_some_and(|t| t.role == SubgraphRole::In)
-            || target.subgraph.as_ref().is_some_and(|t| t.role == SubgraphRole::Out)
+        source
+            .subgraph
+            .as_ref()
+            .is_some_and(|t| t.role == SubgraphRole::In)
+            || target
+                .subgraph
+                .as_ref()
+                .is_some_and(|t| t.role == SubgraphRole::Out)
     }
 
     fn is_routable_node(node: &Node) -> bool {
@@ -870,9 +912,10 @@ impl PatchbayManager {
                 .is_some_and(|d| d.id != target_node.id);
         }
 
-        let any_target_present = source_rules
-            .iter()
-            .any(|r| self.find_matching_target(r, nodes, source_node.id).is_some());
+        let any_target_present = source_rules.iter().any(|r| {
+            self.find_matching_target(r, nodes, source_node.id)
+                .is_some()
+        });
         if !any_target_present {
             return false;
         }
@@ -921,7 +964,10 @@ pub struct EndpointMap {
 
 impl EndpointMap {
     pub fn add(&mut self, from: (&str, &str), to: (&str, &str)) {
-        let list = self.ports.entry((from.0.to_string(), from.1.to_string())).or_default();
+        let list = self
+            .ports
+            .entry((from.0.to_string(), from.1.to_string()))
+            .or_default();
         let to_owned = (to.0.to_string(), to.1.to_string());
         if !list.contains(&to_owned) {
             list.push(to_owned);
@@ -961,7 +1007,13 @@ mod tests {
         }
     }
 
-    fn port(id: ObjectId, node_id: ObjectId, name: &str, dir: PortDirection, mt: MediaType) -> Port {
+    fn port(
+        id: ObjectId,
+        node_id: ObjectId,
+        name: &str,
+        dir: PortDirection,
+        mt: MediaType,
+    ) -> Port {
         Port {
             id,
             node_id,
@@ -1097,7 +1149,13 @@ mod tests {
         graph.insert_link(link(100, &other_out, &hp_in));
         graph.insert_link(link(101, &out, &hp_in));
         let mut pb = PatchbayManager::new(graph.clone());
-        pb.add_rule(AutoConnectRule::new("App", None, "Headphones", None, Some(2)));
+        pb.add_rule(AutoConnectRule::new(
+            "App",
+            None,
+            "Headphones",
+            None,
+            Some(2),
+        ));
         let cmds = pb.scan();
         assert!(disconnects(&cmds).is_empty());
     }
@@ -1307,23 +1365,44 @@ mod tests {
     fn remap_targets_moves_mapped_rules_to_subgraph_edge() {
         let (graph, _, _, _) = setup();
         let mut pb = PatchbayManager::new(graph);
-        let mut learned = AutoConnectRule::new("Firefox", None, "EQ", Some(NodeType::Plugin), Some(7));
+        let mut learned =
+            AutoConnectRule::new("Firefox", None, "EQ", Some(NodeType::Plugin), Some(7));
         learned.add_port_mapping("output_FL".into(), "in_l".into());
         learned.add_port_mapping("output_FR".into(), "in_r".into());
         pb.add_rule(learned);
         pb.add_rule(AutoConnectRule::new("Gate", None, "EQ", None, None)); // inside the subgraph
         pb.add_rule(AutoConnectRule::new("Spotify", None, "EQ", None, None)); // heuristic
-        let map = endpoint_map(&[("EQ", "in_l", "Chain In", "in_FL"), ("EQ", "in_r", "Chain In", "in_FR")]);
+        let map = endpoint_map(&[
+            ("EQ", "in_l", "Chain In", "in_FL"),
+            ("EQ", "in_r", "Chain In", "in_FR"),
+        ]);
         let skip: HashSet<String> = ["Gate".to_string(), "EQ".to_string()].into();
         assert!(pb.remap_rules(&map, true, &skip));
         let rules = pb.rules();
         assert_eq!(rules.len(), 3);
-        let ff = rules.iter().find(|r| r.source_pattern == "Firefox").unwrap();
+        let ff = rules
+            .iter()
+            .find(|r| r.source_pattern == "Firefox")
+            .unwrap();
         assert_eq!(ff.target_pattern, "Chain In");
         assert_eq!(ff.target_node_id, None);
-        assert_eq!(ff.port_mappings.iter().map(|m| m.input_port_name.as_str()).collect::<Vec<_>>(), ["in_FL", "in_FR"]);
-        assert!(rules.iter().any(|r| r.source_pattern == "Gate" && r.target_pattern == "EQ"));
-        assert!(rules.iter().any(|r| r.source_pattern == "Spotify" && r.target_pattern == "Chain In"));
+        assert_eq!(
+            ff.port_mappings
+                .iter()
+                .map(|m| m.input_port_name.as_str())
+                .collect::<Vec<_>>(),
+            ["in_FL", "in_FR"]
+        );
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.source_pattern == "Gate" && r.target_pattern == "EQ")
+        );
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.source_pattern == "Spotify" && r.target_pattern == "Chain In")
+        );
     }
 
     #[test]
@@ -1336,7 +1415,13 @@ mod tests {
         let map = endpoint_map(&[("Chain Out", "out_MONO", "Comp", "output_0")]);
         assert!(pb.remap_rules(&map, false, &HashSet::new()));
         let r = &pb.rules()[0];
-        assert_eq!((r.source_pattern.as_str(), r.port_mappings[0].output_port_name.as_str()), ("Comp", "output_0"));
+        assert_eq!(
+            (
+                r.source_pattern.as_str(),
+                r.port_mappings[0].output_port_name.as_str()
+            ),
+            ("Comp", "output_0")
+        );
     }
 
     fn edge(id: ObjectId, name: &str, role: crate::pipewire::SubgraphRole) -> Node {
@@ -1361,7 +1446,9 @@ mod tests {
         graph.insert_link(link(100, &in_out, &gate_in));
         let mut pb = PatchbayManager::new(graph.clone());
         // A rule on the edge node that doesn't mention Gate.
-        pb.add_rule(AutoConnectRule::new("Chain In", None, "Speakers", None, None));
+        pb.add_rule(AutoConnectRule::new(
+            "Chain In", None, "Speakers", None, None,
+        ));
         assert!(!disconnects(&pb.scan()).contains(&100));
         let (e, g) = (graph.get_node(5).unwrap(), graph.get_node(6).unwrap());
         assert!(!pb.learn_from_link(&e, &g, &in_out, &gate_in));

@@ -10,6 +10,7 @@ pub mod qobject {
         #[qml_element]
         #[qproperty(bool, patchbay_enabled)]
         #[qproperty(bool, patchbay_exclusive)]
+        #[qproperty(bool, patchbay_hide_unnamed)]
         #[qproperty(i32, active_plugin_count)]
         #[qproperty(i32, node_count)]
         #[qproperty(i32, link_count)]
@@ -27,9 +28,6 @@ pub mod qobject {
         #[qinvokable]
         fn request_quit(self: Pin<&mut Self>);
 
-        /// Restart the user's PipeWire, PipeWire-Pulse and WirePlumber
-        /// services (systemd). Runs in the background; a failure is reported
-        /// through error_occurred.
         #[qinvokable]
         fn restart_pipewire(self: Pin<&mut Self>);
 
@@ -60,7 +58,8 @@ pub mod qobject {
         /// "Source → Target" when an enabled block rule forbids connecting
         /// these ports (rules on), otherwise "".
         #[qinvokable]
-        fn blocked_reason(self: Pin<&mut Self>, output_port_id: u32, input_port_id: u32) -> QString;
+        fn blocked_reason(self: Pin<&mut Self>, output_port_id: u32, input_port_id: u32)
+        -> QString;
 
         /// Node pairs under an enabled block rule, for the red lines:
         /// `[{source, target, ruleId, label}]` (empty while rules are off).
@@ -187,6 +186,9 @@ pub mod qobject {
         fn toggle_patchbay_exclusive(self: Pin<&mut Self>, exclusive: bool);
 
         #[qinvokable]
+        fn toggle_patchbay_hide_unnamed(self: Pin<&mut Self>, enabled: bool);
+
+        #[qinvokable]
         fn get_node_names_json(self: Pin<&mut Self>) -> QString;
 
         #[qinvokable]
@@ -212,7 +214,11 @@ pub mod qobject {
         fn infer_subgraph_io(self: Pin<&mut Self>, node_ids_json: QString) -> QString;
         /// Group plugin nodes into a new subgraph; returns its id ("" on failure).
         #[qinvokable]
-        fn create_subgraph(self: Pin<&mut Self>, node_ids_json: QString, config_json: QString) -> QString;
+        fn create_subgraph(
+            self: Pin<&mut Self>,
+            node_ids_json: QString,
+            config_json: QString,
+        ) -> QString;
         /// Change name, I/O, MIDI or device options.
         #[qinvokable]
         fn update_subgraph(self: Pin<&mut Self>, subgraph_id: QString, config_json: QString);
@@ -226,22 +232,37 @@ pub mod qobject {
         /// Copy a subgraph (plugins, settings, wiring) next to it. Returns
         /// `{subgraphId, layout}` like `insert_subgraph_template`.
         #[qinvokable]
-        fn duplicate_subgraph(self: Pin<&mut Self>, subgraph_id: QString, x: f64, y: f64) -> QString;
+        fn duplicate_subgraph(
+            self: Pin<&mut Self>,
+            subgraph_id: QString,
+            x: f64,
+            y: f64,
+        ) -> QString;
         #[qinvokable]
-        fn save_subgraph_template(self: Pin<&mut Self>, subgraph_id: QString, name: QString) -> QString;
+        fn save_subgraph_template(
+            self: Pin<&mut Self>,
+            subgraph_id: QString,
+            name: QString,
+        ) -> QString;
         #[qinvokable]
         fn list_subgraph_templates_json(self: Pin<&mut Self>) -> QString;
         /// Insert a saved template at (x, y); returns `{subgraphId, layout}`
         /// where `layout` maps layout keys to positions.
         #[qinvokable]
-        fn insert_subgraph_template(self: Pin<&mut Self>, file: QString, x: f64, y: f64) -> QString;
+        fn insert_subgraph_template(self: Pin<&mut Self>, file: QString, x: f64, y: f64)
+        -> QString;
         #[qinvokable]
         fn delete_subgraph_template(self: Pin<&mut Self>, file: QString);
         #[qinvokable]
         fn get_virtual_devices_json(self: Pin<&mut Self>) -> QString;
         /// kind: "sink" | "source". Returns the new id.
         #[qinvokable]
-        fn add_virtual_device(self: Pin<&mut Self>, name: QString, kind: QString, channels: u32) -> QString;
+        fn add_virtual_device(
+            self: Pin<&mut Self>,
+            name: QString,
+            kind: QString,
+            channels: u32,
+        ) -> QString;
         #[qinvokable]
         fn update_virtual_device(self: Pin<&mut Self>, id: QString, name: QString, channels: u32);
         #[qinvokable]
@@ -334,11 +355,7 @@ pub mod qobject {
         fn cancel_midi_learn(self: Pin<&mut Self>);
 
         #[qinvokable]
-        fn remove_midi_mapping_for_param(
-            self: Pin<&mut Self>,
-            instance_id: u64,
-            port_index: u32,
-        );
+        fn remove_midi_mapping_for_param(self: Pin<&mut Self>, instance_id: u64, port_index: u32);
 
         #[qinvokable]
         fn get_midi_mappings_json(self: Pin<&mut Self>) -> QString;
@@ -399,7 +416,11 @@ pub mod qobject {
         fn midi_learn_cancelled(self: Pin<&mut AppController>);
 
         #[qsignal]
-        fn midi_mapping_conflict(self: Pin<&mut AppController>, source_json: QString, existing_label: QString);
+        fn midi_mapping_conflict(
+            self: Pin<&mut AppController>,
+            source_json: QString,
+            existing_label: QString,
+        );
 
         #[qsignal]
         fn crash_recovery_available(self: Pin<&mut AppController>, crashed_uris: QString);
@@ -424,11 +445,15 @@ use std::time::{Duration, Instant};
 
 use std::path::PathBuf;
 
-use crate::plugin::PluginManager;
 use crate::patchbay::{PatchbayManager, rules};
-use crate::pipewire::{GraphState, PluginEvent, Node, NodeType, Port, PortDirection, PwCommand, PwEvent};
+use crate::pipewire::{
+    GraphState, Node, NodeType, PluginEvent, Port, PortDirection, PwCommand, PwEvent,
+};
+use crate::plugin::PluginManager;
+use crate::subgraph::{
+    self as sg, NamedLink, PlanEnd, SubgraphDef, VirtualDevice, VirtualDeviceKind,
+};
 use crate::tray::TrayState;
-use crate::subgraph::{self as sg, NamedLink, PlanEnd, SubgraphDef, VirtualDevice, VirtualDeviceKind};
 use crate::ui::subgraphs::{self as sgui, Subgraphs, ViewNodeKind};
 
 /// Tracks the mapping between virtual sub-node IDs (used in the UI for split
@@ -499,6 +524,7 @@ impl BridgeSplitState {
 pub struct AppControllerRust {
     patchbay_enabled: bool,
     patchbay_exclusive: bool,
+    patchbay_hide_unnamed: bool,
     active_plugin_count: i32,
     node_count: i32,
     link_count: i32,
@@ -593,6 +619,7 @@ impl Default for AppControllerRust {
         Self {
             patchbay_enabled: true,
             patchbay_exclusive: true,
+            patchbay_hide_unnamed: true,
             active_plugin_count: 0,
             node_count: 0,
             link_count: 0,
@@ -659,7 +686,8 @@ impl qobject::AppController {
         // Already loaded when the controller was created (see Default).
         let prefs = self.rust().prefs.clone();
         // Before PipeWire starts and saved plugins are restored.
-        crate::plugin::PASSIVE_EFFECTS.store(prefs.passive_plugins, std::sync::atomic::Ordering::Relaxed);
+        crate::plugin::PASSIVE_EFFECTS
+            .store(prefs.passive_plugins, std::sync::atomic::Ordering::Relaxed);
         log::info!(
             "Preferences: rule_settle={}ms, params_persist={}ms, links_persist={}ms, poll={}ms, auto_learn={}, pw_tick={}ms, pw_cooldown={}ms",
             prefs.rule_settle_ms,
@@ -680,7 +708,9 @@ impl qobject::AppController {
             Ok(rx) => self.as_mut().rust_mut().plugin_scan_rx = Some(rx),
             Err(e) => {
                 self.as_mut().set_plugins_scanning(false);
-                self.as_mut().error_occurred(QString::from(format!("Could not start plugin discovery: {e}").as_str()));
+                self.as_mut().error_occurred(QString::from(
+                    format!("Could not start plugin discovery: {e}").as_str(),
+                ));
             }
         }
 
@@ -759,7 +789,10 @@ impl qobject::AppController {
             self.as_mut().rust_mut().restore_batch_size = saved.len();
             for sp in saved {
                 let (instance_id, sid) = self.as_mut().spawn_saved_plugin(sp);
-                self.as_mut().rust_mut().restore_instance_ids.insert(instance_id);
+                self.as_mut()
+                    .rust_mut()
+                    .restore_instance_ids
+                    .insert(instance_id);
                 restore_order.push(instance_id);
                 stable_to_instance.insert(sid, instance_id);
             }
@@ -794,7 +827,8 @@ impl qobject::AppController {
 
         if let Some(ref uris) = crashed_uris_str {
             if has_known_good_plugins() {
-                self.as_mut().crash_recovery_available(QString::from(uris.as_str()));
+                self.as_mut()
+                    .crash_recovery_available(QString::from(uris.as_str()));
             } else {
                 let msg = format!(
                     "Crash detected during plugin restore. No known-good snapshot available.\n\
@@ -815,51 +849,48 @@ impl qobject::AppController {
         let instance_id = self.rust().next_instance_id;
         self.as_mut().rust_mut().next_instance_id += 1;
 
-        let restored_params: Vec<crate::lv2::Lv2ParameterValue> = if let Some(ref mgr) =
-            self.rust().plugin_manager
-        {
-            if let Some(plugin_info) = mgr.find_plugin(&sp.uri) {
-                plugin_info
-                    .ports
-                    .iter()
-                    .filter(|port| port.port_type == crate::lv2::Lv2PortType::ControlInput)
-                    .map(|port| {
-                        let saved_value = sp.parameters.iter().find(|s| {
-                            s.port_index == port.index
-                                || (!s.symbol.is_empty() && s.symbol == port.symbol)
-                        });
-                        crate::lv2::Lv2ParameterValue {
-                            port_index: port.index,
-                            symbol: port.symbol.clone(),
-                            name: port.name.clone(),
-                            value: saved_value
-                                .map(|s| s.value)
-                                .unwrap_or(port.default_value),
-                            min: port.min_value,
-                            max: port.max_value,
-                            default: port.default_value,
-                            is_toggle: port.is_toggle,
-                        }
-                    })
-                    .collect()
+        let restored_params: Vec<crate::lv2::Lv2ParameterValue> =
+            if let Some(ref mgr) = self.rust().plugin_manager {
+                if let Some(plugin_info) = mgr.find_plugin(&sp.uri) {
+                    plugin_info
+                        .ports
+                        .iter()
+                        .filter(|port| port.port_type == crate::lv2::Lv2PortType::ControlInput)
+                        .map(|port| {
+                            let saved_value = sp.parameters.iter().find(|s| {
+                                s.port_index == port.index
+                                    || (!s.symbol.is_empty() && s.symbol == port.symbol)
+                            });
+                            crate::lv2::Lv2ParameterValue {
+                                port_index: port.index,
+                                symbol: port.symbol.clone(),
+                                name: port.name.clone(),
+                                value: saved_value.map(|s| s.value).unwrap_or(port.default_value),
+                                min: port.min_value,
+                                max: port.max_value,
+                                default: port.default_value,
+                                is_toggle: port.is_toggle,
+                            }
+                        })
+                        .collect()
+                } else {
+                    sp.parameters
+                        .iter()
+                        .map(|p| crate::lv2::Lv2ParameterValue {
+                            port_index: p.port_index,
+                            symbol: p.symbol.clone(),
+                            name: String::new(),
+                            value: p.value,
+                            min: 0.0,
+                            max: 1.0,
+                            default: 0.0,
+                            is_toggle: false,
+                        })
+                        .collect()
+                }
             } else {
-                sp.parameters
-                    .iter()
-                    .map(|p| crate::lv2::Lv2ParameterValue {
-                        port_index: p.port_index,
-                        symbol: p.symbol.clone(),
-                        name: String::new(),
-                        value: p.value,
-                        min: 0.0,
-                        max: 1.0,
-                        default: 0.0,
-                        is_toggle: false,
-                    })
-                    .collect()
-            }
-        } else {
-            Vec::new()
-        };
+                Vec::new()
+            };
 
         let sid = if sp.stable_id.is_empty() {
             uuid::Uuid::new_v4().to_string()
@@ -877,7 +908,9 @@ impl qobject::AppController {
 
         let plugin_state = sp.decode_plugin_state();
         let scan_info = sp.usable_scan_info().or_else(|| {
-            self.rust().plugin_manager.as_ref()
+            self.rust()
+                .plugin_manager
+                .as_ref()
                 .and_then(|mgr| mgr.find_plugin_with_format(&sp.uri, plugin_format))
                 .filter(|info| info.format != crate::plugin::PluginFormat::Lv2)
                 .cloned()
@@ -901,7 +934,12 @@ impl qobject::AppController {
             mgr.register_instance(info);
         }
 
-        log::info!("Restoring plugin: {} ({}) [{}]", sp.display_name, sp.uri, sp.format);
+        log::info!(
+            "Restoring plugin: {} ({}) [{}]",
+            sp.display_name,
+            sp.uri,
+            sp.format
+        );
         self.as_mut().send_or_defer_plugin(PwCommand::AddPlugin {
             plugin_uri: sp.uri,
             instance_id,
@@ -929,7 +967,9 @@ impl qobject::AppController {
         use crate::plugin::scan::ScanEvent;
         use std::sync::mpsc::TryRecvError;
         loop {
-            let Some(rx) = &self.rust().plugin_scan_rx else { return };
+            let Some(rx) = &self.rust().plugin_scan_rx else {
+                return;
+            };
             match rx.try_recv() {
                 Ok(ScanEvent::Progress { completed, total }) => {
                     // Workers may send progress out of order after incrementing.
@@ -947,8 +987,16 @@ impl qobject::AppController {
                     self.as_mut().set_plugins_scanning(false);
                     let pending = std::mem::take(&mut self.as_mut().rust_mut().pending_plugin_adds);
                     for mut command in pending {
-                        if let PwCommand::AddPlugin { instance_id, scan_info, .. } = &mut command {
-                            *scan_info = self.rust().plugin_manager.as_ref()
+                        if let PwCommand::AddPlugin {
+                            instance_id,
+                            scan_info,
+                            ..
+                        } = &mut command
+                        {
+                            *scan_info = self
+                                .rust()
+                                .plugin_manager
+                                .as_ref()
                                 .and_then(|mgr| mgr.get_instance(*instance_id))
                                 .and_then(|info| info.scan_info.clone());
                         }
@@ -1042,7 +1090,8 @@ impl qobject::AppController {
                                 // Nodes are coming back; give the graph a few
                                 // seconds to fill in before links are saved.
                                 self.as_mut().rust_mut().pw_reconnecting = false;
-                                self.as_mut().suppress_link_persist(LINK_SETTLE_AFTER_RECONNECT);
+                                self.as_mut()
+                                    .suppress_link_persist(LINK_SETTLE_AFTER_RECONNECT);
                             }
                         }
                         PwEvent::NodeRemoved(_)
@@ -1100,8 +1149,12 @@ impl qobject::AppController {
                         .and_then(|mgr| mgr.get_instance(instance_id))
                         .is_some_and(|info| info.pw_node_id.is_some());
                     if re_added {
-                        log::info!("Plugin instance {} re-added (reconnect/reload)", instance_id);
-                        self.as_mut().suppress_link_persist(LINK_SETTLE_AFTER_RECONNECT);
+                        log::info!(
+                            "Plugin instance {} re-added (reconnect/reload)",
+                            instance_id
+                        );
+                        self.as_mut()
+                            .suppress_link_persist(LINK_SETTLE_AFTER_RECONNECT);
                     }
                     if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager {
                         mgr.set_instance_pw_node_id(instance_id, pw_node_id);
@@ -1202,7 +1255,10 @@ impl qobject::AppController {
                         param_updates.push((instance_id, port, value));
                     }
                 }
-                PluginEvent::ParametersDescribed { instance_id, params } => {
+                PluginEvent::ParametersDescribed {
+                    instance_id,
+                    params,
+                } => {
                     changed = true;
                     if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager {
                         mgr.describe_parameters(instance_id, params);
@@ -1281,16 +1337,28 @@ impl qobject::AppController {
                         errors.push(message);
                     }
                 }
-                PluginEvent::MidiLearnStarted { instance_id, port_index } => {
-                    log::info!("MIDI learn started: instance={} port={}", instance_id, port_index);
-                    self.as_mut().midi_learn_started(instance_id, port_index as u32);
+                PluginEvent::MidiLearnStarted {
+                    instance_id,
+                    port_index,
+                } => {
+                    log::info!(
+                        "MIDI learn started: instance={} port={}",
+                        instance_id,
+                        port_index
+                    );
+                    self.as_mut()
+                        .midi_learn_started(instance_id, port_index as u32);
                 }
                 PluginEvent::MidiLearnCancelled => {
                     log::info!("MIDI learn cancelled");
                     self.as_mut().midi_learn_cancelled();
                 }
                 PluginEvent::MidiMappingAdded(ref mapping) => {
-                    log::info!("MIDI mapping added: {:?} -> {:?}", mapping.source, mapping.target);
+                    log::info!(
+                        "MIDI mapping added: {:?} -> {:?}",
+                        mapping.source,
+                        mapping.target
+                    );
                     // One mapping per source and per target: a re-learn replaces.
                     let replaced: Vec<crate::midi::MidiCcTarget> = self
                         .rust()
@@ -1346,13 +1414,19 @@ impl qobject::AppController {
                         rust.dormant_midi_mappings.retain(|m| m.source != *source);
                         rust.dormant_midi_mappings.extend(gone);
                     }
-                    self.as_mut().rust_mut().midi_mappings.retain(|m| m.source != *source);
+                    self.as_mut()
+                        .rust_mut()
+                        .midi_mappings
+                        .retain(|m| m.source != *source);
                     self.as_mut().persist_midi();
                     for (iid, pidx) in removed {
                         self.as_mut().midi_mapping_removed(iid, pidx);
                     }
                 }
-                PluginEvent::MidiMappingConflict { ref source, ref existing_label } => {
+                PluginEvent::MidiMappingConflict {
+                    ref source,
+                    ref existing_label,
+                } => {
                     log::warn!(
                         "MIDI mapping conflict: {:?} already assigned to '{}'",
                         source,
@@ -1361,7 +1435,8 @@ impl qobject::AppController {
                     let learned = self.as_mut().rust_mut().last_learned_mapping.take();
                     self.as_mut().rust_mut().pending_conflict_mapping =
                         learned.filter(|m| m.source == *source);
-                    let source_json = serde_json::to_string(source).unwrap_or_else(|_| "{}".to_string());
+                    let source_json =
+                        serde_json::to_string(source).unwrap_or_else(|_| "{}".to_string());
                     self.as_mut().midi_mapping_conflict(
                         QString::from(&source_json),
                         QString::from(existing_label.as_str()),
@@ -1376,9 +1451,15 @@ impl qobject::AppController {
                     lv2_state,
                     blob,
                 } => {
-                    self.as_mut().apply_plugin_state(instance_id, lv2_state, blob);
+                    self.as_mut()
+                        .apply_plugin_state(instance_id, lv2_state, blob);
                 }
-                PluginEvent::MidiCcReceived { ref device_name, channel, cc, message_type } => {
+                PluginEvent::MidiCcReceived {
+                    ref device_name,
+                    channel,
+                    cc,
+                    message_type,
+                } => {
                     if let Some((instance_id, port_index, label, mode)) =
                         self.as_mut().rust_mut().midi_learn_target.take()
                     {
@@ -1495,11 +1576,10 @@ impl qobject::AppController {
                 .last_change_time
                 .map(|t| t.elapsed() >= Duration::from_millis(rule_settle_ms))
                 .unwrap_or(false);
-            let expired = self
-                .rust()
-                .pending_links
-                .iter()
-                .any(|p| p.connect_sent_at.is_some_and(|t| t.elapsed() >= LINK_CONNECT_GRACE));
+            let expired = self.rust().pending_links.iter().any(|p| {
+                p.connect_sent_at
+                    .is_some_and(|t| t.elapsed() >= LINK_CONNECT_GRACE)
+            });
             self.rust().restore_instance_ids.is_empty()
                 && !self.rust().pending_links.is_empty()
                 && ((self.rust().links_retry_due && settled) || expired)
@@ -1597,7 +1677,8 @@ impl qobject::AppController {
         // The restore completes when every plugin of the batch reported back
         // (PluginAdded, PluginSkipped or a fatal PluginError); this is a safety
         // cap, scaled with the batch since probes and adds run in sequence.
-        if !self.rust().plugins_scanning && !self.rust().restore_instance_ids.is_empty()
+        if !self.rust().plugins_scanning
+            && !self.rust().restore_instance_ids.is_empty()
             && let Some(started) = self.rust().restore_started_at
         {
             let cap = restore_safety_cap(self.rust().restore_batch_size);
@@ -1649,7 +1730,12 @@ impl qobject::AppController {
 
     /// A plugin from the startup restore batch reported back (added or failed).
     fn finish_restore_of(mut self: Pin<&mut Self>, instance_id: u64) {
-        if !self.as_mut().rust_mut().restore_instance_ids.remove(&instance_id) {
+        if !self
+            .as_mut()
+            .rust_mut()
+            .restore_instance_ids
+            .remove(&instance_id)
+        {
             return;
         }
         if self.rust().restore_instance_ids.is_empty() {
@@ -1670,7 +1756,8 @@ impl qobject::AppController {
 
     /// Links to a plugin that was removed or renamed must not be remembered.
     fn forget_plugin_links(mut self: Pin<&mut Self>, name: &str) {
-        let involves = |l: &SavedPluginLink| l.output_node_name == name || l.input_node_name == name;
+        let involves =
+            |l: &SavedPluginLink| l.output_node_name == name || l.input_node_name == name;
         {
             let mut rust = self.as_mut().rust_mut();
             rust.forgotten_link_nodes.insert(name.to_string());
@@ -1728,7 +1815,8 @@ impl qobject::AppController {
                 }
                 p.connect_sent_at = None;
             }
-            if let (Some(out_id), Some(in_id)) = find_saved_link_ports(&graph, &all_nodes, &p.link) {
+            if let (Some(out_id), Some(in_id)) = find_saved_link_ports(&graph, &all_nodes, &p.link)
+            {
                 log::info!(
                     "Restoring link: {}:{} -> {}:{}",
                     p.link.output_node_name,
@@ -1759,7 +1847,10 @@ impl qobject::AppController {
     fn persist_midi(self: Pin<&mut Self>) {
         let mut all = self.rust().midi_mappings.clone();
         for m in &self.rust().dormant_midi_mappings {
-            if !all.iter().any(|a| a.source == m.source || a.target == m.target) {
+            if !all
+                .iter()
+                .any(|a| a.source == m.source || a.target == m.target)
+            {
                 all.push(m.clone());
             }
         }
@@ -1775,11 +1866,10 @@ impl qobject::AppController {
             return;
         };
         let all_nodes = graph.get_all_nodes();
-        let (back, still): (Vec<_>, Vec<_>) = std::mem::take(
-            &mut self.as_mut().rust_mut().dormant_midi_mappings,
-        )
-        .into_iter()
-        .partition(|m| node_name_present(&graph, &all_nodes, &m.source.device_name));
+        let (back, still): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.as_mut().rust_mut().dormant_midi_mappings)
+                .into_iter()
+                .partition(|m| node_name_present(&graph, &all_nodes, &m.source.device_name));
         self.as_mut().rust_mut().dormant_midi_mappings = still;
         if back.is_empty() {
             return;
@@ -1801,7 +1891,11 @@ impl qobject::AppController {
     }
 
     fn links_persist_suppressed(&self) -> bool {
-        !self.rust().plugin_manager.as_ref().is_some_and(|mgr| mgr.startup_complete())
+        !self
+            .rust()
+            .plugin_manager
+            .as_ref()
+            .is_some_and(|mgr| mgr.startup_complete())
             || self.rust().pw_reconnecting
             || self
                 .rust()
@@ -1865,10 +1959,17 @@ impl qobject::AppController {
         blob: Option<Vec<u8>>,
     ) {
         // A preset was just saved from this plugin: keep the fresh snapshot.
-        if let Some((uri, name)) = self.as_mut().rust_mut().preset_state_refresh.remove(&instance_id)
+        if let Some((uri, name)) = self
+            .as_mut()
+            .rust_mut()
+            .preset_state_refresh
+            .remove(&instance_id)
             && !lv2_state.is_empty()
         {
-            self.as_mut().rust_mut().presets.set_lv2_state(&uri, &name, lv2_state.clone());
+            self.as_mut()
+                .rust_mut()
+                .presets
+                .set_lv2_state(&uri, &name, lv2_state.clone());
             persist_presets(&self.rust().presets);
             // Saving the state may have written files; keep them with it.
             if let Some(scope) = self
@@ -1894,10 +1995,13 @@ impl qobject::AppController {
             match info.format {
                 crate::plugin::PluginFormat::Lv2 => {
                     labels_changed = crate::lv2::atom_state::is_lsp_mixer(&info.plugin_uri)
-                        && info.lv2_state.iter()
+                        && info
+                            .lv2_state
+                            .iter()
                             .find(|e| e.key_uri.ends_with("/KVT"))
                             .map(|e| (&e.value, &e.urid_references))
-                            != lv2_state.iter()
+                            != lv2_state
+                                .iter()
                                 .find(|e| e.key_uri.ends_with("/KVT"))
                                 .map(|e| (&e.value, &e.urid_references));
                     info.lv2_state = lv2_state;
@@ -1966,7 +2070,11 @@ impl qobject::AppController {
             .is_some_and(|tx| tx.send(PwCommand::RequestPluginStates).is_ok());
         if sent {
             // An autosave request may still be in flight; its Done comes first.
-            let mut dones_needed = if self.rust().state_request_sent_at.is_some() { 2 } else { 1 };
+            let mut dones_needed = if self.rust().state_request_sent_at.is_some() {
+                2
+            } else {
+                1
+            };
             let deadline = Instant::now() + timeout;
             while dones_needed > 0 {
                 let now = Instant::now();
@@ -1980,7 +2088,8 @@ impl qobject::AppController {
                         lv2_state,
                         blob,
                     })) => {
-                        self.as_mut().apply_plugin_state(instance_id, lv2_state, blob);
+                        self.as_mut()
+                            .apply_plugin_state(instance_id, lv2_state, blob);
                     }
                     Ok(PwEvent::Plugin(PluginEvent::PluginStatesDone)) => dones_needed -= 1,
                     Ok(other) => self.as_mut().rust_mut().stashed_events.push_back(other),
@@ -2048,19 +2157,28 @@ impl qobject::AppController {
                         json_nodes.push(node_to_json(n, mgr));
                     } else {
                         for (group, device_name) in &groups {
-                            let vid = self.as_mut().rust_mut().bridge_split
+                            let vid = self
+                                .as_mut()
+                                .rust_mut()
+                                .bridge_split
                                 .get_or_create_virtual_id(n.id, group);
 
                             // Register all ports in this group for link rewriting
                             let group_ports = graph.get_ports_for_bridge_group(n.id, group);
                             for port in &group_ports {
-                                self.as_mut().rust_mut().bridge_split
+                                self.as_mut()
+                                    .rust_mut()
+                                    .bridge_split
                                     .register_port(port.id, vid);
                             }
 
                             // Determine sub-node type based on port directions
-                            let has_inputs = group_ports.iter().any(|p| p.direction == PortDirection::Input);
-                            let has_outputs = group_ports.iter().any(|p| p.direction == PortDirection::Output);
+                            let has_inputs = group_ports
+                                .iter()
+                                .any(|p| p.direction == PortDirection::Input);
+                            let has_outputs = group_ports
+                                .iter()
+                                .any(|p| p.direction == PortDirection::Output);
                             let type_str = if has_inputs && has_outputs {
                                 "Duplex"
                             } else if has_outputs {
@@ -2130,8 +2248,11 @@ impl qobject::AppController {
             // Subgraph view nodes, then virtual bridge sub-node IDs
             let ports = if let Some(vn) = self.rust().subgraphs.vm.nodes.get(&node_id) {
                 vn.ports.clone()
-            } else if let Some((real_node_id, group)) =
-                self.rust().bridge_split.resolve_virtual_node(node_id).cloned()
+            } else if let Some((real_node_id, group)) = self
+                .rust()
+                .bridge_split
+                .resolve_virtual_node(node_id)
+                .cloned()
             {
                 graph.get_ports_for_bridge_group(real_node_id, &group)
             } else {
@@ -2155,12 +2276,18 @@ impl qobject::AppController {
                     } else {
                         port_ui_name(p, self.rust().bridge_split.is_virtual_id(node_id))
                     };
-                    let display_name = self.rust().plugin_manager.as_ref()
-                        .and_then(|m| m.active_instances().values()
-                            .find(|i| i.pw_node_id == Some(p.node_id)))
-                        .and_then(|i| crate::lv2::atom_state::port_label(
-                            &i.plugin_uri, &i.lv2_state, &p.name,
-                        ))
+                    let display_name = self
+                        .rust()
+                        .plugin_manager
+                        .as_ref()
+                        .and_then(|m| {
+                            m.active_instances()
+                                .values()
+                                .find(|i| i.pw_node_id == Some(p.node_id))
+                        })
+                        .and_then(|i| {
+                            crate::lv2::atom_state::port_label(&i.plugin_uri, &i.lv2_state, &p.name)
+                        })
                         .unwrap_or(display_name);
                     serde_json::json!({
                         "id": p.id,
@@ -2195,7 +2322,8 @@ impl qobject::AppController {
                 if same_group {
                     log::warn!(
                         "Rejected self-loop connect: ports {} and {} belong to the same node/device",
-                        output_port_id, input_port_id
+                        output_port_id,
+                        input_port_id
                     );
                     return;
                 }
@@ -2354,23 +2482,33 @@ impl qobject::AppController {
         }
     }
 
-    pub fn blocked_reason(self: Pin<&mut Self>, output_port_id: u32, input_port_id: u32) -> QString {
+    pub fn blocked_reason(
+        self: Pin<&mut Self>,
+        output_port_id: u32,
+        input_port_id: u32,
+    ) -> QString {
         let Some(patchbay) = self.rust().patchbay.as_ref().filter(|pb| pb.enabled) else {
             return QString::default();
         };
         let Some(graph) = self.rust().graph.as_ref() else {
             return QString::default();
         };
-        let (Some(out), Some(inp)) = (graph.get_port(output_port_id), graph.get_port(input_port_id))
-        else {
+        let (Some(out), Some(inp)) = (
+            graph.get_port(output_port_id),
+            graph.get_port(input_port_id),
+        ) else {
             return QString::default();
         };
-        let (Some(source), Some(target)) = (graph.get_node(out.node_id), graph.get_node(inp.node_id))
+        let (Some(source), Some(target)) =
+            (graph.get_node(out.node_id), graph.get_node(inp.node_id))
         else {
             return QString::default();
         };
         match patchbay.blocking_rule(&source, &target, &out, &inp) {
-            Some(rule) => QString::from(&format!("{} \u{2192} {}", rule.source_pattern, rule.target_pattern)),
+            Some(rule) => QString::from(&format!(
+                "{} \u{2192} {}",
+                rule.source_pattern, rule.target_pattern
+            )),
             None => QString::default(),
         }
     }
@@ -2463,27 +2601,43 @@ impl qobject::AppController {
         };
 
         if link.output_node_id == node_id || link.input_node_id == node_id {
-            log::warn!("insert_node_on_link: node {} is already part of link {}, ignoring", node_id, link_id);
+            log::warn!(
+                "insert_node_on_link: node {} is already part of link {}, ignoring",
+                node_id,
+                link_id
+            );
             return;
         }
 
         if node.node_type != Some(NodeType::Plugin) {
-            log::warn!("insert_node_on_link: node {} is not an LV2 plugin, ignoring", node_id);
+            log::warn!(
+                "insert_node_on_link: node {} is not an LV2 plugin, ignoring",
+                node_id
+            );
             return;
         }
 
         let node_ports = graph.get_ports_for_node(node_id);
         let mut node_inputs: Vec<_> = node_ports
             .iter()
-            .filter(|p| p.direction == PortDirection::Input && p.media_type == Some(crate::pipewire::MediaType::Audio))
+            .filter(|p| {
+                p.direction == PortDirection::Input
+                    && p.media_type == Some(crate::pipewire::MediaType::Audio)
+            })
             .collect();
         let mut node_outputs: Vec<_> = node_ports
             .iter()
-            .filter(|p| p.direction == PortDirection::Output && p.media_type == Some(crate::pipewire::MediaType::Audio))
+            .filter(|p| {
+                p.direction == PortDirection::Output
+                    && p.media_type == Some(crate::pipewire::MediaType::Audio)
+            })
             .collect();
 
         if node_inputs.is_empty() || node_outputs.is_empty() {
-            log::warn!("insert_node_on_link: node {} has no audio input/output ports", node_id);
+            log::warn!(
+                "insert_node_on_link: node {} has no audio input/output ports",
+                node_id
+            );
             return;
         }
 
@@ -2499,12 +2653,18 @@ impl qobject::AppController {
         let upstream_ports: Vec<_> = graph
             .get_ports_for_node(upstream_node_id)
             .into_iter()
-            .filter(|p| p.direction == PortDirection::Output && p.media_type == Some(crate::pipewire::MediaType::Audio))
+            .filter(|p| {
+                p.direction == PortDirection::Output
+                    && p.media_type == Some(crate::pipewire::MediaType::Audio)
+            })
             .collect();
         let downstream_ports: Vec<_> = graph
             .get_ports_for_node(downstream_node_id)
             .into_iter()
-            .filter(|p| p.direction == PortDirection::Input && p.media_type == Some(crate::pipewire::MediaType::Audio))
+            .filter(|p| {
+                p.direction == PortDirection::Input
+                    && p.media_type == Some(crate::pipewire::MediaType::Audio)
+            })
             .collect();
 
         // Only audio links can take an audio plugin; a MIDI link would be
@@ -2512,21 +2672,36 @@ impl qobject::AppController {
         if !upstream_ports.iter().any(|p| p.id == upstream_out)
             || !downstream_ports.iter().any(|p| p.id == downstream_in)
         {
-            log::warn!("insert_node_on_link: link {} is not an audio link, ignoring", link_id);
+            log::warn!(
+                "insert_node_on_link: link {} is not an audio link, ignoring",
+                link_id
+            );
             return;
         }
 
-        let upstream_idx = upstream_ports.iter().position(|p| p.id == upstream_out).unwrap_or(0);
-        let downstream_idx = downstream_ports.iter().position(|p| p.id == downstream_in).unwrap_or(0);
+        let upstream_idx = upstream_ports
+            .iter()
+            .position(|p| p.id == upstream_out)
+            .unwrap_or(0);
+        let downstream_idx = downstream_ports
+            .iter()
+            .position(|p| p.id == downstream_in)
+            .unwrap_or(0);
 
         let all_links = graph.get_all_links();
         let mut links_to_remove = Vec::new();
         let mut rewire_pairs: Vec<(u32, usize, u32, usize)> = Vec::new();
 
         for existing in &all_links {
-            if existing.output_node_id == upstream_node_id && existing.input_node_id == downstream_node_id {
-                let u_idx = upstream_ports.iter().position(|p| p.id == existing.output_port_id);
-                let d_idx = downstream_ports.iter().position(|p| p.id == existing.input_port_id);
+            if existing.output_node_id == upstream_node_id
+                && existing.input_node_id == downstream_node_id
+            {
+                let u_idx = upstream_ports
+                    .iter()
+                    .position(|p| p.id == existing.output_port_id);
+                let d_idx = downstream_ports
+                    .iter()
+                    .position(|p| p.id == existing.input_port_id);
                 if let (Some(ui), Some(di)) = (u_idx, d_idx) {
                     links_to_remove.push(existing.id);
                     rewire_pairs.push((existing.output_port_id, ui, existing.input_port_id, di));
@@ -2595,17 +2770,21 @@ impl qobject::AppController {
                     graph.get_node(node_id),
                     graph.get_port(*up_port_id),
                     graph.get_port(node_inputs[in_idx].id),
-                )
-                    && let (Some(ins_node2), Some(dn_node), Some(ins_out_port), Some(dn_port)) = (
-                        graph.get_node(node_id),
-                        graph.get_node(downstream_node_id),
-                        graph.get_port(node_outputs[out_idx].id),
-                        graph.get_port(*down_port_id),
-                    )
-                {
+                ) && let (Some(ins_node2), Some(dn_node), Some(ins_out_port), Some(dn_port)) = (
+                    graph.get_node(node_id),
+                    graph.get_node(downstream_node_id),
+                    graph.get_port(node_outputs[out_idx].id),
+                    graph.get_port(*down_port_id),
+                ) {
                     new_link_data.push((
-                        up_node, ins_node, up_port, ins_in_port,
-                        ins_node2, dn_node, ins_out_port, dn_port,
+                        up_node,
+                        ins_node,
+                        up_port,
+                        ins_in_port,
+                        ins_node2,
+                        dn_node,
+                        ins_out_port,
+                        dn_port,
                     ));
                 }
             }
@@ -2626,7 +2805,17 @@ impl qobject::AppController {
                 }
             }
 
-            for (up_node, ins_node, up_port, ins_in_port, ins_node2, dn_node, ins_out_port, dn_port) in &new_link_data {
+            for (
+                up_node,
+                ins_node,
+                up_port,
+                ins_in_port,
+                ins_node2,
+                dn_node,
+                ins_out_port,
+                dn_port,
+            ) in &new_link_data
+            {
                 if patchbay.learn_from_link(up_node, ins_node, up_port, ins_in_port) {
                     log::info!(
                         "insert_node_on_link: learned rule {}:{} -> {}:{}",
@@ -2697,10 +2886,15 @@ impl qobject::AppController {
         log::info!("Quit requested");
         let frozen = crate::PLUGINS_FROZEN.load(std::sync::atomic::Ordering::SeqCst);
         if self.plugins_persistable() {
-            self.as_mut().collect_plugin_states_blocking(Duration::from_secs(3));
+            self.as_mut()
+                .collect_plugin_states_blocking(Duration::from_secs(3));
         }
         let restore_complete = self.rust().restore_instance_ids.is_empty()
-            && self.rust().plugin_manager.as_ref().is_some_and(|mgr| mgr.startup_complete());
+            && self
+                .rust()
+                .plugin_manager
+                .as_ref()
+                .is_some_and(|mgr| mgr.startup_complete());
         remove_crash_marker();
         // While PipeWire is reconnecting the graph is empty/partial; links.json
         // already holds the last good state.
@@ -2810,7 +3004,10 @@ impl qobject::AppController {
         for n in all_nodes.iter().filter(|n| n.ready && n.is_bridge) {
             let groups = graph.get_bridge_port_groups(n.id);
             for (group, device_name) in &groups {
-                let vid = self.as_mut().rust_mut().bridge_split
+                let vid = self
+                    .as_mut()
+                    .rust_mut()
+                    .bridge_split
                     .get_or_create_virtual_id(n.id, group);
                 bridge_vids.push((n.id, vid, group.clone(), device_name.clone()));
             }
@@ -2824,15 +3021,26 @@ impl qobject::AppController {
                     if *real_id != n.id {
                         continue;
                     }
-                    let Some((w, h)) = size_of(*vid) else { continue };
+                    let Some((w, h)) = size_of(*vid) else {
+                        continue;
+                    };
 
                     let mut group_ports = graph.get_ports_for_bridge_group(n.id, group);
-                    let has_inputs = group_ports.iter().any(|p| p.direction == PortDirection::Input);
-                    let has_outputs = group_ports.iter().any(|p| p.direction == PortDirection::Output);
-                    let type_str = if has_inputs && has_outputs { "Duplex" }
-                        else if has_outputs { "Source" }
-                        else if has_inputs { "Sink" }
-                        else { "Duplex" };
+                    let has_inputs = group_ports
+                        .iter()
+                        .any(|p| p.direction == PortDirection::Input);
+                    let has_outputs = group_ports
+                        .iter()
+                        .any(|p| p.direction == PortDirection::Output);
+                    let type_str = if has_inputs && has_outputs {
+                        "Duplex"
+                    } else if has_outputs {
+                        "Source"
+                    } else if has_inputs {
+                        "Sink"
+                    } else {
+                        "Duplex"
+                    };
 
                     layout_nodes.push((*vid, device_name.clone(), type_str, w, h));
                     included.insert(*vid);
@@ -2840,7 +3048,9 @@ impl qobject::AppController {
                     add_ports_to_layout(&group_ports, *vid, &mut layout_ports);
                 }
             } else {
-                let Some((w, h)) = size_of(n.id) else { continue };
+                let Some((w, h)) = size_of(n.id) else {
+                    continue;
+                };
                 let type_str = node_type_str(n);
                 layout_nodes.push((n.id, n.display_name().to_string(), type_str, w, h));
                 included.insert(n.id);
@@ -2862,7 +3072,9 @@ impl qobject::AppController {
             .collect();
         view_nodes.sort_by_key(|(id, _)| *id);
         for (vid, vn) in &view_nodes {
-            let Some((w, h)) = size_of(*vid) else { continue };
+            let Some((w, h)) = size_of(*vid) else {
+                continue;
+            };
             let type_str = match vn.kind {
                 ViewNodeKind::Card => "Duplex",
                 ViewNodeKind::Input => "Source",
@@ -2876,11 +3088,31 @@ impl qobject::AppController {
         }
 
         for l in &all_links {
-            let out_node = self.rust().subgraphs.vm.port_owner.get(&l.output_port_id).copied()
-                .or_else(|| self.rust().bridge_split.resolve_port_virtual_node(l.output_port_id))
+            let out_node = self
+                .rust()
+                .subgraphs
+                .vm
+                .port_owner
+                .get(&l.output_port_id)
+                .copied()
+                .or_else(|| {
+                    self.rust()
+                        .bridge_split
+                        .resolve_port_virtual_node(l.output_port_id)
+                })
                 .unwrap_or(l.output_node_id);
-            let in_node = self.rust().subgraphs.vm.port_owner.get(&l.input_port_id).copied()
-                .or_else(|| self.rust().bridge_split.resolve_port_virtual_node(l.input_port_id))
+            let in_node = self
+                .rust()
+                .subgraphs
+                .vm
+                .port_owner
+                .get(&l.input_port_id)
+                .copied()
+                .or_else(|| {
+                    self.rust()
+                        .bridge_split
+                        .resolve_port_virtual_node(l.input_port_id)
+                })
                 .unwrap_or(l.input_node_id);
 
             if included.contains(&out_node) && included.contains(&in_node) {
@@ -2900,16 +3132,40 @@ impl qobject::AppController {
         }
 
         for &(id, ref name, type_str, w, h) in &layout_nodes {
-            let pin_tag = if pinned_by_id.contains_key(&id) { " [PINNED]" } else { "" };
-            log::debug!("  node {}: {}({}) {}x{}{}", id, name, type_str, w as i32, h as i32, pin_tag);
+            let pin_tag = if pinned_by_id.contains_key(&id) {
+                " [PINNED]"
+            } else {
+                ""
+            };
+            log::debug!(
+                "  node {}: {}({}) {}x{}{}",
+                id,
+                name,
+                type_str,
+                w as i32,
+                h as i32,
+                pin_tag
+            );
         }
-        log::info!("auto_layout: {} nodes ({} pinned), {} links",
-            layout_nodes.len(), pinned_by_id.len(), layout_links.len());
+        log::info!(
+            "auto_layout: {} nodes ({} pinned), {} links",
+            layout_nodes.len(),
+            pinned_by_id.len(),
+            layout_links.len()
+        );
 
-        let sizes_by_id: HashMap<u32, (f64, f64)> =
-            layout_nodes.iter().map(|&(id, _, _, w, h)| (id, (w, h))).collect();
+        let sizes_by_id: HashMap<u32, (f64, f64)> = layout_nodes
+            .iter()
+            .map(|&(id, _, _, w, h)| (id, (w, h)))
+            .collect();
         let gap = config.margin_y;
-        let mut positions = layout::sugiyama_layout(layout_nodes, layout_ports, layout_links, config, &pinned_by_id);
+        let mut positions = layout::sugiyama_layout(
+            layout_nodes,
+            layout_ports,
+            layout_links,
+            config,
+            &pinned_by_id,
+        );
         layout::snap_to_grid(&mut positions, &sizes_by_id, &pinned_by_id, grid_size, gap);
 
         let mut result: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
@@ -2919,7 +3175,8 @@ impl qobject::AppController {
             }
         }
 
-        let json = serde_json::to_string(&serde_json::Value::Object(result)).unwrap_or_else(|_| "{}".to_string());
+        let json = serde_json::to_string(&serde_json::Value::Object(result))
+            .unwrap_or_else(|_| "{}".to_string());
         log::info!("auto_layout: computed {} positions", positions.len());
         QString::from(&json)
     }
@@ -2971,43 +3228,46 @@ impl qobject::AppController {
     pub fn add_plugin(mut self: Pin<&mut Self>, uri: QString) -> QString {
         let uri_str: String = uri.to_string();
 
-        let (display_name, initial_params, plugin_format) = if let Some(ref mgr) =
-            self.rust().plugin_manager
-        {
-            let plugin = mgr.find_plugin(&uri_str);
-            let base_name = plugin
-                .map(|p| p.name.clone())
-                .unwrap_or_else(|| uri_str.clone());
-            let name = self.unique_display_name(&base_name);
-            let format = plugin
-                .map(|p| p.format)
-                .unwrap_or(crate::plugin::PluginFormat::Lv2);
-            let params: Vec<crate::lv2::Lv2ParameterValue> = plugin
-                .map(|p| {
-                    p.ports
-                        .iter()
-                        .filter(|port| port.port_type == crate::lv2::Lv2PortType::ControlInput)
-                        .map(|port| crate::lv2::Lv2ParameterValue {
-                            port_index: port.index,
-                            symbol: port.symbol.clone(),
-                            name: port.name.clone(),
-                            value: port.default_value,
-                            min: port.min_value,
-                            max: port.max_value,
-                            default: port.default_value,
-                            is_toggle: port.is_toggle,
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            (name, params, format)
-        } else {
-            return QString::from("");
-        };
+        let (display_name, initial_params, plugin_format) =
+            if let Some(ref mgr) = self.rust().plugin_manager {
+                let plugin = mgr.find_plugin(&uri_str);
+                let base_name = plugin
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| uri_str.clone());
+                let name = self.unique_display_name(&base_name);
+                let format = plugin
+                    .map(|p| p.format)
+                    .unwrap_or(crate::plugin::PluginFormat::Lv2);
+                let params: Vec<crate::lv2::Lv2ParameterValue> = plugin
+                    .map(|p| {
+                        p.ports
+                            .iter()
+                            .filter(|port| port.port_type == crate::lv2::Lv2PortType::ControlInput)
+                            .map(|port| crate::lv2::Lv2ParameterValue {
+                                port_index: port.index,
+                                symbol: port.symbol.clone(),
+                                name: port.name.clone(),
+                                value: port.default_value,
+                                min: port.min_value,
+                                max: port.max_value,
+                                default: port.default_value,
+                                is_toggle: port.is_toggle,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                (name, params, format)
+            } else {
+                return QString::from("");
+            };
 
         // A new instance starts from the plugin's default preset, if it has one.
         let mut initial_params = initial_params;
-        let default_preset = self.rust().presets.default_name(&uri_str).map(str::to_string);
+        let default_preset = self
+            .rust()
+            .presets
+            .default_name(&uri_str)
+            .map(str::to_string);
         let mut default_values: Vec<(usize, f32)> = Vec::new();
         let mut default_state: Vec<crate::lv2::state::StateEntry> = Vec::new();
         if let Some(ref name) = default_preset
@@ -3018,7 +3278,10 @@ impl qobject::AppController {
             }
             default_values = crate::presets::values_to_apply(preset, &initial_params);
             for (port_index, value) in &default_values {
-                if let Some(p) = initial_params.iter_mut().find(|p| p.port_index == *port_index) {
+                if let Some(p) = initial_params
+                    .iter_mut()
+                    .find(|p| p.port_index == *port_index)
+                {
                     p.value = *value;
                 }
             }
@@ -3028,7 +3291,10 @@ impl qobject::AppController {
         self.as_mut().rust_mut().next_instance_id += 1;
 
         let format_str = plugin_format.as_str().to_string();
-        let scan_info = self.rust().plugin_manager.as_ref()
+        let scan_info = self
+            .rust()
+            .plugin_manager
+            .as_ref()
             .and_then(|mgr| mgr.find_plugin_with_format(&uri_str, plugin_format))
             .filter(|info| info.format != crate::plugin::PluginFormat::Lv2)
             .cloned();
@@ -3036,7 +3302,10 @@ impl qobject::AppController {
         let stable_id = uuid::Uuid::new_v4().to_string();
         let stable_id_for_group = stable_id.clone();
         if let Some(ref name) = default_preset {
-            self.as_mut().rust_mut().presets.select(&stable_id, Some(name));
+            self.as_mut()
+                .rust_mut()
+                .presets
+                .select(&stable_id, Some(name));
             persist_presets(&self.rust().presets);
             if plugin_format == crate::plugin::PluginFormat::Lv2 {
                 crate::presets::restore_preset_files(&uri_str, &stable_id, name);
@@ -3172,7 +3441,10 @@ impl qobject::AppController {
             {
                 self.as_mut().forget_plugin_links(&old_name);
             }
-            self.as_mut().rust_mut().forgotten_link_nodes.remove(&name_str);
+            self.as_mut()
+                .rust_mut()
+                .forgotten_link_nodes
+                .remove(&name_str);
             self.as_mut().mark_links_dirty();
             persist_active_plugins(self.rust().plugin_manager.as_ref());
             self.as_mut().graph_changed();
@@ -3323,14 +3595,21 @@ impl qobject::AppController {
             instance_id,
             port_index: port_index as usize,
         };
-        if self.rust().dormant_midi_mappings.iter().any(|m| m.target == target) {
+        if self
+            .rust()
+            .dormant_midi_mappings
+            .iter()
+            .any(|m| m.target == target)
+        {
             self.as_mut()
                 .rust_mut()
                 .dormant_midi_mappings
                 .retain(|m| m.target != target);
             self.as_mut().persist_midi();
         }
-        let source = self.rust().midi_mappings
+        let source = self
+            .rust()
+            .midi_mappings
             .iter()
             .find(|m| m.target == target)
             .map(|m| m.source.clone());
@@ -3342,7 +3621,8 @@ impl qobject::AppController {
     }
 
     pub fn get_midi_mappings_json(self: Pin<&mut Self>) -> QString {
-        let json = serde_json::to_string(&self.rust().midi_mappings).unwrap_or_else(|_| "[]".to_string());
+        let json =
+            serde_json::to_string(&self.rust().midi_mappings).unwrap_or_else(|_| "[]".to_string());
         QString::from(&json)
     }
 
@@ -3355,7 +3635,9 @@ impl qobject::AppController {
             instance_id,
             port_index: port_index as usize,
         };
-        let mapping = self.rust().midi_mappings
+        let mapping = self
+            .rust()
+            .midi_mappings
             .iter()
             .find(|m| m.target == target);
         match mapping {
@@ -3381,11 +3663,15 @@ impl qobject::AppController {
         if let Some(mgr) = self.rust().plugin_manager.as_ref() {
             let store = &self.rust().presets;
             for info in mgr.active_instances().values() {
-                let Some(node_id) = info.pw_node_id else { continue };
+                let Some(node_id) = info.pw_node_id else {
+                    continue;
+                };
                 let selected = store.selected_name(&info.stable_id, &info.plugin_uri);
                 let modified = selected
                     .and_then(|n| store.get(&info.plugin_uri, n))
-                    .is_some_and(|p| crate::presets::is_modified(p, &info.parameters, &info.lv2_state));
+                    .is_some_and(|p| {
+                        crate::presets::is_modified(p, &info.parameters, &info.lv2_state)
+                    });
                 out.insert(
                     node_id.to_string(),
                     serde_json::json!({
@@ -3419,7 +3705,11 @@ impl qobject::AppController {
             })
             .unwrap_or_default();
         if !changes.is_empty() {
-            log::info!("Preset \"{}\" differs from the plugin: {}", selected, changes.join("; "));
+            log::info!(
+                "Preset \"{}\" differs from the plugin: {}",
+                selected,
+                changes.join("; ")
+            );
         }
         QString::from(
             &serde_json::json!({
@@ -3452,7 +3742,10 @@ impl qobject::AppController {
             let state = (info.format == crate::plugin::PluginFormat::Lv2
                 && crate::presets::state_differs(preset, &info.lv2_state))
             .then(|| preset.lv2_state.clone());
-            (crate::presets::values_to_apply(preset, &info.parameters), state)
+            (
+                crate::presets::values_to_apply(preset, &info.parameters),
+                state,
+            )
         };
         if let Some(state) = reload_state {
             // The plugin's state (e.g. channel names) can only be restored
@@ -3489,7 +3782,10 @@ impl qobject::AppController {
                 }
             }
         }
-        self.as_mut().rust_mut().presets.select(&stable_id, Some(&name));
+        self.as_mut()
+            .rust_mut()
+            .presets
+            .select(&stable_id, Some(&name));
         persist_presets(&self.rust().presets);
         self.as_mut().rust_mut().params_dirty = true;
         if self.rust().params_dirty_since.is_none() {
@@ -3524,7 +3820,10 @@ impl qobject::AppController {
             .rust_mut()
             .presets
             .save(&uri, &name, &params, &lv2_state);
-        self.as_mut().rust_mut().presets.select(&stable_id, Some(&name));
+        self.as_mut()
+            .rust_mut()
+            .presets
+            .select(&stable_id, Some(&name));
         persist_presets(&self.rust().presets);
         if is_lv2 {
             crate::presets::store_preset_files(&uri, &stable_id, &name);
@@ -3927,6 +4226,19 @@ impl qobject::AppController {
         }
     }
 
+    pub fn toggle_patchbay_hide_unnamed(mut self: Pin<&mut Self>, enabled: bool) {
+        if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
+            patchbay.hide_unnamed = enabled;
+            crate::pipewire::HIDE_UNNAMED_NODES
+                .store(enabled, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.as_mut().set_patchbay_hide_unnamed(enabled);
+        self.as_mut().sync_tray_flags();
+        if self.rust().patchbay_enabled {
+            self.as_mut().apply_rules();
+        }
+    }
+
     pub fn get_node_names_json(self: Pin<&mut Self>) -> QString {
         if let Some(ref graph) = self.rust().graph {
             let nodes = graph.get_all_nodes();
@@ -4226,14 +4538,23 @@ impl qobject::AppController {
         let seconds = time_of_day % 60;
         // Compute date from days since epoch (1970-01-01)
         let (year, month, day) = days_to_ymd(days);
-        let timestamp = format!("{:04}{:02}{:02}_{:02}{:02}{:02}", year, month, day, hours, minutes, seconds);
+        let timestamp = format!(
+            "{:04}{:02}{:02}_{:02}{:02}{:02}",
+            year, month, day, hours, minutes, seconds
+        );
         let safe_name = if name_str.trim().is_empty() {
             timestamp.clone()
         } else {
             let sanitized: String = name_str
                 .trim()
                 .chars()
-                .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == ' ' { c } else { '_' })
+                .map(|c| {
+                    if c.is_alphanumeric() || c == '-' || c == '_' || c == ' ' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
                 .collect();
             format!("{}_{}", timestamp, sanitized)
         };
@@ -4294,8 +4615,15 @@ impl qobject::AppController {
                                 let secs = dur.as_secs() as i64;
                                 let tod = (secs % 86400) as u32;
                                 let (y, mo, d) = days_to_ymd(secs / 86400);
-                                format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-                                    y, mo, d, tod / 3600, (tod % 3600) / 60, tod % 60)
+                                format!(
+                                    "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                                    y,
+                                    mo,
+                                    d,
+                                    tod / 3600,
+                                    (tod % 3600) / 60,
+                                    tod % 60
+                                )
                             })
                             .unwrap_or_default()
                     };
@@ -4324,7 +4652,10 @@ impl qobject::AppController {
     pub fn restore_rule_backup(mut self: Pin<&mut Self>, filename: QString) {
         let filename_str: String = filename.to_string();
         if !is_plain_file_name(&filename_str) {
-            log::error!("restore_rule_backup: invalid backup name {:?}", filename_str);
+            log::error!(
+                "restore_rule_backup: invalid backup name {:?}",
+                filename_str
+            );
             return;
         }
         let backup_path = config_path("rule_backups").join(&filename_str);
@@ -4332,7 +4663,8 @@ impl qobject::AppController {
         match std::fs::read_to_string(&backup_path) {
             Ok(content) => {
                 // Validate it parses as rules
-                match serde_json::from_str::<Vec<crate::patchbay::rules::AutoConnectRule>>(&content) {
+                match serde_json::from_str::<Vec<crate::patchbay::rules::AutoConnectRule>>(&content)
+                {
                     Ok(rules) => {
                         // Write to rules.json
                         let rules_path = config_path("rules.json");
@@ -4343,11 +4675,19 @@ impl qobject::AppController {
                         if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
                             patchbay.set_rules(rules.clone());
                         }
-                        log::info!("Restored {} rules from backup {:?}", rules.len(), filename_str);
+                        log::info!(
+                            "Restored {} rules from backup {:?}",
+                            rules.len(),
+                            filename_str
+                        );
                         self.as_mut().rules_changed();
                     }
                     Err(e) => {
-                        log::error!("Backup file {:?} contains invalid rules: {}", filename_str, e);
+                        log::error!(
+                            "Backup file {:?} contains invalid rules: {}",
+                            filename_str,
+                            e
+                        );
                     }
                 }
             }
@@ -4384,8 +4724,10 @@ impl qobject::AppController {
     fn sync_tray_flags(self: Pin<&mut Self>) {
         if let Some(ref tray) = self.rust().tray_state {
             use std::sync::atomic::Ordering;
-            tray.rules_enabled.store(self.rust().patchbay_enabled, Ordering::Release);
-            tray.exclusive.store(self.rust().patchbay_exclusive, Ordering::Release);
+            tray.rules_enabled
+                .store(self.rust().patchbay_enabled, Ordering::Release);
+            tray.exclusive
+                .store(self.rust().patchbay_exclusive, Ordering::Release);
             tray.refresh();
         }
     }
@@ -4519,7 +4861,9 @@ fn take_config_errors() -> Vec<String> {
 }
 
 fn list_contains(list: &std::sync::Mutex<Vec<String>>, name: &str) -> bool {
-    list.lock().map(|l| l.iter().any(|n| n == name)).unwrap_or(false)
+    list.lock()
+        .map(|l| l.iter().any(|n| n == name))
+        .unwrap_or(false)
 }
 
 fn list_set(list: &std::sync::Mutex<Vec<String>>, name: &str, present: bool) {
@@ -4591,12 +4935,18 @@ fn write_atomic(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
 /// data — it is not written over a file that failed to load this session.
 fn write_config(filename: &str, data: &[u8], is_empty: bool) -> bool {
     if list_contains(&SAVE_BLOCKED, filename) {
-        log::warn!("Not saving {}: it failed to load and could not be backed up", filename);
+        log::warn!(
+            "Not saving {}: it failed to load and could not be backed up",
+            filename
+        );
         return false;
     }
     if list_contains(&LOAD_FAILED, filename) {
         if is_empty {
-            log::warn!("Not overwriting {} (failed to load) with empty content", filename);
+            log::warn!(
+                "Not overwriting {} (failed to load) with empty content",
+                filename
+            );
             return false;
         }
         list_set(&LOAD_FAILED, filename, false);
@@ -4698,7 +5048,11 @@ fn has_crash_marker() -> bool {
 fn read_crash_marker() -> Vec<String> {
     let path = crash_marker_path();
     match std::fs::read_to_string(&path) {
-        Ok(s) => s.lines().filter(|l| !l.is_empty()).map(String::from).collect(),
+        Ok(s) => s
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect(),
         Err(_) => Vec::new(),
     }
 }
@@ -4784,15 +5138,21 @@ impl From<&crate::plugin::PluginInstanceInfo> for SavedPlugin {
             uri: info.plugin_uri.clone(),
             display_name: info.display_name.clone(),
             bypassed: info.bypassed,
-            parameters: info.parameters.iter().map(|p| SavedPluginParam {
-                port_index: p.port_index,
-                symbol: p.symbol.clone(),
-                value: p.value,
-            }).collect(),
+            parameters: info
+                .parameters
+                .iter()
+                .map(|p| SavedPluginParam {
+                    port_index: p.port_index,
+                    symbol: p.symbol.clone(),
+                    value: p.value,
+                })
+                .collect(),
             format: info.format.as_str().to_string(),
             scan_info: info.scan_info.clone(),
             lv2_state: info.lv2_state.clone(),
-            plugin_state: info.plugin_state.as_ref()
+            plugin_state: info
+                .plugin_state
+                .as_ref()
                 .map(|blob| base64::engine::general_purpose::STANDARD.encode(blob)),
         }
     }
@@ -5048,9 +5408,9 @@ fn persist_midi_mappings(
 }
 
 fn bridge_device_name_for_port(port: &Port) -> Option<String> {
-    port.port_alias.as_ref().and_then(|alias| {
-        alias.find(':').map(|pos| alias[..pos].to_string())
-    })
+    port.port_alias
+        .as_ref()
+        .and_then(|alias| alias.find(':').map(|pos| alias[..pos].to_string()))
 }
 
 fn build_persistable_links(graph: &GraphState) -> Vec<SavedPluginLink> {
@@ -5115,12 +5475,18 @@ fn build_persistable_links(graph: &GraphState) -> Vec<SavedPluginLink> {
     }
 
     saved_links.sort_by(|a, b| {
-        (&a.output_node_name, &a.output_port_name, &a.input_node_name, &a.input_port_name).cmp(&(
-            &b.output_node_name,
-            &b.output_port_name,
-            &b.input_node_name,
-            &b.input_port_name,
-        ))
+        (
+            &a.output_node_name,
+            &a.output_port_name,
+            &a.input_node_name,
+            &a.input_port_name,
+        )
+            .cmp(&(
+                &b.output_node_name,
+                &b.output_port_name,
+                &b.input_node_name,
+                &b.input_port_name,
+            ))
     });
     saved_links
 }
@@ -5261,7 +5627,8 @@ fn is_plain_file_name(name: &str) -> bool {
 /// name. Never panics on arbitrary (non-ASCII) file names.
 fn parse_backup_stem(stem: &str) -> (Option<String>, String) {
     let b = stem.as_bytes();
-    let digits = |r: std::ops::Range<usize>| b.get(r).is_some_and(|s| s.iter().all(u8::is_ascii_digit));
+    let digits =
+        |r: std::ops::Range<usize>| b.get(r).is_some_and(|s| s.iter().all(u8::is_ascii_digit));
     if b.len() >= 15 && digits(0..8) && b[8] == b'_' && digits(9..15) {
         // Bytes 0..15 are ASCII, so these are char boundaries.
         let date = format!(
@@ -5676,8 +6043,14 @@ mod tests {
     #[test]
     fn midi_mappings_resolve_by_stable_id() {
         let saved = vec![
-            SavedMidiMapping { mapping: mapping(7, 1, 10), stable_id: "a".into() },
-            SavedMidiMapping { mapping: mapping(3, 2, 11), stable_id: "gone".into() },
+            SavedMidiMapping {
+                mapping: mapping(7, 1, 10),
+                stable_id: "a".into(),
+            },
+            SavedMidiMapping {
+                mapping: mapping(3, 2, 11),
+                stable_id: "gone".into(),
+            },
         ];
         let map: HashMap<String, u64> = [("a".to_string(), 42u64)].into_iter().collect();
         let out = resolve_saved_midi_mappings(saved, &map, &[42]);
@@ -5708,7 +6081,10 @@ mod tests {
 
     #[test]
     fn saved_midi_mapping_roundtrip_keeps_stable_id() {
-        let s = SavedMidiMapping { mapping: mapping(1, 2, 3), stable_id: "sid".into() };
+        let s = SavedMidiMapping {
+            mapping: mapping(1, 2, 3),
+            stable_id: "sid".into(),
+        };
         let json = serde_json::to_string(&s).unwrap();
         let back: SavedMidiMapping = serde_json::from_str(&json).unwrap();
         assert_eq!(back.stable_id, "sid");
@@ -5744,30 +6120,57 @@ mod tests {
     fn old_config_gains_a_direct_start_descriptor_without_losing_state() {
         use crate::plugin::{PluginCategory, PluginFormat, PluginInfo, PluginInstanceInfo};
         for format in [PluginFormat::Clap, PluginFormat::Vst2] {
-            let mut old: SavedPlugin = serde_json::from_str(r#"{
+            let mut old: SavedPlugin = serde_json::from_str(
+                r#"{
                 "stable_id":"stable", "uri":"test.instrument", "display_name":"My synth",
                 "format":"CLAP", "bypassed":true, "plugin_state":"AAEC/w==",
                 "parameters":[{"port_index":3,"symbol":"gain","value":0.7}]
-            }"#).unwrap();
+            }"#,
+            )
+            .unwrap();
             old.format = format.as_str().into();
             assert!(old.usable_scan_info().is_none());
-            let library = std::env::temp_dir().join(format!("zestbay-{}.clap", uuid::Uuid::new_v4()));
+            let library =
+                std::env::temp_dir().join(format!("zestbay-{}.clap", uuid::Uuid::new_v4()));
             std::fs::write(&library, "fixture").unwrap();
             let discovered = PluginInfo {
-                uri: old.uri.clone(), name: "Synth".into(), format,
-                category: PluginCategory::Instrument, author: None, ports: Vec::new(),
-                audio_inputs: 0, audio_outputs: 2, control_inputs: 0, control_outputs: 0,
-                required_features: Vec::new(), compatible: true, has_ui: true,
+                uri: old.uri.clone(),
+                name: "Synth".into(),
+                format,
+                category: PluginCategory::Instrument,
+                author: None,
+                ports: Vec::new(),
+                audio_inputs: 0,
+                audio_outputs: 2,
+                control_inputs: 0,
+                control_outputs: 0,
+                required_features: Vec::new(),
+                compatible: true,
+                has_ui: true,
                 library_path: library.to_str().unwrap().into(),
             };
             let mut manager = PluginManager::new();
             manager.register_instance(PluginInstanceInfo {
-                id: 1, stable_id: old.stable_id.clone(), plugin_uri: old.uri.clone(),
-                format, scan_info: None, display_name: old.display_name.clone(),
-                pw_node_id: None, parameters: vec![crate::plugin::ParameterValue {
-                    port_index: 3, symbol: "gain".into(), name: "Gain".into(), value: 0.7,
-                    min: 0.0, max: 1.0, default: 0.5, is_toggle: false,
-                }], active: true, bypassed: old.bypassed, lv2_state: Vec::new(),
+                id: 1,
+                stable_id: old.stable_id.clone(),
+                plugin_uri: old.uri.clone(),
+                format,
+                scan_info: None,
+                display_name: old.display_name.clone(),
+                pw_node_id: None,
+                parameters: vec![crate::plugin::ParameterValue {
+                    port_index: 3,
+                    symbol: "gain".into(),
+                    name: "Gain".into(),
+                    value: 0.7,
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.5,
+                    is_toggle: false,
+                }],
+                active: true,
+                bypassed: old.bypassed,
+                lv2_state: Vec::new(),
                 plugin_state: old.decode_plugin_state(),
             });
             assert!(!manager.startup_complete());
@@ -5778,7 +6181,9 @@ mod tests {
             let saved = SavedPlugin::from(manager.get_instance(1).unwrap());
             let json = serde_json::to_string(&saved).unwrap();
             let next_start: SavedPlugin = serde_json::from_str(&json).unwrap();
-            let info = next_start.usable_scan_info().expect("next start can bypass discovery");
+            let info = next_start
+                .usable_scan_info()
+                .expect("next start can bypass discovery");
             assert_eq!(info.library_path, discovered.library_path);
             assert_eq!(info.category, PluginCategory::Instrument);
             assert_eq!(next_start.stable_id, old.stable_id);
@@ -5794,12 +6199,20 @@ mod tests {
             assert!(mismatched.usable_scan_info().is_none());
 
             std::fs::remove_file(&library).unwrap();
-            assert!(next_start.usable_scan_info().is_none(), "missing paths must wait for discovery");
+            assert!(
+                next_start.usable_scan_info().is_none(),
+                "missing paths must wait for discovery"
+            );
             let mut relocated = discovered.clone();
             relocated.library_path = "/new/location/synth.clap".into();
             manager.set_available_plugins(vec![relocated.clone()]);
-            assert_eq!(SavedPlugin::from(manager.get_instance(1).unwrap()).scan_info.unwrap().library_path,
-                relocated.library_path);
+            assert_eq!(
+                SavedPlugin::from(manager.get_instance(1).unwrap())
+                    .scan_info
+                    .unwrap()
+                    .library_path,
+                relocated.library_path
+            );
         }
     }
 
@@ -5825,7 +6238,10 @@ mod tests {
     #[test]
     fn merge_links_drops_forgotten_plugins() {
         let forgotten: std::collections::HashSet<String> = ["P".to_string()].into_iter().collect();
-        let mut pending = vec![PendingLink::new(link("P", "X")), PendingLink::new(link("Y", "X"))];
+        let mut pending = vec![
+            PendingLink::new(link("P", "X")),
+            PendingLink::new(link("Y", "X")),
+        ];
         let merged =
             merge_links_for_persist(&[], &[link("P", "Z")], &mut pending, &forgotten, |_| false);
         assert_eq!(merged, vec![link("Y", "X")]);
@@ -5835,15 +6251,24 @@ mod tests {
     fn backup_stem_parsing_is_panic_free() {
         assert_eq!(
             parse_backup_stem("20240102_030405_My rules"),
-            (Some("2024-01-02 03:04:05".to_string()), "My rules".to_string())
+            (
+                Some("2024-01-02 03:04:05".to_string()),
+                "My rules".to_string()
+            )
         );
         assert_eq!(
             parse_backup_stem("20240102_030405"),
             (Some("2024-01-02 03:04:05".to_string()), String::new())
         );
         // Multi-byte chars around the indices that used to be sliced.
-        assert_eq!(parse_backup_stem("ééééééééééééééééé"), (None, String::new()));
-        assert_eq!(parse_backup_stem("20240102_03040é_x"), (None, String::new()));
+        assert_eq!(
+            parse_backup_stem("ééééééééééééééééé"),
+            (None, String::new())
+        );
+        assert_eq!(
+            parse_backup_stem("20240102_03040é_x"),
+            (None, String::new())
+        );
         assert_eq!(
             parse_backup_stem("20240102_030405_é"),
             (Some("2024-01-02 03:04:05".to_string()), "é".to_string())
