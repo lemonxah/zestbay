@@ -1,0 +1,47 @@
+name: Nix package
+
+# A Nix package isn't a file to download: users install it from the flake at
+# the tag (nix run github:lemonxah/zestbay?dir=pkg/nix). This checks it builds.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to check the Nix package at (e.g. v1.1.2); empty checks the selected branch"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  # The tag being built: the published release, or the one given on a manual run
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  nix:
+    name: Nix
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG || github.ref }}
+
+      # Packaging (pkg/) comes from the branch running the workflow, so an
+      # existing tag is built from its own source with the current packaging
+      - name: Use this branch's packaging
+        if: env.TAG != ''
+        run: |
+          git fetch --depth=1 origin "$GITHUB_SHA"
+          git checkout "$GITHUB_SHA" -- pkg/
+
+      - uses: cachix/install-nix-action@v31
+
+      - name: Build Nix package
+        run: nix build ./pkg/nix -L
+
+      - name: Check the installed layout
+        run: |
+          test -x result/bin/zestbay
+          test -x result/lib/zestbay/zestbay-ui-bridge
