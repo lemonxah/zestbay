@@ -30,12 +30,6 @@ use clap_sys::stream::{clap_istream, clap_ostream};
 use super::threading::{self, RtGate};
 use crate::plugin::types::*;
 
-static NEXT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1_000_000);
-
-fn next_instance_id() -> PluginInstanceId {
-    NEXT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed)
-}
-
 /// Largest block `process()` is ever called with (K4).
 pub const MAX_BLOCK: usize = 8192;
 /// Max MIDI events forwarded per block.
@@ -50,10 +44,47 @@ struct ClapLibrary {
     _handle: *mut c_void,
     /// The entry point (lives inside the .so).
     entry: *const clap_sys::entry::clap_plugin_entry,
+    /// Path passed to `entry.init`; keys the init/deinit refcount.
+    path: String,
+}
+
+/// Live `ClapLibrary` count per path. The CLAP spec pairs `init` and `deinit`
+/// once per loaded library, but every instance dlopens the same shared
+/// object, so `init` runs on the first instance and `deinit` on the last.
+static LIBRARY_USERS: std::sync::Mutex<Option<std::collections::HashMap<String, usize>>> =
+    std::sync::Mutex::new(None);
+
+/// Count a new user of `path`; returns true if this is the first one (the
+/// caller must then run `entry.init`).
+fn library_acquire(path: &str) -> bool {
+    let mut guard = LIBRARY_USERS.lock().unwrap_or_else(|e| e.into_inner());
+    let count = guard.get_or_insert_with(Default::default).entry(path.to_string()).or_insert(0);
+    *count += 1;
+    *count == 1
+}
+
+/// Drop a user of `path`; returns true if it was the last one.
+fn library_release(path: &str) -> bool {
+    let mut guard = LIBRARY_USERS.lock().unwrap_or_else(|e| e.into_inner());
+    let map = guard.get_or_insert_with(Default::default);
+    match map.get_mut(path) {
+        Some(count) if *count > 1 => {
+            *count -= 1;
+            false
+        }
+        Some(_) => {
+            map.remove(path);
+            true
+        }
+        None => false,
+    }
 }
 
 impl Drop for ClapLibrary {
     fn drop(&mut self) {
+        if !library_release(&self.path) {
+            return;
+        }
         let entry = unsafe { &*self.entry };
         if let Some(deinit) = entry.deinit {
             unsafe {
@@ -77,12 +108,10 @@ pub(crate) struct HostData {
 
 /// A running CLAP plugin instance.
 pub struct ClapPluginInstance {
-    pub id: PluginInstanceId,
     plugin: *const clap_plugin,
     _host_box: Box<clap_host>,
     host_data: Box<HostData>,
 
-    pub plugin_id: String,
     pub display_name: String,
 
     /// Audio port layout (flattened to mono channels, matching the LV2 approach)
@@ -209,11 +238,6 @@ impl ClapPluginInstance {
         self.plugin
     }
 
-    /// Sample rate the plugin was activated with.
-    pub fn sample_rate(&self) -> f64 {
-        self.sample_rate
-    }
-
     /// Load a CLAP plugin from a `.clap` file and instantiate it.
     ///
     /// `state` (from `get_state`) is loaded after `init` and before the
@@ -233,7 +257,6 @@ impl ClapPluginInstance {
         unsafe {
             threading::set_main_thread();
 
-            let instance_id = next_instance_id();
             let c_path = CString::new(clap_path).ok()?;
 
             let handle = libc::dlopen(c_path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
@@ -252,17 +275,20 @@ impl ClapPluginInstance {
             let entry = entry_ptr as *const clap_sys::entry::clap_plugin_entry;
             let entry_ref = &*entry;
 
-            if let Some(init_fn) = entry_ref.init {
-                if !init_fn(c_path.as_ptr()) {
-                    log::error!("CLAP: init failed for {}", clap_path);
-                    libc::dlclose(handle);
-                    return None;
-                }
+            if library_acquire(clap_path)
+                && let Some(init_fn) = entry_ref.init
+                && !init_fn(c_path.as_ptr())
+            {
+                log::error!("CLAP: init failed for {}", clap_path);
+                library_release(clap_path);
+                libc::dlclose(handle);
+                return None;
             }
 
             let library = ClapLibrary {
                 _handle: handle,
                 entry,
+                path: clap_path.to_string(),
             };
 
             let factory_ptr = entry_ref.get_factory?(
@@ -314,12 +340,12 @@ impl ClapPluginInstance {
                 super::ui::remove_plugin_callbacks(plugin_ptr);
             };
 
-            if let Some(init_fn) = plugin_ref.init {
-                if !init_fn(plugin_ptr) {
-                    log::error!("CLAP: plugin init failed for {}", plugin_id);
-                    destroy();
-                    return None;
-                }
+            if let Some(init_fn) = plugin_ref.init
+                && !init_fn(plugin_ptr)
+            {
+                log::error!("CLAP: plugin init failed for {}", plugin_id);
+                destroy();
+                return None;
             }
 
             let state_ext =
@@ -453,11 +479,9 @@ impl ClapPluginInstance {
             let rt = RtState::new(&input_port_channels, &output_port_channels, last_applied);
 
             Some(Self {
-                id: instance_id,
                 plugin: plugin_ptr,
                 _host_box: host_box,
                 host_data,
-                plugin_id: plugin_id.to_string(),
                 display_name: plugin_info.name.clone(),
                 audio_input_channels,
                 audio_output_channels,
@@ -712,23 +736,6 @@ impl ClapPluginInstance {
             .collect()
     }
 
-    pub fn get_info(&self, pw_node_id: Option<u32>) -> PluginInstanceInfo {
-        PluginInstanceInfo {
-            scan_info: None,
-            id: self.id,
-            stable_id: String::new(),
-            plugin_uri: self.plugin_id.clone(),
-            format: PluginFormat::Clap,
-            display_name: self.display_name.clone(),
-            pw_node_id,
-            parameters: self.get_parameters(),
-            active: true,
-            bypassed: self.is_bypassed(),
-            lv2_state: Vec::new(),
-            plugin_state: None,
-        }
-    }
-
     /// Main-thread housekeeping; call on every manager tick.
     ///
     /// Runs `on_main_thread` when the plugin asked for it, applies
@@ -737,10 +744,10 @@ impl ClapPluginInstance {
     pub fn idle(&mut self) {
         unsafe {
             let plugin_ref = &*self.plugin;
-            if self.host_data.callback_requested.swap(false, Ordering::AcqRel) {
-                if let Some(on_main) = plugin_ref.on_main_thread {
-                    on_main(self.plugin);
-                }
+            if self.host_data.callback_requested.swap(false, Ordering::AcqRel)
+                && let Some(on_main) = plugin_ref.on_main_thread
+            {
+                on_main(self.plugin);
             }
         }
 

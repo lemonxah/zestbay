@@ -106,6 +106,11 @@ pub mod qobject {
         #[qinvokable]
         fn get_plugin_params_json(self: Pin<&mut Self>, node_id: u32) -> QString;
 
+        /// The plugin instance's current PipeWire node id, or -1. A reload
+        /// (preset with state, sample-rate change) gives it a new node.
+        #[qinvokable]
+        fn plugin_node_for_instance(self: Pin<&mut Self>, instance_id: u64) -> i32;
+
         #[qinvokable]
         fn set_plugin_parameter(self: Pin<&mut Self>, node_id: u32, port_index: u32, value: f32);
 
@@ -502,6 +507,9 @@ pub struct AppControllerRust {
     plugin_scan_progress: f64,
     plugin_scan_rx: Option<Receiver<crate::plugin::scan::ScanEvent>>,
     pending_plugin_adds: Vec<PwCommand>,
+    /// Events received while `collect_plugin_states_blocking` was waiting
+    /// for state replies; handled by the next `poll_events`.
+    stashed_events: std::collections::VecDeque<PwEvent>,
 
     graph: Option<Arc<GraphState>>,
     event_rx: Option<Receiver<PwEvent>>,
@@ -630,6 +638,7 @@ impl Default for AppControllerRust {
             plugin_scan_progress: -1.0,
             plugin_scan_rx: None,
             pending_plugin_adds: Vec::new(),
+            stashed_events: std::collections::VecDeque::new(),
             prev_cpu_ticks: 0,
             prev_cpu_time: None,
             cpu_avg: 0.0,
@@ -862,6 +871,7 @@ impl qobject::AppController {
             "CLAP" => crate::plugin::PluginFormat::Clap,
             "VST2" => crate::plugin::PluginFormat::Vst2,
             "VST3" => crate::plugin::PluginFormat::Vst3,
+            "LADSPA" => crate::plugin::PluginFormat::Ladspa,
             _ => crate::plugin::PluginFormat::Lv2,
         };
 
@@ -1021,7 +1031,10 @@ impl qobject::AppController {
         if has_events {
             let rx = self.as_mut().rust_mut().event_rx.take();
             if let Some(rx) = rx {
-                while let Ok(event) = rx.try_recv() {
+                // Events set aside by a blocking state collection come first,
+                // in the order they arrived.
+                let mut stashed = std::mem::take(&mut self.as_mut().rust_mut().stashed_events);
+                while let Some(event) = stashed.pop_front().or_else(|| rx.try_recv().ok()) {
                     match event {
                         PwEvent::NodeChanged(_) => {
                             changed = true;
@@ -1148,14 +1161,8 @@ impl qobject::AppController {
                         .as_ref()
                         .and_then(|mgr| mgr.get_instance(instance_id))
                         .map(|info| info.stable_id.clone());
-                    if let Some(sid) = removed_sid
-                        && self.rust().subgraphs.owner_of(&sid).is_some()
-                    {
-                        for def in self.as_mut().rust_mut().subgraphs.defs.iter_mut() {
-                            def.members.retain(|m| m != &sid);
-                        }
-                        self.as_mut().persist_subgraphs();
-                        self.as_mut().subgraphs_changed();
+                    if let Some(sid) = removed_sid {
+                        self.as_mut().drop_subgraph_member(&sid);
                     }
                     let name = self
                         .rust()
@@ -1193,6 +1200,12 @@ impl qobject::AppController {
                         entry.2 = value;
                     } else {
                         param_updates.push((instance_id, port, value));
+                    }
+                }
+                PluginEvent::ParametersDescribed { instance_id, params } => {
+                    changed = true;
+                    if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager {
+                        mgr.describe_parameters(instance_id, params);
                     }
                 }
                 PluginEvent::PluginSkipped { instance_id } => {
@@ -1238,6 +1251,15 @@ impl qobject::AppController {
                             changed = true;
                             if let Some(ref name) = plugin_name {
                                 self.as_mut().forget_plugin_links(name);
+                            }
+                            let sid = self
+                                .rust()
+                                .plugin_manager
+                                .as_ref()
+                                .and_then(|mgr| mgr.get_instance(id))
+                                .map(|info| info.stable_id.clone());
+                            if let Some(sid) = sid {
+                                self.as_mut().drop_subgraph_member(&sid);
                             }
                             if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager {
                                 mgr.remove_instance(id);
@@ -1533,11 +1555,11 @@ impl qobject::AppController {
                 tray.refresh();
             }
 
-            if let Ok(mut req) = tray.open_plugin_ui.lock() {
-                if let Some(node_id) = req.take() {
-                    log::info!("Tray: open plugin UI requested for node_id={}", node_id);
-                    self.as_mut().open_plugin_ui(node_id);
-                }
+            if let Ok(mut req) = tray.open_plugin_ui.lock()
+                && let Some(node_id) = req.take()
+            {
+                log::info!("Tray: open plugin UI requested for node_id={}", node_id);
+                self.as_mut().open_plugin_ui(node_id);
             }
 
             for action in tray.take_actions() {
@@ -1575,23 +1597,23 @@ impl qobject::AppController {
         // The restore completes when every plugin of the batch reported back
         // (PluginAdded, PluginSkipped or a fatal PluginError); this is a safety
         // cap, scaled with the batch since probes and adds run in sequence.
-        if !self.rust().plugins_scanning && !self.rust().restore_instance_ids.is_empty() {
-            if let Some(started) = self.rust().restore_started_at {
-                let cap = restore_safety_cap(self.rust().restore_batch_size);
-                if started.elapsed() > cap {
-                    let remaining = self.rust().restore_instance_ids.len();
-                    log::error!(
-                        "Plugin restore timed out after {}s with {} plugin(s) still pending. \
-                         Clearing restore state.",
-                        cap.as_secs(),
-                        remaining,
-                    );
-                    self.as_mut().rust_mut().restore_instance_ids.clear();
-                    self.as_mut().rust_mut().restore_started_at = None;
-                    self.as_mut().rust_mut().links_retry_due = true;
-                    remove_crash_marker();
-                    self.as_mut().finish_plugin_startup();
-                }
+        if !self.rust().plugins_scanning && !self.rust().restore_instance_ids.is_empty()
+            && let Some(started) = self.rust().restore_started_at
+        {
+            let cap = restore_safety_cap(self.rust().restore_batch_size);
+            if started.elapsed() > cap {
+                let remaining = self.rust().restore_instance_ids.len();
+                log::error!(
+                    "Plugin restore timed out after {}s with {} plugin(s) still pending. \
+                     Clearing restore state.",
+                    cap.as_secs(),
+                    remaining,
+                );
+                self.as_mut().rust_mut().restore_instance_ids.clear();
+                self.as_mut().rust_mut().restore_started_at = None;
+                self.as_mut().rust_mut().links_retry_due = true;
+                remove_crash_marker();
+                self.as_mut().finish_plugin_startup();
             }
         }
 
@@ -1788,6 +1810,18 @@ impl qobject::AppController {
     }
 
     /// Remove every MIDI mapping that targets `instance_id` (plugin removed).
+    /// Take a removed plugin (by stable id) out of the subgraph it belonged to.
+    fn drop_subgraph_member(mut self: Pin<&mut Self>, stable_id: &str) {
+        if self.rust().subgraphs.owner_of(stable_id).is_none() {
+            return;
+        }
+        for def in self.as_mut().rust_mut().subgraphs.defs.iter_mut() {
+            def.members.retain(|m| m != stable_id);
+        }
+        self.as_mut().persist_subgraphs();
+        self.as_mut().subgraphs_changed();
+    }
+
     fn drop_plugin_midi_mappings(mut self: Pin<&mut Self>, instance_id: u64) {
         if let Some(ref tx) = self.rust().cmd_tx {
             let _ = tx.send(PwCommand::RemoveMidiMappingsForPlugin { instance_id });
@@ -1836,6 +1870,16 @@ impl qobject::AppController {
         {
             self.as_mut().rust_mut().presets.set_lv2_state(&uri, &name, lv2_state.clone());
             persist_presets(&self.rust().presets);
+            // Saving the state may have written files; keep them with it.
+            if let Some(scope) = self
+                .rust()
+                .plugin_manager
+                .as_ref()
+                .and_then(|m| m.get_instance(instance_id))
+                .map(|i| i.stable_id.clone())
+            {
+                crate::presets::store_preset_files(&uri, &scope, &name);
+            }
         }
         let mut labels_changed = false;
         if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager
@@ -1909,7 +1953,8 @@ impl qobject::AppController {
     }
 
     /// Ask the PipeWire thread for every plugin's state and wait (bounded) for
-    /// the replies. Other events received meanwhile are dropped — only used on quit.
+    /// the replies. Other events received meanwhile are kept for the next
+    /// `poll_events`.
     fn collect_plugin_states_blocking(mut self: Pin<&mut Self>, timeout: Duration) {
         let Some(rx) = self.as_mut().rust_mut().event_rx.take() else {
             return;
@@ -1938,7 +1983,7 @@ impl qobject::AppController {
                         self.as_mut().apply_plugin_state(instance_id, lv2_state, blob);
                     }
                     Ok(PwEvent::Plugin(PluginEvent::PluginStatesDone)) => dones_needed -= 1,
-                    Ok(_) => {}
+                    Ok(other) => self.as_mut().rust_mut().stashed_events.push_back(other),
                     Err(_) => break,
                 }
             }
@@ -2139,20 +2184,20 @@ impl qobject::AppController {
         if let Some(ref graph) = self.rust().graph {
             let out_port = graph.get_port(output_port_id);
             let in_port = graph.get_port(input_port_id);
-            if let (Some(op), Some(ip)) = (&out_port, &in_port) {
-                if op.node_id == ip.node_id {
-                    // Same PipeWire node — only reject if same port group (or no groups)
-                    let same_group = match (&op.port_group, &ip.port_group) {
-                        (Some(og), Some(ig)) => og == ig,
-                        _ => true, // If either has no group, treat as same device
-                    };
-                    if same_group {
-                        log::warn!(
-                            "Rejected self-loop connect: ports {} and {} belong to the same node/device",
-                            output_port_id, input_port_id
-                        );
-                        return;
-                    }
+            if let (Some(op), Some(ip)) = (&out_port, &in_port)
+                && op.node_id == ip.node_id
+            {
+                // Same PipeWire node — only reject if same port group (or no groups)
+                let same_group = match (&op.port_group, &ip.port_group) {
+                    (Some(og), Some(ig)) => og == ig,
+                    _ => true, // If either has no group, treat as same device
+                };
+                if same_group {
+                    log::warn!(
+                        "Rejected self-loop connect: ports {} and {} belong to the same node/device",
+                        output_port_id, input_port_id
+                    );
+                    return;
                 }
             }
         }
@@ -2462,6 +2507,15 @@ impl qobject::AppController {
             .filter(|p| p.direction == PortDirection::Input && p.media_type == Some(crate::pipewire::MediaType::Audio))
             .collect();
 
+        // Only audio links can take an audio plugin; a MIDI link would be
+        // disconnected and replaced by links that cannot work.
+        if !upstream_ports.iter().any(|p| p.id == upstream_out)
+            || !downstream_ports.iter().any(|p| p.id == downstream_in)
+        {
+            log::warn!("insert_node_on_link: link {} is not an audio link, ignoring", link_id);
+            return;
+        }
+
         let upstream_idx = upstream_ports.iter().position(|p| p.id == upstream_out).unwrap_or(0);
         let downstream_idx = downstream_ports.iter().position(|p| p.id == downstream_in).unwrap_or(0);
 
@@ -2516,7 +2570,8 @@ impl qobject::AppController {
         );
 
         let mut rule_data: Vec<(Node, Node, Port, Port)> = Vec::new();
-        let mut new_link_data: Vec<(Node, Node, Port, Port, Node, Node, Port, Port)> = Vec::new();
+        type NewLinkData = (Node, Node, Port, Port, Node, Node, Port, Port);
+        let mut new_link_data: Vec<NewLinkData> = Vec::new();
 
         {
             let max_in = node_inputs.len() - 1;
@@ -2540,18 +2595,18 @@ impl qobject::AppController {
                     graph.get_node(node_id),
                     graph.get_port(*up_port_id),
                     graph.get_port(node_inputs[in_idx].id),
-                ) {
-                    if let (Some(ins_node2), Some(dn_node), Some(ins_out_port), Some(dn_port)) = (
+                )
+                    && let (Some(ins_node2), Some(dn_node), Some(ins_out_port), Some(dn_port)) = (
                         graph.get_node(node_id),
                         graph.get_node(downstream_node_id),
                         graph.get_port(node_outputs[out_idx].id),
                         graph.get_port(*down_port_id),
-                    ) {
-                        new_link_data.push((
-                            up_node, ins_node, up_port, ins_in_port,
-                            ins_node2, dn_node, ins_out_port, dn_port,
-                        ));
-                    }
+                    )
+                {
+                    new_link_data.push((
+                        up_node, ins_node, up_port, ins_in_port,
+                        ins_node2, dn_node, ins_out_port, dn_port,
+                    ));
                 }
             }
         }
@@ -2983,6 +3038,9 @@ impl qobject::AppController {
         if let Some(ref name) = default_preset {
             self.as_mut().rust_mut().presets.select(&stable_id, Some(name));
             persist_presets(&self.rust().presets);
+            if plugin_format == crate::plugin::PluginFormat::Lv2 {
+                crate::presets::restore_preset_files(&uri_str, &stable_id, name);
+            }
         }
         if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager {
             let info = crate::lv2::Lv2InstanceInfo {
@@ -3161,6 +3219,16 @@ impl qobject::AppController {
         QString::from("{}")
     }
 
+    pub fn plugin_node_for_instance(self: Pin<&mut Self>, instance_id: u64) -> i32 {
+        self.rust()
+            .plugin_manager
+            .as_ref()
+            .and_then(|mgr| mgr.get_instance(instance_id))
+            .and_then(|info| info.pw_node_id)
+            .and_then(|id| i32::try_from(id).ok())
+            .unwrap_or(-1)
+    }
+
     pub fn set_plugin_parameter(
         mut self: Pin<&mut Self>,
         node_id: u32,
@@ -3266,10 +3334,10 @@ impl qobject::AppController {
             .iter()
             .find(|m| m.target == target)
             .map(|m| m.source.clone());
-        if let Some(source) = source {
-            if let Some(ref tx) = self.rust().cmd_tx {
-                let _ = tx.send(PwCommand::RemoveMidiMapping(source));
-            }
+        if let Some(source) = source
+            && let Some(ref tx) = self.rust().cmd_tx
+        {
+            let _ = tx.send(PwCommand::RemoveMidiMapping(source));
         }
     }
 
@@ -3389,7 +3457,9 @@ impl qobject::AppController {
         if let Some(state) = reload_state {
             // The plugin's state (e.g. channel names) can only be restored
             // before it starts, so it is re-created in place with the state
-            // and the preset's parameter values.
+            // and the preset's parameter values. Files the state refers to
+            // are copied into this instance's directory first.
+            crate::presets::restore_preset_files(&uri, &stable_id, &name);
             if let Some(ref tx) = self.rust().cmd_tx {
                 let _ = tx.send(PwCommand::ReloadPluginWithState {
                     instance_id,
@@ -3456,6 +3526,9 @@ impl qobject::AppController {
             .save(&uri, &name, &params, &lv2_state);
         self.as_mut().rust_mut().presets.select(&stable_id, Some(&name));
         persist_presets(&self.rust().presets);
+        if is_lv2 {
+            crate::presets::store_preset_files(&uri, &stable_id, &name);
+        }
         // The state kept here can be up to a minute old; ask for a fresh
         // snapshot and store it in the preset when it arrives.
         if is_lv2
@@ -3538,7 +3611,9 @@ impl qobject::AppController {
         let Some((_, _, uri)) = self.preset_target(node_id) else {
             return;
         };
-        self.as_mut().rust_mut().presets.delete(&uri, &name.to_string());
+        let name = name.to_string();
+        self.as_mut().rust_mut().presets.delete(&uri, &name);
+        crate::presets::delete_preset_files(&uri, &name);
         persist_presets(&self.rust().presets);
     }
 
@@ -3621,6 +3696,9 @@ impl qobject::AppController {
             if let Some(name) = name {
                 self.as_mut().forget_plugin_links(&name);
             }
+            // The instance is gone from the manager before `PluginRemoved`
+            // arrives, so that handler can no longer find its stable id.
+            self.as_mut().drop_subgraph_member(&sid);
             if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager {
                 mgr.remove_instance(instance_id);
             }
@@ -3871,7 +3949,7 @@ impl qobject::AppController {
                 if n.is_bridge {
                     // For bridge nodes, list each device sub-node separately
                     let groups = graph.get_bridge_port_groups(n.id);
-                    for (_group, device_name) in &groups {
+                    for device_name in groups.values() {
                         entries.push(serde_json::json!({
                             "name": device_name,
                             "type": "Duplex",
@@ -4728,7 +4806,9 @@ impl SavedPlugin {
         }
         let path = std::path::Path::new(&info.library_path);
         let exists = match info.format {
-            crate::plugin::PluginFormat::Clap | crate::plugin::PluginFormat::Vst2 => path.is_file(),
+            crate::plugin::PluginFormat::Clap
+            | crate::plugin::PluginFormat::Vst2
+            | crate::plugin::PluginFormat::Ladspa => path.is_file(),
             crate::plugin::PluginFormat::Vst3 => crate::vst3::scanner::find_bundle_binary(path)
                 .is_some_and(|binary| binary.is_file()),
             crate::plugin::PluginFormat::Lv2 => false,
@@ -5278,25 +5358,25 @@ fn node_to_json(
     }
 
     // Enrich plugin nodes with format and hasUi info
-    if n.node_type == Some(NodeType::Plugin) {
-        if let Some(mgr) = plugin_manager {
-            // Find the active instance whose pw_node_id matches this node
-            if let Some(instance) = mgr
-                .active_instances()
-                .values()
-                .find(|inst| inst.pw_node_id == Some(n.id))
-            {
-                let format_str = instance.format.as_str();
-                let has_ui = mgr
-                    .find_plugin_with_format(&instance.plugin_uri, instance.format)
-                    .or(instance.scan_info.as_ref())
-                    .map(|p| p.has_ui)
-                    .unwrap_or(false);
+    if n.node_type == Some(NodeType::Plugin)
+        && let Some(mgr) = plugin_manager
+    {
+        // Find the active instance whose pw_node_id matches this node
+        if let Some(instance) = mgr
+            .active_instances()
+            .values()
+            .find(|inst| inst.pw_node_id == Some(n.id))
+        {
+            let format_str = instance.format.as_str();
+            let has_ui = mgr
+                .find_plugin_with_format(&instance.plugin_uri, instance.format)
+                .or(instance.scan_info.as_ref())
+                .map(|p| p.has_ui)
+                .unwrap_or(false);
 
-                val["pluginFormat"] = serde_json::json!(format_str);
-                val["pluginHasUi"] = serde_json::json!(has_ui);
-                val["pluginBypassed"] = serde_json::json!(instance.bypassed);
-            }
+            val["pluginFormat"] = serde_json::json!(format_str);
+            val["pluginHasUi"] = serde_json::json!(has_ui);
+            val["pluginBypassed"] = serde_json::json!(instance.bypassed);
         }
     }
 

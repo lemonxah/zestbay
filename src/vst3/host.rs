@@ -50,12 +50,15 @@ use crate::plugin::types::*;
 #[cfg(test)]
 const MAX_PARAM_CHANGES: usize = 128;
 
-/// A single parameter value queue (one param, one point at sample offset 0).
+/// A single parameter value queue (one param, one point).
 #[repr(C)]
 struct InlineParamValueQueue {
     vtbl: *const IParamValueQueueVtbl,
     param_id: ParamID,
     value: ParamValue,
+    /// Sample offset of the point (0 for host edits, the event's offset
+    /// for MIDI controllers).
+    offset: i32,
     used: bool,
 }
 
@@ -125,7 +128,7 @@ unsafe extern "system" fn ipvq_get_point(
             return kInvalidArgument;
         }
         if !sample_offset.is_null() {
-            *sample_offset = 0;
+            *sample_offset = (*q).offset;
         }
         if !value.is_null() {
             *value = (*q).value;
@@ -233,6 +236,7 @@ impl InlineParameterChanges {
                 vtbl: &INLINE_PVQ_VTBL,
                 param_id: 0,
                 value: 0.0,
+                offset: 0,
                 used: false,
             });
         }
@@ -251,17 +255,31 @@ impl InlineParameterChanges {
         self.used_count = 0;
     }
 
-    /// Add a parameter change. Returns false if full.
+    /// Add a parameter change at sample offset 0. Returns false if full.
     fn add_change(&mut self, param_id: ParamID, value: ParamValue) -> bool {
+        self.add_change_at(param_id, value, 0).is_some()
+    }
+
+    /// Add a parameter change at `offset`. Returns the queue index, or None
+    /// if full.  A parameter must only be added once per block; later
+    /// values go through [`Self::update_change`].
+    fn add_change_at(&mut self, param_id: ParamID, value: ParamValue, offset: i32) -> Option<usize> {
         let idx = self.used_count as usize;
-        if idx >= self.queues.len() {
-            return false;
-        }
-        self.queues[idx].param_id = param_id;
-        self.queues[idx].value = value;
-        self.queues[idx].used = true;
+        let queue = self.queues.get_mut(idx)?;
+        queue.param_id = param_id;
+        queue.value = value;
+        queue.offset = offset;
+        queue.used = true;
         self.used_count += 1;
-        true
+        Some(idx)
+    }
+
+    /// Replace the point of a queue added earlier in this block.
+    fn update_change(&mut self, idx: usize, value: ParamValue, offset: i32) {
+        if let Some(queue) = self.queues.get_mut(idx) {
+            queue.value = value;
+            queue.offset = offset;
+        }
     }
 }
 
@@ -598,6 +616,25 @@ impl InlineEventList {
         true
     }
 
+    /// Add a polyphonic key pressure event. Returns false if full.
+    fn add_poly_pressure(&mut self, sample_offset: i32, channel: i16, pitch: i16, pressure: f32) -> bool {
+        let Some(evt) = self.next_slot() else {
+            return false;
+        };
+        evt.busIndex = 0;
+        evt.sampleOffset = sample_offset;
+        evt.ppqPosition = 0.0;
+        evt.flags = 0;
+        evt.r#type = Event_::EventTypes_::kPolyPressureEvent as u16;
+        evt.__field0.polyPressure = PolyPressureEvent {
+            channel,
+            pitch,
+            pressure,
+            noteId: -1,
+        };
+        true
+    }
+
     /// Populate from raw PipeWire MIDI events.
     fn fill_from_raw(&mut self, midi_events: &[crate::midi::processing::RawMidiEvent]) {
         self.reset();
@@ -624,9 +661,13 @@ impl InlineEventList {
                 0x80 => {
                     self.add_note_off(offset, channel, pitch, velocity_raw as f32 / 127.0);
                 }
+                0xA0 => {
+                    self.add_poly_pressure(offset, channel, pitch, velocity_raw as f32 / 127.0);
+                }
                 _ => {
-                    // Other MIDI messages (CC, etc.) — not handled as VST3 events
-                    // CC mapping is handled by the filter's process_midi_buffer
+                    // Controllers, pitch bend and channel pressure are not
+                    // VST3 events: they reach the plugin as parameter changes
+                    // through its IMidiMapping (see `MidiMap`).
                 }
             }
         }
@@ -668,15 +709,111 @@ pub struct Vst3Param {
     /// Default in normalized [0, 1] range.
     pub default: f64,
     /// Is this the bypass parameter?
+    #[allow(dead_code)] // always false: bypass params are filtered out of the list
     pub is_bypass: bool,
     pub is_toggle: bool,
     /// VST3 `stepCount` (0 = continuous).
     pub step_count: u32,
 }
 
+/// MIDI controllers per channel in `IMidiMapping`: CC 0-127, channel
+/// pressure (128) and pitch bend (129).
+const MIDI_CONTROLLERS: usize = ControllerNumbers_::kCountCtrlNumber as usize;
+const MIDI_CHANNELS: usize = 16;
+const MIDI_UNASSIGNED: u16 = u16::MAX;
+
+/// A parameter the plugin assigned to a MIDI controller.
+struct MidiTarget {
+    id: ParamID,
+    /// Index into the host's parameter slots, when the parameter is one of
+    /// the listed ones; None for the plugin's hidden controller parameters.
+    slot: Option<usize>,
+    /// The block in which `queue` was added (hidden parameters only).
+    block: u64,
+    queue: usize,
+}
+
+/// The plugin's controller → parameter assignments (`IMidiMapping`, event
+/// bus 0).  VST3 has no controller events: CC, pitch bend and channel
+/// pressure must be delivered as changes of the assigned parameter.
+struct MidiMap {
+    /// `channel * MIDI_CONTROLLERS + controller` → index into `targets`.
+    table: Vec<u16>,
+    targets: Vec<MidiTarget>,
+}
+
+impl MidiMap {
+    /// Ask the controller for every assignment.  Main thread.  Returns None
+    /// when the plugin has no `IMidiMapping` or assigns nothing.
+    unsafe fn query(controller: &vst3::ComPtr<IEditController>, ids: &[ParamID]) -> Option<Self> {
+        let mapping = controller.cast::<IMidiMapping>()?;
+        let mut pairs = Vec::new();
+        for channel in 0..MIDI_CHANNELS {
+            for ctrl in 0..MIDI_CONTROLLERS {
+                let mut id: ParamID = 0;
+                let assigned = unsafe {
+                    mapping.getMidiControllerAssignment(0, channel as i16, ctrl as CtrlNumber, &mut id)
+                } == kResultOk;
+                if assigned {
+                    pairs.push((channel, ctrl, id));
+                }
+            }
+        }
+        Self::from_assignments(&pairs, ids)
+    }
+
+    /// Build from `(channel, controller, parameter id)` assignments.
+    fn from_assignments(pairs: &[(usize, usize, ParamID)], ids: &[ParamID]) -> Option<Self> {
+        let mut table = vec![MIDI_UNASSIGNED; MIDI_CHANNELS * MIDI_CONTROLLERS];
+        let mut targets: Vec<MidiTarget> = Vec::new();
+        for &(channel, ctrl, id) in pairs {
+            if channel >= MIDI_CHANNELS || ctrl >= MIDI_CONTROLLERS {
+                continue;
+            }
+            let index = match targets.iter().position(|t| t.id == id) {
+                Some(index) => index,
+                None => {
+                    targets.push(MidiTarget {
+                        id,
+                        slot: ids.iter().position(|&known| known == id),
+                        block: 0,
+                        queue: 0,
+                    });
+                    targets.len() - 1
+                }
+            };
+            table[channel * MIDI_CONTROLLERS + ctrl] = index as u16;
+        }
+        (!targets.is_empty()).then_some(Self { table, targets })
+    }
+}
+
+/// Controller number and normalized value of a MIDI message that VST3
+/// delivers as a parameter change, or None for any other message.
+fn midi_controller_value(evt: &crate::midi::processing::RawMidiEvent) -> Option<(usize, f64)> {
+    let size = evt.size as usize;
+    if size < 2 {
+        return None;
+    }
+    let data1 = (evt.data[1] & 0x7F) as u32;
+    match evt.data[0] & 0xF0 {
+        0xB0 if size >= 3 => Some((data1 as usize, (evt.data[2] & 0x7F) as f64 / 127.0)),
+        0xD0 => Some((ControllerNumbers_::kAfterTouch as usize, data1 as f64 / 127.0)),
+        0xE0 if size >= 3 => {
+            let bend = (((evt.data[2] & 0x7F) as u32) << 7) | data1;
+            Some((ControllerNumbers_::kPitchBend as usize, bend as f64 / 16383.0))
+        }
+        _ => None,
+    }
+}
+
 /// Preallocated state used by `process()` (or by the main thread while the
 /// RT gate is suspended).
 struct RtState {
+    /// Counts `process()` calls; starts at 1 so a fresh `MidiTarget`
+    /// (block 0) never looks current.
+    block: u64,
+    midi_map: Option<MidiMap>,
     last_applied: Vec<f64>,
     input_param_changes: InlineParameterChanges,
     output_param_changes: OutputParameterChanges,
@@ -695,8 +832,14 @@ impl RtState {
         let n_in: usize = input_buses.iter().sum();
         let n_out: usize = output_buses.iter().sum();
         let mut rt = Self {
+            block: 1,
+            midi_map: None,
             last_applied: initial,
-            input_param_changes: InlineParameterChanges::with_capacity(ids.len().max(1)),
+            // One queue per listed parameter, plus room for every hidden
+            // parameter a plugin may assign to a MIDI controller.
+            input_param_changes: InlineParameterChanges::with_capacity(
+                ids.len() + MIDI_CHANNELS * MIDI_CONTROLLERS,
+            ),
             output_param_changes: OutputParameterChanges::new(ids),
             input_event_list: InlineEventList::new(),
             output_event_list: InlineEventList::new(),
@@ -721,6 +864,45 @@ impl RtState {
         }
         rt
     }
+
+    /// Turn CC, pitch bend and channel pressure into changes of the
+    /// parameters the plugin assigned to them.  Must run after
+    /// `input_param_changes.reset()` and before the host-edit pass: a listed
+    /// parameter is written to its slot and picked up there, a hidden one
+    /// gets its own queue at the event's sample offset (last value wins).
+    /// Nothing is allocated.
+    fn apply_midi_controllers(
+        &mut self,
+        slots: &[PortSlot],
+        midi_events: &[crate::midi::processing::RawMidiEvent],
+        n: usize,
+    ) {
+        self.block = self.block.wrapping_add(1).max(1);
+        let Some(map) = self.midi_map.as_mut() else {
+            return;
+        };
+        for evt in midi_events {
+            let Some((ctrl, value)) = midi_controller_value(evt) else {
+                continue;
+            };
+            let channel = (evt.data[0] & 0x0F) as usize;
+            let index = map.table[channel * MIDI_CONTROLLERS + ctrl];
+            let Some(target) = map.targets.get_mut(index as usize) else {
+                continue;
+            };
+            if let Some(slot) = target.slot.and_then(|q| slots.get(q)) {
+                slot.value.store(value as f32);
+                continue;
+            }
+            let offset = (evt.offset as usize).min(n.saturating_sub(1)) as i32;
+            if target.block == self.block {
+                self.input_param_changes.update_change(target.queue, value, offset);
+            } else if let Some(queue) = self.input_param_changes.add_change_at(target.id, value, offset) {
+                target.block = self.block;
+                target.queue = queue;
+            }
+        }
+    }
 }
 
 fn bus_buffers(ptrs: *mut *mut f32, channels: usize) -> AudioBusBuffers {
@@ -733,7 +915,6 @@ fn bus_buffers(ptrs: *mut *mut f32, channels: usize) -> AudioBusBuffers {
 
 /// A running VST3 plugin instance.
 pub struct Vst3PluginInstance {
-    pub id: PluginInstanceId,
     component: vst3::ComPtr<IComponent>,
     processor: vst3::ComPtr<IAudioProcessor>,
     controller: Option<vst3::ComPtr<IEditController>>,
@@ -923,18 +1104,17 @@ impl Vst3PluginInstance {
             // Connect a separate component ↔ controller via IConnectionPoint
             // (required by e.g. Vital to expose params / create views).
             let mut connection = None;
-            if let (Some(ctrl), false) = (&controller, single_component) {
-                if let (Some(comp_cp), Some(ctrl_cp)) =
+            if let (Some(ctrl), false) = (&controller, single_component)
+                && let (Some(comp_cp), Some(ctrl_cp)) =
                     (component.cast::<IConnectionPoint>(), ctrl.cast::<IConnectionPoint>())
-                {
-                    comp_cp.connect(ctrl_cp.as_ptr());
-                    ctrl_cp.connect(comp_cp.as_ptr());
-                    log::info!(
-                        "VST3: {} — connected component ↔ controller via IConnectionPoint",
-                        plugin_info.name
-                    );
-                    connection = Some((comp_cp, ctrl_cp));
-                }
+            {
+                comp_cp.connect(ctrl_cp.as_ptr());
+                ctrl_cp.connect(comp_cp.as_ptr());
+                log::info!(
+                    "VST3: {} — connected component ↔ controller via IConnectionPoint",
+                    plugin_info.name
+                );
+                connection = Some((comp_cp, ctrl_cp));
             }
 
             // Saved state (component, then controller) while inactive.
@@ -1049,6 +1229,11 @@ impl Vst3PluginInstance {
             let ids: Vec<ParamID> = params.iter().map(|p| p.id).collect();
             let shared = Arc::new(Vst3SharedParams::new(port_updates.clone(), ids.clone()));
 
+            // The handler needs the parameter list, and some plugins (Vital)
+            // only expose their parameters once component and controller are
+            // connected, so it is installed after connection and state load.
+            // Values are read from the controller here, after state load, so
+            // edits made during it are not lost.
             let component_handler = new_host_component_handler(instance_id, shared.clone());
             if let Some(ctrl) = &controller {
                 let ch_ptr = component_handler as *mut IComponentHandler;
@@ -1059,11 +1244,20 @@ impl Vst3PluginInstance {
             }
 
             let last_applied: Vec<f64> = initial_values.iter().map(|&v| v as f32 as f64).collect();
-            let rt = RtState::new(&input_bus_channels, &output_bus_channels, &ids, last_applied);
+            let mut rt = RtState::new(&input_bus_channels, &output_bus_channels, &ids, last_applied);
+            if has_midi_in && let Some(ctrl) = &controller {
+                rt.midi_map = MidiMap::query(ctrl, &ids);
+                if let Some(map) = &rt.midi_map {
+                    log::debug!(
+                        "VST3: {} maps MIDI controllers to {} parameters",
+                        plugin_id,
+                        map.targets.len()
+                    );
+                }
+            }
 
             // From here on Drop performs the full teardown.
             let mut inst = Self {
-                id: instance_id,
                 component,
                 processor,
                 controller,
@@ -1121,6 +1315,9 @@ impl Vst3PluginInstance {
             }
             self.active = true;
             self.processing = self.processor.setProcessing(1) == kResultOk;
+            // Not fatal on purpose: plugins may answer kNotImplemented, and
+            // some that process fine report an error (sfizz and Geonkick
+            // both do), so refusing to run them would break working plugins.
             if !self.processing {
                 log::warn!(
                     "VST3: setProcessing returned error for {} (continuing anyway)",
@@ -1144,11 +1341,6 @@ impl Vst3PluginInstance {
                 self.active = false;
             }
         }
-    }
-
-    /// Sample rate the plugin was set up with.
-    pub fn sample_rate(&self) -> f64 {
-        self.sample_rate
     }
 
     /// Process a block of audio.
@@ -1199,6 +1391,7 @@ impl Vst3PluginInstance {
 
         // Host-side parameter changes → inputParameterChanges
         rt.input_param_changes.reset();
+        rt.apply_midi_controllers(slots, midi_events, n);
         for (i, (slot, last)) in slots.iter().zip(rt.last_applied.iter_mut()).enumerate() {
             let v = slot.value.load() as f64;
             if v != *last {
@@ -1280,15 +1473,14 @@ impl Vst3PluginInstance {
     /// `process()` forwards it to the processor and `sync_controller()` to
     /// the edit controller.
     pub fn set_parameter(&self, port_index: usize, value: f32) {
-        if self.params.iter().any(|p| p.port_index == port_index) {
-            if let Some(slot) = self
+        if self.params.iter().any(|p| p.port_index == port_index)
+            && let Some(slot) = self
                 .port_updates
                 .control_inputs
                 .iter()
                 .find(|s| s.port_index == port_index)
-            {
-                slot.value.store(value.clamp(0.0, 1.0));
-            }
+        {
+            slot.value.store(value.clamp(0.0, 1.0));
         }
     }
 
@@ -1332,6 +1524,32 @@ impl Vst3PluginInstance {
             log::info!("VST3: {} requested a component restart (0x{:x})", self.display_name, flags);
             self.needs_restart = true;
         }
+        if flags & kMidiCCAssignmentChanged != 0 {
+            self.reload_midi_map();
+        }
+    }
+
+    /// Re-query the plugin's MIDI controller assignments and hand the new
+    /// table to the audio side.  If the audio thread cannot be excluded
+    /// right now the request stays pending for the next tick.
+    fn reload_midi_map(&mut self) {
+        use vst3::Steinberg::Vst::RestartFlags_::kMidiCCAssignmentChanged;
+        if !self.has_midi_in || self.parked {
+            return;
+        }
+        let Some(ctrl) = &self.controller else {
+            return;
+        };
+        let mut map = unsafe { MidiMap::query(ctrl, &self.shared.ids) };
+        if !self.gate.suspend(Duration::from_millis(5)) {
+            self.shared
+                .restart_flags
+                .fetch_or(kMidiCCAssignmentChanged, Ordering::AcqRel);
+            return;
+        }
+        std::mem::swap(&mut self.rt.midi_map, &mut map);
+        self.gate.resume();
+        // `map` (the old table) is freed here, after audio has resumed.
     }
 
     /// Re-read all parameter values from the edit controller into the slots.
@@ -1426,23 +1644,6 @@ impl Vst3PluginInstance {
             .collect()
     }
 
-    pub fn get_info(&self, pw_node_id: Option<u32>) -> PluginInstanceInfo {
-        PluginInstanceInfo {
-            scan_info: None,
-            id: self.id,
-            stable_id: String::new(),
-            plugin_uri: self.plugin_id.clone(),
-            format: PluginFormat::Vst3,
-            display_name: self.display_name.clone(),
-            pw_node_id,
-            parameters: self.get_parameters(),
-            active: true,
-            bypassed: self.is_bypassed(),
-            lv2_state: Vec::new(),
-            plugin_state: None,
-        }
-    }
-
     /// Get the full plugin state as a byte vector (main thread).
     ///
     /// Format: `[comp_len: u32 LE][IComponent::getState][IEditController::getState]`.
@@ -1505,13 +1706,13 @@ unsafe fn restore_state(
             }
         }
 
-        if !ctrl_data.is_empty() {
-            if let Some(ctrl) = controller {
-                let result = write_state(ctrl_data, |s| ctrl.setState(s));
-                if result != kResultOk {
-                    log::warn!("VST3: IEditController::setState failed ({})", result);
-                    ok = false;
-                }
+        if !ctrl_data.is_empty()
+            && let Some(ctrl) = controller
+        {
+            let result = write_state(ctrl_data, |s| ctrl.setState(s));
+            if result != kResultOk {
+                log::warn!("VST3: IEditController::setState failed ({})", result);
+                ok = false;
             }
         }
         ok
@@ -1611,6 +1812,90 @@ fn read_string128(buf: &[u16]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- MIDI controllers ----
+
+    fn midi(offset: u32, data: [u8; 3], size: u8) -> crate::midi::processing::RawMidiEvent {
+        crate::midi::processing::RawMidiEvent { offset, data, size }
+    }
+
+    #[test]
+    fn midi_controller_value_decodes_cc_pressure_and_bend() {
+        assert_eq!(midi_controller_value(&midi(0, [0xB3, 64, 127], 3)), Some((64, 1.0)));
+        assert_eq!(midi_controller_value(&midi(0, [0xB0, 1, 0], 3)), Some((1, 0.0)));
+        // Channel pressure is a two-byte message.
+        assert_eq!(midi_controller_value(&midi(0, [0xD0, 127, 0], 2)), Some((128, 1.0)));
+        assert_eq!(midi_controller_value(&midi(0, [0xE0, 0x7F, 0x7F], 3)), Some((129, 1.0)));
+        assert_eq!(midi_controller_value(&midi(0, [0xE0, 0, 0], 3)), Some((129, 0.0)));
+        let (ctrl, centre) = midi_controller_value(&midi(0, [0xE0, 0, 0x40], 3)).unwrap();
+        assert_eq!(ctrl, 129);
+        assert!((centre - 0.5).abs() < 1e-4);
+        // Notes and truncated messages are not controllers.
+        assert_eq!(midi_controller_value(&midi(0, [0x90, 60, 100], 3)), None);
+        assert_eq!(midi_controller_value(&midi(0, [0xB0, 1, 0], 2)), None);
+    }
+
+    #[test]
+    fn midi_controllers_become_parameter_changes() {
+        // Listed parameters 10 and 11; the plugin also has a hidden
+        // parameter 900 for the sustain pedal and 901 for pitch bend.
+        let ids: [ParamID; 2] = [10, 11];
+        let slots: Vec<PortSlot> = (0..2)
+            .map(|i| PortSlot { port_index: i, value: AtomicF32::new(0.0) })
+            .collect();
+        let mut rt = RtState::new(&[2], &[2], &ids, vec![0.0, 0.0]);
+        rt.midi_map = MidiMap::from_assignments(
+            &[(0, 7, 11), (0, 64, 900), (1, 64, 900), (0, 129, 901), (99, 1, 5), (0, 999, 5)],
+            &ids,
+        );
+        let map = rt.midi_map.as_ref().unwrap();
+        assert_eq!(map.targets.len(), 3);
+        assert_eq!(map.targets[0].slot, Some(1));
+        assert_eq!(map.targets[1].slot, None);
+
+        let events = [
+            midi(3, [0xB0, 64, 127], 3),  // pedal down
+            midi(5, [0xB0, 7, 127], 3),   // listed parameter 11
+            midi(9, [0xB1, 64, 0], 3),    // pedal up on channel 2: same parameter
+            midi(900, [0xE0, 0x7F, 0x7F], 3), // offset beyond the block
+            midi(0, [0xB0, 2, 50], 3),    // unassigned controller
+            midi(0, [0x90, 60, 100], 3),  // a note
+        ];
+        rt.input_param_changes.reset();
+        rt.apply_midi_controllers(&slots, &events, 64);
+
+        // Listed parameter: written to its slot for the host-edit pass.
+        assert_eq!(slots[1].value.load(), 1.0);
+        assert_eq!(slots[0].value.load(), 0.0);
+        // Hidden parameters: one queue each, last value and offset win.
+        let pc = &rt.input_param_changes;
+        assert_eq!(pc.used_count, 2);
+        assert_eq!((pc.queues[0].param_id, pc.queues[0].value, pc.queues[0].offset), (900, 0.0, 9));
+        assert_eq!((pc.queues[1].param_id, pc.queues[1].value, pc.queues[1].offset), (901, 1.0, 63));
+
+        // The next block starts fresh queues.
+        rt.input_param_changes.reset();
+        rt.apply_midi_controllers(&slots, &[midi(1, [0xB0, 64, 127], 3)], 64);
+        let pc = &rt.input_param_changes;
+        assert_eq!(pc.used_count, 1);
+        assert_eq!((pc.queues[0].param_id, pc.queues[0].value, pc.queues[0].offset), (900, 1.0, 1));
+
+        // The point is reported to the plugin at its sample offset.
+        let queue = &mut rt.input_param_changes.queues[0] as *mut InlineParamValueQueue
+            as *mut IParamValueQueue;
+        let (mut offset, mut value) = (-1i32, -1.0f64);
+        assert_eq!(unsafe { ipvq_get_point(queue, 0, &mut offset, &mut value) }, kResultOk);
+        assert_eq!((offset, value), (1, 1.0));
+    }
+
+    #[test]
+    fn midi_map_without_assignments_is_none() {
+        assert!(MidiMap::from_assignments(&[], &[1, 2]).is_none());
+        let mut rt = RtState::new(&[2], &[2], &[], Vec::new());
+        rt.input_param_changes.reset();
+        rt.apply_midi_controllers(&[], &[midi(0, [0xB0, 1, 1], 3)], 16);
+        assert_eq!(rt.input_param_changes.used_count, 0);
+    }
 
     // ---- InlineParameterChanges ----
 
@@ -1955,7 +2240,7 @@ mod tests {
     #[test]
     fn state_blob_too_short_rejected() {
         // Less than 4 bytes
-        let blob = vec![1, 2, 3];
+        let blob = [1, 2, 3];
         assert!(blob.len() < 4); // would fail set_state's first check
 
         // 4 bytes but comp_len says more data than exists

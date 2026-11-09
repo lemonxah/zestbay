@@ -280,21 +280,21 @@ unsafe extern "C" fn port_write_callback(
             port_index: port_index as usize,
             value,
         });
-    } else if protocol != 0 && buffer_size > 0 {
-        if let Some(ref port_updates) = ctrl.port_updates {
-            let data =
-                unsafe { std::slice::from_raw_parts(buffer as *const u8, buffer_size as usize) };
-            for atom_in in port_updates.atom_inputs.iter() {
-                if atom_in.port_index == port_index as usize {
-                    if !atom_in.write(data) {
-                        log::warn!(
-                            "UI atom queue full for instance {} port {}; message dropped",
-                            ctrl.instance_id,
-                            port_index
-                        );
-                    }
-                    break;
+    } else if protocol != 0 && buffer_size > 0
+        && let Some(ref port_updates) = ctrl.port_updates
+    {
+        let data =
+            unsafe { std::slice::from_raw_parts(buffer as *const u8, buffer_size as usize) };
+        for atom_in in port_updates.atom_inputs.iter() {
+            if atom_in.port_index == port_index as usize {
+                if !atom_in.write(data) {
+                    log::warn!(
+                        "UI atom queue full for instance {} port {}; message dropped",
+                        ctrl.instance_id,
+                        port_index
+                    );
                 }
+                break;
             }
         }
     }
@@ -524,16 +524,6 @@ fn closing_flags() -> &'static Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>> {
 
 fn open_ui_set() -> &'static Arc<Mutex<std::collections::HashSet<u64>>> {
     OPEN_UI_SET.get_or_init(|| Arc::new(Mutex::new(std::collections::HashSet::new())))
-}
-
-pub fn is_ui_open(instance_id: u64) -> bool {
-    if open_ui_set().lock().unwrap().contains(&instance_id) {
-        return true;
-    }
-    match UI_BRIDGE.lock() {
-        Ok(guard) => guard.as_ref().is_some_and(|b| b.is_open(instance_id)),
-        Err(_) => false,
-    }
 }
 
 fn ensure_gtk_thread() -> &'static Mutex<Sender<GtkCommand>> {
@@ -1183,6 +1173,7 @@ fn shutdown_bridge() {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // public entry point; grouping the arguments would ripple through every caller
 pub fn open_plugin_ui(
     plugin_uri: &str,
     instance_id: u64,
@@ -1254,23 +1245,21 @@ pub fn open_plugin_ui(
         }
     }
 
-    let is_x11_ui = ui_info.as_ref().map_or(false, |(_, t, _, _)| t == LV2_UI_X11);
+    let is_x11_ui = ui_info.as_ref().is_some_and(|(_, t, _, _)| t == LV2_UI_X11);
 
     // Check if the UI requires instance-access (can only work in-process).
     // We check by scanning the bundle's TTL files for the instance-access URI
     // in a requiredFeature context.
-    let needs_instance_access = ui_info.as_ref().map_or(false, |(_, _, bundle, _)| {
+    let needs_instance_access = ui_info.as_ref().is_some_and(|(_, _, bundle, _)| {
         let bundle_dir = std::path::Path::new(bundle);
         if let Ok(entries) = std::fs::read_dir(bundle_dir) {
             for entry in entries.flatten() {
-                if entry.path().extension().is_some_and(|e| e == "ttl") {
-                    if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                        if content.contains("instance-access")
-                            && content.contains("requiredFeature")
-                        {
-                            return true;
-                        }
-                    }
+                if entry.path().extension().is_some_and(|e| e == "ttl")
+                    && let Ok(content) = std::fs::read_to_string(entry.path())
+                    && content.contains("instance-access")
+                    && content.contains("requiredFeature")
+                {
+                    return true;
                 }
             }
         }
@@ -1280,29 +1269,30 @@ pub fn open_plugin_ui(
     // For X11 UIs that DON'T need instance-access, use the bridge process
     // (avoids GLX/EGL conflicts on Wayland). Plugins that need instance-access
     // must run in-process via suil/GTK.
-    if is_x11_ui && !needs_instance_access {
-        if let Some((ref ui_uri, ref ui_type_uri, ref bundle_path, ref binary_path)) = ui_info {
-            let opened = with_bridge(&event_tx, &cmd_tx, |client| {
-                log::info!("Using UI bridge for X11 plugin: {}", plugin_uri);
-                client.open_ui(
-                    instance_id,
-                    plugin_uri,
-                    ui_uri,
-                    ui_type_uri,
-                    bundle_path,
-                    binary_path,
-                    &display_name,
-                    control_values.clone(),
-                    &urid_mapper,
-                    sample_rate,
-                    port_updates.clone(),
-                )
-            });
-            if opened == Some(true) {
-                return;
-            }
-            log::warn!("UI bridge not available, falling back to in-process for X11 UI");
+    if is_x11_ui
+        && !needs_instance_access
+        && let Some((ref ui_uri, ref ui_type_uri, ref bundle_path, ref binary_path)) = ui_info
+    {
+        let opened = with_bridge(&event_tx, &cmd_tx, |client| {
+            log::info!("Using UI bridge for X11 plugin: {}", plugin_uri);
+            client.open_ui(
+                instance_id,
+                plugin_uri,
+                ui_uri,
+                ui_type_uri,
+                bundle_path,
+                binary_path,
+                &display_name,
+                control_values.clone(),
+                &urid_mapper,
+                sample_rate,
+                port_updates.clone(),
+            )
+        });
+        if opened == Some(true) {
+            return;
         }
+        log::warn!("UI bridge not available, falling back to in-process for X11 UI");
     }
 
     // For GTK UIs (or X11 fallback), use the old suil/GTK path

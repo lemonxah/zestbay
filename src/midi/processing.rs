@@ -281,7 +281,7 @@ pub fn copy_sequence_bounded(input: &[u8], out: &mut [u8]) -> usize {
     if out.len() < SEQ_HEADER_SIZE {
         return 0;
     }
-    let seq_type = libspa::sys::SPA_TYPE_Sequence as u32;
+    let seq_type = libspa::sys::SPA_TYPE_Sequence;
     // Empty sequence: pod.size = body header only
     write_u32(out, 0, 8);
     write_u32(out, 4, seq_type);
@@ -822,13 +822,13 @@ mod tests {
 
     fn build_sequence(events: &[(u32, &[u8])]) -> Vec<u8> {
         let mut v = vec![0u8; 16];
-        v[4..8].copy_from_slice(&(libspa::sys::SPA_TYPE_Sequence as u32).to_ne_bytes());
+        v[4..8].copy_from_slice(&(libspa::sys::SPA_TYPE_Sequence).to_ne_bytes());
         for (offset, data) in events {
             let start = v.len();
             v.extend_from_slice(&offset.to_ne_bytes());
-            v.extend_from_slice(&(libspa::sys::SPA_CONTROL_Midi as u32).to_ne_bytes());
+            v.extend_from_slice(&(libspa::sys::SPA_CONTROL_Midi).to_ne_bytes());
             v.extend_from_slice(&(data.len() as u32).to_ne_bytes());
-            v.extend_from_slice(&(libspa::sys::SPA_TYPE_Bytes as u32).to_ne_bytes());
+            v.extend_from_slice(&(libspa::sys::SPA_TYPE_Bytes).to_ne_bytes());
             v.extend_from_slice(data);
             let padded = (v.len() - start + 7) & !7;
             v.resize(start + padded, 0);
@@ -844,7 +844,7 @@ mod tests {
         let n = copy_sequence_bounded(&[], &mut out);
         assert_eq!(n, 16);
         assert_eq!(read_u32(&out, 0), 8);
-        assert_eq!(read_u32(&out, 4), libspa::sys::SPA_TYPE_Sequence as u32);
+        assert_eq!(read_u32(&out, 4), libspa::sys::SPA_TYPE_Sequence);
     }
 
     #[test]

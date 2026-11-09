@@ -70,6 +70,7 @@ pub struct StateEntry {
 }
 
 impl StateEntry {
+    #[cfg(test)]
     pub fn new_string(key_uri: &str, value: &str) -> Self {
         let atom_string_uri = "http://lv2plug.in/ns/ext/atom#String";
         let mut bytes = value.as_bytes().to_vec();
@@ -81,18 +82,6 @@ impl StateEntry {
             flags: 0,
             urid_references: Vec::new(),
         }
-    }
-
-    pub fn as_string(&self) -> Option<&str> {
-        if !self.type_uri.contains("String") {
-            return None;
-        }
-        let bytes = if self.value.last() == Some(&0) {
-            &self.value[..self.value.len() - 1]
-        } else {
-            &self.value
-        };
-        std::str::from_utf8(bytes).ok()
     }
 }
 
@@ -170,9 +159,16 @@ unsafe extern "C" fn retrieve_callback(
         let ctx = &*(handle as *const RetrieveContext);
         for entry in &ctx.entries {
             if entry.key_urid == key {
-                *size = entry.data.len();
-                *type_ = entry.type_urid;
-                *flags = entry.flags;
+                // The LV2 state spec allows NULL for each output parameter.
+                if !size.is_null() {
+                    *size = entry.data.len();
+                }
+                if !type_.is_null() {
+                    *type_ = entry.type_urid;
+                }
+                if !flags.is_null() {
+                    *flags = entry.flags;
+                }
                 return entry.data.as_ptr() as *const c_void;
             }
         }
@@ -296,7 +292,38 @@ impl StatePathContext {
     }
 }
 
-fn sanitize_uri(uri: &str) -> String {
+/// Directory holding the state files (makePath/mapPath) of one plugin
+/// instance, identified by its stable id.
+pub fn instance_state_dir(plugin_uri: &str, scope: &str) -> std::path::PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("~/.config"))
+        .join("zestbay")
+        .join("plugin-state")
+        .join(sanitize_uri(plugin_uri))
+        .join(sanitize_uri(scope))
+}
+
+/// Recursively copy the regular files and directories of `src` into `dst`
+/// (created if needed). A missing `src` copies nothing; symlinks are skipped.
+pub fn copy_dir_contents(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    if !src.is_dir() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let target = dst.join(entry.file_name());
+        if kind.is_dir() {
+            copy_dir_contents(&entry.path(), &target)?;
+        } else if kind.is_file() {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn sanitize_uri(uri: &str) -> String {
     uri.chars()
         .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
         .collect()
@@ -452,6 +479,7 @@ impl Lv2StatePathSetup {
         *ctx.state_dir.lock() = ctx.base_dir.join(sanitize_uri(scope));
     }
 
+    #[cfg(test)]
     pub fn state_dir(&self) -> std::path::PathBuf {
         unsafe { &*self.ctx_ptr }.dir()
     }
@@ -499,6 +527,67 @@ impl Drop for Lv2StatePathSetup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_dir_contents_copies_nested_files_and_ignores_missing_source() {
+        let root = std::env::temp_dir().join(format!("zestbay-copy-{}", uuid::Uuid::new_v4()));
+        let (src, dst) = (root.join("src"), root.join("dst"));
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("a.txt"), "a").unwrap();
+        std::fs::write(src.join("sub/b.txt"), "b").unwrap();
+        std::os::unix::fs::symlink(src.join("a.txt"), src.join("link")).unwrap();
+        copy_dir_contents(&src, &dst).unwrap();
+        assert_eq!(std::fs::read_to_string(dst.join("a.txt")).unwrap(), "a");
+        assert_eq!(std::fs::read_to_string(dst.join("sub/b.txt")).unwrap(), "b");
+        assert!(!dst.join("link").exists(), "symlinks are skipped");
+        copy_dir_contents(&root.join("missing"), &root.join("other")).unwrap();
+        assert!(!root.join("other").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retrieve_callback_accepts_null_outputs() {
+        let ctx = RetrieveContext {
+            entries: vec![RetrieveEntry {
+                key_urid: 7,
+                type_urid: 9,
+                data: vec![1, 2, 3],
+                flags: 5,
+            }],
+        };
+        let handle = &ctx as *const RetrieveContext as LV2_State_Handle;
+        unsafe {
+            // All outputs NULL is legal per the LV2 state spec.
+            let p = retrieve_callback(
+                handle,
+                7,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+            assert!(!p.is_null());
+            let mut size = 0usize;
+            let p = retrieve_callback(
+                handle,
+                7,
+                &mut size,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+            assert!(!p.is_null());
+            assert_eq!(size, 3);
+            assert!(
+                retrieve_callback(
+                    handle,
+                    8,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut()
+                )
+                .is_null()
+            );
+        }
+    }
 
     #[test]
     fn scope_changes_state_dir_per_instance() {

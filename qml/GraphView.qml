@@ -285,7 +285,35 @@ Item {
         return ax.length - bx.length
     }
 
+    // While a refresh runs, layout and pin saves are collected and written
+    // once at the end: every write is an fsync on the UI thread, and a
+    // refresh can place many new nodes.
+    property int deferSaveDepth: 0
+    property var pendingLayoutJson: null
+    property var pendingPinnedJson: null
+
     function refreshData() {
+        deferSaveDepth++
+        try {
+            refreshDataNow()
+        } finally {
+            deferSaveDepth--
+            if (deferSaveDepth === 0) {
+                if (pendingLayoutJson !== null) {
+                    var layoutJson = pendingLayoutJson
+                    pendingLayoutJson = null
+                    controller.save_layout(layoutJson)
+                }
+                if (pendingPinnedJson !== null) {
+                    var pinnedJson = pendingPinnedJson
+                    pendingPinnedJson = null
+                    controller.save_pinned(pinnedJson)
+                }
+            }
+        }
+    }
+
+    function refreshDataNow() {
         // Follow the controller's view (it leaves a subgraph by itself when
         // the subgraph is ungrouped or deleted).
         var sgView = controller.get_subgraph_view ? controller.get_subgraph_view() : ""
@@ -410,6 +438,8 @@ Item {
             }
         }
         portMediaTypes = newPortMedia
+        // Port ids can be recycled across refreshes.
+        dragSourcePortId = -1
 
         // Drop per-id state for nodes that no longer exist. PipeWire recycles
         // object ids (and bridge sub-node ids can change), so a stale entry
@@ -859,7 +889,9 @@ Item {
             }
         }
         savedLayout = layoutObj
-        controller.save_layout(JSON.stringify(layoutObj))
+        var json = JSON.stringify(layoutObj)
+        if (deferSaveDepth > 0) pendingLayoutJson = json
+        else controller.save_layout(json)
     }
 
     Timer {
@@ -1457,7 +1489,9 @@ Item {
         for (var k in pinnedNodes) {
             if (pinnedNodes[k]) arr.push(k)
         }
-        controller.save_pinned(JSON.stringify(arr))
+        var json = JSON.stringify(arr)
+        if (deferSaveDepth > 0) pendingPinnedJson = json
+        else controller.save_pinned(json)
     }
 
     // Build a mapping from node.id → unique layout key, disambiguating nodes
@@ -2174,11 +2208,23 @@ Item {
         return searchText.length > 0 && (port.name || "").toLowerCase().indexOf(searchText.toLowerCase()) >= 0
     }
 
+    // Node of the port a wire is being dragged from. Looked up once per
+    // drag (and per refresh) instead of once per drawn pin.
+    property int dragSourcePortId: -1
+    property int dragSourceNodeId: -1
+    function connectFromNodeId() {
+        if (dragSourcePortId !== connectFromPortId) {
+            dragSourceNodeId = getPortNodeId(connectFromPortId)
+            dragSourcePortId = connectFromPortId
+        }
+        return dragSourceNodeId
+    }
+
     // Could the wire being dragged end on this port?
     function isValidDropTarget(port, nodeId) {
         if (connectFromPortId < 0 || port.id === connectFromPortId) return false
         if (port.direction === connectFromDir) return false
-        if (getPortNodeId(connectFromPortId) === nodeId) return false
+        if (connectFromNodeId() === nodeId) return false
         var fromMt = portMediaTypes[connectFromPortId]
         return !fromMt || fromMt === "Unknown" || !port.mediaType || port.mediaType === fromMt
     }
@@ -3378,6 +3424,9 @@ Item {
             if (link.outputPortId === undefined) continue
             // Skip links connected to the node itself to prevent self-loops
             if (link.outputNodeId === nodeId || link.inputNodeId === nodeId) continue
+            // Only an audio link can take a plugin.
+            if (portMediaTypes[link.outputPortId] !== "Audio"
+                    || portMediaTypes[link.inputPortId] !== "Audio") continue
             var fromPos = portPositions[link.outputPortId]
             var toPos = portPositions[link.inputPortId]
             if (!fromPos || !toPos) continue

@@ -107,6 +107,7 @@ impl RtGate {
         self.suspended.store(false, Ordering::SeqCst);
     }
 
+    #[cfg(test)]
     pub fn is_suspended(&self) -> bool {
         self.suspended.load(Ordering::SeqCst)
     }

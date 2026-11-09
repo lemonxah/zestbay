@@ -82,13 +82,13 @@ fn arch_dir_candidates() -> Vec<String> {
 pub fn find_bundle_binary(bundle_path: &Path) -> Option<PathBuf> {
     for arch in arch_dir_candidates() {
         let contents_dir = bundle_path.join("Contents").join(arch);
-        if contents_dir.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(&contents_dir) {
-                for entry in entries.flatten() {
-                    let p = entry.path();
-                    if p.extension().is_some_and(|e| e == "so") {
-                        return Some(p);
-                    }
+        if contents_dir.is_dir()
+            && let Ok(entries) = std::fs::read_dir(&contents_dir)
+        {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension().is_some_and(|e| e == "so") {
+                    return Some(p);
                 }
             }
         }
@@ -334,10 +334,10 @@ fn category_from_subcategories(sub: &str) -> PluginCategory {
     }
 
     // Broad categories
-    if parts.iter().any(|&p| p == "Fx") {
+    if parts.contains(&"Fx") {
         return PluginCategory::Filter;
     }
-    if parts.iter().any(|&p| p == "Instrument") {
+    if parts.contains(&"Instrument") {
         return PluginCategory::Instrument;
     }
 

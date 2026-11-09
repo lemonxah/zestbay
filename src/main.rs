@@ -11,6 +11,7 @@ mod tray;
 mod ui;
 pub mod ui_bridge;
 mod vst2;
+mod ladspa;
 mod vst3;
 
 use cxx_qt::casting::Upcast;

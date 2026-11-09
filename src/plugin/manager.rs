@@ -16,6 +16,7 @@ pub struct PluginManager {
     active_instances: HashMap<PluginInstanceId, PluginInstanceInfo>,
     startup_complete: bool,
     /// The sample rate reported by PipeWire (set after PW init).
+    #[allow(dead_code)] // written at init; no reader yet
     pub sample_rate: f64,
 }
 
@@ -53,17 +54,6 @@ impl PluginManager {
             }
         }
         self.available_plugins = plugins;
-    }
-
-    /// Append additional plugins (e.g. after a single-format rescan).
-    pub fn extend_available_plugins(&mut self, plugins: Vec<PluginInfo>) {
-        self.available_plugins.extend(plugins);
-    }
-
-    /// Sort the catalog alphabetically by name (case-insensitive).
-    pub fn sort_catalog(&mut self) {
-        self.available_plugins
-            .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     }
 
     pub fn available_plugins(&self) -> &[PluginInfo] {
@@ -124,6 +114,36 @@ impl PluginManager {
         }
     }
 
+    /// Replace an instance's parameter list with the one its running host
+    /// reported.  Names, ranges and defaults come from `described`; a value
+    /// this side already holds (a saved or just-edited one) is kept, matched
+    /// by symbol and otherwise by port index.
+    pub fn describe_parameters(
+        &mut self,
+        instance_id: PluginInstanceId,
+        described: Vec<ParameterValue>,
+    ) {
+        let Some(info) = self.active_instances.get_mut(&instance_id) else {
+            return;
+        };
+        let known = std::mem::take(&mut info.parameters);
+        info.parameters = described
+            .into_iter()
+            .map(|mut d| {
+                let held = known
+                    .iter()
+                    .find(|k| !k.symbol.is_empty() && k.symbol == d.symbol)
+                    .or_else(|| known.iter().find(|k| k.port_index == d.port_index));
+                if let Some(k) = held
+                    && k.value.is_finite()
+                {
+                    d.value = k.value;
+                }
+                d
+            })
+            .collect();
+    }
+
     pub fn active_instances(&self) -> &HashMap<PluginInstanceId, PluginInstanceInfo> {
         &self.active_instances
     }
@@ -142,16 +162,85 @@ impl PluginManager {
             .find(|info| info.stable_id == stable_id)
     }
 
-    pub fn find_by_stable_id_mut(&mut self, stable_id: &str) -> Option<&mut PluginInstanceInfo> {
-        self.active_instances
-            .values_mut()
-            .find(|info| info.stable_id == stable_id)
-    }
-
     pub fn instance_id_for_stable_id(&self, stable_id: &str) -> Option<PluginInstanceId> {
         self.active_instances
             .iter()
             .find(|(_, info)| info.stable_id == stable_id)
             .map(|(id, _)| *id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn param(port_index: usize, symbol: &str, name: &str, value: f32, max: f32) -> ParameterValue {
+        ParameterValue {
+            port_index,
+            symbol: symbol.to_string(),
+            name: name.to_string(),
+            value,
+            min: 0.0,
+            max,
+            default: 0.5,
+            is_toggle: false,
+        }
+    }
+
+    fn manager_with(parameters: Vec<ParameterValue>) -> PluginManager {
+        let mut manager = PluginManager::new();
+        manager.register_instance(PluginInstanceInfo {
+            id: 1,
+            stable_id: "sid".to_string(),
+            plugin_uri: "urn:test".to_string(),
+            format: PluginFormat::Lv2,
+            scan_info: None,
+            display_name: "Test".to_string(),
+            pw_node_id: None,
+            parameters,
+            active: true,
+            bypassed: false,
+            lv2_state: Vec::new(),
+            plugin_state: None,
+        });
+        manager
+    }
+
+    #[test]
+    fn described_parameters_take_metadata_and_keep_saved_values() {
+        // What a restore before the catalog scan leaves behind: saved
+        // values with no names and a 0..1 range.
+        let mut manager = manager_with(vec![
+            param(0, "gain", "", 12.0, 1.0),
+            param(1, "", "", 0.25, 1.0),
+        ]);
+        manager.describe_parameters(
+            1,
+            vec![
+                // Port order changed since the save: matched by symbol.
+                param(3, "gain", "Gain", 0.0, 24.0),
+                // No symbol on the saved side: matched by port index.
+                param(1, "mix", "Mix", 1.0, 1.0),
+                // New parameter: the host's value stands.
+                param(2, "tone", "Tone", 0.7, 1.0),
+            ],
+        );
+        let params = &manager.get_instance(1).unwrap().parameters;
+        assert_eq!(params.len(), 3);
+        assert_eq!((params[0].port_index, params[0].name.as_str()), (3, "Gain"));
+        assert_eq!((params[0].value, params[0].max), (12.0, 24.0));
+        assert_eq!((params[1].name.as_str(), params[1].value), ("Mix", 0.25));
+        assert_eq!((params[2].name.as_str(), params[2].value), ("Tone", 0.7));
+    }
+
+    #[test]
+    fn described_parameters_fill_an_instance_that_had_none() {
+        let mut manager = manager_with(Vec::new());
+        manager.describe_parameters(1, vec![param(0, "param_7", "Cutoff", 0.3, 1.0)]);
+        let params = &manager.get_instance(1).unwrap().parameters;
+        assert_eq!(params.len(), 1);
+        assert_eq!((params[0].name.as_str(), params[0].value), ("Cutoff", 0.3));
+        // Unknown instances are ignored.
+        manager.describe_parameters(99, vec![param(0, "x", "X", 0.0, 1.0)]);
     }
 }

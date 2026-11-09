@@ -59,8 +59,8 @@ impl PluginTimingSlot {
         let rate = self.last_rate.load(Ordering::Relaxed) as u32;
         let worker_total = self.worker_total_ns.swap(0, Ordering::Relaxed);
 
-        let avg_ns = if calls > 0 { total / calls } else { 0 };
-        let worker_avg_ns = if calls > 0 { worker_total / calls } else { 0 };
+        let avg_ns = total.checked_div(calls).unwrap_or(0);
+        let worker_avg_ns = worker_total.checked_div(calls).unwrap_or(0);
 
         // DSP load: what fraction of the available buffer time was used
         // Only RT thread time counts toward the deadline

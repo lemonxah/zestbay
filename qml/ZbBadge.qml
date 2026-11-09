@@ -13,7 +13,7 @@ Rectangle {
 
     // Tone for a plugin format string ("LV2", "VST3", "CLAP").
     function formatTone(fmt) {
-        return fmt === "CLAP" ? "teal" : (fmt === "VST3" || fmt === "VST2") ? "orange" : fmt === "LV2" ? "blue" : "neutral"
+        return fmt === "CLAP" ? "teal" : (fmt === "VST3" || fmt === "VST2") ? "orange" : fmt === "LADSPA" ? "violet" : fmt === "LV2" ? "blue" : "neutral"
     }
 
     readonly property color _base: tone === "teal" ? Theme.catHardware

@@ -218,7 +218,7 @@ pub fn snap_to_grid(
     grid: f64,
     gap: f64,
 ) {
-    if !(grid > 0.0) {
+    if grid.is_nan() || grid <= 0.0 {
         return;
     }
     let size = |id: &NodeId| sizes.get(id).copied().unwrap_or((0.0, 0.0));

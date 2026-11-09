@@ -8,6 +8,11 @@
 
 use std::os::raw::{c_char, c_int, c_long, c_uint, c_ulong, c_void};
 
+/// Error handler that swallows the error instead of exiting the process.
+unsafe extern "C" fn ignore_x_error(_display: *mut c_void, _event: *mut c_void) -> c_int {
+    0
+}
+
 #[link(name = "X11")]
 unsafe extern "C" {
     fn XOpenDisplay(name: *const c_char) -> *mut c_void;
@@ -33,6 +38,9 @@ unsafe extern "C" {
     fn XNextEvent(display: *mut c_void, event: *mut XEvent) -> c_int;
     fn XFlush(display: *mut c_void) -> c_int;
     fn XSync(display: *mut c_void, discard: c_int) -> c_int;
+    fn XSetErrorHandler(
+        handler: Option<unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int>,
+    ) -> Option<unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int>;
     fn XStoreName(display: *mut c_void, window: c_ulong, name: *const c_char) -> c_int;
     fn XResizeWindow(display: *mut c_void, window: c_ulong, w: c_uint, h: c_uint) -> c_int;
     fn XSelectInput(display: *mut c_void, window: c_ulong, event_mask: c_long) -> c_int;
@@ -196,11 +204,16 @@ impl HostWindow {
                             log::debug!("X11: plugin child window 0x{:x} detected", child);
                         }
                     }
-                    FOCUS_IN => {
-                        if self.child != 0 {
-                            XSetInputFocus(self.display, self.child, REVERT_TO_PARENT, CURRENT_TIME);
-                            XFlush(self.display);
-                        }
+                    // The plugin may have destroyed or reparented its
+                    // child window; the default Xlib error handler
+                    // would exit the whole process on BadWindow.
+                    // Swap in a tolerant handler just for this call
+                    // so other Xlib users' handlers stay intact.
+                    FOCUS_IN if self.child != 0 => {
+                        let previous = XSetErrorHandler(Some(ignore_x_error));
+                        XSetInputFocus(self.display, self.child, REVERT_TO_PARENT, CURRENT_TIME);
+                        XSync(self.display, 0);
+                        XSetErrorHandler(previous);
                     }
                     _ => {}
                 }

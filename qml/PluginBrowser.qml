@@ -42,8 +42,8 @@ ZbWindow {
         if (!visible && !addedPlugin) cancelled()
     }
 
-    readonly property var formats: allowSubgraphs ? ["All", "LV2", "VST2", "VST3", "CLAP", "Subgraphs"]
-                                                  : ["All", "LV2", "VST2", "VST3", "CLAP"]
+    readonly property var formats: allowSubgraphs ? ["All", "LV2", "VST2", "VST3", "CLAP", "LADSPA", "Subgraphs"]
+                                                  : ["All", "LV2", "VST2", "VST3", "CLAP", "LADSPA"]
     readonly property bool showingTemplates: selectedFormat === "Subgraphs"
 
     property var allPlugins: []
@@ -497,7 +497,7 @@ ZbWindow {
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.sizeCaption
                 color: Theme.textMuted
-                text: "Your own plugins (e.g. Pianoteq): put them in the lv2, vst (VST2), vst3 or clap folder inside "
+                text: "Your own plugins (e.g. Pianoteq): put them in the lv2, vst (VST2), vst3, clap or ladspa folder inside "
                       + pluginBrowser.appPluginFolder.replace(/^\/home\/[^\/]+/, "~")
                       + ", then restart ZestBay. Free plugins are on Flathub as org.freedesktop.LinuxAudio.Plugins.*."
             }

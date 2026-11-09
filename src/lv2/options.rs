@@ -37,9 +37,6 @@ pub const SEQUENCE_SIZE: usize = 65536;
 // ── Option context values ──
 
 pub const LV2_OPTIONS_INSTANCE: u32 = 0;
-pub const LV2_OPTIONS_RESOURCE: u32 = 1;
-pub const LV2_OPTIONS_BLANK: u32 = 2;
-pub const LV2_OPTIONS_PORT: u32 = 3;
 
 // ── C-compatible option struct ──
 

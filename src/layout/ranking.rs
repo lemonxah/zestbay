@@ -182,7 +182,8 @@ pub fn insert_dummy_nodes(graph: &mut LayoutGraph) {
     let original_edge_count = graph.edges.len();
 
     // Collect edges that need splitting (to avoid borrow issues)
-    let mut to_split: Vec<(usize, usize, usize, i32, i32, Option<u32>, Option<u32>)> = Vec::new();
+    type SplitEdge = (usize, usize, usize, i32, i32, Option<u32>, Option<u32>);
+    let mut to_split: Vec<SplitEdge> = Vec::new();
     for ei in 0..original_edge_count {
         let edge = &graph.edges[ei];
         let from_rank = graph.nodes[edge.from_node].rank;
@@ -232,7 +233,7 @@ pub fn insert_dummy_nodes(graph: &mut LayoutGraph) {
         graph.edges.push(super::graph::LayoutEdge {
             id: 0,
             from_node: prev_node,
-            to_node: to_node,
+            to_node,
             from_port: None,
             to_port,
         });
