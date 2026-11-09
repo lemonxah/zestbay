@@ -303,16 +303,51 @@ each release.
 - PipeWire
 - Qt6 (Base, Declarative)
 - lilv, LV2, suil
+- GTK3
 - libX11
 - D-Bus
 
 **Build:**
-- Rust (stable toolchain)
-- Cargo
-- Clang
+- Rust (current stable toolchain, at least 1.88) and Cargo
+- Clang (libclang) and a C/C++ compiler
 - CMake
 - pkg-config
-- Qt6 development headers
+- Development headers for the runtime libraries above. Qt must be Qt6: ZestBay does not build against Qt5
+
+#### Debian / Ubuntu
+
+```sh
+# Build dependencies
+sudo apt install build-essential pkg-config cmake clang libclang-dev \
+    libpipewire-0.3-dev qt6-base-dev qt6-base-private-dev qt6-declarative-dev \
+    qt6-declarative-private-dev liblilv-dev lv2-dev libsuil-dev libdbus-1-dev \
+    libx11-dev libgtk-3-dev
+
+# QML modules ZestBay loads when it runs
+sudo apt install qml6-module-qtquick qml6-module-qtquick-controls \
+    qml6-module-qtquick-layouts qml6-module-qtquick-shapes \
+    qml6-module-qtquick-templates qml6-module-qtquick-window \
+    qml6-module-qtqml-models qml6-module-qtqml-workerscript
+```
+
+The `rustc` package on Debian 13 and Ubuntu 24.04 is older than ZestBay needs, so install Rust with [rustup](https://rustup.rs) there.
+
+#### Fedora
+
+```sh
+sudo dnf install rust cargo clang cmake pkgconf-pkg-config pipewire-devel \
+    qt6-qtbase-devel qt6-qtdeclarative-devel lilv-devel lv2-devel suil-devel \
+    gtk3-devel libX11-devel dbus-devel
+```
+
+#### Arch Linux
+
+```sh
+sudo pacman -S --needed base-devel rust clang cmake pipewire qt6-base \
+    qt6-declarative lilv lv2 suil gtk3 libx11 dbus
+```
+
+Leave out `rust` if you manage your toolchain with `rustup`.
 
 ### Build
 
@@ -321,6 +356,16 @@ cargo build --release
 ```
 
 The binaries are at `target/release/zestbay` and `target/release/zestbay-ui-bridge`.
+
+If the build stops in `cxx-qt-lib` with missing `QtQml/...` or `QtQuickControls2/...` headers and `qt5` in the include paths, it picked up Qt5 because the Qt6 development packages are not installed. Install them (see above), then run `cargo clean` and build again.
+
+### Tests
+
+```sh
+cargo test --workspace
+```
+
+The LADSPA tests compile a small plugin against the system `ladspa.h`, which is in `ladspa-sdk` (Debian/Ubuntu), `ladspa-devel` (Fedora) or `ladspa` (Arch Linux). It is only needed for the tests, not to build or run ZestBay.
 
 ### Run
 
