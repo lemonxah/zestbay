@@ -2,10 +2,12 @@ mod clap;
 mod layout;
 mod lv2;
 mod midi;
+mod osc;
 mod patchbay;
 mod pipewire;
 mod plugin;
 mod presets;
+mod session;
 mod subgraph;
 mod tray;
 mod ui;
@@ -83,6 +85,16 @@ fn main() {
         let probe_args: Vec<String> = args[pos + 1..].to_vec();
         plugin::sandbox::run_probe_main(&probe_args);
         // run_probe_main never returns
+    }
+
+    // Before anything reads or writes the config.
+    match session::parse_args(&args[1..]).and_then(session::init) {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!("zestbay: {e}");
+            eprintln!("Usage: zestbay [--session <name> | --session_path <folder>]");
+            std::process::exit(2);
+        }
     }
 
     if args.iter().any(|a| a == "--safe-mode") {

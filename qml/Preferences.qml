@@ -21,6 +21,39 @@ ZbWindow {
     signal gridSizeChanged(int px)
 
     property var prefs: ({})
+    property var sessionInfo: ({ current: "", path: "", sessions: [] })
+    property string sessionError: ""
+    property string sessionToDelete: ""
+
+    ZbDialog {
+        id: deleteSessionConfirm
+        title: "Delete session?"
+        primaryText: "Delete"
+        secondaryText: "Cancel"
+        width: Math.min(prefsWindow.width * 0.8, 420)
+
+        Text {
+            width: parent ? parent.width : 380
+            wrapMode: Text.WordWrap
+            font.family: Theme.fontSans
+            font.pixelSize: Theme.sizeBody
+            color: Theme.textPrimary
+            text: "The session \u201c" + prefsWindow.sessionToDelete + "\u201d and everything saved in it (plugins, links, rules, layout) is deleted. This can't be undone. Presets and settings are kept."
+        }
+        onAccepted: {
+            prefsWindow.sessionError = controller.delete_session(prefsWindow.sessionToDelete);
+            prefsWindow.sessionToDelete = "";
+            prefsWindow.loadSessions();
+        }
+    }
+
+    Connections {
+        target: controller
+        function onSession_changed() {
+            prefsWindow.loadSessions();
+        }
+    }
+
 
     readonly property var themeModes: ["system", "dark", "light"]
 
@@ -32,8 +65,18 @@ ZbWindow {
         }
     }
 
+    function loadSessions() {
+        try {
+            sessionInfo = JSON.parse(controller.get_sessions_json());
+        } catch (e) {
+            sessionInfo = { current: "", path: "", sessions: [] };
+        }
+    }
+
     function open() {
         loadPrefs();
+        loadSessions();
+        sessionError = "";
         prefsWindow.visible = true;
         prefsWindow.raise();
         prefsWindow.requestActivate();
@@ -197,6 +240,40 @@ ZbWindow {
 
     // Slider row: text left, value read-out right, slider and range labels
     // beneath. Saved on release (or on each keyboard step).
+    // A number typed into a field, committed on Enter or when focus leaves.
+    component NumberRow: RowLayout {
+        id: numberRow
+        property string title
+        property string description
+        property string key
+        property int fallback: 0
+        Layout.fillWidth: true
+        Layout.leftMargin: Theme.grid * 4
+        Layout.rightMargin: Theme.grid * 4
+        Layout.topMargin: Theme.grid * 3
+        Layout.bottomMargin: Theme.grid * 3
+        spacing: Theme.grid * 4
+
+        RowText {
+            Layout.fillWidth: true
+            title: numberRow.title
+            description: numberRow.description
+        }
+        ZbTextField {
+            Layout.alignment: Qt.AlignVCenter
+            Layout.preferredWidth: 90
+            horizontalAlignment: TextInput.AlignRight
+            inputMethodHints: Qt.ImhDigitsOnly
+            validator: IntValidator { bottom: 1024; top: 65535 }
+            text: String(prefsWindow.pref(numberRow.key, numberRow.fallback))
+            onEditingFinished: {
+                if (acceptableInput)
+                    prefsWindow.setPref(numberRow.key, parseInt(text));
+                text = Qt.binding(() => String(prefsWindow.pref(numberRow.key, numberRow.fallback)));
+            }
+        }
+    }
+
     component SliderRow: ColumnLayout {
         id: sliderRow
         property string title
@@ -335,6 +412,123 @@ ZbWindow {
                     spacing: Theme.dialogPadding
 
                     SettingsSection {
+                        label: "Session"
+                        hint: "Switching saves this session and loads the other."
+
+                        RowText {
+                            Layout.fillWidth: true
+                            Layout.leftMargin: Theme.grid * 4
+                            Layout.rightMargin: Theme.grid * 4
+                            Layout.topMargin: Theme.grid * 3
+                            Layout.bottomMargin: Theme.grid * 3
+                            title: prefsWindow.sessionInfo.current !== "" ? "Current: " + prefsWindow.sessionInfo.current : "Current: opened from a folder"
+                            description: prefsWindow.sessionInfo.path
+                        }
+                        Repeater {
+                            model: prefsWindow.sessionInfo.sessions
+                            delegate: ColumnLayout {
+                                required property string modelData
+                                Layout.fillWidth: true
+                                spacing: 0
+                                ZbDivider { Layout.fillWidth: true }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Layout.leftMargin: Theme.grid * 4
+                                    Layout.rightMargin: Theme.grid * 4
+                                    Layout.topMargin: Theme.grid * 2
+                                    Layout.bottomMargin: Theme.grid * 2
+                                    spacing: Theme.grid * 4
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: modelData
+                                        elide: Text.ElideRight
+                                        font.family: Theme.fontSans
+                                        font.pixelSize: Theme.sizeBody
+                                        color: Theme.textPrimary
+                                    }
+                                    // The open session is marked; the others get icon buttons.
+                                    ZbIcon {
+                                        visible: modelData === prefsWindow.sessionInfo.current
+                                        name: "check"
+                                        size: 14
+                                        color: Theme.accent
+                                    }
+                                    ZbButton {
+                                        id: switchButton
+                                        visible: modelData !== prefsWindow.sessionInfo.current
+                                        iconName: "switch"
+                                        iconSize: 14
+                                        textColor: Theme.textIcon
+                                        onClicked: {
+                                            prefsWindow.sessionError = controller.switch_session(modelData);
+                                            prefsWindow.loadSessions();
+                                        }
+                                        ZbTooltip {
+                                            visible: switchButton.hovered
+                                            text: "Switch to session"
+                                        }
+                                    }
+                                    ZbButton {
+                                        id: deleteButton
+                                        visible: modelData !== prefsWindow.sessionInfo.current
+                                        iconName: "trash"
+                                        iconSize: 14
+                                        destructive: true
+                                        onClicked: {
+                                            prefsWindow.sessionToDelete = modelData;
+                                            deleteSessionConfirm.open();
+                                        }
+                                        ZbTooltip {
+                                            visible: deleteButton.hovered
+                                            text: "Delete session"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        ZbDivider { Layout.fillWidth: true }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Layout.leftMargin: Theme.grid * 4
+                            Layout.rightMargin: Theme.grid * 4
+                            Layout.topMargin: Theme.grid * 3
+                            Layout.bottomMargin: Theme.grid * 3
+                            spacing: Theme.grid * 3
+                            ZbTextField {
+                                id: newSessionField
+                                Layout.fillWidth: true
+                                placeholderText: "New session name"
+                                onAccepted: createSessionButton.clicked()
+                            }
+                            ZbButton {
+                                id: createSessionButton
+                                text: "Create"
+                                enabled: newSessionField.text.trim().length > 0
+                                onClicked: {
+                                    const err = controller.create_session(newSessionField.text.trim());
+                                    prefsWindow.sessionError = err;
+                                    if (err === "") {
+                                        newSessionField.text = "";
+                                        prefsWindow.loadSessions();
+                                    }
+                                }
+                            }
+                        }
+                        Text {
+                            visible: prefsWindow.sessionError !== ""
+                            Layout.fillWidth: true
+                            Layout.leftMargin: Theme.grid * 4
+                            Layout.rightMargin: Theme.grid * 4
+                            Layout.bottomMargin: Theme.grid * 3
+                            wrapMode: Text.Wrap
+                            text: prefsWindow.sessionError
+                            font.family: Theme.fontSans
+                            font.pixelSize: Theme.sizeCaption
+                            color: Theme.textDestructive
+                        }
+                    }
+
+                    SettingsSection {
                         label: "General"
 
                         ToggleRow {
@@ -356,6 +550,54 @@ ZbWindow {
                             description: "Create or update a rule whenever you connect ports by hand."
                             key: "auto_learn_rules"
                             fallback: true
+                        }
+                    }
+
+                    SettingsSection {
+                        label: "Remote control (OSC)"
+                        hint: "Control plugins over UDP. Links can't be controlled."
+
+                        ToggleRow {
+                            title: "Enable OSC"
+                            description: "Listen for OSC messages. Changes apply immediately."
+                            key: "osc_enabled"
+                            fallback: false
+                        }
+                        ZbDivider { Layout.fillWidth: true }
+                        NumberRow {
+                            title: "UDP port"
+                            description: "1024\u201365535."
+                            key: "osc_port"
+                            fallback: 9000
+                        }
+                        ZbDivider { Layout.fillWidth: true }
+                        ToggleRow {
+                            title: "Accept from other devices"
+                            description: "Listen on the network instead of only on this computer. There is no password, so anyone who can reach the port can control your plugins."
+                            key: "osc_listen_all"
+                            fallback: false
+                        }
+                        ZbDivider { Layout.fillWidth: true }
+                        Text {
+                            Layout.fillWidth: true
+                            Layout.leftMargin: Theme.grid * 4
+                            Layout.rightMargin: Theme.grid * 4
+                            Layout.topMargin: Theme.grid * 3
+                            Layout.bottomMargin: Theme.grid * 3
+                            wrapMode: Text.Wrap
+                            font.family: Theme.fontMono
+                            font.pixelSize: Theme.sizeCaption
+                            color: Theme.textMuted
+                            text: "/zestbay/plugins\n"
+                                + "/zestbay/plugin/<name>/enable <1|0>\n"
+                                + "/zestbay/plugin/<name>/bypass <1|0>\n"
+                                + "/zestbay/plugin/<name>/toggle\n"
+                                + "/zestbay/plugin/<name>/param/<param> <value>\n"
+                                + "/zestbay/plugin/<name>/param/<param>/normalized <0..1>\n"
+                                + "/zestbay/plugin/<name>/preset <preset name>\n"
+                                + "/zestbay/plugin/<name>/params\n\n"
+                                + "<name>: the plugin's name in lowercase, _ for spaces.\n"
+                                + "<param>: parameter symbol, name or port index."
                         }
                     }
 
@@ -457,6 +699,13 @@ ZbWindow {
                         label: "Advanced"
                         hint: "Rarely needed; some take effect after a restart."
 
+                        ToggleRow {
+                            title: "Hide unnamed nodes"
+                            description: "Leave out nodes that have no name of their own, such as the level-meter streams pavucontrol creates."
+                            key: "hide_unnamed_nodes"
+                            fallback: true
+                        }
+                        ZbDivider { Layout.fillWidth: true }
                         ToggleRow {
                             title: "Let idle devices sleep"
                             description: "Mark effect plugins as passive, so a mic or output linked only through plugins can suspend when nothing else uses it. Off keeps chains like mic \u2192 effect \u2192 headset running. Applies to plugins added or reloaded afterwards."

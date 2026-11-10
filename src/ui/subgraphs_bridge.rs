@@ -327,7 +327,7 @@ impl qobject::AppController {
         }
     }
 
-    fn send_owned(&self, key: String, spec: Option<OwnedNodeSpec>) {
+    pub(super) fn send_owned(&self, key: String, spec: Option<OwnedNodeSpec>) {
         if let Some(ref tx) = self.rust().cmd_tx {
             let _ = tx.send(PwCommand::SetOwnedNode { key, spec });
         }

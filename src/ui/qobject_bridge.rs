@@ -28,6 +28,23 @@ pub mod qobject {
         #[qinvokable]
         fn request_quit(self: Pin<&mut Self>);
 
+        /// {"current": name or "", "path": folder, "sessions": [names]}
+        #[qinvokable]
+        fn get_sessions_json(self: Pin<&mut Self>) -> QString;
+
+        /// Empty string on success, otherwise what went wrong.
+        #[qinvokable]
+        fn create_session(self: Pin<&mut Self>, name: QString) -> QString;
+
+        /// Delete a session's folder. Empty string on success, otherwise why not.
+        #[qinvokable]
+        fn delete_session(self: Pin<&mut Self>, name: QString) -> QString;
+
+        /// Save this session and load another one, live. Empty string when
+        /// it started, otherwise why it can't.
+        #[qinvokable]
+        fn switch_session(self: Pin<&mut Self>, name: QString) -> QString;
+
         #[qinvokable]
         fn restart_pipewire(self: Pin<&mut Self>);
 
@@ -103,6 +120,9 @@ pub mod qobject {
         fn rename_plugin(self: Pin<&mut Self>, node_id: u32, new_name: QString);
 
         #[qinvokable]
+        fn rename_port(self: Pin<&mut Self>, port_id: u32, new_name: QString);
+
+        #[qinvokable]
         fn get_plugin_params_json(self: Pin<&mut Self>, node_id: u32) -> QString;
 
         /// The plugin instance's current PipeWire node id, or -1. A reload
@@ -133,6 +153,9 @@ pub mod qobject {
         /// update if the name exists. The preset becomes the selected one.
         #[qinvokable]
         fn save_plugin_preset(self: Pin<&mut Self>, node_id: u32, name: QString) -> bool;
+
+        #[qinvokable]
+        fn save_modified_presets(self: Pin<&mut Self>) -> i32;
 
         #[qinvokable]
         fn delete_plugin_preset(self: Pin<&mut Self>, node_id: u32, name: QString);
@@ -403,6 +426,14 @@ pub mod qobject {
         #[qsignal]
         fn subgraphs_changed(self: Pin<&mut AppController>);
 
+        /// A session switch is starting: the view saves what it holds.
+        #[qsignal]
+        fn session_changing(self: Pin<&mut AppController>);
+
+        /// Another session is now open: the view reloads layout, pins etc.
+        #[qsignal]
+        fn session_changed(self: Pin<&mut AppController>);
+
         #[qsignal]
         fn midi_mapping_added(self: Pin<&mut AppController>, mapping_json: QString);
 
@@ -612,6 +643,19 @@ pub struct AppControllerRust {
     midi_mappings: Vec<crate::midi::MidiCcMapping>,
     midi_learn_target: Option<(u64, usize, String, crate::midi::MappingMode)>,
     plugins_frozen: bool,
+
+    /// OSC remote control, while enabled in the preferences.
+    osc: Option<crate::osc::OscServer>,
+
+    /// Set while one session is being taken down for another.
+    session_swap: Option<SessionSwap>,
+}
+
+/// A live session switch in progress: the plugins of the old session are
+/// being removed; the new one loads once they are gone.
+struct SessionSwap {
+    target: String,
+    started: Instant,
 }
 
 impl Default for AppControllerRust {
@@ -675,6 +719,8 @@ impl Default for AppControllerRust {
             midi_mappings: Vec::new(),
             midi_learn_target: None,
             plugins_frozen: false,
+            osc: None,
+            session_swap: None,
         }
     }
 }
@@ -688,6 +734,8 @@ impl qobject::AppController {
         // Before PipeWire starts and saved plugins are restored.
         crate::plugin::PASSIVE_EFFECTS
             .store(prefs.passive_plugins, std::sync::atomic::Ordering::Relaxed);
+        crate::pipewire::HIDE_UNNAMED_NODES
+            .store(prefs.hide_unnamed_nodes, std::sync::atomic::Ordering::Relaxed);
         log::info!(
             "Preferences: rule_settle={}ms, params_persist={}ms, links_persist={}ms, poll={}ms, auto_learn={}, pw_tick={}ms, pw_cooldown={}ms",
             prefs.rule_settle_ms,
@@ -699,6 +747,7 @@ impl qobject::AppController {
             prefs.pw_operation_cooldown_ms,
         );
         self.as_mut().rust_mut().prefs = prefs;
+        self.as_mut().restart_osc();
 
         let graph = GraphState::new();
 
@@ -724,6 +773,9 @@ impl qobject::AppController {
         patchbay.exclusive = self.rust().prefs.patchbay_exclusive;
         let exclusive = patchbay.exclusive;
         self.as_mut().set_patchbay_exclusive(exclusive);
+        patchbay.hide_unnamed = self.rust().prefs.hide_unnamed_nodes;
+        let hide_unnamed = patchbay.hide_unnamed;
+        self.as_mut().set_patchbay_hide_unnamed(hide_unnamed);
 
         self.as_mut().rust_mut().graph = Some(graph);
         self.as_mut().rust_mut().event_rx = Some(event_rx);
@@ -731,6 +783,26 @@ impl qobject::AppController {
         self.as_mut().rust_mut().patchbay = Some(patchbay);
         self.as_mut().rust_mut().plugin_manager = Some(plugin_manager);
 
+        let crashed_uris_str = self.as_mut().begin_session_restore();
+
+        let tray_state = crate::tray::spawn_tray();
+        if self.rust().prefs.start_minimized {
+            tray_state
+                .window_visible
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
+        self.as_mut().rust_mut().tray_state = Some(tray_state);
+        self.as_mut().sync_tray_flags();
+
+        self.as_mut().notify_crash_recovery(crashed_uris_str);
+
+        log::info!("AppController initialized successfully");
+    }
+
+    /// Load the open session's links, plugins, MIDI mappings and subgraphs
+    /// and start restoring them. Returns the plugins named by a crash marker
+    /// (a previous restore crashed), in which case nothing is restored.
+    fn begin_session_restore(mut self: Pin<&mut Self>) -> Option<String> {
         let saved_links = load_saved_links();
         if !saved_links.is_empty() {
             log::info!(
@@ -815,32 +887,7 @@ impl qobject::AppController {
             }
         }
         self.as_mut().load_subgraphs();
-
-        let tray_state = crate::tray::spawn_tray();
-        if self.rust().prefs.start_minimized {
-            tray_state
-                .window_visible
-                .store(false, std::sync::atomic::Ordering::Release);
-        }
-        self.as_mut().rust_mut().tray_state = Some(tray_state);
-        self.as_mut().sync_tray_flags();
-
-        if let Some(ref uris) = crashed_uris_str {
-            if has_known_good_plugins() {
-                self.as_mut()
-                    .crash_recovery_available(QString::from(uris.as_str()));
-            } else {
-                let msg = format!(
-                    "Crash detected during plugin restore. No known-good snapshot available.\n\
-                     Crashed plugins: {}\n\
-                     Restart without --safe-mode to try again, or manually edit plugins.json.",
-                    uris
-                );
-                self.as_mut().error_occurred(QString::from(msg.as_str()));
-            }
-        }
-
-        log::info!("AppController initialized successfully");
+        crashed_uris_str
     }
 
     /// Register and start a plugin from its saved form (plugins.json entry
@@ -930,6 +977,7 @@ impl qobject::AppController {
                 bypassed: sp.bypassed,
                 lv2_state: sp.lv2_state.clone(),
                 plugin_state: plugin_state.clone(),
+                port_names: sp.port_names.clone(),
             };
             mgr.register_instance(info);
         }
@@ -1039,35 +1087,37 @@ impl qobject::AppController {
         self.as_mut().persist_midi();
     }
 
+    /// Load the open session's patchbay rules and default node.
+    fn load_rules_and_default_node(mut self: Pin<&mut Self>) {
+        let rules = load_rules();
+        if !rules.is_empty() {
+            log::info!("Loaded {} patchbay rules", rules.len());
+        }
+        let default_node = std::fs::read_to_string(config_path("default_node.txt"))
+            .ok()
+            .map(|key| key.trim().to_string())
+            .filter(|key| !key.is_empty())
+            .map(|key| match key.find(':') {
+                Some(pos) => key[pos + 1..].to_string(),
+                None => key,
+            });
+        if let Some(ref name) = default_node {
+            log::info!("Loaded default node: {}", name);
+        }
+        if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
+            patchbay.set_rules(rules);
+            patchbay.rules_dirty = false;
+            patchbay.set_default_target(default_node);
+        }
+    }
+
     pub fn poll_events(mut self: Pin<&mut Self>) {
         self.as_mut().poll_plugin_scan();
+        self.as_mut().poll_osc();
+        self.as_mut().poll_session_swap();
         if !self.rust().rules_loaded {
             self.as_mut().rust_mut().rules_loaded = true;
-            let rules = load_rules();
-            if !rules.is_empty() {
-                log::info!("Loaded {} patchbay rules", rules.len());
-                if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
-                    patchbay.set_rules(rules);
-                    patchbay.rules_dirty = false;
-                }
-            }
-
-            // Load default node setting
-            let default_node_path = config_path("default_node.txt");
-            if let Ok(key) = std::fs::read_to_string(&default_node_path) {
-                let key = key.trim().to_string();
-                if !key.is_empty() {
-                    let display_name = if let Some(pos) = key.find(':') {
-                        key[pos + 1..].to_string()
-                    } else {
-                        key.clone()
-                    };
-                    log::info!("Loaded default node: {}", display_name);
-                    if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
-                        patchbay.set_default_target(Some(display_name));
-                    }
-                }
-            }
+            self.as_mut().load_rules_and_default_node();
         }
 
         let mut changed = false;
@@ -2289,9 +2339,23 @@ impl qobject::AppController {
                             crate::lv2::atom_state::port_label(&i.plugin_uri, &i.lv2_state, &p.name)
                         })
                         .unwrap_or(display_name);
+                    // Ports keep their place when the user renames them.
+                    let sort_name = display_name.clone();
+                    let display_name = self
+                        .rust()
+                        .plugin_manager
+                        .as_ref()
+                        .and_then(|m| {
+                            m.active_instances()
+                                .values()
+                                .find(|i| i.pw_node_id == Some(p.node_id))
+                        })
+                        .and_then(|i| i.port_names.get(&p.name).cloned())
+                        .unwrap_or(display_name);
                     serde_json::json!({
                         "id": p.id,
                         "name": display_name,
+                        "sortName": sort_name,
                         "direction": format!("{:?}", p.direction),
                         "nodeId": node_id,
                         "mediaType": media_str,
@@ -2882,8 +2946,217 @@ impl qobject::AppController {
         });
     }
 
-    pub fn request_quit(mut self: Pin<&mut Self>) {
-        log::info!("Quit requested");
+    pub fn get_sessions_json(self: Pin<&mut Self>) -> QString {
+        QString::from(
+            &serde_json::json!({
+                "current": crate::session::current_name().unwrap_or_default(),
+                "path": crate::session::dir().to_string_lossy(),
+                "sessions": crate::session::list(),
+            })
+            .to_string(),
+        )
+    }
+
+    pub fn create_session(self: Pin<&mut Self>, name: QString) -> QString {
+        match crate::session::create(name.to_string().trim()) {
+            Ok(()) => QString::from(""),
+            Err(e) => QString::from(&e),
+        }
+    }
+
+    pub fn delete_session(self: Pin<&mut Self>, name: QString) -> QString {
+        match crate::session::delete(&name.to_string()) {
+            Ok(()) => QString::from(""),
+            Err(e) => QString::from(&e),
+        }
+    }
+
+    pub fn switch_session(mut self: Pin<&mut Self>, name: QString) -> QString {
+        match self.as_mut().begin_session_swap(&name.to_string()) {
+            Ok(()) => QString::from(""),
+            Err(e) => QString::from(&e),
+        }
+    }
+
+    /// Start switching to another session: save this one, take its plugins
+    /// and subgraphs down, and (in `poll_session_swap`) load the other.
+    fn begin_session_swap(mut self: Pin<&mut Self>, name: &str) -> Result<(), String> {
+        if self.rust().session_swap.is_some() {
+            return Err("A session switch is already in progress.".into());
+        }
+        if !crate::session::list().iter().any(|n| n == name) {
+            return Err(format!("There is no session called \"{name}\"."));
+        }
+        if crate::session::current_name().as_deref() == Some(name) {
+            return Err(format!("\"{name}\" is already open."));
+        }
+        let ready = !self.rust().plugins_scanning
+            && self.rust().plugin_scan_progress >= 1.0
+            && self.rust().restore_instance_ids.is_empty()
+            && self.rust().pending_plugin_adds.is_empty()
+            && self
+                .rust()
+                .plugin_manager
+                .as_ref()
+                .is_some_and(|mgr| mgr.startup_complete());
+        if !ready {
+            return Err("ZestBay is still starting up. Try again in a moment.".into());
+        }
+        log::info!("Switching to session \"{name}\"");
+        self.as_mut().session_changing();
+        self.as_mut().save_session_now();
+
+        // From here on nothing is written until the new session is open.
+        crate::session::suspend_writes(true);
+
+        let (owned_keys, running, idle): (Vec<String>, Vec<u64>, Vec<u64>) = {
+            let sgs = &self.rust().subgraphs;
+            let mut keys: Vec<String> = sgs
+                .defs
+                .iter()
+                .flat_map(|d| d.node_specs().into_iter().map(|(k, _)| k))
+                .collect();
+            keys.extend(sgs.vdevs.iter().map(|v| v.key()));
+            let (mut running, mut idle) = (Vec::new(), Vec::new());
+            if let Some(mgr) = self.rust().plugin_manager.as_ref() {
+                for (id, info) in mgr.active_instances() {
+                    if info.active && info.pw_node_id.is_some() {
+                        running.push(*id);
+                    } else {
+                        idle.push(*id);
+                    }
+                }
+            }
+            (keys, running, idle)
+        };
+        for key in owned_keys {
+            self.send_owned(key, None);
+        }
+        if let Some(ref tx) = self.rust().cmd_tx {
+            for instance_id in &running {
+                let _ = tx.send(PwCommand::RemovePlugin {
+                    instance_id: *instance_id,
+                });
+            }
+        }
+        // Plugins that never started have nothing to wait for.
+        for instance_id in idle {
+            if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager {
+                mgr.remove_instance(instance_id);
+            }
+            self.as_mut().drop_plugin_midi_mappings(instance_id);
+        }
+        self.as_mut().rust_mut().session_swap = Some(SessionSwap {
+            target: name.to_string(),
+            started: Instant::now(),
+        });
+        Ok(())
+    }
+
+    /// Finish a session switch once the old plugins are gone (or have taken
+    /// too long to go).
+    fn poll_session_swap(mut self: Pin<&mut Self>) {
+        const GIVE_UP_AFTER: Duration = Duration::from_secs(8);
+        let Some(swap) = self.rust().session_swap.as_ref() else {
+            return;
+        };
+        let drained = self
+            .rust()
+            .plugin_manager
+            .as_ref()
+            .is_none_or(|mgr| mgr.active_instances().is_empty());
+        if !drained && swap.started.elapsed() < GIVE_UP_AFTER {
+            return;
+        }
+        if !drained {
+            log::warn!("Old plugins did not all stop in time; switching session anyway");
+        }
+        let target = swap.target.clone();
+        self.as_mut().finish_session_swap(&target);
+    }
+
+    fn finish_session_swap(mut self: Pin<&mut Self>, target: &str) {
+        self.as_mut().rust_mut().session_swap = None;
+        if let Err(e) = crate::session::activate(target) {
+            crate::session::suspend_writes(false);
+            self.as_mut().error_occurred(QString::from(&e));
+            return;
+        }
+
+        // Nothing of the old session may linger.
+        crate::PLUGINS_FROZEN.store(false, std::sync::atomic::Ordering::SeqCst);
+        list_clear(&LOAD_FAILED);
+        list_clear(&SAVE_BLOCKED);
+        {
+            let mut rust = self.as_mut().rust_mut();
+            rust.plugins_frozen = false;
+            rust.plugins_load_failed = false;
+            rust.restore_instance_ids.clear();
+            rust.restore_started_at = None;
+            rust.restore_batch_size = 0;
+            rust.pending_links.clear();
+            rust.last_graph_links.clear();
+            rust.forgotten_link_nodes.clear();
+            rust.links_retry_due = false;
+            rust.links_dirty = false;
+            rust.links_dirty_since = None;
+            rust.links_suppressed_until = None;
+            rust.params_dirty = false;
+            rust.params_dirty_since = None;
+            rust.preset_state_refresh.clear();
+            rust.midi_mappings.clear();
+            rust.dormant_midi_mappings.clear();
+            rust.midi_learn_target = None;
+            rust.last_learned_mapping = None;
+            rust.pending_conflict_mapping = None;
+            rust.state_request_sent_at = None;
+            rust.last_state_autosave = Instant::now();
+            rust.subgraphs = Subgraphs::default();
+            if let Some(ref mut mgr) = rust.plugin_manager {
+                mgr.reset_for_new_session();
+            }
+        }
+        if let Some(ref tx) = self.rust().cmd_tx {
+            let _ = tx.send(PwCommand::CancelMidiLearn);
+        }
+        crate::session::suspend_writes(false);
+
+        // Load the new one, the way startup does.
+        self.as_mut().load_rules_and_default_node();
+        self.as_mut().rust_mut().rules_loaded = true;
+        let crashed = self.as_mut().begin_session_restore();
+        self.as_mut().notify_crash_recovery(crashed);
+        self.as_mut().rust_mut().links_retry_due = true;
+        self.as_mut().finish_plugin_startup();
+        self.as_mut().refresh_cache();
+        self.as_mut().sync_tray_plugins();
+        self.as_mut().subgraphs_changed();
+        self.as_mut().session_changed();
+        self.as_mut().graph_changed();
+        log::info!("Session \"{target}\" is open");
+    }
+
+    /// Tell the user a previous restore crashed (a crash marker was found).
+    fn notify_crash_recovery(mut self: Pin<&mut Self>, crashed: Option<String>) {
+        let Some(uris) = crashed else { return };
+        if has_known_good_plugins() {
+            self.as_mut()
+                .crash_recovery_available(QString::from(uris.as_str()));
+        } else {
+            let msg = format!(
+                "Crash detected during plugin restore. No known-good snapshot available.\n\
+                 Crashed plugins: {}\n\
+                 Restart without --safe-mode to try again, or manually edit plugins.json.",
+                uris
+            );
+            self.as_mut().error_occurred(QString::from(msg.as_str()));
+        }
+    }
+
+    /// Write the open session's state to disk: plugin states, links,
+    /// plugins, subgraphs and MIDI mappings. Used on quit and before
+    /// switching to another session.
+    fn save_session_now(mut self: Pin<&mut Self>) {
         let frozen = crate::PLUGINS_FROZEN.load(std::sync::atomic::Ordering::SeqCst);
         if self.plugins_persistable() {
             self.as_mut()
@@ -2902,11 +3175,18 @@ impl qobject::AppController {
             self.as_mut().persist_links_now();
         }
         persist_active_plugins(self.rust().plugin_manager.as_ref());
+        self.as_mut().persist_midi();
+        self.persist_subgraphs();
         // Only a session that really loaded plugins.json (no safe mode, no
         // parse failure, restore finished) may become the known-good snapshot.
         if !frozen && !self.rust().plugins_load_failed && restore_complete {
             save_known_good_plugins();
         }
+    }
+
+    pub fn request_quit(mut self: Pin<&mut Self>) {
+        log::info!("Quit requested");
+        self.as_mut().save_session_now();
         crate::lv2::ui::shutdown_gtk_thread();
         crate::exit_now(0);
     }
@@ -3325,6 +3605,7 @@ impl qobject::AppController {
                 bypassed: false,
                 lv2_state: default_state.clone(),
                 plugin_state: None,
+                port_names: Default::default(),
             };
             mgr.register_instance(info);
         }
@@ -3434,6 +3715,7 @@ impl qobject::AppController {
             if let Some(ref graph) = self.rust().graph {
                 graph.set_node_description(node_id, &name_str);
             }
+            crate::plugin::cpu_stats::global_cpu_tracker().rename(instance_id, &name_str);
             // Links are saved by display name: drop the old-name entries, the
             // current links are re-saved under the new name.
             if let Some(old_name) = old_name
@@ -3454,6 +3736,30 @@ impl qobject::AppController {
                 node_id
             );
         }
+    }
+
+    /// Give a plugin port a name of the user's choosing; an empty name goes
+    /// back to the port's own.
+    pub fn rename_port(mut self: Pin<&mut Self>, port_id: u32, new_name: QString) {
+        let new_name = new_name.to_string().trim().to_string();
+        let Some(port) = self.rust().graph.as_ref().and_then(|g| g.get_port(port_id)) else {
+            return;
+        };
+        let Some(instance_id) = self.find_instance_id_for_node(port.node_id) else {
+            log::warn!("rename_port: port {} does not belong to a plugin", port_id);
+            return;
+        };
+        if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager
+            && let Some(info) = mgr.get_instance_mut(instance_id)
+        {
+            if new_name.is_empty() {
+                info.port_names.remove(&port.name);
+            } else {
+                info.port_names.insert(port.name.clone(), new_name);
+            }
+        }
+        persist_active_plugins(self.rust().plugin_manager.as_ref());
+        self.as_mut().graph_changed();
     }
 
     pub fn get_plugin_params_json(self: Pin<&mut Self>, node_id: u32) -> QString {
@@ -3507,45 +3813,280 @@ impl qobject::AppController {
         port_index: u32,
         value: f32,
     ) {
-        let instance_id = self.find_instance_id_for_node(node_id);
-        if let Some(instance_id) = instance_id {
-            if let Some(ref tx) = self.rust().cmd_tx {
-                let _ = tx.send(PwCommand::SetPluginParameter {
-                    instance_id,
-                    port_index: port_index as usize,
-                    value,
-                });
-            }
-            if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager {
-                mgr.update_parameter(instance_id, port_index as usize, value);
-            }
-            self.as_mut().rust_mut().params_dirty = true;
-            if self.rust().params_dirty_since.is_none() {
-                self.as_mut().rust_mut().params_dirty_since = Some(Instant::now());
-            }
+        if let Some(instance_id) = self.find_instance_id_for_node(node_id) {
+            self.as_mut()
+                .set_instance_parameter(instance_id, port_index as usize, value);
         }
     }
 
     pub fn set_plugin_bypass(mut self: Pin<&mut Self>, node_id: u32, bypassed: bool) {
-        let instance_id = self.find_instance_id_for_node(node_id);
-        if let Some(instance_id) = instance_id {
-            if let Some(ref tx) = self.rust().cmd_tx {
-                let _ = tx.send(PwCommand::SetPluginBypass {
-                    instance_id,
-                    bypassed,
-                });
-            }
-            if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager
-                && let Some(info) = mgr.get_instance_mut(instance_id)
-            {
-                info.bypassed = bypassed;
-            }
-            self.as_mut().rust_mut().params_dirty = true;
-            if self.rust().params_dirty_since.is_none() {
-                self.as_mut().rust_mut().params_dirty_since = Some(Instant::now());
-            }
+        if let Some(instance_id) = self.find_instance_id_for_node(node_id) {
+            self.as_mut().set_instance_bypass(instance_id, bypassed);
             // Let the graph view pick up the new bypass state.
             self.as_mut().graph_changed();
+        }
+    }
+
+    fn set_instance_parameter(mut self: Pin<&mut Self>, instance_id: u64, port_index: usize, value: f32) {
+        if let Some(ref tx) = self.rust().cmd_tx {
+            let _ = tx.send(PwCommand::SetPluginParameter {
+                instance_id,
+                port_index,
+                value,
+            });
+        }
+        if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager {
+            mgr.update_parameter(instance_id, port_index, value);
+        }
+        self.as_mut().rust_mut().params_dirty = true;
+        if self.rust().params_dirty_since.is_none() {
+            self.as_mut().rust_mut().params_dirty_since = Some(Instant::now());
+        }
+    }
+
+    fn set_instance_bypass(mut self: Pin<&mut Self>, instance_id: u64, bypassed: bool) {
+        if let Some(ref tx) = self.rust().cmd_tx {
+            let _ = tx.send(PwCommand::SetPluginBypass {
+                instance_id,
+                bypassed,
+            });
+        }
+        if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager
+            && let Some(info) = mgr.get_instance_mut(instance_id)
+        {
+            info.bypassed = bypassed;
+        }
+        self.as_mut().rust_mut().params_dirty = true;
+        if self.rust().params_dirty_since.is_none() {
+            self.as_mut().rust_mut().params_dirty_since = Some(Instant::now());
+        }
+    }
+
+    /// (Re)start the OSC server to match the preferences.
+    fn restart_osc(mut self: Pin<&mut Self>) {
+        // Free the port before binding it again.
+        self.as_mut().rust_mut().osc = None;
+        let (enabled, port, all) = {
+            let p = &self.rust().prefs;
+            (p.osc_enabled, p.osc_port, p.osc_listen_all)
+        };
+        if !enabled {
+            return;
+        }
+        match crate::osc::OscServer::start(all, port) {
+            Ok(server) => self.as_mut().rust_mut().osc = Some(server),
+            Err(e) => {
+                log::error!("OSC could not listen on port {port}: {e}");
+                self.as_mut().error_occurred(QString::from(
+                    format!("OSC could not listen on port {port}: {e}").as_str(),
+                ));
+            }
+        }
+    }
+
+    /// The plugin an OSC address names: its stable id, or its name in the
+    /// lowercase `_` form. The lowest instance id wins if two names collide.
+    fn find_osc_plugin(&self, key: &str) -> Option<u64> {
+        let want = crate::osc::slug(key);
+        self.rust()
+            .plugin_manager
+            .as_ref()?
+            .active_instances()
+            .iter()
+            .filter(|(_, i)| i.stable_id == key || crate::osc::slug(&i.display_name) == want)
+            .map(|(id, _)| *id)
+            .min()
+    }
+
+    fn poll_osc(mut self: Pin<&mut Self>) {
+        let requests = match self.rust().osc.as_ref() {
+            Some(server) => server.drain(),
+            None => return,
+        };
+        if requests.is_empty() {
+            return;
+        }
+        let mut changed = false;
+        for req in requests {
+            changed |= self.as_mut().handle_osc(req);
+        }
+        if changed {
+            self.as_mut().graph_changed();
+        }
+    }
+
+    /// Apply one OSC request. Returns whether the graph view needs a refresh.
+    fn handle_osc(mut self: Pin<&mut Self>, req: crate::osc::OscRequest) -> bool {
+        use crate::osc::{OscAction, slug};
+        use rosc::OscType;
+
+        let reply = |this: &Self, addr: &str, args: Vec<OscType>| {
+            if let Some(server) = this.rust().osc.as_ref() {
+                server.reply(req.from, addr, args);
+            }
+        };
+        // While a session is being swapped the plugins are going away; only
+        // the session list can be asked for.
+        if self.rust().session_swap.is_some() && !matches!(req.action, OscAction::ListSessions) {
+            log::debug!("OSC: ignored while the session is switching");
+            return false;
+        }
+        match req.action {
+            OscAction::ListSessions => {
+                let current = crate::session::current_name();
+                for name in crate::session::list() {
+                    let is_current = current.as_deref() == Some(name.as_str());
+                    reply(
+                        &self,
+                        "/zestbay/session",
+                        vec![OscType::String(name), OscType::Int(is_current as i32)],
+                    );
+                }
+                false
+            }
+            OscAction::LoadSession { name } => {
+                if let Err(e) = self.as_mut().begin_session_swap(&name) {
+                    log::warn!("OSC: could not load session \"{name}\": {e}");
+                    reply(&self, "/zestbay/error", vec![OscType::String(e)]);
+                }
+                false
+            }
+            OscAction::ListPlugins => {
+                let mut rows: Vec<(u64, String, String, bool)> = self
+                    .rust()
+                    .plugin_manager
+                    .iter()
+                    .flat_map(|m| m.active_instances().iter())
+                    .map(|(id, i)| (*id, slug(&i.display_name), i.display_name.clone(), !i.bypassed))
+                    .collect();
+                rows.sort();
+                for (_, key, name, enabled) in rows {
+                    reply(
+                        &self,
+                        "/zestbay/plugin",
+                        vec![
+                            OscType::String(key),
+                            OscType::String(name),
+                            OscType::Int(enabled as i32),
+                        ],
+                    );
+                }
+                false
+            }
+            OscAction::ListParams { plugin } => {
+                let Some(id) = self.find_osc_plugin(&plugin) else {
+                    log::debug!("OSC: no plugin \"{plugin}\"");
+                    return false;
+                };
+                let rows: Vec<(String, crate::plugin::ParameterValue)> = self
+                    .rust()
+                    .plugin_manager
+                    .as_ref()
+                    .and_then(|m| m.get_instance(id))
+                    .map(|i| (slug(&i.display_name), i.parameters.clone()))
+                    .map(|(key, params)| params.into_iter().map(|p| (key.clone(), p)).collect())
+                    .unwrap_or_default();
+                for (key, p) in rows {
+                    reply(
+                        &self,
+                        "/zestbay/param",
+                        vec![
+                            OscType::String(key),
+                            OscType::String(p.symbol),
+                            OscType::String(p.name),
+                            OscType::Float(p.value),
+                            OscType::Float(p.min),
+                            OscType::Float(p.max),
+                        ],
+                    );
+                }
+                false
+            }
+            OscAction::Enable { plugin, enabled } => {
+                let Some(id) = self.find_osc_plugin(&plugin) else {
+                    log::debug!("OSC: no plugin \"{plugin}\"");
+                    return false;
+                };
+                self.as_mut().set_instance_bypass(id, !enabled);
+                true
+            }
+            OscAction::Toggle { plugin } => {
+                let Some(id) = self.find_osc_plugin(&plugin) else {
+                    log::debug!("OSC: no plugin \"{plugin}\"");
+                    return false;
+                };
+                let bypassed = self
+                    .rust()
+                    .plugin_manager
+                    .as_ref()
+                    .and_then(|m| m.get_instance(id))
+                    .is_some_and(|i| i.bypassed);
+                self.as_mut().set_instance_bypass(id, !bypassed);
+                true
+            }
+            OscAction::Param {
+                plugin,
+                param,
+                value,
+                normalized,
+            } => {
+                let Some(id) = self.find_osc_plugin(&plugin) else {
+                    log::debug!("OSC: no plugin \"{plugin}\"");
+                    return false;
+                };
+                let target = self
+                    .rust()
+                    .plugin_manager
+                    .as_ref()
+                    .and_then(|m| m.get_instance(id))
+                    .and_then(|i| {
+                        let want = slug(&param);
+                        i.parameters
+                            .iter()
+                            .find(|p| p.symbol.eq_ignore_ascii_case(&param))
+                            .or_else(|| {
+                                i.parameters
+                                    .iter()
+                                    .find(|p| !p.name.is_empty() && slug(&p.name) == want)
+                            })
+                            .or_else(|| {
+                                let index = param.parse::<usize>().ok()?;
+                                i.parameters.iter().find(|p| p.port_index == index)
+                            })
+                            .cloned()
+                    });
+                let Some(p) = target else {
+                    log::debug!("OSC: plugin \"{plugin}\" has no parameter \"{param}\"");
+                    return false;
+                };
+                let value = if normalized {
+                    p.min + value.clamp(0.0, 1.0) * (p.max - p.min)
+                } else {
+                    value.max(p.min).min(p.max)
+                };
+                self.as_mut().set_instance_parameter(id, p.port_index, value);
+                true
+            }
+            OscAction::Preset { plugin, name } => {
+                let node_id = self
+                    .find_osc_plugin(&plugin)
+                    .and_then(|id| {
+                        self.rust()
+                            .plugin_manager
+                            .as_ref()?
+                            .get_instance(id)?
+                            .pw_node_id
+                    });
+                let Some(node_id) = node_id else {
+                    log::debug!("OSC: no running plugin \"{plugin}\"");
+                    return false;
+                };
+                if !self.as_mut().apply_plugin_preset(node_id, QString::from(&name)) {
+                    log::debug!("OSC: plugin \"{plugin}\" has no preset \"{name}\"");
+                    return false;
+                }
+                true
+            }
         }
     }
 
@@ -3671,6 +4212,7 @@ impl qobject::AppController {
                     .and_then(|n| store.get(&info.plugin_uri, n))
                     .is_some_and(|p| {
                         crate::presets::is_modified(p, &info.parameters, &info.lv2_state)
+                            || crate::presets::port_names_differ(p, &info.port_names)
                     });
                 out.insert(
                     node_id.to_string(),
@@ -3701,7 +4243,12 @@ impl qobject::AppController {
             .and_then(|m| m.get_instance(instance_id))
             .zip(store.get(&uri, selected))
             .map(|(info, preset)| {
-                crate::presets::differences(preset, &info.parameters, &info.lv2_state)
+                let mut changes =
+                    crate::presets::differences(preset, &info.parameters, &info.lv2_state);
+                if crate::presets::port_names_differ(preset, &info.port_names) {
+                    changes.push("Port names".to_string());
+                }
+                changes
             })
             .unwrap_or_default();
         if !changes.is_empty() {
@@ -3727,7 +4274,7 @@ impl qobject::AppController {
         let Some((instance_id, stable_id, uri)) = self.preset_target(node_id) else {
             return false;
         };
-        let (values, reload_state) = {
+        let (values, reload_state, port_names) = {
             let Some(preset) = self.rust().presets.get(&uri, &name) else {
                 return false;
             };
@@ -3745,8 +4292,20 @@ impl qobject::AppController {
             (
                 crate::presets::values_to_apply(preset, &info.parameters),
                 state,
+                preset.port_names.clone(),
             )
         };
+        // A preset saved with port names sets them; one saved without leaves
+        // the instance's own names alone.
+        if !port_names.is_empty() {
+            if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager
+                && let Some(info) = mgr.get_instance_mut(instance_id)
+            {
+                info.port_names = port_names;
+            }
+            persist_active_plugins(self.rust().plugin_manager.as_ref());
+            self.as_mut().graph_changed();
+        }
         if let Some(state) = reload_state {
             // The plugin's state (e.g. channel names) can only be restored
             // before it starts, so it is re-created in place with the state
@@ -3802,7 +4361,7 @@ impl qobject::AppController {
         let Some((instance_id, stable_id, uri)) = self.preset_target(node_id) else {
             return false;
         };
-        let (params, lv2_state, is_lv2) = match self
+        let (params, lv2_state, is_lv2, port_names) = match self
             .rust()
             .plugin_manager
             .as_ref()
@@ -3812,6 +4371,7 @@ impl qobject::AppController {
                 info.parameters.clone(),
                 info.lv2_state.clone(),
                 info.format == crate::plugin::PluginFormat::Lv2,
+                info.port_names.clone(),
             ),
             None => return false,
         };
@@ -3820,6 +4380,10 @@ impl qobject::AppController {
             .rust_mut()
             .presets
             .save(&uri, &name, &params, &lv2_state);
+        self.as_mut()
+            .rust_mut()
+            .presets
+            .set_port_names(&uri, &name, &port_names);
         self.as_mut()
             .rust_mut()
             .presets
@@ -3848,6 +4412,35 @@ impl qobject::AppController {
             lv2_state.len()
         );
         true
+    }
+
+    /// Ctrl+S: write every plugin's current settings back into the preset it
+    /// has selected, for the ones that differ from it. Returns how many.
+    pub fn save_modified_presets(mut self: Pin<&mut Self>) -> i32 {
+        let targets: Vec<(u32, String)> = {
+            let Some(mgr) = self.rust().plugin_manager.as_ref() else {
+                return 0;
+            };
+            let store = &self.rust().presets;
+            mgr.active_instances()
+                .values()
+                .filter_map(|info| {
+                    let node_id = info.pw_node_id?;
+                    let name = store.selected_name(&info.stable_id, &info.plugin_uri)?;
+                    let preset = store.get(&info.plugin_uri, name)?;
+                    (crate::presets::is_modified(preset, &info.parameters, &info.lv2_state)
+                        || crate::presets::port_names_differ(preset, &info.port_names))
+                    .then(|| (node_id, name.to_string()))
+                })
+                .collect()
+        };
+        let mut saved = 0;
+        for (node_id, name) in targets {
+            if self.as_mut().save_plugin_preset(node_id, QString::from(&name)) {
+                saved += 1;
+            }
+        }
+        saved
     }
 
     pub fn start_new_plugin_preset(mut self: Pin<&mut Self>, node_id: u32) {
@@ -4232,6 +4825,8 @@ impl qobject::AppController {
             crate::pipewire::HIDE_UNNAMED_NODES
                 .store(enabled, std::sync::atomic::Ordering::Relaxed);
         }
+        self.as_mut().rust_mut().prefs.hide_unnamed_nodes = enabled;
+        save_preferences(&self.rust().prefs);
         self.as_mut().set_patchbay_hide_unnamed(enabled);
         self.as_mut().sync_tray_flags();
         if self.rust().patchbay_enabled {
@@ -4393,6 +4988,29 @@ impl qobject::AppController {
                     crate::plugin::PASSIVE_EFFECTS.store(v, std::sync::atomic::Ordering::Relaxed);
                 }
             }
+            "hide_unnamed_nodes" => {
+                if let Ok(v) = val_str.parse::<bool>() {
+                    self.as_mut().toggle_patchbay_hide_unnamed(v);
+                }
+            }
+            "osc_enabled" => {
+                if let Ok(v) = val_str.parse::<bool>() {
+                    self.as_mut().rust_mut().prefs.osc_enabled = v;
+                    self.as_mut().restart_osc();
+                }
+            }
+            "osc_port" => {
+                if let Ok(v) = val_str.parse::<u16>() {
+                    self.as_mut().rust_mut().prefs.osc_port = v.max(1024);
+                    self.as_mut().restart_osc();
+                }
+            }
+            "osc_listen_all" => {
+                if let Ok(v) = val_str.parse::<bool>() {
+                    self.as_mut().rust_mut().prefs.osc_listen_all = v;
+                    self.as_mut().restart_osc();
+                }
+            }
             "snap_to_grid" => {
                 if let Ok(v) = val_str.parse::<bool>() {
                     self.as_mut().rust_mut().prefs.snap_to_grid = v;
@@ -4440,6 +5058,12 @@ impl qobject::AppController {
             patchbay.exclusive = exclusive;
         }
         self.as_mut().set_patchbay_exclusive(exclusive);
+        let hide_unnamed = self.rust().prefs.hide_unnamed_nodes;
+        if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
+            patchbay.hide_unnamed = hide_unnamed;
+        }
+        crate::pipewire::HIDE_UNNAMED_NODES.store(hide_unnamed, std::sync::atomic::Ordering::Relaxed);
+        self.as_mut().set_patchbay_hide_unnamed(hide_unnamed);
         log::info!("Preferences reset to defaults");
     }
 
@@ -4825,10 +5449,7 @@ fn days_to_ymd(days: i64) -> (i64, u32, u32) {
 }
 
 fn config_path(filename: &str) -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("zestbay")
-        .join(filename)
+    crate::session::config_path(filename)
 }
 
 // ---------------------------------------------------------------------------
@@ -4866,6 +5487,12 @@ fn list_contains(list: &std::sync::Mutex<Vec<String>>, name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn list_clear(list: &std::sync::Mutex<Vec<String>>) {
+    if let Ok(mut l) = list.lock() {
+        l.clear();
+    }
+}
+
 fn list_set(list: &std::sync::Mutex<Vec<String>>, name: &str, present: bool) {
     if let Ok(mut l) = list.lock() {
         l.retain(|n| n != name);
@@ -4898,6 +5525,9 @@ fn timestamp_string() -> String {
 /// rename over the target, fsync the directory.
 fn write_atomic(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
+    if crate::session::writes_suspended() {
+        return Ok(());
+    }
     let result = (|| {
         let dir = path
             .parent()
@@ -5128,6 +5758,9 @@ struct SavedPlugin {
     /// Older configs omit this and use background discovery on the first run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     scan_info: Option<crate::plugin::PluginInfo>,
+    /// User-chosen port names, by port name.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    port_names: std::collections::BTreeMap<String, String>,
 }
 
 impl From<&crate::plugin::PluginInstanceInfo> for SavedPlugin {
@@ -5149,6 +5782,7 @@ impl From<&crate::plugin::PluginInstanceInfo> for SavedPlugin {
                 .collect(),
             format: info.format.as_str().to_string(),
             scan_info: info.scan_info.clone(),
+            port_names: info.port_names.clone(),
             lv2_state: info.lv2_state.clone(),
             plugin_state: info
                 .plugin_state
@@ -5865,6 +6499,22 @@ struct Preferences {
     /// suspend when nothing else uses them (see plugin::PASSIVE_EFFECTS).
     #[serde(default)]
     pub passive_plugins: bool,
+
+    /// Hide nodes that have no name of their own (e.g. pavucontrol's
+    /// level-meter streams).
+    #[serde(default = "Preferences::default_hide_unnamed_nodes")]
+    pub hide_unnamed_nodes: bool,
+
+    /// Accept OSC messages that enable, disable and tune plugins.
+    #[serde(default)]
+    pub osc_enabled: bool,
+
+    #[serde(default = "Preferences::default_osc_port")]
+    pub osc_port: u16,
+
+    /// Listen on every network interface instead of only this machine.
+    #[serde(default)]
+    pub osc_listen_all: bool,
 }
 
 impl Preferences {
@@ -5910,6 +6560,12 @@ impl Preferences {
     fn default_snap_to_grid() -> bool {
         true
     }
+    fn default_hide_unnamed_nodes() -> bool {
+        true
+    }
+    fn default_osc_port() -> u16 {
+        crate::osc::DEFAULT_PORT
+    }
 }
 
 impl Default for Preferences {
@@ -5930,6 +6586,10 @@ impl Default for Preferences {
             snap_to_grid: Self::default_snap_to_grid(),
             grid_size_px: Self::default_grid_size_px(),
             passive_plugins: false,
+            hide_unnamed_nodes: Self::default_hide_unnamed_nodes(),
+            osc_enabled: false,
+            osc_port: Self::default_osc_port(),
+            osc_listen_all: false,
         }
     }
 }
@@ -6105,6 +6765,7 @@ mod tests {
             lv2_state: Vec::new(),
             plugin_state: Some(base64::engine::general_purpose::STANDARD.encode(&blob)),
             scan_info: None,
+            port_names: Default::default(),
         };
         let json = serde_json::to_string(&sp).unwrap();
         let back: SavedPlugin = serde_json::from_str(&json).unwrap();
@@ -6172,6 +6833,7 @@ mod tests {
                 bypassed: old.bypassed,
                 lv2_state: Vec::new(),
                 plugin_state: old.decode_plugin_state(),
+                port_names: Default::default(),
             });
             assert!(!manager.startup_complete());
             manager.set_available_plugins(vec![discovered.clone()]);

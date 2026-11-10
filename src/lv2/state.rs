@@ -295,9 +295,7 @@ impl StatePathContext {
 /// Directory holding the state files (makePath/mapPath) of one plugin
 /// instance, identified by its stable id.
 pub fn instance_state_dir(plugin_uri: &str, scope: &str) -> std::path::PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("~/.config"))
-        .join("zestbay")
+    crate::session::dir()
         .join("plugin-state")
         .join(sanitize_uri(plugin_uri))
         .join(sanitize_uri(scope))
@@ -434,10 +432,7 @@ impl Lv2StatePathSetup {
     /// `default_scope` names the per-instance directory used until
     /// `set_scope` is called (so unscoped instances never share files).
     pub fn new(plugin_uri: &str, default_scope: &str) -> Self {
-        let config_dir = dirs::config_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("~/.config"));
-        let base_dir = config_dir
-            .join("zestbay")
+        let base_dir = crate::session::dir()
             .join("plugin-state")
             .join(sanitize_uri(plugin_uri));
         let state_dir = base_dir.join(sanitize_uri(default_scope));
