@@ -22,7 +22,7 @@ Item {
         // Theme lives in the qml/ directory, not visible from here.
         Qt.createQmlObject('import QtQuick; import "' + qmlDir + '"; QtObject { Component.onCompleted: Theme.mode = "'
                            + mode + '" }', root)
-        var isMain = target === "main" || target === "main-presets"
+        var isMain = target === "main" || target === "main-presets" || target === "main-sessions" || target === "main-portmenu"
         var file = isMain ? "main.qml" : target + ".qml"
         var c = Qt.createComponent(qmlDir + file)
         if (c.status !== Component.Ready) {
@@ -34,6 +34,13 @@ Item {
         if (target === "PluginParams") w.openForNode(30)
         else if (!isMain && w.open) w.open()
         w.visible = true
+        if (target === "main-sessions" || target === "main-portmenu") {
+            // The whole window with the session dropdown / a port's menu open.
+            menuShot.win = w
+            menuShot.kind = target
+            menuShot.start()
+            return
+        }
         if (target === "main-presets") {
             // The whole window with a plugin node's preset dropdown open.
             presetShot.win = w
@@ -52,6 +59,81 @@ Item {
             if (r) return r
         }
         return null
+    }
+
+    // Walk Items and their non-visual children (menus are only in `data`).
+    function findMenu(item, wanted) {
+        var d = item.data
+        for (var i = 0; i < d.length; i++) {
+            var o = d[i]
+            if (o && typeof o.insertItem === "function" && typeof o.itemAt === "function") {
+                for (var k = 0; k < o.count; k++) {
+                    var it = o.itemAt(k)
+                    if (it && it.text === wanted) return o
+                }
+            }
+            if (o && o.data !== undefined) {
+                var r = findMenu(o, wanted)
+                if (r) return r
+            }
+        }
+        return null
+    }
+
+    Timer {
+        id: menuShot
+        property var win
+        property string kind
+        interval: 2500
+        onTriggered: {
+            var graph = root.findByFunction(win.contentItem, "openPresetMenu")
+            if (!graph) { console.warn("no graph view found"); Qt.quit(); return }
+            var menu = null
+            if (kind === "main-sessions") {
+                menu = root.findMenu(win.header, "New session\u2026")
+                if (!menu) { console.warn("no session menu"); Qt.quit(); return }
+                var btn = menu.parent
+                menu.popup(btn, 0, btn.height + 6)
+                menuMirror.hostOffset = btn.mapToItem(graph, 0, btn.height + 6)
+            } else {
+                graph.contextNodeId = 30
+                graph.contextNode = graph.findNodeData(30)
+                graph.contextPortId = 3010
+                menu = root.findMenu(graph, "Disconnect")
+                if (!menu) { console.warn("no port menu"); Qt.quit(); return }
+                var pp = graph.portPositions[3010]
+                menu.popup(graph, pp.cx * graph.zoom + graph.panX + 18, pp.cy * graph.zoom + graph.panY - 6)
+                menuMirror.hostOffset = Qt.point(menu.x, menu.y)
+            }
+            menuMirror.menu = menu
+            menuMirror.graph = graph
+            menuMirror.win = win
+            menuMirror.start()
+        }
+    }
+
+    Timer {
+        id: menuMirror
+        property var menu
+        property var graph
+        property var win
+        property point hostOffset
+        interval: 600
+        onTriggered: {
+            var bg = menu.background, ct = menu.contentItem
+            var bw = menu.width, bh = menu.height
+            var cx = menu.leftPadding, cy = menu.topPadding
+            var cw = ct.width, ch = ct.height
+            bg.parent = graph
+            ct.parent = graph
+            bg.z = 100000
+            ct.z = 100001
+            bg.x = hostOffset.x; bg.y = hostOffset.y; bg.width = bw; bg.height = bh
+            ct.x = hostOffset.x + cx; ct.y = hostOffset.y + cy; ct.width = cw; ct.height = ch
+            grab.win = win
+            grab.interval = 500
+            grab.start()
+        }
     }
 
     Timer {
