@@ -3729,6 +3729,7 @@ impl qobject::AppController {
                 .remove(&name_str);
             self.as_mut().mark_links_dirty();
             persist_active_plugins(self.rust().plugin_manager.as_ref());
+            self.as_mut().sync_tray_plugins();
             self.as_mut().graph_changed();
         } else {
             log::warn!(

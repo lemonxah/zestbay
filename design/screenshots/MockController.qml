@@ -28,6 +28,8 @@ QtObject {
     signal crash_recovery_available(string crashed_uris)
     signal plugin_parameter_changed(var instance_id, var port_index, real value)
     signal subgraphs_changed()
+    signal session_changing()
+    signal session_changed()
 
     // The subgraph the view is inside ("" = main graph; "sub" on the command
     // line starts inside "Mic Chain").
@@ -88,7 +90,8 @@ QtObject {
                      { id: 3002, name: "midi_out", direction: "Output", mediaType: "Midi" },
                      { id: 3003, name: "output_0", direction: "Output", mediaType: "Audio" },
                      { id: 3004, name: "output_1", direction: "Output", mediaType: "Audio" }]
-            for (var i = 0; i < 8; i++) a.push({ id: 3010 + i, name: "input_" + i, direction: "Input", mediaType: "Audio" })
+            var renamed = ["Daw L", "Daw R", "Media L", "Media R", "Comms L", "Comms R", "Mic", "Mic"]
+            for (var i = 0; i < 8; i++) a.push({ id: 3010 + i, name: renamed[i], direction: "Input", mediaType: "Audio" })
             return a })(),
         40: stereoIn(4000),
         41: stereoIn(4100),
@@ -199,7 +202,8 @@ QtObject {
         return JSON.stringify({ rule_settle_ms: 500, params_persist_ms: 1000, links_persist_ms: 2000, poll_interval_ms: 100,
                                 auto_learn_rules: true, start_minimized: false, close_to_tray: false, pw_tick_interval_ms: 10,
                                 pw_operation_cooldown_ms: 50, patchbay_exclusive: true, snap_gap_px: 10, snap_to_grid: true,
-                                grid_size_px: 24, theme: light ? "light" : "dark" })
+                                grid_size_px: 24, theme: light ? "light" : "dark",
+                                hide_unnamed_nodes: true, osc_enabled: true, osc_port: 9000, osc_listen_all: false })
     }
     function get_poll_interval_ms() { return 100 }
     function get_viewport_json() { return JSON.stringify({ panX: 16, panY: 8, zoom: 1 }) }
@@ -277,6 +281,15 @@ QtObject {
     function add_virtual_device(n, k, c) { return "" }
     function update_virtual_device(id, n, c) {}
     function remove_virtual_device(id) {}
+    // ---- Sessions ----
+    property string sessionName: "studio"
+    function get_sessions_json() {
+        return JSON.stringify({ current: sessionName, path: "/home/user/.config/zestbay/sessions/" + sessionName,
+                                sessions: ["live", "streaming", "studio"] })
+    }
+    function create_session(n) { return "" }
+    function switch_session(n) { return "" }
+    function delete_session(n) { return "" }
     function backup_rules() {}
     function set_window_visible(v) {}
     function set_default_node(k) {}

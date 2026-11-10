@@ -42,6 +42,9 @@ shot light main          main-light       "$LIGHT"
 shot dark  main-presets  presets          "$DARK"
 # Just the mixer card and its open preset dropdown.
 [ -f "$OUT/presets.png" ] && magick "$OUT/presets.png" -crop 640x1180+1620+270 +repage "$OUT/presets.png"
+# The toolbar's session dropdown, and a plugin port's right-click menu.
+shot dark  main-sessions sessions         "$DARK"
+shot dark  main-portmenu port-menu        "$DARK"
 # Dialog content is captured without the window's padding; add it back.
 shot dark  RuleEditor    rules            "$DARK" 48
 shot dark  PluginBrowser add-plugin       "$DARK" 48

@@ -103,7 +103,8 @@ Carla is a full-featured plugin host and JACK patchbay. The differences are abou
 - Plugins with many unused ports fold them into a "n more" row
 - **Default node**: right-click a sink or plugin → Set as default; app streams without a rule are routed there
 - Drag a plugin onto a wire to insert it into that connection
-- Right-click menus for nodes, wires and the canvas
+- Right-click menus for nodes, wires, ports and the canvas; right-click a port's name or pin to **rename** it or **disconnect** everything on it (see [Renaming nodes and ports](#renaming-nodes-and-ports))
+- **Hide unnamed nodes** (Preferences › Advanced, on by default) leaves out nodes with no name of their own, such as pavucontrol's level-meter streams
 - Dark and light themes, or follow the desktop
 - Status bar with node/link counts, a CPU sparkline and the rules state
 
@@ -120,13 +121,24 @@ Carla is a full-featured plugin host and JACK patchbay. The differences are abou
   - **VST3**: Embedded X11 windows with IPlugFrame resize support
   - **CLAP**: Embedded X11 windows with GUI resize and timer support
 - Multiple simultaneous native plugin UIs
-- Bypass toggle and rename per plugin instance
+- Bypass toggle per plugin instance; rename plugins and their ports (see [Renaming nodes and ports](#renaming-nodes-and-ports))
 - Plugin state (parameters, bypass, LV2 state, VST2/VST3/CLAP state, connections) persisted across sessions
 - **Persistent LSP input names**: rename channels in an LSP Mixer LV2 editor and the names appear on the corresponding node input ports within about a second. Names are saved with the plugin state and restored after restarting ZestBay. Stereo channels show L/R suffixes; routing keeps its stable port identifiers.
 - **Crash protection**: each plugin is test-loaded in a separate process before it runs in ZestBay, so a crashing plugin is skipped instead of taking the app down. If a restore still crashes, the next start enters safe mode and offers the last known-good plugin set
 - **Presets** per plugin: save a plugin's settings once and reuse them on any other instance (see [Plugin Presets](#plugin-presets))
 - **CPU usage** window: per-plugin DSP load over time
 - Optional "Let idle devices sleep" (passive effects) so a device linked only through plugins can suspend
+
+### Renaming nodes and ports
+
+**Nodes.** Right-click a plugin → **Rename…** (a subgraph: **Rename / edit…**; a virtual device: **Edit virtual device…**). The dialog opens with the name selected, so just type the new one. The name is saved, shows in the graph, in the **CPU usage** window and in the tray, and the plugin's saved links follow it.
+
+**Ports of plugins.** Right-click a port's **name** (or its pin, without dragging) on a plugin node → **Rename port…**. An empty name restores the original. Renamed ports keep their place in the list, and links are unaffected. Port names are saved with the plugin in `plugins.json`, so they come back after a restart, and they can be saved with a preset:
+- Saving a preset also saves the plugin's port names. Applying a preset that has names sets them; a preset saved without any (including every preset from before this feature) leaves your names alone.
+- A preset shows the modified `*` marker when its saved port names differ from the plugin's.
+- **Ctrl+S** writes every plugin's current settings, port names included, back into the preset it has selected, for the plugins that differ from it. Plugins with no preset selected are skipped; nothing new is created.
+
+Only plugin ports can be renamed (device and stream ports are named by their owners). The same port menu has **Disconnect**, which removes every link on that port; right-dragging from a pin still draws a block wire.
 
 ### Plugin Presets
 
@@ -154,6 +166,7 @@ Every plugin node has a preset row above the **On / UI / Params** buttons: a dro
 - All the plugin's parameter values.
 - For LV2 plugins, the plugin's saved state too, which is where things that aren't ordinary parameters live, such as the **LSP Mixer's channel names**. Applying a preset with state re-creates the plugin in place (same name, same links), with a brief audio gap. Files the plugin keeps for its state (written through the LV2 state path features) are copied into the preset and into the target instance when the preset is applied. Those per-instance state folders under `~/.config/zestbay/plugin-state/` are not deleted when a plugin is removed.
 - CLAP, VST3 and VST2 presets hold parameter values only.
+- Presets also hold the plugin's [port names](#renaming-nodes-and-ports).
 
 Presets are kept per plugin, so a preset made for one plugin never shows up on another, and every instance of that plugin shares the same list. They are stored in `~/.config/zestbay/presets.json` (under `~/.var/app/io.github.lemonxah.ZestBay/config/zestbay/` for the Flatpak). To use your presets on another machine, copy that file.
 
@@ -207,6 +220,69 @@ ZestBay provides a comprehensive set of LV2 host features, allowing it to load t
 - **Templates**: save a subgraph (plugins, settings, wiring, layout) and insert it again from Add plugin › Subgraphs, or Duplicate it
 - **Virtual devices**: create virtual sinks and sources (like "Comms Sink") from the canvas menu instead of PipeWire config; edit or remove them from their node menu. They exist while ZestBay runs; a name another device already uses is skipped
 
+### Sessions
+
+A session is one complete setup: its plugins (with state, presets selection and port names), links, patchbay rules, subgraphs, virtual devices, MIDI mappings, node layout, pins, hidden nodes, default node and view. Keep several (for example "studio", "live" and "streaming") and switch between them without restarting.
+
+- **Pick one** from the dropdown in the toolbar, between the ZestBay name and the search field. **New session…** creates an empty one and switches to it. The dustbin on a row deletes that session after a confirmation; the open session can't be deleted. Preferences › Session has the same list with switch and delete buttons.
+- **Switching is live.** ZestBay saves the open session, stops its plugins and virtual devices, then loads the other one the way startup does. Audio through ZestBay's plugins stops for a few seconds. It refuses while ZestBay is still starting up. The new session's patchbay rules apply as soon as it opens, so with **Exclusive mode** on, links the new rules don't allow are removed.
+- **Open one from the command line** (for that run only; it doesn't change which session opens by default):
+
+  ```sh
+  zestbay --session studio                 # ~/.config/zestbay/sessions/studio/, created if missing
+  zestbay --session_path /path/to/folder   # use any folder as the session
+  ```
+
+  Without either, ZestBay opens the one you last switched to (remembered in `current_session`), otherwise `default`.
+- **Where they live:** one folder per session in `~/.config/zestbay/sessions/<name>/`, so the list of sessions is the list of folders and you can copy, back up or share one with a file manager. Names are plain folder names: no slashes, not starting with a dot.
+- **Shared by every session:** preferences, window size, OSC settings, **presets** (`presets.json` and its files) and the subgraph templates.
+- **First run after updating:** your existing files are copied into the `default` session. The old files stay where they were.
+- **Over OSC:** `/zestbay/session/load "name"` switches session, `/zestbay/sessions` lists them (see below).
+
+### OSC Remote Control
+
+Control plugins from another program or device (TouchOSC, a script, `oscsend`, a stage controller) over UDP. Links are not controllable by design.
+
+Turn it on in **Preferences › Remote control (OSC)**:
+- **Enable OSC**: off by default; takes effect immediately.
+- **UDP port**: 9000 by default (1024-65535).
+- **Accept from other devices**: off by default, so only programs on this computer can reach it. There is no password; turn it on only on a network you trust.
+
+**Naming.** `<plugin>` is the plugin's name as shown in ZestBay, in lowercase with every run of other characters turned into `_`: "Reverb 1" is `reverb_1`, "LSP Compressor (stereo)" is `lsp_compressor_stereo`. The plugin's stable id also works. `<param>` is the parameter's symbol, its name in the same lowercase form, or its port index. Ask ZestBay for the exact names with the query messages below.
+
+| Address | Arguments | Effect |
+|---------|-----------|--------|
+| `/zestbay/plugin/<plugin>/enable` | `1` / `0` (none = on) | Turn the plugin on or off (off = bypassed) |
+| `/zestbay/plugin/<plugin>/bypass` | `1` / `0` (none = bypassed) | The reverse of `enable` |
+| `/zestbay/plugin/<plugin>/toggle` | none, or `1` | Flip on/off. A `0` is ignored, so a button that sends 1 on press and 0 on release toggles once |
+| `/zestbay/plugin/<plugin>/param/<param>` | number | Set the parameter in its own range; clamped to its minimum and maximum |
+| `/zestbay/plugin/<plugin>/param/<param>/normalized` | number 0.0-1.0 | Set the parameter as a fraction of its range |
+| `/zestbay/plugin/<plugin>/preset` | string | Apply a saved preset by exact name (same as picking it in the UI, including saved state and port names) |
+| `/zestbay/session/load` | string | Switch to another session, live |
+| `/zestbay/plugins` | none | Query: list the plugins |
+| `/zestbay/plugin/<plugin>/params` | none | Query: list the plugin's parameters |
+| `/zestbay/sessions` | none | Query: list the sessions |
+
+Numbers can be sent as float, int, double or boolean. Bundles are accepted.
+
+**Replies.** Queries are answered to the address and port the request came from:
+- `/zestbay/plugin <plugin> <name> <enabled 0|1>`, one message per plugin
+- `/zestbay/param <plugin> <symbol> <name> <value> <min> <max>`, one per parameter
+- `/zestbay/session <name> <open 0|1>`, one per session
+- `/zestbay/error <message>` when `/zestbay/session/load` fails (unknown session, already open, still starting up)
+
+**Examples** (with `oscsend` from liblo):
+
+```sh
+oscsend localhost 9000 /zestbay/plugin/reverb_1/enable i 0            # switch the reverb off
+oscsend localhost 9000 /zestbay/plugin/comp/param/threshold f -18.0  # set a value
+oscsend localhost 9000 /zestbay/plugin/comp/param/threshold/normalized f 0.5
+oscsend localhost 9000 /zestbay/plugin/comp/preset s "Vocal"
+oscsend localhost 9000 /zestbay/session/load s "live"
+```
+
+**Good to know.** Messages are applied on ZestBay's UI timer (100 ms by default; Preferences › Timing, minimum 16 ms), and a parameter sent repeatedly within one tick only counts once, so a fast fader doesn't pile up. Parameter changes are saved like changes made in the UI. While a session switch is in progress other messages are ignored.
+
 ### System Tray
 - Start minimized (background service mode) and close to tray
 - Left-click the tray icon to show or hide the window
@@ -221,29 +297,38 @@ ZestBay provides a comprehensive set of LV2 host features, allowing it to load t
 | Delete / Backspace | Disconnect the selected wires |
 | Escape | Cancel a drag or placement, clear the selection, then leave a subgraph |
 | Shift (while dragging) | Snap to nearby nodes (when snap to grid is off) |
+| Ctrl+S | Save every modified plugin's settings into its selected preset |
 | Ctrl+Q | Quit |
 
 ### Persistence
-Everything is saved to `~/.config/zestbay/` (`~/.var/app/io.github.lemonxah.ZestBay/config/zestbay/` for the Flatpak) as JSON:
+Everything is saved to `~/.config/zestbay/` (`~/.var/app/io.github.lemonxah.ZestBay/config/zestbay/` for the Flatpak) as JSON. Settings and libraries sit in that folder; each [session](#sessions) has its own folder under `sessions/<name>/` with everything that makes up a setup.
+
+**Shared by every session** (`~/.config/zestbay/`):
 
 | File | Contents |
 |------|----------|
-| `preferences.json` | All user settings |
-| `plugins.json` | Active plugin instances (LV2, LADSPA, VST2, VST3, CLAP) with parameters and state, including custom LSP Mixer input names |
-| `plugins.known_good.json` | Last plugin set that loaded cleanly (crash recovery) |
-| `links.json` | Connections of plugins, subgraphs and virtual devices |
-| `rules.json` | Patchbay connect and block rules |
-| `rule_backups/` | Saved rule backups |
-| `subgraphs.json` | Subgraphs: settings, member plugins, view |
+| `preferences.json` | All user settings, including OSC |
+| `window.json` | Window position and size |
+| `presets.json`, `preset-files/` | Plugin presets (with port names) and the state files they hold |
 | `subgraph_templates/` | Saved subgraph templates |
+| `current_session` | The session that opens by default |
+
+**Per session** (`~/.config/zestbay/sessions/<name>/`):
+
+| File | Contents |
+|------|----------|
+| `plugins.json` | Active plugin instances (LV2, LADSPA, VST2, VST3, CLAP) with parameters, state and port names, including custom LSP Mixer input names |
+| `plugins.known_good.json` | Last plugin set that loaded cleanly (crash recovery) |
+| `plugin-state/` | State files plugins keep per instance |
+| `links.json` | Connections of plugins, subgraphs and virtual devices |
+| `rules.json`, `rule_backups/` | Patchbay connect and block rules, and their backups |
+| `subgraphs.json` | Subgraphs: settings, member plugins, view |
 | `virtual_devices.json` | Virtual sinks and sources |
+| `midi_mappings.json` | MIDI CC/note-to-parameter mappings |
 | `layout.json` | Node positions in the graph view |
-| `pinned.json` | Pinned nodes |
-| `hidden.json` | Hidden nodes |
+| `pinned.json`, `hidden.json` | Pinned and hidden nodes |
 | `default_node.txt` | The default node for unruled app streams |
 | `viewport.json` | Pan and zoom state |
-| `window.json` | Window position and size |
-| `midi_mappings.json` | MIDI CC/note-to-parameter mappings |
 
 Subgraph and virtual device files from older versions are upgraded when ZestBay starts (the original is kept as `<file>.pre-upgrade`); a config file that can't be read is kept as `<file>.corrupt-<date>` and reported.
 
@@ -385,6 +470,8 @@ Command-line options:
 |--------|--------|
 | `--safe-mode` | Start without restoring saved plugins (they stay in `plugins.json`) |
 | `--no-probe` | Skip the crash-protection test load of plugins (faster, but a crashing plugin takes ZestBay down) |
+| `--session <name>` | Open the named [session](#sessions) for this run (created if it doesn't exist) |
+| `--session_path <folder>` | Use a folder as the session for this run (`--session-path` and `--option=value` also work) |
 
 `RUST_LOG=debug zestbay` shows detailed logs.
 
