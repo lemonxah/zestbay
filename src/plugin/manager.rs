@@ -40,6 +40,13 @@ impl PluginManager {
         self.startup_complete = true;
     }
 
+    /// Forget every instance and go back to "starting up", for loading
+    /// another session. The catalog of available plugins stays.
+    pub fn reset_for_new_session(&mut self) {
+        self.active_instances.clear();
+        self.startup_complete = false;
+    }
+
     /// Replace the entire catalog (called after scanning all formats).
     pub fn set_available_plugins(&mut self, plugins: Vec<PluginInfo>) {
         // Backfill old saves and refresh paths for relocated plugins. Keep a
@@ -202,6 +209,7 @@ mod tests {
             bypassed: false,
             lv2_state: Vec::new(),
             plugin_state: None,
+            port_names: Default::default(),
         });
         manager
     }

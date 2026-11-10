@@ -291,6 +291,9 @@ pub struct PluginInstanceInfo {
     pub lv2_state: Vec<crate::lv2::state::StateEntry>,
     /// Cached CLAP/VST3 opaque state blob, used for persistence
     pub plugin_state: Option<Vec<u8>>,
+    /// User-chosen port names, keyed by the port's own name. Saved with the
+    /// plugin and with its presets.
+    pub port_names: std::collections::BTreeMap<String, String>,
 }
 
 // ---------------------------------------------------------------------------

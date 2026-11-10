@@ -13,6 +13,7 @@ ZbWindow {
     title: "ZestBay"
 
     Component.onCompleted: {
+        loadSessions();
         try {
             var geo = JSON.parse(controller.get_window_geometry_json());
             if (geo.width && geo.height) {
@@ -172,6 +173,121 @@ ZbWindow {
         }
     }
 
+    // ---- Sessions (toolbar dropdown) --------------------------------------
+    property var sessionInfo: ({
+            current: "",
+            path: "",
+            sessions: []
+        })
+    // The session's name, or the folder's name when opened with --session_path.
+    readonly property string sessionLabel: sessionInfo.current !== "" ? sessionInfo.current : (sessionInfo.path.split("/").filter(s => s.length > 0).pop() || "Session")
+    property string pendingSession: ""
+
+    function loadSessions() {
+        try {
+            sessionInfo = JSON.parse(controller.get_sessions_json());
+        } catch (e) {
+            sessionInfo = {
+                current: "",
+                path: "",
+                sessions: []
+            };
+        }
+    }
+
+    ZbDialog {
+        id: switchSessionDialog
+        title: "Switch session?"
+        primaryText: "Switch"
+        secondaryText: "Cancel"
+        width: Math.min(mainWindow.width * 0.6, 460)
+
+        Text {
+            width: parent ? parent.width : 400
+            wrapMode: Text.WordWrap
+            font.family: Theme.fontSans
+            font.pixelSize: Theme.sizeBody
+            color: Theme.textPrimary
+            text: "ZestBay saves this session, stops its plugins and loads \u201c" + mainWindow.pendingSession + "\u201d. Audio through ZestBay's plugins stops for a few seconds."
+        }
+        onAccepted: {
+            const err = controller.switch_session(mainWindow.pendingSession);
+            if (err !== "")
+                graphView.showToast(err);
+        }
+    }
+
+    ZbDialog {
+        id: deleteSessionDialog
+        title: "Delete session?"
+        primaryText: "Delete"
+        secondaryText: "Cancel"
+        width: Math.min(mainWindow.width * 0.6, 460)
+
+        Text {
+            width: parent ? parent.width : 400
+            wrapMode: Text.WordWrap
+            font.family: Theme.fontSans
+            font.pixelSize: Theme.sizeBody
+            color: Theme.textPrimary
+            text: "The session \u201c" + mainWindow.pendingSession + "\u201d and everything saved in it (plugins, links, rules, layout) is deleted. This can't be undone. Presets and settings are kept."
+        }
+        onAccepted: {
+            const err = controller.delete_session(mainWindow.pendingSession);
+            if (err !== "")
+                graphView.showToast(err);
+            mainWindow.loadSessions();
+        }
+    }
+
+    Connections {
+        target: controller
+        function onSession_changed() {
+            mainWindow.loadSessions();
+            graphView.showToast("Session \u201c" + mainWindow.sessionLabel + "\u201d is open");
+        }
+    }
+
+    ZbDialog {
+        id: newSessionDialog
+        title: "New session"
+        primaryText: "Create and switch"
+        secondaryText: "Cancel"
+        width: 380
+        primaryEnabled: newSessionField.text.trim().length > 0 && mainWindow.sessionInfo.sessions.indexOf(newSessionField.text.trim()) < 0
+
+        ColumnLayout {
+            width: parent ? parent.width : 340
+            spacing: 8
+            ZbTextField {
+                id: newSessionField
+                Layout.fillWidth: true
+                placeholderText: "Session name"
+                onAccepted: if (newSessionDialog.primaryEnabled)
+                    newSessionDialog.accept()
+            }
+            Text {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.sizeCaption
+                color: Theme.textMuted
+                text: "The new session starts empty. ZestBay saves this one and switches to it."
+            }
+        }
+        onAboutToShow: newSessionField.text = ""
+        onOpened: newSessionField.forceActiveFocus()
+        onAccepted: {
+            const name = newSessionField.text.trim();
+            let err = controller.create_session(name);
+            if (err === "")
+                err = controller.switch_session(name);
+            mainWindow.loadSessions();
+            if (err !== "")
+                graphView.showToast(err);
+        }
+    }
+
     ZbDialog {
         id: restartPipewireDialog
         title: "Restart PipeWire?"
@@ -250,6 +366,16 @@ ZbWindow {
         onActivated: searchField.forceActiveFocus()
     }
 
+    // Writes each plugin's current settings back into its selected preset.
+    Shortcut {
+        sequence: "Ctrl+S"
+        onActivated: {
+            var n = controller.save_modified_presets();
+            graphView.presetChanged();
+            graphView.showToast(n === 0 ? "No modified presets to save" : (n === 1 ? "Saved 1 preset" : "Saved " + n + " presets"));
+        }
+    }
+
     // ---- Toolbar (replaces the menu bar; design bible §6.4) -------------
     header: Rectangle {
         implicitHeight: Theme.toolbarHeight
@@ -273,12 +399,80 @@ ZbWindow {
                 size: 26
             }
             Text {
-                text: "ZestBay"
+                text: "Current Session"
                 font.family: Theme.fontSans
                 font.pixelSize: 14
                 font.weight: Font.DemiBold
                 color: Theme.textStrong
-                Layout.rightMargin: 16
+                Layout.leftMargin: 4
+                Layout.rightMargin: 1
+            }
+
+            // Session picker: the open session's name; the menu lists the
+            // folders in the sessions directory.
+            ZbButton {
+                id: sessionButton
+                Layout.rightMargin: 12
+                text: mainWindow.sessionLabel
+                trailingIconName: "chevronDown"
+                onClicked: {
+                    mainWindow.loadSessions();
+                    sessionMenu.popup(sessionButton, 0, sessionButton.height + 6);
+                }
+                ZbTooltip {
+                    visible: parent.hovered && !sessionMenu.visible
+                    text: "Session: " + mainWindow.sessionInfo.path
+                }
+
+                ZbMenu {
+                    id: sessionMenu
+                    implicitWidth: 220
+                    Repeater {
+                        model: mainWindow.sessionInfo.sessions
+                        delegate: ZbMenuItem {
+                            required property string modelData
+                            implicitWidth: 208
+                            text: modelData
+                            selected: modelData === mainWindow.sessionInfo.current
+                            // Room for the delete button.
+                            rightPadding: selected ? 10 : 36
+                            onTriggered: {
+                                if (selected)
+                                    return;
+                                mainWindow.pendingSession = modelData;
+                                switchSessionDialog.open();
+                            }
+
+                            ZbButton {
+                                id: deleteButton
+                                z: 1
+                                anchors.right: parent.right
+                                anchors.rightMargin: 4
+                                anchors.verticalCenter: parent.verticalCenter
+                                visible: modelData !== mainWindow.sessionInfo.current
+                                compact: true
+                                iconName: "trash"
+                                iconSize: 14
+                                destructive: true
+                                onClicked: {
+                                    mainWindow.pendingSession = modelData;
+                                    sessionMenu.close();
+                                    deleteSessionDialog.open();
+                                }
+                                ZbTooltip {
+                                    visible: deleteButton.hovered
+                                    text: "Delete session"
+                                }
+                            }
+                        }
+                    }
+                    ZbMenuSeparator {}
+                    ZbMenuItem {
+                        implicitWidth: 208
+                        text: "New session\u2026"
+                        onTriggered: newSessionDialog.open()
+                    }
+                }
             }
 
             ZbSearchField {
@@ -484,13 +678,6 @@ ZbWindow {
                         enabled: controller.patchbay_enabled
                         checked: controller.patchbay_exclusive
                         onToggled: controller.toggle_patchbay_exclusive(!controller.patchbay_exclusive)
-                    }
-                    ZbMenuItem {
-                        // Off: rules only add links; nothing they don't cover is removed.
-                        text: "Hide Unnamed Nodes"
-                        checkable: true
-                        checked: controller.patchbay_hide_unnamed
-                        onToggled: controller.toggle_patchbay_hide_unnamed(!controller.patchbay_hide_unnamed)
                     }
                     ZbMenuItem {
                         text: "Apply rules now"

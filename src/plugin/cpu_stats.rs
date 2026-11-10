@@ -126,6 +126,13 @@ impl PluginCpuTracker {
         slot
     }
 
+    /// Change the name a registered plugin is listed under.
+    pub fn rename(&self, id: PluginInstanceId, name: &str) {
+        if let Some(entry) = self.slots.lock().unwrap().get_mut(&id) {
+            entry.0 = name.to_string();
+        }
+    }
+
     /// Unregister a plugin when it's removed.
     pub fn unregister(&self, id: PluginInstanceId) {
         self.slots.lock().unwrap().remove(&id);

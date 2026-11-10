@@ -69,6 +69,9 @@ pub struct Preset {
     /// mixer's channel names). Empty for plugins without state.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lv2_state: Vec<StateEntry>,
+    /// User-chosen port names, by port name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub port_names: BTreeMap<String, String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default)]
@@ -139,6 +142,7 @@ impl PresetStore {
                 })
                 .collect(),
             lv2_state: lv2_state.to_vec(),
+            port_names: BTreeMap::new(),
         };
         self.plugins
             .entry(uri.to_string())
@@ -153,6 +157,13 @@ impl PresetStore {
     pub fn set_lv2_state(&mut self, uri: &str, name: &str, lv2_state: Vec<StateEntry>) {
         if let Some(p) = self.plugins.get_mut(uri).and_then(|p| p.presets.get_mut(name)) {
             p.lv2_state = lv2_state;
+        }
+    }
+
+    /// Store the port names a preset is saved with.
+    pub fn set_port_names(&mut self, uri: &str, name: &str, port_names: &BTreeMap<String, String>) {
+        if let Some(p) = self.plugins.get_mut(uri).and_then(|p| p.presets.get_mut(name)) {
+            p.port_names = port_names.clone();
         }
     }
 
@@ -196,6 +207,13 @@ impl PresetStore {
             }
         }
     }
+}
+
+/// Whether the instance's port names differ from the ones `preset` was
+/// saved with. A preset saved without port names leaves them alone, so it
+/// never differs.
+pub fn port_names_differ(preset: &Preset, port_names: &BTreeMap<String, String>) -> bool {
+    !preset.port_names.is_empty() && preset.port_names != *port_names
 }
 
 /// The (port_index, value) pairs to apply `preset` to an instance with
@@ -392,6 +410,22 @@ mod tests {
         assert_eq!(indexed, values_to_apply_linear(&preset, &params));
         assert!(!indexed.is_empty());
         assert_eq!(values_to_apply(&preset, &[]), Vec::new());
+    }
+
+    #[test]
+    fn port_names_only_count_when_the_preset_has_them() {
+        let names = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+            pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        };
+        let mut s = PresetStore::default();
+        s.save("urn:p", "A", &[], &[]);
+        let plain = s.get("urn:p", "A").unwrap().clone();
+        assert!(!port_names_differ(&plain, &names(&[("in1", "Kick")])));
+        s.set_port_names("urn:p", "A", &names(&[("in1", "Kick")]));
+        let named = s.get("urn:p", "A").unwrap();
+        assert!(!port_names_differ(named, &names(&[("in1", "Kick")])));
+        assert!(port_names_differ(named, &names(&[("in1", "Snare")])));
+        assert!(port_names_differ(named, &BTreeMap::new()));
     }
 
     #[test]
