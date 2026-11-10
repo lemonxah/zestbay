@@ -6,7 +6,7 @@ export DH_VERBOSE = 1
 export CARGO_HOME = $(CURDIR)/debian/cargo-home
 export CARGO_TARGET_DIR = $(CURDIR)/target
 
-# Edition 2024 needs Rust >= 1.85. Use the newest versioned toolchain
+# ZestBay needs Rust >= 1.88 (edition 2024 with let chains). Use the newest versioned toolchain
 # (rust-1.NN) if installed, otherwise the default one.
 RUST_BIN := $(lastword $(sort $(wildcard /usr/lib/rust-1.*/bin)))
 ifneq ($(RUST_BIN),)

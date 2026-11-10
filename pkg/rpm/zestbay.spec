@@ -7,8 +7,8 @@ License:        MIT
 URL:            https://github.com/lemonxah/zestbay
 Source0:        %{name}-%{version}.tar.gz
 
-BuildRequires:  rust >= 1.85
-BuildRequires:  cargo
+BuildRequires:  rust >= 1.88
+BuildRequires:  cargo >= 1.88
 BuildRequires:  clang
 BuildRequires:  cmake
 BuildRequires:  pkg-config

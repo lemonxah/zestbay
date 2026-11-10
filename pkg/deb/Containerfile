@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libx11-dev libgtk-3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Edition 2024 needs Rust >= 1.85, newer than Ubuntu's packaged rustc
+# ZestBay needs Rust >= 1.88 (edition 2024 with let chains), newer than Ubuntu's packaged rustc
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
 RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable \
     && chmod -R a+rwX /opt/cargo /opt/rustup

@@ -45,6 +45,9 @@ shot dark  main-presets  presets          "$DARK"
 # The toolbar's session dropdown, and a plugin port's right-click menu.
 shot dark  main-sessions sessions         "$DARK"
 shot dark  main-portmenu port-menu        "$DARK"
+# Tight crops of those two for the website.
+[ -f "$OUT/sessions.png" ] && magick "$OUT/sessions.png" -crop 1180x430+0+0 +repage "$OUT/sessions-crop.png"
+[ -f "$OUT/port-menu.png" ] && magick "$OUT/port-menu.png" -crop 700x640+1700+300 +repage "$OUT/port-menu-crop.png"
 # Dialog content is captured without the window's padding; add it back.
 shot dark  RuleEditor    rules            "$DARK" 48
 shot dark  PluginBrowser add-plugin       "$DARK" 48

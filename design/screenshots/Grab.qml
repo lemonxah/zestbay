@@ -99,7 +99,7 @@ Item {
                 graph.contextNodeId = 30
                 graph.contextNode = graph.findNodeData(30)
                 graph.contextPortId = 3010
-                menu = root.findMenu(graph, "Disconnect")
+                menu = root.findMenu(graph, "Rename port\u2026")
                 if (!menu) { console.warn("no port menu"); Qt.quit(); return }
                 var pp = graph.portPositions[3010]
                 menu.popup(graph, pp.cx * graph.zoom + graph.panX + 18, pp.cy * graph.zoom + graph.panY - 6)
