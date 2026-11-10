@@ -427,19 +427,25 @@ ZbWindow {
                 ZbMenu {
                     id: sessionMenu
                     implicitWidth: 220
+                    // One Repeater for every row: a Menu puts Repeater items
+                    // after its static items, so "New session…" would come first.
                     Repeater {
-                        model: mainWindow.sessionInfo.sessions
+                        model: mainWindow.sessionInfo.sessions.map(n => ({ name: n, isNew: false })).concat([{ name: "New session\u2026", isNew: true }])
                         delegate: ZbMenuItem {
-                            required property string modelData
+                            required property var modelData
                             implicitWidth: 208
-                            text: modelData
-                            selected: modelData === mainWindow.sessionInfo.current
+                            text: modelData.name
+                            selected: !modelData.isNew && modelData.name === mainWindow.sessionInfo.current
                             // Room for the delete button.
-                            rightPadding: selected ? 10 : 36
+                            rightPadding: modelData.isNew || selected ? 10 : 36
                             onTriggered: {
+                                if (modelData.isNew) {
+                                    newSessionDialog.open();
+                                    return;
+                                }
                                 if (selected)
                                     return;
-                                mainWindow.pendingSession = modelData;
+                                mainWindow.pendingSession = modelData.name;
                                 switchSessionDialog.open();
                             }
 
@@ -449,13 +455,13 @@ ZbWindow {
                                 anchors.right: parent.right
                                 anchors.rightMargin: 4
                                 anchors.verticalCenter: parent.verticalCenter
-                                visible: modelData !== mainWindow.sessionInfo.current
+                                visible: !modelData.isNew && modelData.name !== mainWindow.sessionInfo.current
                                 compact: true
                                 iconName: "trash"
                                 iconSize: 14
                                 destructive: true
                                 onClicked: {
-                                    mainWindow.pendingSession = modelData;
+                                    mainWindow.pendingSession = modelData.name;
                                     sessionMenu.close();
                                     deleteSessionDialog.open();
                                 }
@@ -465,12 +471,6 @@ ZbWindow {
                                 }
                             }
                         }
-                    }
-                    ZbMenuSeparator {}
-                    ZbMenuItem {
-                        implicitWidth: 208
-                        text: "New session\u2026"
-                        onTriggered: newSessionDialog.open()
                     }
                 }
             }

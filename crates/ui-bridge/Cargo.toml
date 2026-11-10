@@ -2,6 +2,7 @@
 name = "zestbay-ui-bridge"
 version = "0.7.0"
 edition = "2024"
+rust-version = "1.88"
 description = "Standalone UI bridge process for ZestBay LV2 plugin hosting"
 
 [[bin]]

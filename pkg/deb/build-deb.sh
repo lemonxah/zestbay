@@ -16,7 +16,7 @@ set -euo pipefail
 #     libpipewire-0.3-dev qt6-base-dev qt6-base-private-dev qt6-declarative-dev
 #     qt6-declarative-private-dev liblilv-dev lv2-dev libsuil-dev libdbus-1-dev
 #     libx11-dev libgtk-3-dev
-#   plus Rust >= 1.85 from rustup (Ubuntu's packaged rustc is too old)
+#   plus Rust >= 1.88 from rustup (Ubuntu's packaged rustc is too old)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"

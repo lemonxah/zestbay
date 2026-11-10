@@ -194,7 +194,7 @@ fn query(tree: &[usize], mut pos: usize) -> usize {
     let mut sum = 0;
     while pos > 0 {
         sum += tree[pos];
-        pos -= pos.isolate_lowest_one();
+        pos -= pos & pos.wrapping_neg();
     }
     sum
 }
@@ -203,6 +203,6 @@ fn query(tree: &[usize], mut pos: usize) -> usize {
 fn update(tree: &mut [usize], mut pos: usize, val: usize, max_pos: usize) {
     while pos <= max_pos {
         tree[pos] += val;
-        pos += pos.isolate_lowest_one();
+        pos += pos & pos.wrapping_neg();
     }
 }
