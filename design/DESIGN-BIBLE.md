@@ -233,6 +233,14 @@ buttons. To add one, take the path from the design source (convert
 and add it to the list above. The patchbay canvas draws the same data with
 `ctx.path = Glyphs.icons[name].d`.
 
+Glyphs too intricate to hand-write are **traced**: `grab` and `select` (the
+canvas drag-mode switch) come from raster masters in `images/glyphs/`
+(generated with Nano Banana 2 as bold black line art on white), which
+`images/trace-glyphs.py` turns into filled outlines in `Glyphs.traced`
+(`fill: true`, 16-unit viewBox). `ZbIcon` draws them by the same `name` and
+tints them with `color` like any other glyph, so they follow the theme — never
+ship a raster icon in the UI. Use them at 16–18 px.
+
 ### 5.3 Scrolling
 
 Scroll bars sit **beside** the content in a reserved column, never on top of
@@ -423,6 +431,15 @@ button holds the old File / Help items.
 - **Virtual device dialog:** Name; Type (Output device / Input device
   segmented, fixed after creation); Channels stepper 1–16; caption: they
   exist while ZestBay runs.
+- **Drag mode switch:** at the canvas's top-left, 12 px in (the subgraph
+  breadcrumb sits 8 px to its right): a `bgPanel` pill (strong border,
+  radius 8, 34 tall) holding two 28×28 cells (radius 6, 2 px apart), `grab`
+  and `select` glyphs at 18 px. Exactly one is active: `accentFaint` fill,
+  1 px `accentRing` border, `accent` glyph; the other is `textMuted`
+  (`textIcon` on `bgHover` when hovered). **Grab** (default) makes a
+  left-drag on empty canvas pan like a middle-drag (open-hand cursor, closed
+  while panning; a plain click still clears the selection); **Select** draws
+  the selection box. **W** toggles; saved as preference `drag_mode`.
 - **Selection:** accent border + 3 px `accentRing` halo; the node's wires and
   pins turn accent.
 - **Search:** non-matching nodes at 35 % opacity; matching ports get a 2 px
