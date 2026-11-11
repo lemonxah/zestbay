@@ -166,20 +166,29 @@ QtObject {
     readonly property int wheelLineHeight: 72  // px per wheel "line" (ZbWheelScroll); 3 lines = 216 px/notch
 
     // ─── Node card geometry (patchbay canvas) ───────────────────────────
-    readonly property int nodeWidth: 184
-    readonly property int nodeWidthPlugin: 208
-    readonly property int nodeHeader: 34
-    readonly property int nodePortRow: 22
-    readonly property int nodePortsTop: 4
-    readonly property int nodePortsBottom: 8
-    readonly property int nodeFooter: 34
-    readonly property int nodeFooterButton: 22
-    readonly property int nodePresetRow: 30     // plugin cards: preset selector above the footer
-    readonly property int nodePin: 10
-    readonly property int nodePinHover: 12
-    readonly property int nodeChip: 18
-    readonly property int nodeGlyph: 12
-    readonly property int nodePadX: 14        // port label inset
+    // Card density (preference card_row_px, set by GraphView): the height of
+    // one port row, 22 px for the standard card. Everything on the card
+    // scales with it (Compact 18 px = 0.82, Spacious 26 px = 1.18; clamped to
+    // 0.73 … 1.45). Widths follow at 60 % of that, so port names keep most of
+    // their room; text sizes never change.
+    property int cardRow: 22
+    readonly property real nodeScale: Math.max(0.7, Math.min(1.45, cardRow / 22))
+    readonly property real nodeWidthScale: 1 + (nodeScale - 1) * 0.6
+    readonly property int nodeWidth: Math.round(184 * nodeWidthScale)
+    readonly property int nodeWidthPlugin: Math.round(208 * nodeWidthScale)
+    readonly property int nodeHeader: Math.round(34 * nodeScale)
+    readonly property int nodePortRow: Math.round(22 * nodeScale)
+    readonly property int nodePortsTop: Math.round(4 * nodeScale)
+    readonly property int nodePortsBottom: Math.round(8 * nodeScale)
+    readonly property int nodeFooter: Math.round(34 * nodeScale)
+    readonly property int nodeFooterButton: 22  // ZbButton "subtle" (fixed)
+    readonly property int nodeFooterBtn: Math.round(22 * nodeScale)  // buttons on node cards
+    readonly property int nodePresetRow: Math.round(30 * nodeScale)  // plugin cards: preset selector above the footer
+    readonly property int nodePin: Math.max(8, Math.round(10 * nodeScale))
+    readonly property int nodePinHover: nodePin + 2
+    readonly property int nodeChip: Math.max(14, Math.round(18 * nodeScale))
+    readonly property int nodeGlyph: Math.max(10, Math.round(12 * nodeScale))
+    readonly property int nodePadX: Math.round(14 * nodeScale)  // port label inset
     readonly property int gridPitch: 24
     readonly property int gridOffset: 12
 

@@ -3400,7 +3400,14 @@ impl qobject::AppController {
             }
         }
 
-        let config = layout::graph::LayoutConfig::default();
+        // Graph density (preference node_spacing_px): the gap between
+        // stacked nodes, and 2.5x that between columns (50 / 20 by default).
+        let spacing = f64::from(self.rust().prefs.node_spacing_px);
+        let config = layout::graph::LayoutConfig {
+            margin_x: spacing * 2.5,
+            margin_y: spacing,
+            ..Default::default()
+        };
         let mut pinned_by_id: HashMap<u32, (f64, f64)> = HashMap::new();
         for (key, pos) in &pinned_raw {
             if pos.len() >= 2
@@ -5027,6 +5034,16 @@ impl qobject::AppController {
                     self.as_mut().rust_mut().prefs.snap_gap_px = v.clamp(0, 200);
                 }
             }
+            "node_spacing_px" => {
+                if let Ok(v) = val_str.parse::<u32>() {
+                    self.as_mut().rust_mut().prefs.node_spacing_px = v.clamp(4, 96);
+                }
+            }
+            "card_row_px" => {
+                if let Ok(v) = val_str.parse::<u32>() {
+                    self.as_mut().rust_mut().prefs.card_row_px = v.clamp(16, 32);
+                }
+            }
             "drag_mode" => {
                 if matches!(val_str.as_str(), "grab" | "select") {
                     self.as_mut().rust_mut().prefs.drag_mode = val_str.clone();
@@ -6504,6 +6521,19 @@ struct Preferences {
     #[serde(default = "Preferences::default_grid_size_px")]
     pub grid_size_px: u32,
 
+    /// Graph density: the room Auto layout and the placement of new nodes
+    /// leave between stacked nodes, in graph units (pixels at 100 % zoom);
+    /// columns are 2.5x as far apart. Presets: 8 compact, 20 normal, 40 spacious.
+    #[serde(default = "Preferences::default_node_spacing_px")]
+    pub node_spacing_px: u32,
+
+    /// Node card density: the height of one port row on a node card, in
+    /// pixels at 100 % zoom; the rest of the card (header, footer,
+    /// paddings, pins, width) scales with it. Presets: 18 compact, 22 normal,
+    /// 26 spacious.
+    #[serde(default = "Preferences::default_card_row_px")]
+    pub card_row_px: u32,
+
     /// What a left-drag on empty canvas does: "grab" pans the view (like a
     /// middle-drag), "select" draws a selection box.
     #[serde(default = "Preferences::default_drag_mode")]
@@ -6574,6 +6604,12 @@ impl Preferences {
     fn default_snap_to_grid() -> bool {
         true
     }
+    fn default_node_spacing_px() -> u32 {
+        20
+    }
+    fn default_card_row_px() -> u32 {
+        22
+    }
     fn default_drag_mode() -> String {
         "grab".to_string()
     }
@@ -6602,6 +6638,8 @@ impl Default for Preferences {
             snap_gap_px: Self::default_snap_gap_px(),
             snap_to_grid: Self::default_snap_to_grid(),
             grid_size_px: Self::default_grid_size_px(),
+            node_spacing_px: Self::default_node_spacing_px(),
+            card_row_px: Self::default_card_row_px(),
             drag_mode: Self::default_drag_mode(),
             passive_plugins: false,
             hide_unnamed_nodes: Self::default_hide_unnamed_nodes(),

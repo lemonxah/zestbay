@@ -31,6 +31,12 @@ QtObject {
         "fit":        { vb: 14, sw: 1.5, d: "M2 5.5V2h3.5M8.5 2H12v3.5M12 8.5V12H8.5M5.5 12H2V8.5" },
         // Snap to grid (toolbar).
         "grid":       { vb: 14, sw: 1.4, d: "M5 1.5v11M9 1.5v11M1.5 5h11M1.5 9h11" },
+        // Density (toolbar): the gap between two nodes, with a double arrow.
+        "density":    { vb: 14, sw: 1.4, d: "M2 1.5h10M2 12.5h10M7 3.8v6.4M5 5.8L7 3.8l2 2M5 8.2L7 10.2l2-2" },
+        // Auto layout: a node feeding two others, tidily arranged.
+        "autoLayout": { vb: 14, sw: 1.4, d: "M1.5 5.2h3.5v3.6H1.5zM9 2h3.5v3.5H9zM9 8.5h3.5V12H9zM5 7h2M7 3.75v6.5M7 3.75h2M7 10.25h2" },
+        // Card density (toolbar): a node card with its header and port rows.
+        "cards":      { vb: 14, sw: 1.4, d: "M3 1.8h8a1.2 1.2 0 0 1 1.2 1.2v8a1.2 1.2 0 0 1-1.2 1.2H3A1.2 1.2 0 0 1 1.8 11V3A1.2 1.2 0 0 1 3 1.8zM1.8 5h10.4M4.5 7.3h5M4.5 9.4h5" },
         "trash":      { vb: 14, sw: 1.4, d: "M2 3.5h10M5.5 3.5V2h3v1.5M3.5 3.5l.6 8h5.8l.6-8" },
         // Two opposite arrows: switch to another session.
         "switch":     { vb: 14, sw: 1.5, d: "M2 4.5h9.5M9 2l2.5 2.5L9 7M12 9.5H2.5M5 7L2.5 9.5 5 12" },

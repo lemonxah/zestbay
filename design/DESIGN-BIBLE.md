@@ -225,7 +225,7 @@ joins at their native stroke width. `ZbIcon` and `ZbLogo` antialias with the
 Qt 6.6+ curve renderer (no layer; crisp at any scale factor) and fall back to
 a multisampled layer on older Qt — don't put vector shapes in multisampled
 layers elsewhere: those vanish on some HiDPI/software renderers. Available: `speaker mic headphones camera
-wave plug din pin pinFill search plus minus fit trash reset arrow block subgraph enter settings
+wave plug din pin pinFill search plus minus fit grid density trash reset arrow block subgraph enter settings
 menu close check grid chevronDown chevronRight` (`pinFill` is the filled head drawn
 under `pin` for the pinned state). Sizes: 12 in node chips, 14–16 in toolbars and
 buttons. To add one, take the path from the design source (convert
@@ -440,8 +440,76 @@ button holds the old File / Help items.
   left-drag on empty canvas pan like a middle-drag (open-hand cursor, closed
   while panning; a plain click still clears the selection); **Select** draws
   the selection box. **W** toggles; saved as preference `drag_mode`.
+- **Mode override hint:** bottom centre of the canvas, 18 px up: a `bgPanel`
+  pill (strong border, radius 8, 28 tall) reading *glyph · "Hold" · key cap ·
+  what it does* in `textMuted` 11 px, for the key that gives the **other**
+  mode's action: `Space` "to pan" in Select mode, `Shift` "and drag to select"
+  in Grab mode. The key cap is a mono 10 px outline tag (radius 4). While the
+  key is held the pill is **active**: `accentFaint` fill, `accentRing` border,
+  `accent` DemiBold text — "Panning — release `Space` to go back to Select".
+  Space pans from anywhere (over nodes too) in both modes. Toasts sit 10 px
+  above it.
 - **Selection:** accent border + 3 px `accentRing` halo; the node's wires and
-  pins turn accent.
+  pins turn accent. A box started with Shift or Ctrl adds to the selection.
+- **Wires:** hover and click reach 10 screen px either side of the curve
+  (`linkHitPx`), nearest wire wins; nodes and pins still win over wires.
+- **New-node cue:** a node that appears while you work gets one pulse: a 2 px
+  `accent` ring growing 3 → 16 px out of the card and fading over 1.6 s. If it
+  appeared out of view, an edge marker points to it instead: a 26 px
+  `bgPanel` + `accentFaint` pill (`accentRing` border) with a rotated `arrow`
+  glyph and "New: name" 11/Medium; click pans to the node, which then pulses.
+  Markers last 12 s. Nothing is cued for 2.5 s after start-up, a session
+  switch or entering/leaving a subgraph, nor for bursts of more than four.
+- **Graph density** (preference `node_spacing_px`, default 20; Compact 8 /
+  Normal 20 / Spacious 40, or any 4–96 px): how far apart nodes are, i.e. the
+  gap between stacked nodes; columns are 2.5× as far apart. Used by Auto
+  layout (`LayoutConfig.margin_y` / `margin_x`) and by the placement of new
+  nodes. With snap to grid on, gaps round up to the grid. It does not change
+  the cards.
+- **Card density** (preference `card_row_px`, default 22; Compact 18 / Normal
+  22 / Spacious 26, or any 16–32 px): how big the node cards are, as the
+  height of one port row. `Theme.cardRow` → `Theme.nodeScale` (row ÷ 22,
+  clamped 0.7 … 1.45): header, port row, paddings, footer, preset row, pins,
+  chip and glyph scale by it, card widths by 60 % of it; font sizes never
+  change, and `ZbButton` "subtle" keeps its fixed 22 px (`nodeFooterButton`;
+  cards use `nodeFooterBtn`). A change re-measures every card at once and
+  pushes cards that now overlap apart (the lower one down, one undo step;
+  pins are kept unless two pinned cards collide); the rest of the layout
+  stays until Auto layout.
+- **Density controls:** Preferences › Graph has a Compact / Normal / Spacious
+  segmented control and a pixel slider for each ("Graph density" + "Node
+  spacing", "Card density" + "Card row height"); when the slider is set to a
+  value of its own, no segment is active. The toolbar has one bordered cluster
+  right of the grid cluster, two cells: `density` glyph + "20px" (graph) and
+  `cards` glyph + "22px" (cards), each with a chevron and a menu of the three
+  presets (px as the right-hand hint), pixel values, and "Re-space now (Auto
+  layout)". Changing a density never moves existing nodes by itself (apart
+  from pushing overlapping cards apart); a toast says what it applied to.
+- **Auto layout:** a 34 px `bgPanel` button at the canvas's top-right (12 px
+  in, clear of the scroll bar; `autoLayout` glyph 18 px), the **L** key, and
+  the canvas menu. It never moves pinned nodes, and says so in the toast
+  ("moved 4 nodes; 28 pinned nodes stayed"). **Shift+click / Shift+L** (menu:
+  "Auto layout, including pinned") lays out pinned nodes too — they keep their
+  pin at the new place; when every node is pinned, a plain Auto layout asks
+  "Everything is pinned" with *Lay out all* instead of doing nothing. One undo
+  step either way.
+- **Hovered node:** the card under the cursor (its pins count) gets an
+  `accentFaint` tint and a 1 px `accent` border at 70 % — lighter than
+  selection, which has the full border and a halo. A title cut short with "…"
+  shows its full name in a tooltip above the card (below the header when
+  there is no room above) after 350 ms; it closes when the cursor leaves, a
+  pin or button tooltip takes over, or you pan, zoom or press.
+- **Placement of new nodes:** beside the linked peer (upstream left,
+  downstream right, one column gap apart), in the nearest free slot of that
+  column — below first, then above, keeping the node spacing — and in the
+  next column further
+  out only once the stack is about three nodes away. Unlinked nodes join a
+  node of their own kind that is on screen, else go into the view by flow
+  rank (sources left … sinks right) below the top-left controls. Only the
+  newcomer moves (a stream comes to a device, never the reverse) and only
+  within `settleWindowMs` of appearing; dragged, pinned, nudged or
+  hand-wired nodes never move. A restored position that another node has
+  taken moves to the nearest free slot; pins restore exactly.
 - **Search:** non-matching nodes at 35 % opacity; matching ports get a 2 px
   accent ring.
 - **Snapping (Shift-drag):** aligning edges snaps flush; stacking above/below
