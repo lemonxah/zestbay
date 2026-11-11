@@ -883,6 +883,11 @@ ZbWindow {
                     }
                     ZbMenuSeparator {}
                     ZbMenuItem {
+                        text: "Keyboard shortcuts\u2026"
+                        shortcutHint: "F1"
+                        onTriggered: shortcutsDialog.open()
+                    }
+                    ZbMenuItem {
                         text: "About ZestBay"
                         onTriggered: aboutDialog.open()
                     }
@@ -1174,6 +1179,7 @@ ZbWindow {
         }
         Component.onCompleted: mainWindow.refreshRuleCount()
         onOpenPluginParams: nodeId => pluginParamsDialog.openForNode(nodeId)
+        onShowShortcuts: shortcutsDialog.open()
     }
 
     PluginBrowser {
@@ -1233,5 +1239,16 @@ ZbWindow {
     About {
         id: aboutDialog
         controller: controller
+    }
+
+    // Every shortcut, grouped: ? on the canvas, F1, the menu, the canvas's
+    // help button.
+    ShortcutsDialog {
+        id: shortcutsDialog
+    }
+
+    Shortcut {
+        sequence: "F1"
+        onActivated: shortcutsDialog.open()
     }
 }

@@ -92,32 +92,45 @@ Carla is a full-featured plugin host and JACK patchbay. The differences are abou
 ## Features
 
 ### Graph View
+
+**The graph**
 - Real-time PipeWire graph: devices, app streams, virtual sinks, plugins and subgraphs as node cards, colour-coded by kind; wires coloured by signal (audio, MIDI, video)
 - MIDI bridge devices split into one node per device
-- Drag from a port to another port to connect; select wires (click, Ctrl+click, selection box) and press Delete to disconnect. Wires highlight and can be clicked from a few pixels away, so you don't have to hit them exactly
-- Pan with middle-drag, zoom with the wheel (0.25x-3.0x), scroll bars, Fit to view (Home) and Reset zoom. Pinch on a touchpad or touchscreen zooms too
+- Plugins with many unused ports fold them into a "n more" row
+- The node under the cursor is highlighted, and a node whose name is too long for its card shows the full name in a popup
+- **Search** nodes and ports (Ctrl+F); non-matching nodes dim
+- Status bar with node/link counts, a CPU sparkline and the rules state; dark and light themes, or follow the desktop
+- **Hide unnamed nodes** (Preferences › Advanced, on by default) leaves out nodes with no name of their own, such as pavucontrol's level-meter streams
+
+**Moving around**
+- Zoom with the wheel (0.25x-3.0x; pinch on a touchpad or touchscreen works too), scroll bars, Fit to view (Home), Frame selection (F) and Reset zoom
 - **Grab / Select mode** (buttons at the canvas's top-left, or **W**): in Grab mode (the default) a left-drag on empty canvas pans, like a middle-drag; in Select mode it draws a selection box. The choice is remembered
 - **Hold a key for the other mode**: hold **Space** and drag to pan from anywhere, even over a node; hold **Shift** and drag empty canvas to draw a selection box while in Grab mode. A hint at the bottom of the canvas names the key and lights up while the override is on
-- Selection boxes started with **Shift** or **Ctrl** add to the selection; **Ctrl+A** selects everything; arrow keys nudge the selected nodes one grid step; **F** frames the selection
-- **Delete** also works on selected nodes: plugins, subgraphs and virtual devices are removed (after a confirmation), devices and app streams are hidden
+- A **?** button at the bottom-right of the canvas, **?** and **F1** open a list of every shortcut (also in the menu: Keyboard shortcuts…)
+
+**Wiring**
+- Drag from a port to another port to connect. Wires highlight and can be clicked from a few pixels away, so you don't have to hit them exactly
+- Right-drag from one port to another to **block** the pair; blocked pairs are drawn as red dashed lines with a ⊘. Hover one to highlight it, click it to select it (Ctrl+click to add more) and press **Delete** to remove the rule that blocks it. A rule can cover several pairs; the toast says when removing it frees others too
+- Drag a plugin onto a wire to insert it into that connection
+- **Default node**: right-click a sink or plugin → Set as default; app streams without a rule are routed there
+
+**Selecting and editing**
+- Select nodes and wires with a click, Ctrl+click or a selection box; boxes started with **Shift** or **Ctrl** add to the selection, **Ctrl+A** selects all nodes and wires. Neither a box nor Ctrl+A takes block lines, so Delete can't remove a rule by accident
+- **Delete** disconnects the selected wires, removes the selected plugins, subgraphs and virtual devices (after a confirmation), hides the selected devices and app streams, and removes the selected block rules
+- Arrow keys nudge the selected nodes one grid step
 - **Undo / redo** (Ctrl+Z, Ctrl+Shift+Z) for node moves, Auto layout, wires you connect or disconnect, and hidden nodes
-- **New nodes find a tidy spot**: a stream that a rule connects goes beside the node it is wired to, stacked with the others in that column; a node without wires goes with its own kind (sources left, sinks right) inside the part of the graph you are looking at. Only the newcomer moves, and only in its first seconds; anything you placed or pinned stays put. A new node pulses once, and if it appeared outside the view a marker at the edge points to it (click to go there)
 - Drag nodes, alone or as a group; **snap to grid** (on by default, adjustable grid size) or Shift-drag to snap next to other nodes with a configurable gap
 - **Pin** nodes so Auto layout never moves them; hide and unhide nodes
-- Auto layout that follows the signal flow (and the grid): the button at the canvas's top-right, **L**, or the canvas menu. Pinned nodes stay put and the toast tells you how many did; **Shift+click / Shift+L** lays out pinned nodes too, and when every node is pinned it offers to do so
-- The node under the cursor is highlighted, and a node whose name is too long for its card shows the full name in a popup
+- Right-click menus for nodes, wires, block lines, ports and the canvas; right-click a port's name or pin to **rename** it or **disconnect** everything on it (see [Renaming nodes and ports](#renaming-nodes-and-ports))
+
+**Layout and density**
+- **Auto layout** follows the signal flow (and the grid): the button at the canvas's top-right, **L**, or the canvas menu. Pinned nodes stay put and the toast tells you how many did; **Shift+click / Shift+L** lays out pinned nodes too, and when every node is pinned it offers to do so
+- **New nodes find a tidy spot**: a stream that a rule connects goes beside the node it is wired to, stacked with the others in that column; a node without wires goes with its own kind (sources left, sinks right) inside the part of the graph you are looking at. Only the newcomer moves, and only in its first seconds; anything you placed or pinned stays put. A new node pulses once, and if it appeared outside the view a marker at the edge points to it (click to go there)
 - **Two densities** (toolbar, or Preferences › Graph), each Compact / Normal / Spacious or any pixel value:
   - **Graph density** (node spacing, 4–96 px): how far apart nodes are. It sets the room Auto layout and newly placed nodes leave around each node.
   - **Card density** (card row height, 16–32 px): how big the node cards are. Compact packs more nodes on screen, Spacious makes ports easier to hit; text sizes stay. Cards that end up overlapping are pushed apart (Ctrl+Z undoes it).
-  The toolbar menus can re-space the whole graph with Auto layout
-- **Search** nodes and ports (Ctrl+F); non-matching nodes dim
-- Plugins with many unused ports fold them into a "n more" row
-- **Default node**: right-click a sink or plugin → Set as default; app streams without a rule are routed there
-- Drag a plugin onto a wire to insert it into that connection
-- Right-click menus for nodes, wires, ports and the canvas; right-click a port's name or pin to **rename** it or **disconnect** everything on it (see [Renaming nodes and ports](#renaming-nodes-and-ports))
-- **Hide unnamed nodes** (Preferences › Advanced, on by default) leaves out nodes with no name of their own, such as pavucontrol's level-meter streams
-- Dark and light themes, or follow the desktop
-- Status bar with node/link counts, a CPU sparkline and the rules state
+
+  The toolbar menus can re-space the whole graph with Auto layout.
 
 ### Plugin Hosting (LV2, LADSPA, VST2, VST3, CLAP)
 - Browse, search, and filter all installed plugins by name, author, category, format or URI/ID; hide incompatible ones
@@ -216,7 +229,7 @@ ZestBay provides a comprehensive set of LV2 host features, allowing it to load t
 - Glob pattern matching for source and target node names (`*`, `?`), optionally limited to a node type
 - Per-port-pair mappings with heuristic fallback (channel name, position)
 - **Exclusive mode**: a source with rules is kept to exactly the connections its rules allow; turned off, rules only add links and never remove any
-- **Block rules**: right-click a wire → Block this connection, select wires → Block selected links, or right-drag from one port to another. A blocked source never reaches the target: not by rules, the default node or by hand. Blocked pairs are drawn as red ⊘ lines; right-click one to remove the block
+- **Block rules**: right-click a wire → Block this connection, select wires → Block selected links, or right-drag from one port to another. A blocked source never reaches the target: not by rules, the default node or by hand. Blocked pairs are drawn as red ⊘ lines; hover one to highlight it, click it to select it and press Delete (or right-click it → Remove block) to remove the rule
 - Rules dialog: filter, enable/disable or delete each rule, add connect or block rules with quick-fill from existing node names
 - **Backups**: save named backups of the rule set and restore them
 - Snapshot current connections as a complete rule set
@@ -301,24 +314,53 @@ oscsend localhost 9000 /zestbay/session/load s "live"
 
 ### Keyboard Shortcuts
 
+Press **?** or **F1** (or use the **?** button at the canvas's bottom-right, or the menu) for this list inside ZestBay.
+
+**Move around**
+
 | Key | Action |
 |-----|--------|
-| Ctrl+F | Search nodes and ports |
+| Wheel | Zoom around the cursor |
+| Middle-drag | Pan |
+| Left-drag on empty canvas | Pan in Grab mode, draw a selection box in Select mode |
+| W | Switch between Grab and Select mode |
+| Space (hold) | Pan with a left-drag from anywhere, in either mode |
+| Shift (hold, on empty canvas) | Draw a selection box in Grab mode |
 | Home | Fit the graph to the view |
 | F | Frame the selected nodes (everything when nothing is selected) |
+| Ctrl+= / Ctrl+- / Ctrl+0 | Zoom in / zoom out / reset zoom |
+
+**Select**
+
+| Key | Action |
+|-----|--------|
+| Click | Select a node, a wire or a block line |
+| Ctrl+Click | Add to or remove from the selection |
+| Shift or Ctrl (while drawing a selection box) | Add to the selection |
+| Ctrl+A | Select all nodes and wires (not block rules) |
+| Escape | Cancel a drag or placement, clear the selection, then leave a subgraph |
+
+**Connect and edit**
+
+| Key | Action |
+|-----|--------|
+| Drag from a port | Connect to another port |
+| Right-drag from a port | Block the pair (a red line) |
+| Delete / Backspace | Disconnect the selected wires; remove the selected plugins, subgraphs and virtual devices (asks first); hide the other selected nodes; remove the selected block rules |
+| Arrow keys | Move the selected nodes one grid step (1 px without snap to grid, 10 px with Shift) |
+| Shift (while dragging a node) | Snap to nearby nodes (when snap to grid is off) |
+| Ctrl+Z / Ctrl+Shift+Z (or Ctrl+Y) | Undo / redo node moves, Auto layout, connecting and disconnecting wires, hiding nodes |
+| Double-click | Open a subgraph |
+
+**Layout and application**
+
+| Key | Action |
+|-----|--------|
 | L | Auto layout (pinned nodes stay put) |
 | Shift+L | Auto layout including pinned nodes |
-| Ctrl+= / Ctrl+- / Ctrl+0 | Zoom in / zoom out / reset zoom |
-| W | Switch between Grab mode (drag pans the canvas) and Select mode (drag draws a selection box) |
-| Space (hold) | Pan with a left-drag from anywhere, in either mode |
-| Shift (hold, on empty canvas) | Draw a selection box in Grab mode; add to the selection |
-| Ctrl+A | Select all nodes and wires |
-| Arrow keys | Move the selected nodes one grid step (1 px without snap to grid, 10 px with Shift) |
-| Delete / Backspace | Disconnect the selected wires; remove the selected plugins, subgraphs and virtual devices (asks first) and hide the other selected nodes |
-| Ctrl+Z / Ctrl+Shift+Z (or Ctrl+Y) | Undo / redo node moves, Auto layout, connecting and disconnecting wires, hiding nodes |
-| Escape | Cancel a drag or placement, clear the selection, then leave a subgraph |
-| Shift (while dragging) | Snap to nearby nodes (when snap to grid is off) |
+| Ctrl+F | Search nodes and ports |
 | Ctrl+S | Save every modified plugin's settings into its selected preset |
+| F1 or ? | Show the shortcut list |
 | Ctrl+Q | Quit |
 
 ### Persistence
@@ -646,6 +688,10 @@ ZestBay uses a multi-threaded architecture with clean separation between compone
 - The **`zestbay-ui-bridge` process** hosts LV2 UIs that can run out of process, and short-lived **probe processes** test-load plugins so a crashing plugin can't take ZestBay down
 - **Subgraph edges** and **virtual devices** are PipeWire nodes ZestBay owns: pass-through filters and in-process loopback modules
 - Communication uses typed channels (`mpsc`) and lock-free atomics -- no mutexes on the audio path
+
+## Feedback
+
+Found a bug or want a feature? Open an issue on [GitHub](https://github.com/lemonxah/zestbay/issues). **About ZestBay** (menu) has **Report an issue** and **Request a feature** buttons that open a new issue in your browser, with your version filled in for bug reports. Project page: [lemonxah.github.io/zestbay](https://lemonxah.github.io/zestbay/).
 
 ## License
 
