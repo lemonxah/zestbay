@@ -61,7 +61,112 @@ Item {
     // auto-placed); dropped once the user moves the node. A node can change
     // key while keeping its id (a plugin's filter node first appears untyped
     // as "Unknown:<name>"), and then its saved position must still be applied.
+    // placedBaseById holds the node's own layoutKey at that time: when only
+    // the "#n" suffix of the unique key changes (another node of the same
+    // name went away) the node must stay where it is.
     property var placedKeyById: ({})
+    property var placedBaseById: ({})
+
+    // When each node first appeared: nodeId -> { t: ms, seq: refresh number }.
+    // Automatic repositioning (waiting for a rule to link the node, fixing a
+    // backward wire) only ever touches a node inside settleWindowMs of its
+    // appearance; after that it stays where it is until the user moves it.
+    property var appearedAt: ({})
+    property int refreshSeq: 0
+    // Longer than it takes a patchbay rule to connect a new node (main.qml
+    // widens it when the rule settle time is raised).
+    property int settleWindowMs: 8000
+    // Graph density (preference node_spacing_px; 8 compact, 20 normal, 40
+    // spacious): the gap automatic placement leaves between stacked nodes,
+    // in graph units. A column beside a peer is 2.5x as far away, leaving
+    // room for the wires. Auto layout uses the same two gaps. (How big the
+    // cards are is the separate cardRow below.)
+    property real nodeSpacing: 20
+    readonly property real placeColumnGap: Math.round(nodeSpacing * 2.5)
+    // Node card density (preference card_row_px; 18 compact, 22 normal, 26
+    // spacious): the height of a port row. Everything on the card scales
+    // with it (Theme.nodeScale). Cards are re-measured at once and cards that
+    // now overlap are pushed apart (one undo step); the rest of the layout
+    // stays until Auto layout.
+    property int cardRow: 22
+    property int densityMoved: 0   // nodes moved by the last card size change
+    onCardRowChanged: {
+        Theme.cardRow = cardRow;
+        applyDensity();
+    }
+    function applyDensity() {
+        densityMoved = 0;
+        if (!layoutLoaded)
+            return;   // nothing measured or placed yet
+        refreshData();
+        var before = {};
+        for (var i = 0; i < nodes.length; i++) {
+            if (nodePositions[nodes[i].id])
+                before[nodes[i].id] = {
+                    x: nodePositions[nodes[i].id].x,
+                    y: nodePositions[nodes[i].id].y
+                };
+        }
+        separateOverlaps();
+        var entry = recordMove("re-space", before);
+        if (entry) {
+            densityMoved = entry.items.length;
+            persistLayout();
+        }
+        canvas.requestPaint();
+    }
+
+    // Push overlapping cards apart: the lower one moves down just clear of the
+    // upper one, keeping the node spacing (on the grid); when only the lower
+    // one is pinned, the upper one moves up instead.
+    function separateOverlaps() {
+        var gap = nodeSpacing;
+        for (var pass = 0; pass < 40; pass++) {
+            var vis = [];
+            for (var i = 0; i < nodes.length; i++) {
+                var n = nodes[i];
+                if ((n.layoutKey && hiddenNodes[n.layoutKey]) || !nodePositions[n.id])
+                    continue;
+                vis.push({
+                    node: n,
+                    x: nodePositions[n.id].x,
+                    y: nodePositions[n.id].y,
+                    w: getNodeWidth(n.id),
+                    h: calculateNodeHeight(n)
+                });
+            }
+            vis.sort((a, b) => a.y - b.y || a.x - b.x);
+            var fixed = false;
+            for (var ai = 0; ai < vis.length && !fixed; ai++) {
+                for (var bi = ai + 1; bi < vis.length; bi++) {
+                    var a = vis[ai], b = vis[bi];
+                    if (!(a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y))
+                        continue;
+                    if (nodeIsPinned(b.node) && !nodeIsPinned(a.node)) {
+                        var up = b.y - a.h - gap;
+                        if (snapToGrid)
+                            up = Math.floor(up / gridSize) * gridSize;
+                        nodePositions[a.node.id] = {
+                            x: a.x,
+                            y: up
+                        };
+                    } else {
+                        var down = a.y + a.h + gap;
+                        if (snapToGrid)
+                            down = Math.ceil(down / gridSize) * gridSize;
+                        nodePositions[b.node.id] = {
+                            x: b.x,
+                            y: down
+                        };
+                    }
+                    fixed = true;
+                    break;
+                }
+            }
+            if (!fixed)
+                break;
+        }
+    }
 
     property int connectFromPortId: -1
     property string connectFromDir: ""
@@ -120,6 +225,28 @@ Item {
     property bool hoverEmpty: false
     onDragModeChanged: updateCursor()
 
+    // Temporary overrides of the drag mode while a key is held: Space makes
+    // a left-drag pan from anywhere (even over a node); Shift makes a
+    // left-drag on empty canvas draw a selection box in grab mode. The hint
+    // at the bottom of the canvas names the override and shows when it is on.
+    property bool spaceHeld: false
+    property bool shiftHeld: false
+    property bool spacePanning: false
+    property bool middlePanning: false
+    readonly property string overrideState: spaceHeld ? "pan" : (shiftHeld && dragMode === "grab" && dragNodeId < 0 && !groupDragging && connectFromPortId < 0 && !grabPanning) ? "select" : ""
+    onOverrideStateChanged: updateCursor()
+    onActiveFocusChanged: if (!activeFocus) {
+        spaceHeld = false;
+        shiftHeld = false;
+    }
+    // A selection box that adds to the selection it started with (Shift or
+    // Ctrl held when it began).
+    property bool selectAdditive: false
+    property var selectBaseNodes: ({})
+    property var selectBaseLinks: ({})
+    // Where the node(s) being dragged started, for undo.
+    property var dragStartPos: null
+
     function setDragMode(mode) {
         if ((mode !== "grab" && mode !== "select") || mode === dragMode)
             return;
@@ -129,7 +256,7 @@ Item {
 
     function toggleDragMode() {
         // Not in the middle of a left-drag: it would change meaning under the hand.
-        if (grabPanning || selectDragging)
+        if (grabPanning || spacePanning || selectDragging)
             return;
         setDragMode(dragMode === "grab" ? "select" : "grab");
     }
@@ -224,6 +351,11 @@ Item {
     // Hover state (canvas repaint + pin tooltip).
     property int hoveredPortId: -1
     property int hoveredLinkId: -1
+    // The node under the cursor (its pins count): highlighted on the canvas.
+    // nameTruncated: nodeId -> true while drawNode had to cut its title short
+    // (a popup then shows the full name); not bound to anything.
+    property int hoveredNodeId: -1
+    property var nameTruncated: ({})
     // Preset selector on plugin cards: nodeId -> {name, isDefault, modified, count}
     property var presetInfo: ({})
     property int presetMenuNodeId: -1
@@ -269,10 +401,14 @@ Item {
         pinnedNodes = {};
         nodePositions = {};
         placedKeyById = {};
+        placedBaseById = {};
+        appearedAt = {};
         autoPlaced = {};
         awaitingLinkPlacement = {};
         selectedNodes = {};
         selectedLinks = {};
+        clearUndo();
+        quietCues();
         defaultNodeKey = "";
         currentSubgraph = "";
         currentSubgraphName = "";
@@ -538,6 +674,8 @@ Item {
         nodeLayouts = newLayouts;
         nodeHeights = newHeights;
         uniqueKeyById = buildUniqueLayoutKeys();
+        // Placement below needs the real widths, not the first paint's.
+        calculateNodeWidths();
         widthsDirty = true;
 
         var newPortMedia = {};
@@ -574,6 +712,14 @@ Item {
         for (var staleK in placedKeyById) {
             if (!liveIds[staleK])
                 delete placedKeyById[staleK];
+        }
+        for (var staleB in placedBaseById) {
+            if (!liveIds[staleB])
+                delete placedBaseById[staleB];
+        }
+        for (var staleT in appearedAt) {
+            if (!liveIds[staleT])
+                delete appearedAt[staleT];
         }
 
         // Selections must refer to the same objects they did when made: drop
@@ -621,37 +767,64 @@ Item {
         if (bypassPruned)
             localBypassState = localBypassState;
 
+        refreshSeq++;
+        var nowMs = Date.now();
+        var appeared = [];
         for (var ni = 0; ni < nodes.length; ni++) {
             var n = nodes[ni];
             var key = uniqueKeyById[n.id] || "";
+            var baseKey = n.layoutKey || "";
             if (n.id in nodePositions) {
-                // Same node, new key, and the user hasn't moved it since it was
-                // placed: apply the position saved for the new key, or the
-                // next persistLayout() would overwrite it with this one.
                 var placedKey = placedKeyById[n.id];
-                if (placedKey !== undefined && placedKey !== key && key && savedLayout[key]) {
-                    var resaved = savedLayout[key];
-                    nodePositions[n.id] = {
-                        x: resaved[0],
-                        y: resaved[1]
-                    };
+                if (placedKey !== undefined && placedKey !== key) {
+                    if (placedBaseById[n.id] !== baseKey && key && savedLayout[key]) {
+                        // Same node, new key (a plugin's filter node gets its
+                        // type), and the user hasn't moved it since it was
+                        // placed: apply the position saved for the new key, or
+                        // the next persistLayout() would overwrite it.
+                        var resaved = savedLayout[key];
+                        nodePositions[n.id] = {
+                            x: resaved[0],
+                            y: resaved[1]
+                        };
+                        delete autoPlaced[n.id];
+                        delete awaitingLinkPlacement[n.id];
+                    } else {
+                        // Only the "#n" suffix moved because another node of
+                        // the same name went away: the node stays put, and its
+                        // position is saved under the key it has now.
+                        persistLayout();
+                    }
                     placedKeyById[n.id] = key;
-                    delete autoPlaced[n.id];
-                    delete awaitingLinkPlacement[n.id];
+                    placedBaseById[n.id] = baseKey;
                 }
                 continue;
             }
             placedKeyById[n.id] = key;
+            placedBaseById[n.id] = baseKey;
+            appearedAt[n.id] = {
+                t: nowMs,
+                seq: refreshSeq
+            };
+            appeared.push(n.id);
 
             if (key && savedLayout[key]) {
                 // Known position from a previous session/placement. Restore it
-                // exactly and never auto-move it — a device toggling off/on (new
-                // PipeWire id, same layoutKey) must reappear where the user left it.
+                // and never auto-move it — a device toggling off/on (new
+                // PipeWire id, same layoutKey) must reappear where the user
+                // left it. Only if something else has taken the spot in the
+                // meantime does it move to the nearest free slot (pins are
+                // restored exactly, always).
                 var saved = savedLayout[key];
-                nodePositions[n.id] = {
+                var restored = {
                     x: saved[0],
                     y: saved[1]
                 };
+                nodePositions[n.id] = restored;
+                if (!nodeIsPinned(n) && !(n.layoutKey && hiddenNodes[n.layoutKey]) && spotIsTaken(n, restored.x, restored.y)) {
+                    nodePositions[n.id] = findFreeSpot(n, restored.x, restored.y, 0, false);
+                    persistLayout();
+                }
             } else if (n.type === "Plugin" && pendingPluginPosition && (pendingPluginName === "" || n.name === pendingPluginName)) {
                 // User-added plugin: try to drop it on a free spot near the
                 // add-point. If there's no room nearby, place it "in hand" so the
@@ -663,9 +836,9 @@ Item {
                     x: anchor.x,
                     y: anchor.y
                 };
-                var spot = findFreeSpot(n, anchor.x, anchor.y, true);
+                var spot = findFreeSpot(n, anchor.x, anchor.y, 0, true);
                 if (spot) {
-                    nodePositions[n.id] = gridPos(spot);
+                    nodePositions[n.id] = spot;
                     persistLayout();
                 } else {
                     startPlacing(n.id);
@@ -673,17 +846,14 @@ Item {
             } else {
                 // Auto-appearing node (hardware device, stream). If a patchbay
                 // rule has already linked it, drop it next to the node that
-                // picked it up. Otherwise place it provisionally — near the
+                // picked it up. Otherwise place it provisionally — beside the
                 // default node if one is set (that's where a ruleless node will
-                // connect), else near the cluster — and remember it so the
-                // second pass can reposition it once its links show up.
+                // connect), else with its own kind inside the view — and let
+                // the second pass reposition it if its links show up shortly.
                 autoPlaced[n.id] = true;
                 if (!placeNearPeer(n)) {
                     var pa = provisionalAnchor(n);
-                    nodePositions[n.id] = gridPos(pa);
-                    var spot2 = findFreeSpot(n, pa.x, pa.y, false);
-                    if (spot2)
-                        nodePositions[n.id] = gridPos(spot2);
+                    nodePositions[n.id] = findFreeSpot(n, pa.x, pa.y, pa.dir, false);
                     persistLayout();
                     if (!nodeIsPinned(n)) {
                         awaitingLinkPlacement[n.id] = true;
@@ -700,38 +870,48 @@ Item {
             }
         }
 
-        // Second placement pass: reposition nodes that were waiting for a rule
-        // to connect them, now that their links may have arrived.
+        // Second placement pass: a node that appeared a moment ago without
+        // links moves beside its peer once a rule has connected it. Only the
+        // newcomer moves (see placementPeer); a node that has been sitting
+        // there longer than settleWindowMs is settled and stays.
         var stillAwaiting = {};
         for (var aid in awaitingLinkPlacement) {
             var anode = findNodeData(parseInt(aid));
             if (!anode)
                 // node vanished — forget it
                 continue;
-            if (nodeIsPinned(anode))
-                // user pinned it — honor the pin
+            if (nodeIsPinned(anode) || !isFresh(anode.id))
+                // pinned or settled — it stays where it is
                 continue;
-            if (!placeNearPeer(anode)) {
+            if (placeNearPeer(anode))
+                continue;
+            if (!nodeHasLinks(anode.id))
                 stillAwaiting[aid] = true;   // no peer yet, keep waiting
-            }
+            // else: linked, but it is the anchor its newer peers move to.
         }
         awaitingLinkPlacement = stillAwaiting;
 
-        // Third pass: fix auto-placed nodes whose links flow backwards (the
-        // line's input end sits left of its output end, i.e. the connection
-        // angle points right-to-left). One-shot per node, and only for nodes
-        // the user never touched — pinned or hand-placed nodes are sacred.
+        // Third pass: fix freshly auto-placed nodes whose links flow backwards
+        // (the line's input end sits left of its output end). One-shot per
+        // node, and only for nodes that just appeared and the user never
+        // touched — settled, pinned or hand-placed nodes are sacred.
         for (var bid in autoPlaced) {
             if (awaitingLinkPlacement[bid])
                 continue;
             var bnode = findNodeData(parseInt(bid));
             if (!bnode || nodeIsPinned(bnode))
                 continue;
+            if (!isFresh(bnode.id)) {
+                delete autoPlaced[bid];
+                continue;
+            }
             if (nodeHasBackwardLink(parseInt(bid))) {
                 delete autoPlaced[bid];
                 placeNearPeer(bnode);
             }
         }
+
+        noteAppeared(appeared);
 
         // A restored viewport (or one saved on a bigger screen) may show none of
         // the graph; bring it back into view once, on the first populated refresh.
@@ -780,50 +960,108 @@ Item {
         return !!(node && node.layoutKey && pinnedNodes[node.layoutKey]);
     }
 
-    // If `node` is linked to an already-positioned peer, place it immediately
-    // next to that peer (downstream → right of peer, upstream → left) on the
-    // nearest free spot. Returns true if placed. Pinned nodes are never moved.
-    function placeNearPeer(node) {
-        if (nodeIsPinned(node))
-            return false;
-        var nodeId = node.id;
+    // Still inside the settle window after it first appeared?
+    function isFresh(nodeId) {
+        var a = appearedAt[nodeId];
+        return !!a && Date.now() - a.t <= settleWindowMs;
+    }
+
+    function nodeHasLinks(nodeId) {
         for (var li = 0; li < links.length; li++) {
-            var link = links[li];
-            var peerId = -1;
-            var nodeFeedsPeer = false;  // node output → peer input (node sits left)
-            if (link.outputNodeId === nodeId && (link.inputNodeId in nodePositions) && link.inputNodeId !== nodeId) {
-                peerId = link.inputNodeId;
-                nodeFeedsPeer = true;
-            } else if (link.inputNodeId === nodeId && (link.outputNodeId in nodePositions) && link.outputNodeId !== nodeId) {
-                peerId = link.outputNodeId;
-                nodeFeedsPeer = false;
-            }
-            if (peerId < 0)
-                continue;
-            var peerNode = findNodeData(peerId);
-            if (!peerNode || !nodePositions[peerId])
-                continue;
-            var anchor = adjacentAnchor(node, peerNode, nodeFeedsPeer);
-            var spot = findFreeSpot(node, anchor.x, anchor.y, false);
-            nodePositions[nodeId] = gridPos(spot || anchor);
-            persistLayout();
-            return true;
+            if (links[li].outputNodeId === nodeId || links[li].inputNodeId === nodeId)
+                return true;
         }
         return false;
     }
 
+    // How readily a node gives way when two unsettled nodes get linked:
+    // streams come to devices and plugins, never the other way round.
+    function placementMobility(node) {
+        if (node.type === "StreamOutput" || node.type === "StreamInput")
+            return 2;
+        if (node.type === "Source" || node.type === "Sink" || node.type === "Duplex" || node.type === "Plugin" || node.type === "Subgraph")
+            return 0;
+        return 1;
+    }
+
+    // May `node` be placed beside `peer`? A settled peer is always an anchor.
+    // When the peer is itself still waiting for placement, only one of the
+    // two moves: the more mobile kind, else the one that appeared later.
+    function peerAnchors(node, peer) {
+        if (!awaitingLinkPlacement[peer.id] || !isFresh(peer.id))
+            return true;
+        var mn = placementMobility(node), mp = placementMobility(peer);
+        if (mn !== mp)
+            return mn > mp;
+        var an = appearedAt[node.id], ap = appearedAt[peer.id];
+        var sn = an ? an.seq : 0, sp = ap ? ap.seq : 0;
+        if (sn !== sp)
+            return sn > sp;
+        return node.id > peer.id;
+    }
+
+    // The linked, positioned node that `node` should sit beside, as
+    // { peer, nodeFeedsPeer } (nodeFeedsPeer: node output → peer input, so
+    // the node belongs on the peer's left), or null.
+    function placementPeer(node) {
+        var nodeId = node.id;
+        for (var li = 0; li < links.length; li++) {
+            var link = links[li];
+            var peerId = -1;
+            var nodeFeedsPeer = false;
+            if (link.outputNodeId === nodeId && link.inputNodeId !== nodeId) {
+                peerId = link.inputNodeId;
+                nodeFeedsPeer = true;
+            } else if (link.inputNodeId === nodeId && link.outputNodeId !== nodeId) {
+                peerId = link.outputNodeId;
+            }
+            if (peerId < 0 || !nodePositions[peerId])
+                continue;
+            var peerNode = findNodeData(peerId);
+            if (!peerNode || (peerNode.layoutKey && hiddenNodes[peerNode.layoutKey]))
+                continue;
+            if (!peerAnchors(node, peerNode))
+                continue;
+            return {
+                peer: peerNode,
+                nodeFeedsPeer: nodeFeedsPeer
+            };
+        }
+        return null;
+    }
+
+    // If `node` is linked to an already-positioned peer, place it beside that
+    // peer (downstream → the column to the peer's right, upstream → to its
+    // left) in the nearest free slot. Returns true if placed. Pinned nodes
+    // are never moved.
+    function placeNearPeer(node) {
+        if (nodeIsPinned(node))
+            return false;
+        var pp = placementPeer(node);
+        if (!pp)
+            return false;
+        var anchor = adjacentAnchor(node, pp.peer, pp.nodeFeedsPeer);
+        nodePositions[node.id] = findFreeSpot(node, anchor.x, anchor.y, anchor.dir, false);
+        delete awaitingLinkPlacement[node.id];
+        persistLayout();
+        return true;
+    }
+
     // Top-left anchor placing `node` directly beside `peer`: to the peer's left
     // when the node feeds the peer (signal flows node → peer), otherwise to its
-    // right. Same vertical level as the peer.
+    // right, placeColumnGap away, at the peer's level. `dir` is the side the
+    // search may spill to (-1 further left, 1 further right).
     function adjacentAnchor(node, peer, nodeFeedsPeer) {
         var peerPos = nodePositions[peer.id];
-        var w = getNodeWidth(node.id) || minNodeWidth;
-        var peerW = getNodeWidth(peer.id) || minNodeWidth;
-        var spacing = 40;
-        var anchorX = nodeFeedsPeer ? (peerPos.x - w - spacing) : (peerPos.x + peerW + spacing);
+        var w = getNodeWidth(node.id);
+        var peerW = getNodeWidth(peer.id);
+        var x = nodeFeedsPeer ? (peerPos.x - w - placeColumnGap) : (peerPos.x + peerW + placeColumnGap);
+        if (snapToGrid)
+            x = nodeFeedsPeer ? Math.floor(x / gridSize) * gridSize : Math.ceil(x / gridSize) * gridSize;
         return {
-            x: anchorX,
-            y: peerPos.y
+            x: x,
+            y: peerPos.y,
+            dir: nodeFeedsPeer ? -1 : 1
         };
     }
 
@@ -853,15 +1091,16 @@ Item {
 
     // Where to drop a freshly-appeared node before its links exist: beside the
     // default node if one is set (a ruleless node connects there), otherwise
-    // near the existing cluster. The second pass corrects this once real links
-    // arrive; if the node never connects, it simply stays here.
+    // with its own kind inside the view. The second pass corrects this if
+    // real links arrive shortly; if the node never connects, it stays here.
+    // Returns { x, y, dir } for findFreeSpot.
     function provisionalAnchor(node) {
         var defNode = findNodeByLayoutKey(defaultNodeKey);
-        if (defNode && defNode.id !== node.id && nodePositions[defNode.id]) {
+        if (defNode && defNode.id !== node.id && nodePositions[defNode.id] && !(defNode.layoutKey && hiddenNodes[defNode.layoutKey])) {
             var nodeFeedsDefault = flowRank(node.type) <= flowRank(defNode.type);
             return adjacentAnchor(node, defNode, nodeFeedsDefault);
         }
-        return clusterAnchor(node);
+        return kindAnchor(node);
     }
 
     function findConnectedPeerPosition(nodeId) {
@@ -1173,6 +1412,11 @@ Item {
                     hiddenNodes[contextNode.layoutKey] = true;
                     hiddenNodes = hiddenNodes;
                     persistHidden();
+                    pushUndo({
+                        kind: "hide",
+                        label: "hide 1 node",
+                        keys: [contextNode.layoutKey]
+                    });
                     canvas.requestPaint();
                 }
             }
@@ -1324,8 +1568,7 @@ Item {
             text: contextLinkIds.length > 1 ? "Disconnect " + contextLinkIds.length + " links" : "Disconnect"
             shortcutHint: "Del"
             onTriggered: {
-                for (var i = 0; i < contextLinkIds.length; i++)
-                    controller.disconnect_link(contextLinkIds[i]);
+                disconnectLinks(contextLinkIds);
                 selectedLinks = {};
                 canvas.requestPaint();
             }
@@ -1358,8 +1601,7 @@ Item {
             text: attached.length > 1 ? "Disconnect " + attached.length + " links" : "Disconnect"
             enabled: attached.length > 0
             onTriggered: {
-                for (var i = 0; i < attached.length; i++)
-                    controller.disconnect_link(attached[i]);
+                disconnectLinks(attached);
                 canvas.requestPaint();
             }
         }
@@ -1368,6 +1610,28 @@ Item {
     // Delete selected links · Block selected links · — · Add plugin… · — · Unhide all · Fit to view · Reset zoom · Auto layout
     ZbMenu {
         id: canvasContextMenu
+
+        ZbMenuItem {
+            text: graphView.canUndo ? "Undo " + graphView.undoStack[graphView.undoStack.length - 1].label : "Undo"
+            shortcutHint: "Ctrl+Z"
+            enabled: graphView.canUndo
+            onTriggered: undo()
+        }
+
+        ZbMenuItem {
+            text: graphView.canRedo ? "Redo " + graphView.redoStack[graphView.redoStack.length - 1].label : "Redo"
+            shortcutHint: "Ctrl+Shift+Z"
+            enabled: graphView.canRedo
+            onTriggered: redo()
+        }
+
+        ZbMenuSeparator {}
+
+        ZbMenuItem {
+            text: "Select all"
+            shortcutHint: "Ctrl+A"
+            onTriggered: selectAll()
+        }
 
         ZbMenuItem {
             text: "Delete selected links"
@@ -1450,7 +1714,14 @@ Item {
 
         ZbMenuItem {
             text: "Auto layout"
-            onTriggered: runAutoLayout()
+            shortcutHint: "L"
+            onTriggered: requestAutoLayout(false)
+        }
+
+        ZbMenuItem {
+            text: "Auto layout, including pinned"
+            shortcutHint: "Shift+L"
+            onTriggered: requestAutoLayout(true)
         }
     }
 
@@ -1660,6 +1931,48 @@ Item {
         onAccepted: controller.delete_subgraph(subgraphId)
     }
 
+    // Delete key with plugins, subgraphs or virtual devices selected.
+    ZbDialog {
+        id: deleteSelectionDialog
+        title: "Delete selection?"
+        primaryText: "Delete"
+        secondaryText: "Cancel"
+        width: 420
+        focus: true
+        onOpened: deleteLines.forceActiveFocus()
+        Column {
+            id: deleteLines
+            width: parent ? parent.width : 360
+            spacing: 6
+            // It was opened from the keyboard: Enter confirms, Esc cancels.
+            Keys.onReturnPressed: deleteSelectionDialog.accept()
+            Keys.onEnterPressed: deleteSelectionDialog.accept()
+            Repeater {
+                model: deleteSelectionDialog.visible ? graphView.deletePlanLines() : []
+                Text {
+                    required property string modelData
+                    width: parent.width
+                    wrapMode: Text.WordWrap
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.sizeBody
+                    color: Theme.textPrimary
+                    text: "\u2022  " + modelData
+                }
+            }
+            Text {
+                width: parent.width
+                topPadding: 6
+                wrapMode: Text.WordWrap
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.sizeBody
+                color: Theme.textMuted
+                text: "Removing can\u2019t be undone."
+            }
+        }
+        onAccepted: graphView.performDelete()
+        onRejected: graphView.deletePlan = null
+    }
+
     ZbDialog {
         id: renameDialog
         title: "Rename plugin"
@@ -1825,147 +2138,275 @@ Item {
         return pinned;
     }
 
-    function runAutoLayout() {
+    // Visible nodes (not hidden) and how many of them are pinned.
+    function visibleNodeCount() {
+        var c = 0;
+        for (var i = 0; i < nodes.length; i++) {
+            if (!(nodes[i].layoutKey && hiddenNodes[nodes[i].layoutKey]))
+                c++;
+        }
+        return c;
+    }
+    function pinnedVisibleCount() {
+        var c = 0;
+        for (var i = 0; i < nodes.length; i++) {
+            var n = nodes[i];
+            if (!(n.layoutKey && hiddenNodes[n.layoutKey]) && nodeIsPinned(n))
+                c++;
+        }
+        return c;
+    }
+
+    // Auto layout, as the button, the L key and the menus ask for it. Pinned
+    // nodes stay where they are, so when every node is pinned there is
+    // nothing it may move: ask whether to lay out the pinned ones too.
+    // includePinned (Shift+L, Shift-click, the menu item) lays out everything;
+    // pinned nodes keep their pin, at their new place.
+    function requestAutoLayout(includePinned) {
+        var total = visibleNodeCount();
+        if (total === 0) {
+            showToast("Auto layout: there are no nodes to arrange");
+            return;
+        }
+        if (!includePinned && pinnedVisibleCount() === total) {
+            autoLayoutAllDialog.open();
+            return;
+        }
+        runAutoLayout(includePinned);
+    }
+
+    function runAutoLayout(includePinned) {
+        includePinned = !!includePinned;
+        var kept = includePinned ? 0 : pinnedVisibleCount();
         var sizesJson = JSON.stringify(collectNodeSizes());
-        var pinnedJson = JSON.stringify(collectPinnedPositions());
+        var pinnedJson = includePinned ? "{}" : JSON.stringify(collectPinnedPositions());
         var resultJson = controller.auto_layout(sizesJson, pinnedJson, snapToGrid ? gridSize : 0);
         try {
             // Result is keyed by node id. Only the laid-out nodes move; hidden
             // nodes keep their positions and saved entries for absent devices
             // and plugins stay in savedLayout (persistLayout merges into it).
             var positions = JSON.parse(resultJson);
+            var before = {};
             for (var ni = 0; ni < nodes.length; ni++) {
                 var n = nodes[ni];
                 var pos = positions[n.id];
                 if (pos && pos.length >= 2) {
+                    if (nodePositions[n.id])
+                        before[n.id] = nodePositions[n.id];
                     nodePositions[n.id] = {
                         x: pos[0],
                         y: pos[1]
                     };
-                    delete autoPlaced[n.id];
-                    delete awaitingLinkPlacement[n.id];
-                    delete placedKeyById[n.id];
+                    markHandPlaced(n.id);
                 }
             }
+            var laidOut = recordMove("auto layout of", before);
+            if (laidOut)
+                laidOut.label = includePinned ? "auto layout (all)" : "auto layout";
+            var moved = laidOut ? laidOut.items.length : 0;
+            var msg = moved > 0 ? "Auto layout: moved " + counted(moved, "node", "nodes") : "Auto layout: nothing needed to move";
+            if (kept > 0)
+                msg += "; " + counted(kept, "pinned node", "pinned nodes") + " stayed (Shift+L lays out pinned nodes too)";
+            showToast(msg + ".");
             canvas.requestPaint();
             persistLayout();
         } catch (e) {
             console.log("Auto layout failed:", e);
+            showToast("Auto layout failed");
         }
     }
 
-    // Does a node of size w×h placed at (x, y) clear every obstacle rect,
-    // keeping at least `spacing` px of gap?
-    function spotIsFree(x, y, w, h, obstacles, spacing) {
-        for (var oi = 0; oi < obstacles.length; oi++) {
-            var o = obstacles[oi];
-            if (x < o.x + o.w + spacing && x + w + spacing > o.x && y < o.y + o.h + spacing && y + h + spacing > o.y) {
-                return false;
-            }
+    // Every node is pinned: offer to lay out the pinned ones as well.
+    ZbDialog {
+        id: autoLayoutAllDialog
+        title: "Everything is pinned"
+        primaryText: "Lay out all"
+        secondaryText: "Cancel"
+        width: 420
+        Text {
+            width: parent ? parent.width : 360
+            wrapMode: Text.WordWrap
+            font.family: Theme.fontSans
+            font.pixelSize: Theme.sizeBody
+            color: Theme.textPrimary
+            text: "All " + graphView.visibleNodeCount() + " nodes are pinned, and Auto layout never moves pinned nodes. Lay them out anyway? They keep their pin, at their new place. Ctrl+Z undoes it."
         }
-        return true;
+        onAccepted: graphView.runAutoLayout(true)
     }
 
-    // Find the nearest free spot for `node` starting at (anchorX, anchorY),
-    // searching outward in a grid spiral. When `bounded` is true the search
-    // gives up after a few rings (caller falls back to in-hand placement);
-    // when false it always returns a spot (falling back to the right of
-    // everything). Work is capped: obstacles are gathered once and only those
-    // near the search area are tested.
-    function findFreeSpot(node, anchorX, anchorY, bounded) {
-        var w = getNodeWidth(node.id) || minNodeWidth;
-        var h = calculateNodeHeight(node);
-        var spacing = 20;
-        var stepX = w + spacing;
-        var stepY = h + spacing;
-        var maxRings = bounded ? 4 : 24;
-
-        var reachX = (maxRings + 1) * stepX + maxNodeWidth;
-        var reachY = (maxRings + 1) * stepY + h;
+    // Rects of the visible, positioned nodes other than `exceptId`.
+    function placementObstacles(exceptId) {
         var obstacles = [];
-        var maxRight = -Infinity;
         for (var oi = 0; oi < nodes.length; oi++) {
             var other = nodes[oi];
-            if (other.id === node.id)
+            if (other.id === exceptId)
                 continue;
             if (other.layoutKey && hiddenNodes[other.layoutKey])
                 continue;
             var opos = nodePositions[other.id];
             if (!opos)
                 continue;
-            var ow = getNodeWidth(other.id) || minNodeWidth;
-            maxRight = Math.max(maxRight, opos.x + ow);
-            if (Math.abs(opos.x - anchorX) > reachX || Math.abs(opos.y - anchorY) > reachY)
-                continue;
             obstacles.push({
                 x: opos.x,
                 y: opos.y,
-                w: ow,
+                w: getNodeWidth(other.id),
                 h: calculateNodeHeight(other)
             });
         }
+        return obstacles;
+    }
 
-        if (spotIsFree(anchorX, anchorY, w, h, obstacles, spacing)) {
-            return {
-                x: anchorX,
-                y: anchorY
-            };
+    // Does a node of size w×h placed at (x, y) clear every obstacle rect,
+    // keeping at least `gap` between them?
+    function spotIsFree(x, y, w, h, obstacles, gap) {
+        var eps = 1e-6;
+        for (var oi = 0; oi < obstacles.length; oi++) {
+            var o = obstacles[oi];
+            if (x < o.x + o.w + gap - eps && x + w + gap - eps > o.x && y < o.y + o.h + gap - eps && y + h + gap - eps > o.y)
+                return false;
         }
+        return true;
+    }
 
-        for (var ring = 1; ring <= maxRings; ring++) {
-            for (var dx = -ring; dx <= ring; dx++) {
-                for (var dy = -ring; dy <= ring; dy++) {
-                    // Only test the perimeter of the current ring.
-                    if (Math.abs(dx) !== ring && Math.abs(dy) !== ring)
-                        continue;
-                    var cx = anchorX + dx * stepX;
-                    var cy = anchorY + dy * stepY;
-                    if (spotIsFree(cx, cy, w, h, obstacles, spacing)) {
-                        return {
-                            x: cx,
-                            y: cy
-                        };
-                    }
+    // Would `node` at (x, y) sit on top of another visible node? Only a real
+    // overlap counts (a third of the smaller card each way), so cards that
+    // merely touch after one of them grew are left alone.
+    function spotIsTaken(node, x, y) {
+        var w = getNodeWidth(node.id);
+        var h = calculateNodeHeight(node);
+        var obstacles = placementObstacles(node.id);
+        for (var oi = 0; oi < obstacles.length; oi++) {
+            var o = obstacles[oi];
+            var ox = Math.min(x + w, o.x + o.w) - Math.max(x, o.x);
+            var oy = Math.min(y + h, o.y + o.h) - Math.max(y, o.y);
+            if (ox > Math.min(w, o.w) / 3 && oy > Math.min(h, o.h) / 3)
+                return true;
+        }
+        return false;
+    }
+
+    // The free y nearest to `anchorY` for a w×h node in the column at `x`:
+    // the anchor itself, or just below / above one of the nodes in the way
+    // (on the grid when snapping). There always is one. Ties go below.
+    function columnSlot(x, anchorY, w, h, obstacles, gap) {
+        if (spotIsFree(x, anchorY, w, h, obstacles, gap))
+            return anchorY;
+        var best = null;
+        var bestD = Infinity;
+        for (var oi = 0; oi < obstacles.length; oi++) {
+            var o = obstacles[oi];
+            if (!(x < o.x + o.w + gap && x + w + gap > o.x))
+                continue;
+            var below = o.y + o.h + gap;
+            var above = o.y - h - gap;
+            if (snapToGrid) {
+                below = Math.ceil(below / gridSize) * gridSize;
+                above = Math.floor(above / gridSize) * gridSize;
+            }
+            var cands = [below, above];
+            for (var ci = 0; ci < 2; ci++) {
+                var d = Math.abs(cands[ci] - anchorY);
+                if (d < bestD && spotIsFree(x, cands[ci], w, h, obstacles, gap)) {
+                    bestD = d;
+                    best = cands[ci];
                 }
             }
         }
-        if (bounded)
-            return null;
-        // Nothing nearby: to the right of every node is always free.
-        return {
-            x: (maxRight > -Infinity ? maxRight : anchorX) + spacing * 2,
-            y: anchorY
-        };
+        return best !== null ? best : anchorY;
     }
 
-    // Anchor point for auto-appearing nodes: the centre of the existing
-    // visible cluster (or a default origin if the canvas is empty).
-    function clusterAnchor(node) {
-        var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-        var count = 0;
+    // The free spot for `node` nearest to (anchorX, anchorY): stacked in the
+    // anchor's column (the nearest slot below or above), or, once that column
+    // would put it too far away, in the next column over. `dir` is the side
+    // further columns may be on: -1 left, 1 right (so a node placed beside a
+    // peer never ends up behind it), 0 either. When `bounded`, a spot far
+    // from the anchor is refused and null returned (the caller falls back to
+    // in-hand placement); otherwise there always is a spot.
+    function findFreeSpot(node, anchorX, anchorY, dir, bounded) {
+        var w = getNodeWidth(node.id);
+        var h = calculateNodeHeight(node);
+        var gap = nodeSpacing;
+        var a = gridPos({
+            x: anchorX,
+            y: anchorY
+        });
+        var colStep = w + placeColumnGap;
+        if (snapToGrid)
+            colStep = Math.ceil(colStep / gridSize) * gridSize;
+        var obstacles = placementObstacles(node.id);
+        var cols = dir !== 0 ? [0, dir, 2 * dir, 3 * dir] : [0, 1, -1, 2, -2];
+        var best = null;
+        var bestCost = Infinity;
+        for (var ci = 0; ci < cols.length; ci++) {
+            var k = cols[ci];
+            var x = a.x + k * colStep;
+            var y = columnSlot(x, a.y, w, h, obstacles, gap);
+            var dy = Math.abs(y - a.y);
+            if (bounded && (Math.abs(k) > 1 || dy > 2 * (h + gap)))
+                continue;
+            // A column further out costs as much as a tall stack in this one.
+            var cost = dy + Math.abs(k) * colStep * 1.5;
+            if (cost < bestCost) {
+                bestCost = cost;
+                best = {
+                    x: x,
+                    y: y
+                };
+            }
+        }
+        return best;
+    }
+
+    // Where an unlinked newcomer goes: into the column of a node of its own
+    // kind that is on screen, else into the view at the place its kind has
+    // in the signal flow (sources left … sinks right), below the canvas's
+    // top-left controls. Returns { x, y, dir } for findFreeSpot.
+    function kindAnchor(node) {
+        var w = getNodeWidth(node.id);
+        var rank = flowRank(node.type);
+        if (width <= 0 || height <= 0) {
+            var b = contentBounds();
+            return {
+                x: b ? b.left + (b.right - b.left - w) * rank / 4 : 48,
+                y: b ? b.top : 72,
+                dir: 0
+            };
+        }
+        var visL = -panX / zoom, visT = -panY / zoom;
+        var visR = (width - panX) / zoom, visB = (height - panY) / zoom;
+        var cx = (visL + visR) / 2, cy = (visT + visB) / 2;
+        var best = null;
+        var bestD = Infinity;
         for (var i = 0; i < nodes.length; i++) {
             var o = nodes[i];
-            if (o.id === node.id)
+            if (o.id === node.id || flowRank(o.type) !== rank)
                 continue;
             if (o.layoutKey && hiddenNodes[o.layoutKey])
                 continue;
             var p = nodePositions[o.id];
             if (!p)
                 continue;
-            minX = Math.min(minX, p.x);
-            minY = Math.min(minY, p.y);
-            maxX = Math.max(maxX, p.x);
-            maxY = Math.max(maxY, p.y);
-            count++;
+            var ow = getNodeWidth(o.id), oh = calculateNodeHeight(o);
+            if (p.x + ow < visL || p.x > visR || p.y + oh < visT || p.y > visB)
+                continue;
+            var d = Math.abs(p.x + ow / 2 - cx) + Math.abs(p.y + oh / 2 - cy);
+            if (d < bestD) {
+                bestD = d;
+                best = p;
+            }
         }
-        if (count === 0)
+        if (best)
             return {
-                x: 50,
-                y: 50
+                x: best.x,
+                y: best.y,
+                dir: 0
             };
+        var margin = 48 / zoom;
+        var span = Math.max(0, visR - visL - w - 2 * margin);
         return {
-            x: (minX + maxX) / 2,
-            y: (minY + maxY) / 2
+            x: visL + margin + span * rank / 4,
+            y: visT + 72 / zoom,
+            dir: 0
         };
     }
 
@@ -2227,6 +2668,7 @@ Item {
 
     // Zoom to `newZoom` keeping the canvas point under screen (sx, sy) fixed.
     function zoomAt(sx, sy, newZoom) {
+        hideNameTip();
         newZoom = Math.max(minZoom, Math.min(maxZoom, newZoom));
         var c = toCanvas(sx, sy);
         panX += c.x * (zoom - newZoom);
@@ -2238,7 +2680,40 @@ Item {
 
     // Center the view on all visible nodes, zoomed to fit (never above 100%).
     function fitToView() {
-        var b = contentBounds();
+        fitBounds(contentBounds());
+    }
+
+    // Center the view on the selected nodes (all of them when none are).
+    function frameSelection() {
+        var b = null;
+        for (var k in selectedNodes) {
+            var node = findNodeData(parseInt(k));
+            var pos = node ? nodePositions[node.id] : null;
+            if (!pos || (node.layoutKey && hiddenNodes[node.layoutKey]))
+                continue;
+            var r = pos.x + getNodeWidth(node.id);
+            var btm = pos.y + calculateNodeHeight(node);
+            if (!b)
+                b = {
+                    left: pos.x,
+                    top: pos.y,
+                    right: r,
+                    bottom: btm
+                };
+            else {
+                b.left = Math.min(b.left, pos.x);
+                b.top = Math.min(b.top, pos.y);
+                b.right = Math.max(b.right, r);
+                b.bottom = Math.max(b.bottom, btm);
+            }
+        }
+        fitBounds(b || contentBounds());
+    }
+
+    // Zoom (never above 100%) and pan so the canvas box `b` is centred in
+    // the part of the view that the top-left controls and the bottom hint
+    // leave free.
+    function fitBounds(b) {
         if (!b || width <= 0 || height <= 0) {
             zoom = 1.0;
             panX = 0;
@@ -2247,12 +2722,14 @@ Item {
             return;
         }
         var margin = 40;
+        var top = 58, bottom = 52;
         var bw = Math.max(b.right - b.left, 1);
         var bh = Math.max(b.bottom - b.top, 1);
-        var z = Math.min((width - 2 * margin) / bw, (height - 2 * margin) / bh, 1.0);
+        var availH = Math.max(height - top - bottom, 1);
+        var z = Math.min((width - 2 * margin) / bw, availH / bh, 1.0);
         zoom = Math.max(minZoom, z);
         panX = width / 2 - (b.left + bw / 2) * zoom;
-        panY = height / 2 - (b.top + bh / 2) * zoom;
+        panY = top + availH / 2 - (b.top + bh / 2) * zoom;
         canvas.requestPaint();
     }
 
@@ -2425,7 +2902,7 @@ Item {
         var margin = 10;
         var gap = 6;
         var saveW = 44;
-        var h = Theme.nodeFooterButton;
+        var h = Theme.nodeFooterBtn;
         var w = getNodeWidth(n.id);
         var y = ny + nh - Theme.nodeFooter - Theme.nodePresetRow + (Theme.nodePresetRow - h) / 2;
         return {
@@ -2484,7 +2961,7 @@ Item {
     }
 
     function footerButtons(n, nx, ny, nh) {
-        var y = ny + nh - Theme.nodeFooter + (Theme.nodeFooter - Theme.nodeFooterButton) / 2;
+        var y = ny + nh - Theme.nodeFooter + (Theme.nodeFooter - Theme.nodeFooterBtn) / 2;
         var base = n.type === "Subgraph" ? [
             {
                 key: "open",
@@ -2519,7 +2996,7 @@ Item {
                 x: x,
                 y: y,
                 w: w,
-                h: Theme.nodeFooterButton
+                h: Theme.nodeFooterBtn
             });
             x += w + gap;
         }
@@ -3028,6 +3505,21 @@ Item {
             ctx.lineWidth = 3;
             ctx.stroke();
         }
+        // A node that just appeared: an accent ring that grows and fades.
+        var cue = nodeCues[node.id];
+        if (cue) {
+            var cueAge = Date.now() - cue.t;
+            if (cueAge >= 0 && cueAge < cuePulseMs) {
+                var ck = cueAge / cuePulseMs;
+                var grow = 3 + 13 * ck;
+                ctx.globalAlpha = baseAlpha * (1 - ck);
+                roundRectPath(ctx, nx - grow, ny - grow, nw + 2 * grow, nh + 2 * grow, Theme.radiusCard + grow);
+                ctx.strokeStyle = "" + Theme.accent;
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                ctx.globalAlpha = baseAlpha;
+            }
+        }
 
         // Subgraph: a second card edge behind, offset 4 px (a stack).
         if (isSubgraph) {
@@ -3039,13 +3531,22 @@ Item {
             ctx.stroke();
         }
 
-        // Body.
+        // Body. The node under the cursor gets an accent tint and a softer
+        // accent border (selection is the full accent border and halo).
+        var hovered = hoveredNodeId === node.id && !selected;
         roundRectPath(ctx, nx, ny, nw, nh, Theme.radiusCard);
         ctx.fillStyle = "" + Theme.bgSurface;
         ctx.fill();
-        ctx.strokeStyle = "" + (selected ? Theme.accent : Theme.borderStrong);
+        if (hovered) {
+            ctx.fillStyle = "" + Theme.accentFaint;
+            ctx.fill();
+        }
+        ctx.strokeStyle = "" + (selected || hovered ? Theme.accent : Theme.borderStrong);
+        if (hovered)
+            ctx.globalAlpha = baseAlpha * 0.7;
         ctx.lineWidth = 1;
         ctx.stroke();
+        ctx.globalAlpha = baseAlpha;
 
         // Header: category chip, title, tags; hairline below.
         var chip = Theme.nodeChip;
@@ -3093,7 +3594,9 @@ Item {
         ctx.textAlign = "left";
         ctx.textBaseline = "middle";
         var titleX = chipX + chip + 8;
-        ctx.fillText(elide(ctx, node.name, tagRight - titleX - 2), titleX, ny + hdr / 2 + 0.5);
+        var shownTitle = elide(ctx, node.name, tagRight - titleX - 2);
+        nameTruncated[node.id] = shownTitle !== node.name;
+        ctx.fillText(shownTitle, titleX, ny + hdr / 2 + 0.5);
 
         ctx.fillStyle = "" + Theme.borderHairline;
         ctx.fillRect(nx + 1, ny + hdr, nw - 2, 1);
@@ -3300,19 +3803,64 @@ Item {
     }
 
     Keys.onPressed: event => {
-        if (event.key === Qt.Key_Delete || event.key === Qt.Key_Backspace) {
-            deleteSelectedLinks();
-            event.accepted = true;
+        var ctrl = !!(event.modifiers & Qt.ControlModifier);
+        var shift = !!(event.modifiers & Qt.ShiftModifier);
+        var plain = !(event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier));
+
+        // Held keys that override the drag mode (see overrideState).
+        if (event.key === Qt.Key_Shift) {
+            shiftHeld = true;
+            return;
         }
-        if (event.key === Qt.Key_Home) {
+        if (event.key === Qt.Key_Space && plain) {
+            if (!event.isAutoRepeat)
+                spaceHeld = true;
+            event.accepted = true;
+            return;
+        }
+
+        if (event.key === Qt.Key_Delete || event.key === Qt.Key_Backspace) {
+            deleteSelection();
+            event.accepted = true;
+        } else if (event.key === Qt.Key_Home) {
             fitToView();
             event.accepted = true;
-        }
-        if (event.key === Qt.Key_W && !event.isAutoRepeat && !(event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))) {
+        } else if (event.key === Qt.Key_W && plain && !event.isAutoRepeat) {
             toggleDragMode();
             event.accepted = true;
-        }
-        if (event.key === Qt.Key_Escape) {
+        } else if (event.key === Qt.Key_F && plain && !event.isAutoRepeat) {
+            frameSelection();
+            event.accepted = true;
+        } else if (event.key === Qt.Key_L && !event.isAutoRepeat && !(event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))) {
+            requestAutoLayout(shift);
+            event.accepted = true;
+        } else if (ctrl && event.key === Qt.Key_A) {
+            selectAll();
+            event.accepted = true;
+        } else if (ctrl && event.key === Qt.Key_Z) {
+            if (shift)
+                redo();
+            else
+                undo();
+            event.accepted = true;
+        } else if (ctrl && event.key === Qt.Key_Y) {
+            redo();
+            event.accepted = true;
+        } else if (ctrl && (event.key === Qt.Key_Plus || event.key === Qt.Key_Equal)) {
+            zoomAt(width / 2, height / 2, zoom * 1.1);
+            event.accepted = true;
+        } else if (ctrl && event.key === Qt.Key_Minus) {
+            zoomAt(width / 2, height / 2, zoom / 1.1);
+            event.accepted = true;
+        } else if (ctrl && event.key === Qt.Key_0) {
+            zoomAt(width / 2, height / 2, 1.0);
+            event.accepted = true;
+        } else if (!ctrl && (event.key === Qt.Key_Left || event.key === Qt.Key_Right || event.key === Qt.Key_Up || event.key === Qt.Key_Down)) {
+            var ndx = event.key === Qt.Key_Left ? -1 : event.key === Qt.Key_Right ? 1 : 0;
+            var ndy = event.key === Qt.Key_Up ? -1 : event.key === Qt.Key_Down ? 1 : 0;
+            if (nudgeSelection(ndx, ndy, shift))
+                event.accepted = true;
+        } else if (event.key === Qt.Key_Escape) {
             if (placingNodeId >= 0) {
                 finishPlacing();
             } else if (connectFromPortId >= 0) {
@@ -3327,6 +3875,15 @@ Item {
             } else if (currentSubgraph !== "") {
                 exitSubgraph();
             }
+            event.accepted = true;
+        }
+    }
+
+    Keys.onReleased: event => {
+        if (event.key === Qt.Key_Shift) {
+            shiftHeld = false;
+        } else if (event.key === Qt.Key_Space && !event.isAutoRepeat) {
+            spaceHeld = false;
             event.accepted = true;
         }
     }
@@ -3356,7 +3913,10 @@ Item {
             lastY = mouse.y;
             pressX = mouse.x;
             pressY = mouse.y;
+            hideNameTip();
             grabPanning = false;
+            spacePanning = false;
+            shiftHeld = !!(mouse.modifiers & Qt.ShiftModifier);
 
             // In-hand placement: a click drops the node where it currently sits.
             if (placingNodeId >= 0) {
@@ -3365,6 +3925,8 @@ Item {
             }
 
             if (mouse.button === Qt.MiddleButton) {
+                middlePanning = true;
+                updateCursor();
                 return;
             }
 
@@ -3432,6 +3994,13 @@ Item {
             }
 
             if (mouse.button === Qt.LeftButton) {
+                // Space held: pan from anywhere, whatever is under the cursor.
+                if (spaceHeld) {
+                    spacePanning = true;
+                    updateCursor();
+                    return;
+                }
+
                 var btnHit = findButtonAt(mouse.x, mouse.y);
                 if (btnHit) {
                     if (btnHit.button === "toggle") {
@@ -3491,10 +4060,8 @@ Item {
                     if (nodeIsSelected) {
                         groupDragging = true;
                         for (var agid in selectedNodes) {
-                            if (selectedNodes[agid]) {
-                                delete autoPlaced[agid];
-                                delete placedKeyById[agid];
-                            }
+                            if (selectedNodes[agid])
+                                markHandPlaced(agid);
                         }
                         var cg = toCanvas(mouse.x, mouse.y);
                         groupDragStartX = cg.x;
@@ -3512,12 +4079,15 @@ Item {
                         selectedNodes = {};
                         selectedLinks = {};
                         dragNodeId = nodeIdDrag;
-                        delete autoPlaced[nodeIdDrag];
-                        delete placedKeyById[nodeIdDrag];
+                        markHandPlaced(nodeIdDrag);
                         var c = toCanvas(mouse.x, mouse.y);
                         var pos = nodePositions[nodeIdDrag];
                         dragOffsetX = c.x - pos.x;
                         dragOffsetY = c.y - pos.y;
+                        dragStartPos = {
+                            x: pos.x,
+                            y: pos.y
+                        };
                     }
                     canvas.requestPaint();
                     return;
@@ -3546,14 +4116,23 @@ Item {
                     return;
                 }
 
-                // Empty canvas: pan it (grab mode) or start a selection box.
-                if (dragMode === "grab") {
+                // Empty canvas: pan it (grab mode) or start a selection box
+                // (select mode, or Shift held in grab mode). With Shift or
+                // Ctrl the box adds to the current selection.
+                var boxShift = !!(mouse.modifiers & Qt.ShiftModifier);
+                if (dragMode === "grab" && !boxShift) {
                     grabPanning = true;
                     grabMoved = false;
                     updateCursor();
                     return;
                 }
-                clearSelection();
+                selectAdditive = boxShift || !!(mouse.modifiers & Qt.ControlModifier);
+                if (selectAdditive) {
+                    selectBaseNodes = Object.assign({}, selectedNodes);
+                    selectBaseLinks = Object.assign({}, selectedLinks);
+                } else {
+                    clearSelection();
+                }
                 selectDragging = true;
                 selectStartX = mouse.x;
                 selectStartY = mouse.y;
@@ -3563,6 +4142,7 @@ Item {
         }
 
         onPositionChanged: mouse => {
+            shiftHeld = !!(mouse.modifiers & Qt.ShiftModifier);
             // In-hand placement: keep the node centred under the cursor.
             if (placingNodeId >= 0) {
                 var pc = toCanvas(mouse.x, mouse.y);
@@ -3577,7 +4157,7 @@ Item {
                 return;
             }
 
-            if ((mouse.buttons & Qt.MiddleButton) || (grabPanning && (mouse.buttons & Qt.LeftButton))) {
+            if ((mouse.buttons & Qt.MiddleButton) || ((grabPanning || spacePanning) && (mouse.buttons & Qt.LeftButton))) {
                 if (grabPanning && !grabMoved && (Math.abs(mouse.x - pressX) > 4 || Math.abs(mouse.y - pressY) > 4))
                     grabMoved = true;
                 panX += mouse.x - lastX;
@@ -3687,6 +4267,10 @@ Item {
 
         onReleased: mouse => {
             activeSnapLines = [];
+            if (mouse.button === Qt.MiddleButton) {
+                middlePanning = false;
+                updateCursor();
+            }
             if (mouse.button === Qt.RightButton && connectBlocking) {
                 var moved = Math.abs(mouse.x - connectPressX) > 4 || Math.abs(mouse.y - connectPressY) > 4;
                 var blockFrom = connectFromPortId;
@@ -3716,6 +4300,10 @@ Item {
                         clearSelection();
                     updateCursor();
                 }
+                if (spacePanning) {
+                    spacePanning = false;
+                    updateCursor();
+                }
 
                 if (connectFromPortId >= 0) {
                     var targetId = findPortAt(mouse.x, mouse.y);
@@ -3728,9 +4316,9 @@ Item {
                             if (why !== "") {
                                 showToast("Blocked by rule " + why + ". Remove the block to connect.");
                             } else if (connectFromDir === "Output") {
-                                controller.connect_ports(connectFromPortId, targetId);
+                                connectPorts(connectFromPortId, targetId);
                             } else {
-                                controller.connect_ports(targetId, connectFromPortId);
+                                connectPorts(targetId, connectFromPortId);
                             }
                         }
                     }
@@ -3753,6 +4341,7 @@ Item {
                             }
                         }
                     }
+                    recordMove("move", groupDragStart);
                     persistLayout();
                     canvas.requestPaint();
                 }
@@ -3772,29 +4361,54 @@ Item {
                     if (droppedNode) {
                         resolveNodeOverlap(droppedNode);
                     }
+                    if (dragStartPos) {
+                        var movedFrom = {};
+                        movedFrom[dragNodeId] = dragStartPos;
+                        recordMove("move", movedFrom);
+                    }
                     persistLayout();
                     canvas.requestPaint();
                 }
                 dragNodeId = -1;
+                dragStartPos = null;
 
                 if (selectDragging) {
                     selectDragging = false;
                     var dx = Math.abs(selectEndX - selectStartX);
                     var dy = Math.abs(selectEndY - selectStartY);
                     if (dx > 5 || dy > 5) {
-                        selectedLinks = findLinksInRect(selectStartX, selectStartY, selectEndX, selectEndY);
-                        selectedNodes = findNodesInRect(selectStartX, selectStartY, selectEndX, selectEndY);
+                        var boxLinks = findLinksInRect(selectStartX, selectStartY, selectEndX, selectEndY);
+                        var boxNodes = findNodesInRect(selectStartX, selectStartY, selectEndX, selectEndY);
+                        if (selectAdditive) {
+                            boxLinks = Object.assign({}, selectBaseLinks, boxLinks);
+                            boxNodes = Object.assign({}, selectBaseNodes, boxNodes);
+                        }
+                        selectedLinks = boxLinks;
+                        selectedNodes = boxNodes;
                     }
+                    selectAdditive = false;
                     canvas.requestPaint();
                 }
             }
         }
 
+        // The wheel zooms around the cursor.
         onWheel: wheel => {
             if (wheel.angleDelta.y === 0)
                 return;
             var factor = wheel.angleDelta.y > 0 ? 1.1 : 0.9;
             zoomAt(wheel.x, wheel.y, zoom * factor);
+        }
+
+        // Touchpad / touchscreen pinch zooms around the fingers.
+        PinchHandler {
+            id: pinchZoom
+            target: null
+            property real startZoom: 1
+            onActiveChanged: if (active)
+                startZoom = graphView.zoom
+            onActiveScaleChanged: if (active)
+                graphView.zoomAt(centroid.position.x, centroid.position.y, startZoom * activeScale)
         }
     }
 
@@ -3804,17 +4418,15 @@ Item {
     // canvas does. The active mode is the accent-tinted cell; W toggles.
     component ModeCell: AbstractButton {
         id: cell
-        property string mode
         property string iconName
         property string tip
-        readonly property bool active: graphView.dragMode === mode
+        property bool active: false
         width: 28
         height: 28
         hoverEnabled: true
         // Keep the keyboard on the canvas (W, Delete, Home, Esc).
         focusPolicy: Qt.NoFocus
         Accessible.name: tip
-        onClicked: graphView.setDragMode(mode)
         background: Rectangle {
             radius: Theme.radiusSmall
             color: cell.active ? Theme.accentFaint : cell.hovered || cell.down ? Theme.bgHover : "transparent"
@@ -3861,14 +4473,60 @@ Item {
             anchors.centerIn: parent
             spacing: 2
             ModeCell {
-                mode: "grab"
                 iconName: "grab"
                 tip: "Grab: drag the canvas to move around (W)"
+                active: graphView.dragMode === "grab"
+                onClicked: graphView.setDragMode("grab")
             }
             ModeCell {
-                mode: "select"
                 iconName: "select"
                 tip: "Select: drag a box around nodes and wires (W)"
+                active: graphView.dragMode === "select"
+                onClicked: graphView.setDragMode("select")
+            }
+        }
+    }
+
+    // Auto layout at the canvas's top-right (clear of the scroll bar): a
+    // plain click arranges everything that is not pinned, Shift+click (or
+    // Shift+L) the pinned nodes too.
+    Rectangle {
+        id: autoLayoutButton
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.rightMargin: 12 + (vScrollBar.visible ? vScrollBar.width : 0)
+        anchors.topMargin: 12
+        height: 34
+        width: 34
+        radius: Theme.radiusControl
+        color: Theme.bgPanel
+        border.width: 1
+        border.color: Theme.borderStrong
+
+        AbstractButton {
+            id: autoLayoutCell
+            anchors.centerIn: parent
+            width: 28
+            height: 28
+            hoverEnabled: true
+            focusPolicy: Qt.NoFocus   // the canvas keeps the keyboard
+            Accessible.name: "Auto layout"
+            onClicked: graphView.requestAutoLayout(graphView.shiftHeld)
+            background: Rectangle {
+                radius: Theme.radiusSmall
+                color: autoLayoutCell.down ? Theme.borderStrong : autoLayoutCell.hovered ? Theme.bgHover : "transparent"
+            }
+            contentItem: Item {
+                ZbIcon {
+                    anchors.centerIn: parent
+                    name: "autoLayout"
+                    size: 18
+                    color: autoLayoutCell.hovered ? Theme.textPrimary : Theme.textIcon
+                }
+            }
+            ZbTooltip {
+                visible: autoLayoutCell.hovered
+                text: "Auto layout (L). Pinned nodes stay put; Shift+click (Shift+L) lays them out too."
             }
         }
     }
@@ -3929,12 +4587,137 @@ Item {
         }
     }
 
+    // New nodes that appeared outside the view: a marker at the nearest
+    // edge, pointing at the node; click to go there.
+    Repeater {
+        model: graphView.edgeMarkers
+        delegate: Rectangle {
+            id: marker
+            required property var modelData
+            x: Math.max(8, Math.min(graphView.width - width - 8, modelData.x - width / 2))
+            y: Math.max(8, Math.min(graphView.height - height - 8, modelData.y - height / 2))
+            width: markerRow.implicitWidth + 20
+            height: 26
+            radius: height / 2
+            color: Theme.bgPanel
+            border.width: 1
+            border.color: Theme.accentRing
+
+            Rectangle {
+                anchors.fill: parent
+                radius: parent.radius
+                color: markerMouse.containsMouse ? Theme.accentRing : Theme.accentFaint
+            }
+            Row {
+                id: markerRow
+                anchors.centerIn: parent
+                spacing: 6
+                ZbIcon {
+                    name: "arrow"
+                    size: 12
+                    color: Theme.accent
+                    rotation: marker.modelData.angle
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+                Text {
+                    text: "New: " + marker.modelData.name
+                    width: Math.min(implicitWidth, 180)
+                    elide: Text.ElideRight
+                    anchors.verticalCenter: parent.verticalCenter
+                    font.family: Theme.fontSans
+                    font.pixelSize: 11
+                    font.weight: Font.Medium
+                    color: Theme.textPrimary
+                }
+            }
+            MouseArea {
+                id: markerMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: graphView.revealNode(marker.modelData.id)
+            }
+        }
+    }
+
+    // Temporary drag-mode override, at the bottom centre of the canvas: which
+    // key to hold, and — accent-tinted — that the override is on right now.
+    Rectangle {
+        id: overrideHint
+        readonly property bool active: graphView.overrideState !== ""
+        // What holding the key does: the other mode's action.
+        readonly property string action: graphView.overrideState !== "" ? graphView.overrideState : (graphView.dragMode === "grab" ? "select" : "pan")
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 18
+        height: 28
+        width: hintRow.implicitWidth + 22
+        radius: Theme.radiusControl
+        color: Theme.bgPanel
+        border.width: 1
+        border.color: active ? Theme.accentRing : Theme.borderStrong
+
+        Rectangle {
+            anchors.fill: parent
+            radius: parent.radius
+            color: Theme.accentFaint
+            visible: overrideHint.active
+        }
+
+        component HintText: Text {
+            property bool on: false
+            anchors.verticalCenter: parent.verticalCenter
+            font.family: Theme.fontSans
+            font.pixelSize: 11
+            font.weight: on ? Font.DemiBold : Font.Normal
+            color: on ? Theme.accent : Theme.textMuted
+        }
+
+        Row {
+            id: hintRow
+            anchors.centerIn: parent
+            spacing: 6
+            ZbIcon {
+                name: overrideHint.action === "pan" ? "grab" : "select"
+                size: 14
+                color: overrideHint.active ? Theme.accent : Theme.textMuted
+                anchors.verticalCenter: parent.verticalCenter
+            }
+            HintText {
+                on: overrideHint.active
+                text: overrideHint.active ? (overrideHint.action === "pan" ? "Panning \u2014 release" : "Selecting \u2014 release") : "Hold"
+            }
+            // Key cap.
+            Rectangle {
+                anchors.verticalCenter: parent.verticalCenter
+                height: 18
+                width: keyText.implicitWidth + 12
+                radius: Theme.radiusTag
+                color: "transparent"
+                border.width: 1
+                border.color: overrideHint.active ? Theme.accent : Theme.borderStrong
+                Text {
+                    id: keyText
+                    anchors.centerIn: parent
+                    text: overrideHint.action === "pan" ? "Space" : "Shift"
+                    font.family: Theme.fontMono
+                    font.pixelSize: 10
+                    color: overrideHint.active ? Theme.accent : Theme.textIcon
+                }
+            }
+            HintText {
+                on: overrideHint.active
+                text: overrideHint.active ? (graphView.dragMode === "grab" ? "to go back to Grab" : "to go back to Select") : (overrideHint.action === "pan" ? "to pan" : "and drag to select")
+            }
+        }
+    }
+
     // Short notice at the bottom of the canvas (e.g. a refused connection).
     Rectangle {
         id: toast
         anchors.horizontalCenter: parent.horizontalCenter
-        anchors.bottom: parent.bottom
-        anchors.bottomMargin: 28
+        anchors.bottom: overrideHint.top
+        anchors.bottomMargin: 10
         width: Math.min(toastText.implicitWidth + 32, parent.width - 32)
         height: toastText.implicitHeight + 16
         radius: Theme.radiusControl
@@ -4016,24 +4799,37 @@ Item {
         var link = -1;
         var btn = "";
         var empty = false;
+        var nodeUnder = -1;
         if (sx >= 0 && connectFromPortId < 0 && dragNodeId < 0 && !groupDragging) {
             port = findPortAt(sx, sy);
+            nodeUnder = findNodeAt(sx, sy);
+            if (nodeUnder < 0 && port >= 0 && portPositions[port])
+                nodeUnder = portPositions[port].nodeId;
             if (port < 0) {
                 var hit = findButtonAt(sx, sy);
                 if (hit) {
                     btn = hit.nodeId + ":" + hit.button;
-                } else if (findNodeAt(sx, sy) < 0) {
+                } else if (nodeUnder < 0) {
                     link = findLinkAt(sx, sy);
                     empty = link < 0;
                 }
             }
         }
-        var changed = port !== hoveredPortId || link !== hoveredLinkId || btn !== hoveredButton;
+        var nodeChanged = nodeUnder !== hoveredNodeId;
+        var changed = nodeChanged || port !== hoveredPortId || link !== hoveredLinkId || btn !== hoveredButton;
         hoveredPortId = port;
         hoveredLinkId = link;
         hoveredButton = btn;
+        hoveredNodeId = nodeUnder;
         hoverEmpty = empty;
         updateCursor();
+        // Full-name popup: only for a node whose title is cut short, and not
+        // while a pin or a node button has a tooltip of its own.
+        if (nodeChanged || port >= 0 || btn !== "") {
+            hideNameTip();
+            if (nodeUnder >= 0 && port < 0 && btn === "" && nameTruncated[nodeUnder])
+                nameTimer.restart();
+        }
         if (changed) {
             if (port >= 0 && portPositions[port]) {
                 var pp = portPositions[port];
@@ -4061,14 +4857,20 @@ Item {
         }
     }
 
-    // Canvas cursor: a pointing hand over pins and node buttons; in grab mode
-    // an open hand over empty canvas and a closed one while panning.
+    // Canvas cursor: a closed hand while panning (grab, Space or middle
+    // drag) and an open one wherever a left-drag would pan (Space held, or
+    // empty canvas in grab mode); a cross where Shift would start a selection
+    // box; a pointing hand over pins and node buttons.
     function updateCursor() {
         var shape = Qt.ArrowCursor;
-        if (grabPanning)
+        if (grabPanning || spacePanning || middlePanning)
             shape = Qt.ClosedHandCursor;
+        else if (spaceHeld)
+            shape = Qt.OpenHandCursor;
         else if (hoveredButton !== "" || hoveredPortId >= 0)
             shape = Qt.PointingHandCursor;
+        else if (overrideState === "select" && hoverEmpty)
+            shape = Qt.CrossCursor;
         else if (dragMode === "grab" && hoverEmpty && placingNodeId < 0)
             shape = Qt.OpenHandCursor;
         if (mouseArea.cursorShape !== shape)
@@ -4092,6 +4894,44 @@ Item {
         delay: 300
     }
 
+    // Full node name, when the card's title is cut short: shown above the
+    // card (below its header when there is no room above) after a short pause.
+    ZbTooltip {
+        id: nameTip
+        delay: 0
+    }
+    TextMetrics {
+        id: nameMetrics
+        font: nameTip.font
+        text: nameTip.text
+    }
+    Timer {
+        id: nameTimer
+        interval: 350
+        onTriggered: graphView.showNameTip()
+    }
+    function hideNameTip() {
+        nameTimer.stop();
+        nameTip.close();
+    }
+    function showNameTip() {
+        var n = hoveredNodeId >= 0 ? findNodeData(hoveredNodeId) : null;
+        var pos = n ? nodePositions[n.id] : null;
+        if (!n || !pos || !nameTruncated[n.id] || hoveredPortId >= 0 || hoveredButton !== "" || dragNodeId >= 0 || groupDragging || grabPanning || spacePanning || middlePanning)
+            return;
+        nameTip.text = n.name;
+        nameTip.width = Math.min(nameMetrics.advanceWidth + nameTip.leftPadding + nameTip.rightPadding + 2, Math.min(420, width - 16));
+        placeNameTip(n, pos);
+        nameTip.open();
+        Qt.callLater(placeNameTip, n, pos);   // the height settles once it wraps
+    }
+    function placeNameTip(n, pos) {
+        var s = toScreen(pos.x, pos.y);
+        nameTip.x = Math.max(8, Math.min(width - nameTip.width - 8, s.x));
+        var above = s.y - nameTip.height - 6;
+        nameTip.y = above >= 8 ? above : s.y + Theme.nodeHeader * zoom + 4;
+    }
+
     // Wire control-point offset: clamp(0.5·|dx|, 32, 200), horizontal only,
     // so wires leave and enter pins horizontally. Shared by drawing and
     // every hit test.
@@ -4110,9 +4950,13 @@ Item {
         ctx.stroke();
     }
 
+    // The wire nearest to the cursor within linkHitPx screen pixels, so a
+    // wire highlights (and can be clicked) from close by, not only when the
+    // cursor is exactly on it.
+    readonly property real linkHitPx: 10
     function findLinkAt(sx, sy) {
         var c = toCanvas(sx, sy);
-        var threshold = 4 / zoom;   // 8 px band around the wire
+        var threshold = linkHitPx / zoom;
         var bestId = -1;
         var bestDist = threshold + 1;
 
@@ -4121,6 +4965,12 @@ Item {
             var fromPos = portPositions[link.outputPortId];
             var toPos = portPositions[link.inputPortId];
             if (!fromPos || !toPos)
+                continue;
+            // The curve stays inside its control polygon's box.
+            var ctrl = bezierCtrl(fromPos.cx, toPos.cx);
+            if (c.x < Math.min(fromPos.cx, toPos.cx - ctrl) - threshold || c.x > Math.max(fromPos.cx + ctrl, toPos.cx) + threshold)
+                continue;
+            if (c.y < Math.min(fromPos.cy, toPos.cy) - threshold || c.y > Math.max(fromPos.cy, toPos.cy) + threshold)
                 continue;
             var dist = distToBezier(c.x, c.y, fromPos.cx, fromPos.cy, toPos.cx, toPos.cy);
             if (dist < bestDist) {
@@ -4188,6 +5038,9 @@ Item {
         return bestId;
     }
 
+    // Distance from (px, py) to the wire from (x1, y1) to (x2, y2): the
+    // curve is walked as a polyline and the distance taken to its segments,
+    // so a long wire has no dead spots between sample points.
     function distToBezier(px, py, x1, y1, x2, y2) {
         var ctrlDist = bezierCtrl(x1, x2);
         var cx1 = x1 + ctrlDist;
@@ -4195,19 +5048,25 @@ Item {
         var cx2 = x2 - ctrlDist;
         var cy2 = y2;
         var steps = 30;
-        var minDist = Infinity;
-        for (var i = 0; i <= steps; i++) {
+        var minSq = Infinity;
+        var ax = x1, ay = y1;
+        for (var i = 1; i <= steps; i++) {
             var t = i / steps;
             var u = 1 - t;
             var bx = u * u * u * x1 + 3 * u * u * t * cx1 + 3 * u * t * t * cx2 + t * t * t * x2;
             var by = u * u * u * y1 + 3 * u * u * t * cy1 + 3 * u * t * t * cy2 + t * t * t * y2;
-            var dx = px - bx;
-            var dy = py - by;
-            var d = Math.sqrt(dx * dx + dy * dy);
-            if (d < minDist)
-                minDist = d;
+            var sx = bx - ax, sy = by - ay;
+            var len = sx * sx + sy * sy;
+            var k = len > 0 ? Math.max(0, Math.min(1, ((px - ax) * sx + (py - ay) * sy) / len)) : 0;
+            var dx = px - (ax + k * sx);
+            var dy = py - (ay + k * sy);
+            var d = dx * dx + dy * dy;
+            if (d < minSq)
+                minSq = d;
+            ax = bx;
+            ay = by;
         }
-        return minDist;
+        return Math.sqrt(minSq);
     }
 
     function bezierIntersectsRect(x1, y1, x2, y2, rx, ry, rw, rh) {
@@ -4284,19 +5143,575 @@ Item {
     }
 
     function deleteSelectedLinks() {
-        var count = 0;
+        var ids = [];
         for (var linkId in selectedLinks) {
             var lid = parseInt(linkId);
             // Only disconnect a link that is still the one that was selected.
-            if (linkMatchesSig(findLinkData(lid), selectedLinks[linkId])) {
-                controller.disconnect_link(lid);
-                count++;
-            }
+            if (linkMatchesSig(findLinkData(lid), selectedLinks[linkId]))
+                ids.push(lid);
         }
-        if (count > 0) {
+        if (disconnectLinks(ids) > 0) {
             selectedLinks = {};
             canvas.requestPaint();
         }
+    }
+
+    // ---- New-node cue -----------------------------------------------------
+    // A node that appears while you are working pulses once (an accent ring,
+    // drawn by drawNode); when it appeared outside the view, a marker at the
+    // nearest edge points to it until it has been seen. Nothing is cued
+    // while the graph is still filling in: at start-up, after a session
+    // switch or when entering / leaving a subgraph (cueQuiet).
+    // nodeId -> { born: ms it appeared, t: ms its pulse (re)started }
+    property var nodeCues: ({})
+    property bool cueQuiet: true
+    readonly property int cuePulseMs: 1600
+    readonly property int cueMarkerMs: 12000
+    // [{ id, name, x, y, angle }] in screen space, for the edge markers.
+    property var edgeMarkers: []
+
+    function quietCues() {
+        cueQuiet = true;
+        nodeCues = {};
+        edgeMarkers = [];
+        cueQuietTimer.restart();
+    }
+
+    // Called by refreshData with the ids that appeared in this refresh.
+    function noteAppeared(ids) {
+        if (ids.length === 0)
+            return;
+        if (cueQuiet) {
+            cueQuietTimer.restart();
+            return;
+        }
+        // A burst (a device with many nodes, a subgraph being ungrouped) is
+        // not news about any one node.
+        if (ids.length > 4)
+            return;
+        var now = Date.now();
+        var added = false;
+        for (var i = 0; i < ids.length; i++) {
+            var n = findNodeData(ids[i]);
+            if (!n || ids[i] === placingNodeId || (n.layoutKey && hiddenNodes[n.layoutKey]))
+                continue;
+            nodeCues[ids[i]] = {
+                born: now,
+                t: now
+            };
+            added = true;
+        }
+        if (added) {
+            nodeCues = nodeCues;
+            cueTimer.start();
+        }
+    }
+
+    // Is any part of the node inside the view?
+    function nodeOnScreen(node) {
+        var p = nodePositions[node.id];
+        if (!p)
+            return false;
+        var a = toScreen(p.x, p.y);
+        var b = toScreen(p.x + getNodeWidth(node.id), p.y + calculateNodeHeight(node));
+        return b.x > 0 && a.x < width && b.y > 0 && a.y < height;
+    }
+
+    // Drop finished cues and place a marker for each cued node out of view.
+    function updateCues() {
+        var now = Date.now();
+        var markers = [];
+        var pulsing = false;
+        var left = 0;
+        for (var id in nodeCues) {
+            var cue = nodeCues[id];
+            var n = findNodeData(parseInt(id));
+            if (!n || (n.layoutKey && hiddenNodes[n.layoutKey])) {
+                delete nodeCues[id];
+                continue;
+            }
+            var onScreen = nodeOnScreen(n);
+            if (onScreen ? now - cue.t > cuePulseMs : now - cue.born > cueMarkerMs) {
+                // Seen (the pulse has played), or the marker has had its time.
+                delete nodeCues[id];
+                continue;
+            }
+            left++;
+            if (onScreen) {
+                pulsing = true;
+                continue;
+            }
+            // Off screen: the pulse waits until the node comes into view.
+            cue.t = now;
+            var p = nodePositions[n.id];
+            var c = toScreen(p.x + getNodeWidth(n.id) / 2, p.y + calculateNodeHeight(n) / 2);
+            var mx = Math.max(90, Math.min(width - 90, c.x));
+            var my = Math.max(70, Math.min(height - 64, c.y));
+            markers.push({
+                id: n.id,
+                name: n.name || "",
+                x: Math.round(mx),
+                y: Math.round(my),
+                angle: Math.round(Math.atan2(c.y - my, c.x - mx) * 180 / Math.PI)
+            });
+        }
+        if (JSON.stringify(markers) !== JSON.stringify(edgeMarkers))
+            edgeMarkers = markers;
+        if (pulsing)
+            canvas.requestPaint();
+        if (left === 0)
+            cueTimer.stop();
+    }
+
+    // Bring a node to the middle of the view and pulse it again.
+    function revealNode(nodeId) {
+        var n = findNodeData(nodeId);
+        var p = n ? nodePositions[nodeId] : null;
+        if (!p)
+            return;
+        panX = width / 2 - (p.x + getNodeWidth(nodeId) / 2) * zoom;
+        panY = height / 2 - (p.y + calculateNodeHeight(n) / 2) * zoom;
+        clampPan();
+        nodeCues[nodeId] = {
+            born: Date.now(),
+            t: Date.now()
+        };
+        nodeCues = nodeCues;
+        cueTimer.start();
+        canvas.requestPaint();
+    }
+
+    Timer {
+        id: cueTimer
+        interval: 40
+        repeat: true
+        onTriggered: graphView.updateCues()
+    }
+
+    // The graph has stopped filling in: start cueing newcomers.
+    Timer {
+        id: cueQuietTimer
+        interval: 2500
+        running: true
+        onTriggered: graphView.cueQuiet = false
+    }
+
+    // ---- Undo / redo ------------------------------------------------------
+    // Session-only history of node moves, wires made and removed, and nodes
+    // hidden. Entries name nodes by layout key and wires by their ports, and
+    // are checked against the live graph when applied, so a recycled id can
+    // never be moved or rewired by mistake. Cleared when the view changes
+    // (another session, into or out of a subgraph).
+    property var undoStack: []
+    property var redoStack: []
+    readonly property int undoLimit: 50
+    readonly property bool canUndo: undoStack.length > 0
+    readonly property bool canRedo: redoStack.length > 0
+
+    function pushUndo(entry) {
+        var st = undoStack.slice();
+        st.push(entry);
+        if (st.length > undoLimit)
+            st.shift();
+        undoStack = st;
+        redoStack = [];
+    }
+
+    function clearUndo() {
+        undoStack = [];
+        redoStack = [];
+    }
+
+    // "node" / "3 nodes" (history labels), and "1 node" / "3 nodes".
+    function plural(n, one, many) {
+        return n === 1 ? one : n + " " + many;
+    }
+    function counted(n, one, many) {
+        return n + " " + (n === 1 ? one : many);
+    }
+
+    function nodeIdForKey(key) {
+        for (var id in uniqueKeyById) {
+            if (uniqueKeyById[id] === key)
+                return parseInt(id);
+        }
+        return -1;
+    }
+
+    // The user positioned this node: automatic placement leaves it alone.
+    function markHandPlaced(nodeId) {
+        delete autoPlaced[nodeId];
+        delete placedKeyById[nodeId];
+        delete awaitingLinkPlacement[nodeId];
+    }
+
+    // Record a move of the nodes in `fromById` (nodeId -> {x, y} before) to
+    // where they are now. Nodes that did not move are left out.
+    function recordMove(verb, fromById) {
+        var items = [];
+        for (var id in fromById) {
+            var nid = parseInt(id);
+            var from = fromById[id];
+            var to = nodePositions[nid];
+            var key = uniqueKeyById[nid];
+            if (!from || !to || !key || (from.x === to.x && from.y === to.y))
+                continue;
+            items.push({
+                key: key,
+                from: {
+                    x: from.x,
+                    y: from.y
+                },
+                to: {
+                    x: to.x,
+                    y: to.y
+                }
+            });
+        }
+        if (items.length === 0)
+            return null;
+        var entry = {
+            kind: "move",
+            label: verb + " " + plural(items.length, "node", "nodes"),
+            items: items
+        };
+        pushUndo(entry);
+        return entry;
+    }
+
+    function linkRecord(link) {
+        return {
+            o: link.outputPortId,
+            i: link.inputPortId,
+            onKey: uniqueKeyById[link.outputNodeId] || "",
+            innKey: uniqueKeyById[link.inputNodeId] || ""
+        };
+    }
+
+    // Do the ports of a recorded wire still belong to the nodes they did?
+    function linkRecordValid(rec) {
+        var on = getPortNodeId(rec.o);
+        var inn = getPortNodeId(rec.i);
+        return on >= 0 && inn >= 0 && (uniqueKeyById[on] || "") === rec.onKey && (uniqueKeyById[inn] || "") === rec.innKey;
+    }
+
+    function findLinkByPorts(outPort, inPort) {
+        for (var i = 0; i < links.length; i++) {
+            if (links[i].outputPortId === outPort && links[i].inputPortId === inPort)
+                return links[i];
+        }
+        return null;
+    }
+
+    // Connect two ports by hand, as one undoable step. The two nodes stay
+    // where they are: the user is wiring them in place.
+    function connectPorts(outPort, inPort) {
+        var on = getPortNodeId(outPort);
+        var inn = getPortNodeId(inPort);
+        markHandPlaced(on);
+        markHandPlaced(inn);
+        controller.connect_ports(outPort, inPort);
+        pushUndo({
+            kind: "connect",
+            label: "connect",
+            links: [
+                {
+                    o: outPort,
+                    i: inPort,
+                    onKey: uniqueKeyById[on] || "",
+                    innKey: uniqueKeyById[inn] || ""
+                }
+            ]
+        });
+    }
+
+    // Disconnect the links with these ids, as one undoable step. Returns
+    // how many there were.
+    function disconnectLinks(ids) {
+        var recs = [];
+        for (var i = 0; i < ids.length; i++) {
+            var l = findLinkData(ids[i]);
+            if (!l)
+                continue;
+            recs.push(linkRecord(l));
+            controller.disconnect_link(l.id);
+        }
+        if (recs.length > 0)
+            pushUndo({
+                kind: "disconnect",
+                label: "disconnect " + plural(recs.length, "wire", "wires"),
+                links: recs
+            });
+        return recs.length;
+    }
+
+    // Apply a history entry backwards (undoing) or forwards. Returns how
+    // many of its items could still be applied.
+    function applyHistory(entry, undoing) {
+        var done = 0;
+        if (entry.kind === "move") {
+            for (var mi = 0; mi < entry.items.length; mi++) {
+                var it = entry.items[mi];
+                var nid = nodeIdForKey(it.key);
+                if (nid < 0)
+                    continue;
+                var target = undoing ? it.from : it.to;
+                nodePositions[nid] = {
+                    x: target.x,
+                    y: target.y
+                };
+                markHandPlaced(nid);
+                done++;
+            }
+            if (done > 0)
+                persistLayout();
+        } else if (entry.kind === "hide") {
+            for (var hi = 0; hi < entry.keys.length; hi++) {
+                if (undoing)
+                    delete hiddenNodes[entry.keys[hi]];
+                else
+                    hiddenNodes[entry.keys[hi]] = true;
+                done++;
+            }
+            hiddenNodes = hiddenNodes;
+            persistHidden();
+        } else {
+            // "connect" / "disconnect": undoing one is doing the other.
+            var make = (entry.kind === "disconnect") === undoing;
+            for (var li = 0; li < entry.links.length; li++) {
+                var rec = entry.links[li];
+                if (!linkRecordValid(rec))
+                    continue;
+                var live = findLinkByPorts(rec.o, rec.i);
+                if (make && !live) {
+                    controller.connect_ports(rec.o, rec.i);
+                    done++;
+                } else if (!make && live) {
+                    controller.disconnect_link(live.id);
+                    done++;
+                }
+            }
+        }
+        canvas.requestPaint();
+        return done;
+    }
+
+    function undo() {
+        if (undoStack.length === 0) {
+            showToast("Nothing to undo");
+            return;
+        }
+        var st = undoStack.slice();
+        var entry = st.pop();
+        undoStack = st;
+        if (applyHistory(entry, true) > 0) {
+            var rs = redoStack.slice();
+            rs.push(entry);
+            redoStack = rs;
+            showToast("Undo: " + entry.label);
+        } else {
+            showToast("Can\u2019t undo \u201c" + entry.label + "\u201d: it is no longer there");
+        }
+    }
+
+    function redo() {
+        if (redoStack.length === 0) {
+            showToast("Nothing to redo");
+            return;
+        }
+        var rs = redoStack.slice();
+        var entry = rs.pop();
+        redoStack = rs;
+        if (applyHistory(entry, false) > 0) {
+            var st = undoStack.slice();
+            st.push(entry);
+            undoStack = st;
+            showToast("Redo: " + entry.label);
+        } else {
+            showToast("Can\u2019t redo \u201c" + entry.label + "\u201d: it is no longer there");
+        }
+    }
+
+    // ---- Keyboard edits ---------------------------------------------------
+
+    // Ids of the selected nodes that are still the nodes that were selected.
+    function selectedNodeIds() {
+        var ids = [];
+        for (var k in selectedNodes) {
+            var n = findNodeData(parseInt(k));
+            if (n && selectedNodes[k] && selectedNodes[k].key === (n.layoutKey || ""))
+                ids.push(n.id);
+        }
+        return ids;
+    }
+
+    function selectAll() {
+        var allNodes = {};
+        for (var i = 0; i < nodes.length; i++) {
+            var n = nodes[i];
+            if ((n.layoutKey && hiddenNodes[n.layoutKey]) || !nodePositions[n.id])
+                continue;
+            allNodes[n.id] = nodeSig(n);
+        }
+        var allLinks = {};
+        for (var li = 0; li < links.length; li++) {
+            var l = links[li];
+            if (portPositions[l.outputPortId] && portPositions[l.inputPortId])
+                allLinks[l.id] = linkSig(l);
+        }
+        selectedNodes = allNodes;
+        selectedLinks = allLinks;
+        canvas.requestPaint();
+    }
+
+    // Arrow keys: move the selected nodes one grid step (1 px without the
+    // grid, 10 with Shift). A run of nudges is one undo step.
+    property var nudgeEntry: null
+    function nudgeSelection(dx, dy, big) {
+        var ids = selectedNodeIds();
+        if (ids.length === 0)
+            return false;
+        var step = snapToGrid ? gridSize : (big ? 10 : 1);
+        var from = {};
+        for (var i = 0; i < ids.length; i++) {
+            var p = nodePositions[ids[i]];
+            if (!p)
+                continue;
+            from[ids[i]] = {
+                x: p.x,
+                y: p.y
+            };
+            nodePositions[ids[i]] = {
+                x: p.x + dx * step,
+                y: p.y + dy * step
+            };
+            markHandPlaced(ids[i]);
+        }
+        var last = undoStack.length > 0 ? undoStack[undoStack.length - 1] : null;
+        if (nudgeTimer.running && nudgeEntry !== null && last === nudgeEntry) {
+            // Same run: keep where the nodes started, update where they are.
+            for (var ni = 0; ni < nudgeEntry.items.length; ni++) {
+                var it = nudgeEntry.items[ni];
+                var nid = nodeIdForKey(it.key);
+                if (nid >= 0 && nodePositions[nid])
+                    it.to = {
+                        x: nodePositions[nid].x,
+                        y: nodePositions[nid].y
+                    };
+            }
+        } else {
+            nudgeEntry = recordMove("move", from);
+        }
+        nudgeTimer.restart();
+        canvas.requestPaint();
+        return true;
+    }
+
+    // Ends a run of nudges and saves the layout once for the whole run.
+    Timer {
+        id: nudgeTimer
+        interval: 700
+        onTriggered: {
+            graphView.nudgeEntry = null;
+            graphView.persistLayout();
+        }
+    }
+
+    // Delete: disconnect the selected wires and take the selected nodes off
+    // the canvas — plugins, subgraphs and virtual devices are removed (after
+    // a confirmation, that can't be undone); devices and app streams, which
+    // can't be removed, are hidden.
+    property var deletePlan: null
+    function deleteSelection() {
+        var plan = {
+            links: [],
+            plugins: [],
+            subgraphs: [],
+            vdevs: [],
+            hide: []
+        };
+        var removed = {};
+        var ids = selectedNodeIds();
+        for (var i = 0; i < ids.length; i++) {
+            var n = findNodeData(ids[i]);
+            if (n.type === "Plugin") {
+                plan.plugins.push(n);
+                removed[n.id] = true;
+            } else if (n.type === "Subgraph") {
+                plan.subgraphs.push(n);
+                removed[n.id] = true;
+            } else if (n.vdevId) {
+                plan.vdevs.push(n);
+                removed[n.id] = true;
+            } else if (n.type !== "SubgraphInput" && n.type !== "SubgraphOutput" && n.layoutKey) {
+                plan.hide.push(n);
+            }
+        }
+        for (var linkId in selectedLinks) {
+            var l = findLinkData(parseInt(linkId));
+            // Wires of a node that is being removed go with it.
+            if (linkMatchesSig(l, selectedLinks[linkId]) && !removed[l.outputNodeId] && !removed[l.inputNodeId])
+                plan.links.push(l.id);
+        }
+        var destructive = plan.plugins.length + plan.subgraphs.length + plan.vdevs.length;
+        if (destructive + plan.hide.length + plan.links.length === 0)
+            return;
+        deletePlan = plan;
+        if (destructive > 0)
+            deleteSelectionDialog.open();
+        else
+            performDelete();
+    }
+
+    function deletePlanLines() {
+        var plan = deletePlan;
+        if (!plan)
+            return [];
+        var lines = [];
+        if (plan.plugins.length > 0)
+            lines.push("Remove " + counted(plan.plugins.length, "plugin", "plugins"));
+        if (plan.subgraphs.length > 0)
+            lines.push("Delete " + counted(plan.subgraphs.length, "subgraph", "subgraphs") + " and the plugins inside");
+        if (plan.vdevs.length > 0)
+            lines.push("Remove " + counted(plan.vdevs.length, "virtual device", "virtual devices"));
+        if (plan.hide.length > 0)
+            lines.push("Hide " + counted(plan.hide.length, "node", "nodes") + " (devices and app streams can\u2019t be removed)");
+        if (plan.links.length > 0)
+            lines.push("Disconnect " + counted(plan.links.length, "wire", "wires"));
+        return lines;
+    }
+
+    function performDelete() {
+        var plan = deletePlan;
+        deletePlan = null;
+        if (!plan)
+            return;
+        disconnectLinks(plan.links);
+        if (plan.hide.length > 0) {
+            var keys = [];
+            for (var hi = 0; hi < plan.hide.length; hi++) {
+                hiddenNodes[plan.hide[hi].layoutKey] = true;
+                keys.push(plan.hide[hi].layoutKey);
+            }
+            hiddenNodes = hiddenNodes;
+            persistHidden();
+            pushUndo({
+                kind: "hide",
+                label: "hide " + plural(keys.length, "node", "nodes"),
+                keys: keys
+            });
+        }
+        for (var pi = 0; pi < plan.plugins.length; pi++)
+            controller.remove_plugin(plan.plugins[pi].id);
+        for (var si = 0; si < plan.subgraphs.length; si++)
+            controller.delete_subgraph(plan.subgraphs[si].subgraphId);
+        for (var vi = 0; vi < plan.vdevs.length; vi++)
+            controller.remove_virtual_device(plan.vdevs[vi].vdevId);
+        selectedNodes = {};
+        selectedLinks = {};
+        if (plan.hide.length > 0)
+            showToast("Hid " + counted(plan.hide.length, "node", "nodes") + ". Ctrl+Z or right-click \u203a Unhide all brings them back.");
+        canvas.requestPaint();
     }
 
     // Block rule label ("A → B") forbidding a drag from `fromPort` (direction
@@ -4475,6 +5890,8 @@ Item {
                 zoom: zoom
             };
         clearSelection();
+        clearUndo();
+        quietCues();
         currentSubgraph = id;
         currentSubgraphName = info.name;
         fitAfterRefresh = !(info.view && info.view.zoom);
@@ -4495,6 +5912,8 @@ Item {
             zoom: zoom
         }));
         clearSelection();
+        clearUndo();
+        quietCues();
         currentSubgraph = "";
         currentSubgraphName = "";
         fitAfterRefresh = false;

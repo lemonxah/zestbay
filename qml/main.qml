@@ -38,6 +38,14 @@ ZbWindow {
                 graphView.snapToGrid = prefs.snap_to_grid;
             if (prefs.drag_mode)
                 graphView.dragMode = prefs.drag_mode;
+            if (prefs.node_spacing_px !== undefined)
+                graphView.nodeSpacing = prefs.node_spacing_px;
+            if (prefs.card_row_px !== undefined)
+                graphView.cardRow = prefs.card_row_px;
+            // New nodes may still be repositioned until their rule has had
+            // time to connect them.
+            if (prefs.rule_settle_ms !== undefined)
+                graphView.settleWindowMs = Math.max(8000, prefs.rule_settle_ms + 4000);
             if (prefs.start_minimized) {
                 controller.set_window_visible(false);
                 return;
@@ -353,6 +361,46 @@ ZbWindow {
         graphView.gridSize = px;
     }
 
+    // Two densities, each a pixel value with three named presets:
+    //  - graph density: the gap between nodes (node spacing, px);
+    //  - card density: how big the node cards are (the height of a port row, px).
+    readonly property var densityPresets: [
+        { name: "Compact", px: 8 },
+        { name: "Normal", px: 20 },
+        { name: "Spacious", px: 40 }
+    ]
+    readonly property var cardPresets: [
+        { name: "Compact", px: 18 },
+        { name: "Normal", px: 22 },
+        { name: "Spacious", px: 26 }
+    ]
+    function presetName(presets, px) {
+        for (var i = 0; i < presets.length; i++) {
+            if (presets[i].px === Math.round(px))
+                return presets[i].name;
+        }
+        return "Custom";
+    }
+    function densityName(px) {
+        return presetName(densityPresets, px);
+    }
+    function cardName(px) {
+        return presetName(cardPresets, px);
+    }
+    function setNodeSpacing(px) {
+        controller.set_preference("node_spacing_px", String(px));
+        graphView.nodeSpacing = px;
+        graphView.showToast("Graph density: " + densityName(px) + " (" + px + " px between nodes). It applies to new nodes and to Auto layout; use Re-space now to apply it to the whole graph.");
+    }
+    function setCardRow(px) {
+        controller.set_preference("card_row_px", String(px));
+        graphView.cardRow = px;
+        var moved = graphView.densityMoved;
+        graphView.showToast("Card density: " + cardName(px) + " (" + px + " px rows). Cards resized"
+            + (moved > 0 ? "; " + moved + (moved === 1 ? " node" : " nodes") + " moved apart (Ctrl+Z undoes)" : "")
+            + ". Use Re-space now or Auto layout to tidy the rest.");
+    }
+
     function addPluginAtCenter() {
         var center = graphView.toCanvas(graphView.width / 2, graphView.height / 2);
         graphView.pendingPluginPosition = {
@@ -639,6 +687,125 @@ ZbWindow {
                 }
             }
 
+            // Density cluster: [graph density ▾] [card density ▾]. Graph
+            // density is the gap between nodes; card density is how big the
+            // cards are. Each: presets, pixel values, re-space now.
+            Rectangle {
+                implicitHeight: Theme.controlHeight
+                implicitWidth: densityRow.implicitWidth + 2
+                radius: Theme.radiusControl
+                color: Theme.bgRaised
+                border.width: 1
+                border.color: Theme.borderStrong
+
+                Row {
+                    id: densityRow
+                    anchors.centerIn: parent
+
+                    ZoomCell {
+                        id: densityCell
+                        width: 78
+                        iconName: "density"
+                        label: Math.round(graphView.nodeSpacing) + "px"
+                        trailingIcon: "chevronDown"
+                        tip: "Graph density: " + mainWindow.densityName(graphView.nodeSpacing) + " (" + Math.round(graphView.nodeSpacing) + " px between nodes)"
+                        onClicked: densityMenu.popup(densityCell, 0, densityCell.height + 6)
+
+                        ZbMenu {
+                            id: densityMenu
+                            implicitWidth: 212
+                            ZbMenuItem {
+                                implicitWidth: 200
+                                text: "Graph density"
+                                enabled: false
+                            }
+                            ZbMenuSeparator {}
+                            Repeater {
+                                model: mainWindow.densityPresets
+                                delegate: ZbMenuItem {
+                                    required property var modelData
+                                    implicitWidth: 200
+                                    text: modelData.name
+                                    shortcutHint: modelData.px + " px"
+                                    selected: Math.round(graphView.nodeSpacing) === modelData.px
+                                    onTriggered: mainWindow.setNodeSpacing(modelData.px)
+                                }
+                            }
+                            ZbMenuSeparator {}
+                            Repeater {
+                                model: [4, 12, 16, 24, 32, 48, 64, 96]
+                                delegate: ZbMenuItem {
+                                    required property int modelData
+                                    implicitWidth: 200
+                                    text: modelData + " px"
+                                    selected: Math.round(graphView.nodeSpacing) === modelData
+                                    onTriggered: mainWindow.setNodeSpacing(modelData)
+                                }
+                            }
+                            ZbMenuSeparator {}
+                            ZbMenuItem {
+                                implicitWidth: 200
+                                text: "Re-space now (Auto layout)"
+                                onTriggered: graphView.requestAutoLayout(false)
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: 1
+                        height: Theme.controlHeight - 2
+                        color: Theme.borderHairline
+                    }
+                    ZoomCell {
+                        id: cardCell
+                        width: 78
+                        iconName: "cards"
+                        label: Math.round(graphView.cardRow) + "px"
+                        trailingIcon: "chevronDown"
+                        tip: "Card density: " + mainWindow.cardName(graphView.cardRow) + " (" + Math.round(graphView.cardRow) + " px port rows)"
+                        onClicked: cardMenu.popup(cardCell, 0, cardCell.height + 6)
+
+                        ZbMenu {
+                            id: cardMenu
+                            implicitWidth: 212
+                            ZbMenuItem {
+                                implicitWidth: 200
+                                text: "Card density"
+                                enabled: false
+                            }
+                            ZbMenuSeparator {}
+                            Repeater {
+                                model: mainWindow.cardPresets
+                                delegate: ZbMenuItem {
+                                    required property var modelData
+                                    implicitWidth: 200
+                                    text: modelData.name
+                                    shortcutHint: modelData.px + " px"
+                                    selected: Math.round(graphView.cardRow) === modelData.px
+                                    onTriggered: mainWindow.setCardRow(modelData.px)
+                                }
+                            }
+                            ZbMenuSeparator {}
+                            Repeater {
+                                model: [16, 20, 24, 28, 30, 32]
+                                delegate: ZbMenuItem {
+                                    required property int modelData
+                                    implicitWidth: 200
+                                    text: modelData + " px"
+                                    selected: Math.round(graphView.cardRow) === modelData
+                                    onTriggered: mainWindow.setCardRow(modelData)
+                                }
+                            }
+                            ZbMenuSeparator {}
+                            ZbMenuItem {
+                                implicitWidth: 200
+                                text: "Re-space now (Auto layout)"
+                                onTriggered: graphView.requestAutoLayout(false)
+                            }
+                        }
+                    }
+                }
+            }
+
             ZbDivider {
                 vertical: true
                 strong: true
@@ -748,6 +915,9 @@ ZbWindow {
         width: Theme.controlHeight
         height: Theme.controlHeight - 2
         hoverEnabled: true
+        // Clicking a toolbar cell must not take the keyboard from the canvas
+        // (W, Delete, arrows, Ctrl+Z … keep working); Tab still reaches it.
+        focusPolicy: Qt.TabFocus
         background: Rectangle {
             radius: Theme.radiusControl - 1
             color: cell.active ? Theme.accentFaint : cell.hovered || cell.down ? Theme.bgHover : "transparent"
@@ -1051,6 +1221,8 @@ ZbWindow {
         onSnapToGridChanged: enabled => graphView.snapToGrid = enabled
         onGridSizeChanged: px => graphView.gridSize = px
         onDragModeChanged: mode => graphView.dragMode = mode
+        onNodeSpacingChanged: px => graphView.nodeSpacing = px
+        onCardRowChanged: px => graphView.cardRow = px
     }
 
     CpuOverlay {

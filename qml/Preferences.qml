@@ -22,6 +22,28 @@ ZbWindow {
     // this only reports its value after a reset to defaults.
     signal dragModeChanged(string mode)
     signal gridSizeChanged(int px)
+    signal nodeSpacingChanged(int px)
+    signal cardRowChanged(int px)
+
+    // Two densities, each a pixel value with three presets (the sliders set
+    // any value in between): graph density is the gap between nodes (node
+    // spacing), card density is how big the node cards are (port row height).
+    readonly property var densityPresets: [8, 20, 40]
+    readonly property var cardPresets: [18, 22, 26]
+    function densityIndex() {
+        return densityPresets.indexOf(pref("node_spacing_px", 20));
+    }
+    function cardIndex() {
+        return cardPresets.indexOf(pref("card_row_px", 22));
+    }
+    function setDensity(px) {
+        setPref("node_spacing_px", px);
+        densitySegmented.currentIndex = Qt.binding(() => prefsWindow.densityIndex());
+    }
+    function setCardDensity(px) {
+        setPref("card_row_px", px);
+        cardSegmented.currentIndex = Qt.binding(() => prefsWindow.cardIndex());
+    }
 
     property var prefs: ({})
     property var sessionInfo: ({ current: "", path: "", sessions: [] })
@@ -106,6 +128,12 @@ ZbWindow {
         if (key === "grid_size_px") {
             gridSizeChanged(value);
         }
+        if (key === "node_spacing_px") {
+            nodeSpacingChanged(value);
+        }
+        if (key === "card_row_px") {
+            cardRowChanged(value);
+        }
     }
 
     function themeIndex() {
@@ -125,6 +153,8 @@ ZbWindow {
         snapGapChanged(pref("snap_gap_px", 10));
         snapToGridChanged(pref("snap_to_grid", true));
         gridSizeChanged(pref("grid_size_px", 24));
+        nodeSpacingChanged(pref("node_spacing_px", 20));
+        cardRowChanged(pref("card_row_px", 22));
         dragModeChanged(pref("drag_mode", "grab"));
         Theme.mode = "system";
         themeSegmented.currentIndex = Qt.binding(() => prefsWindow.themeIndex());
@@ -634,6 +664,70 @@ ZbWindow {
                     SettingsSection {
                         label: "Graph"
 
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Layout.leftMargin: Theme.grid * 4
+                            Layout.rightMargin: Theme.grid * 4
+                            Layout.topMargin: Theme.grid * 3
+                            Layout.bottomMargin: Theme.grid * 3
+                            spacing: Theme.grid * 4
+                            RowText {
+                                Layout.fillWidth: true
+                                title: "Graph density"
+                                description: "How far apart nodes are. Auto layout and newly placed nodes leave this much room between nodes. None is highlighted when Node spacing is set to a value of its own."
+                            }
+                            ZbSegmented {
+                                id: densitySegmented
+                                Layout.alignment: Qt.AlignVCenter
+                                model: ["Compact", "Normal", "Spacious"]
+                                currentIndex: prefsWindow.densityIndex()
+                                onActivated: index => prefsWindow.setDensity(prefsWindow.densityPresets[index])
+                            }
+                        }
+                        ZbDivider { Layout.fillWidth: true }
+                        SliderRow {
+                            title: "Node spacing"
+                            description: "Graph density in pixels: the gap between stacked nodes (at 100 % zoom); columns are 2.5\u00d7 as far apart. With snap to grid on, gaps round up to the grid. Run Auto layout to re-space the nodes already on the canvas."
+                            key: "node_spacing_px"
+                            from: 4
+                            to: 96
+                            stepSize: 1
+                            fallback: 20
+                            unit: "px"
+                        }
+                        ZbDivider { Layout.fillWidth: true }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Layout.leftMargin: Theme.grid * 4
+                            Layout.rightMargin: Theme.grid * 4
+                            Layout.topMargin: Theme.grid * 3
+                            Layout.bottomMargin: Theme.grid * 3
+                            spacing: Theme.grid * 4
+                            RowText {
+                                Layout.fillWidth: true
+                                title: "Card density"
+                                description: "How big the node cards are. Compact packs more nodes on screen; Spacious makes ports easier to hit. Text sizes stay the same. None is highlighted when Card row height is set to a value of its own."
+                            }
+                            ZbSegmented {
+                                id: cardSegmented
+                                Layout.alignment: Qt.AlignVCenter
+                                model: ["Compact", "Normal", "Spacious"]
+                                currentIndex: prefsWindow.cardIndex()
+                                onActivated: index => prefsWindow.setCardDensity(prefsWindow.cardPresets[index])
+                            }
+                        }
+                        ZbDivider { Layout.fillWidth: true }
+                        SliderRow {
+                            title: "Card row height"
+                            description: "Card density in pixels: the height of one port row; the header, footer, padding, pins and width of a card follow it. Cards that end up overlapping are pushed apart."
+                            key: "card_row_px"
+                            from: 16
+                            to: 32
+                            stepSize: 1
+                            fallback: 22
+                            unit: "px"
+                        }
+                        ZbDivider { Layout.fillWidth: true }
                         ToggleRow {
                             title: "Snap to grid"
                             description: "Keep every node on the grid when dragging, placing and running Auto layout."

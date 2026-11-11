@@ -94,12 +94,22 @@ Carla is a full-featured plugin host and JACK patchbay. The differences are abou
 ### Graph View
 - Real-time PipeWire graph: devices, app streams, virtual sinks, plugins and subgraphs as node cards, colour-coded by kind; wires coloured by signal (audio, MIDI, video)
 - MIDI bridge devices split into one node per device
-- Drag from a port to another port to connect; select wires (click, Ctrl+click, selection box) and press Delete to disconnect
-- Pan with middle-drag, zoom with the wheel (0.25x-3.0x), scroll bars, Fit to view (Home) and Reset zoom
+- Drag from a port to another port to connect; select wires (click, Ctrl+click, selection box) and press Delete to disconnect. Wires highlight and can be clicked from a few pixels away, so you don't have to hit them exactly
+- Pan with middle-drag, zoom with the wheel (0.25x-3.0x), scroll bars, Fit to view (Home) and Reset zoom. Pinch on a touchpad or touchscreen zooms too
 - **Grab / Select mode** (buttons at the canvas's top-left, or **W**): in Grab mode (the default) a left-drag on empty canvas pans, like a middle-drag; in Select mode it draws a selection box. The choice is remembered
+- **Hold a key for the other mode**: hold **Space** and drag to pan from anywhere, even over a node; hold **Shift** and drag empty canvas to draw a selection box while in Grab mode. A hint at the bottom of the canvas names the key and lights up while the override is on
+- Selection boxes started with **Shift** or **Ctrl** add to the selection; **Ctrl+A** selects everything; arrow keys nudge the selected nodes one grid step; **F** frames the selection
+- **Delete** also works on selected nodes: plugins, subgraphs and virtual devices are removed (after a confirmation), devices and app streams are hidden
+- **Undo / redo** (Ctrl+Z, Ctrl+Shift+Z) for node moves, Auto layout, wires you connect or disconnect, and hidden nodes
+- **New nodes find a tidy spot**: a stream that a rule connects goes beside the node it is wired to, stacked with the others in that column; a node without wires goes with its own kind (sources left, sinks right) inside the part of the graph you are looking at. Only the newcomer moves, and only in its first seconds; anything you placed or pinned stays put. A new node pulses once, and if it appeared outside the view a marker at the edge points to it (click to go there)
 - Drag nodes, alone or as a group; **snap to grid** (on by default, adjustable grid size) or Shift-drag to snap next to other nodes with a configurable gap
 - **Pin** nodes so Auto layout never moves them; hide and unhide nodes
-- Auto layout that follows the signal flow (and the grid)
+- Auto layout that follows the signal flow (and the grid): the button at the canvas's top-right, **L**, or the canvas menu. Pinned nodes stay put and the toast tells you how many did; **Shift+click / Shift+L** lays out pinned nodes too, and when every node is pinned it offers to do so
+- The node under the cursor is highlighted, and a node whose name is too long for its card shows the full name in a popup
+- **Two densities** (toolbar, or Preferences › Graph), each Compact / Normal / Spacious or any pixel value:
+  - **Graph density** (node spacing, 4–96 px): how far apart nodes are. It sets the room Auto layout and newly placed nodes leave around each node.
+  - **Card density** (card row height, 16–32 px): how big the node cards are. Compact packs more nodes on screen, Spacious makes ports easier to hit; text sizes stay. Cards that end up overlapping are pushed apart (Ctrl+Z undoes it).
+  The toolbar menus can re-space the whole graph with Auto layout
 - **Search** nodes and ports (Ctrl+F); non-matching nodes dim
 - Plugins with many unused ports fold them into a "n more" row
 - **Default node**: right-click a sink or plugin → Set as default; app streams without a rule are routed there
@@ -295,8 +305,17 @@ oscsend localhost 9000 /zestbay/session/load s "live"
 |-----|--------|
 | Ctrl+F | Search nodes and ports |
 | Home | Fit the graph to the view |
+| F | Frame the selected nodes (everything when nothing is selected) |
+| L | Auto layout (pinned nodes stay put) |
+| Shift+L | Auto layout including pinned nodes |
+| Ctrl+= / Ctrl+- / Ctrl+0 | Zoom in / zoom out / reset zoom |
 | W | Switch between Grab mode (drag pans the canvas) and Select mode (drag draws a selection box) |
-| Delete / Backspace | Disconnect the selected wires |
+| Space (hold) | Pan with a left-drag from anywhere, in either mode |
+| Shift (hold, on empty canvas) | Draw a selection box in Grab mode; add to the selection |
+| Ctrl+A | Select all nodes and wires |
+| Arrow keys | Move the selected nodes one grid step (1 px without snap to grid, 10 px with Shift) |
+| Delete / Backspace | Disconnect the selected wires; remove the selected plugins, subgraphs and virtual devices (asks first) and hide the other selected nodes |
+| Ctrl+Z / Ctrl+Shift+Z (or Ctrl+Y) | Undo / redo node moves, Auto layout, connecting and disconnecting wires, hiding nodes |
 | Escape | Cancel a drag or placement, clear the selection, then leave a subgraph |
 | Shift (while dragging) | Snap to nearby nodes (when snap to grid is off) |
 | Ctrl+S | Save every modified plugin's settings into its selected preset |
