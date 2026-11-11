@@ -8,6 +8,7 @@ Item {
 
     signal openPluginBrowser
     signal openPluginParams(int nodeId)
+    signal showShortcuts
 
     property real zoom: 1.0
     property real panX: 0
@@ -186,6 +187,12 @@ Item {
     property var blockedPairs: []
     property var blockGeom: []
     property var contextBlock: null
+    // Block lines can be selected by clicking them (and removed with Delete,
+    // which removes their rule). Keys are blockKey(); a box selection and
+    // Ctrl+A never take them, so Delete can't remove rules by accident.
+    // hoveredBlockKey is the block line under the cursor ("" for none).
+    property var selectedBlocks: ({})
+    property string hoveredBlockKey: ""
     // Left-drag over a port that a block rule forbids: the wire turns red.
     property int connectHoverPortId: -1
     property bool connectTargetBlocked: false
@@ -407,6 +414,7 @@ Item {
         awaitingLinkPlacement = {};
         selectedNodes = {};
         selectedLinks = {};
+        selectedBlocks = {};
         clearUndo();
         quietCues();
         defaultNodeKey = "";
@@ -425,25 +433,75 @@ Item {
         } catch (e) {
             blockedPairs = [];
         }
+        pruneSelectedBlocks();
         canvas.requestPaint();
     }
 
-    function findBlockAt(sx, sy) {
+    function blockKey(b) {
+        return b.ruleId + "|" + b.source + "|" + b.target;
+    }
+
+    // Selected block lines whose rule or pair has gone are dropped.
+    function pruneSelectedBlocks() {
+        var live = {};
+        for (var i = 0; i < blockedPairs.length; i++)
+            live[blockKey(blockedPairs[i])] = true;
+        var kept = {};
+        var dropped = false;
+        for (var k in selectedBlocks) {
+            if (live[k])
+                kept[k] = selectedBlocks[k];
+            else
+                dropped = true;
+        }
+        if (dropped)
+            selectedBlocks = kept;
+        if (hoveredBlockKey !== "" && !live[hoveredBlockKey])
+            hoveredBlockKey = "";
+    }
+
+    // The block line nearest to the cursor within linkHitPx screen pixels:
+    // { g: geometry, dist } (canvas units), or null. The ⊘ marker is a bigger
+    // target than the thin line.
+    function blockHit(sx, sy) {
         var c = toCanvas(sx, sy);
-        var threshold = 5 / zoom;
+        var threshold = linkHitPx / zoom;
         var best = null;
         var bestDist = threshold + 1;
         for (var i = 0; i < blockGeom.length; i++) {
             var g = blockGeom[i];
-            // The ⊘ marker is a bigger target than the thin line.
             var dm = Math.sqrt((c.x - g.mx) * (c.x - g.mx) + (c.y - g.my) * (c.y - g.my));
-            var d = dm <= 9 / zoom ? 0 : distToBezier(c.x, c.y, g.x1, g.y1, g.x2, g.y2);
+            var d = dm <= 10 / zoom ? 0 : distToBezier(c.x, c.y, g.x1, g.y1, g.x2, g.y2);
             if (d < bestDist) {
                 bestDist = d;
                 best = g;
             }
         }
-        return bestDist <= threshold ? best : null;
+        return best && bestDist <= threshold ? {
+            g: best,
+            dist: bestDist
+        } : null;
+    }
+
+    function findBlockAt(sx, sy) {
+        var h = blockHit(sx, sy);
+        return h ? h.g : null;
+    }
+
+    // The wire under the cursor: a link or a block line, whichever is nearer
+    // ({ link: id or -1, block: geometry or null }; at most one is set).
+    function wireAt(sx, sy) {
+        var lh = linkHit(sx, sy);
+        var bh = blockHit(sx, sy);
+        if (bh && (!lh || bh.dist <= lh.dist))
+            return {
+                link: -1,
+                block: bh.g
+            };
+        return {
+            link: lh ? lh.id : -1,
+            block: null
+        };
     }
 
     function showToast(message) {
@@ -629,6 +687,7 @@ Item {
         } catch (e) {
             blockedPairs = [];
         }
+        pruneSelectedBlocks();
 
         var newPorts = {};
         for (var i = 0; i < nodes.length; i++) {
@@ -3361,23 +3420,37 @@ Item {
                 var by2 = btPos.y + 17;
                 var bmx = (bx1 + bx2) / 2;
                 var bmy = (by1 + by2) / 2;
-                var bHot = contextBlock && contextBlock.ruleId === bp.ruleId && contextBlock.source === bp.source && contextBlock.target === bp.target;
+                var bKey = blockKey(bp);
+                var bSel = !!selectedBlocks[bKey];
+                var bHot = bSel || hoveredBlockKey === bKey || (contextBlock && contextBlock.ruleId === bp.ruleId && contextBlock.source === bp.source && contextBlock.target === bp.target);
                 ctx.save();
+                if (bSel) {
+                    // Selected: a soft halo under the line, like a selected wire.
+                    ctx.globalAlpha = 1;
+                    ctx.setLineDash([]);
+                    drawBezier(ctx, bx1, by1, bx2, by2, Theme.tint(Theme.textDestructive, 0.28), 8);
+                }
                 ctx.globalAlpha = bHot ? 1 : 0.8;
                 ctx.setLineDash([6, 4]);
-                drawBezier(ctx, bx1, by1, bx2, by2, Theme.textDestructive, bHot ? Theme.wireWidthActive : Theme.wireWidth);
+                drawBezier(ctx, bx1, by1, bx2, by2, Theme.textDestructive, bHot ? Theme.wireWidthActive + (bSel ? 0.5 : 0) : Theme.wireWidth);
                 ctx.setLineDash([]);
                 ctx.globalAlpha = 1;
+                var bR = bHot ? 8.5 : 7;
                 ctx.beginPath();
-                ctx.arc(bmx, bmy, 7, 0, Math.PI * 2);
+                ctx.arc(bmx, bmy, bR, 0, Math.PI * 2);
                 ctx.fillStyle = "" + Theme.bgCanvas;
                 ctx.fill();
+                if (bHot) {
+                    ctx.fillStyle = "" + Theme.tint(Theme.textDestructive, bSel ? 0.35 : 0.18);
+                    ctx.fill();
+                }
                 ctx.strokeStyle = "" + Theme.textDestructive;
-                ctx.lineWidth = 1.5;
+                ctx.lineWidth = bHot ? 2 : 1.5;
                 ctx.stroke();
+                var bK = bHot ? 5.2 : 4.5;
                 ctx.beginPath();
-                ctx.moveTo(bmx - 4.5, bmy + 4.5);
-                ctx.lineTo(bmx + 4.5, bmy - 4.5);
+                ctx.moveTo(bmx - bK, bmy + bK);
+                ctx.lineTo(bmx + bK, bmy - bK);
                 ctx.stroke();
                 ctx.restore();
                 newBlockGeom.push({
@@ -3831,6 +3904,9 @@ Item {
         } else if (event.key === Qt.Key_F && plain && !event.isAutoRepeat) {
             frameSelection();
             event.accepted = true;
+        } else if ((event.key === Qt.Key_Question || (event.key === Qt.Key_Slash && shift)) && !ctrl) {
+            showShortcuts();
+            event.accepted = true;
         } else if (event.key === Qt.Key_L && !event.isAutoRepeat && !(event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))) {
             requestAutoLayout(shift);
             event.accepted = true;
@@ -3967,6 +4043,7 @@ Item {
                             one[menuLinkId] = linkSig(menuLink);
                         selectedLinks = one;
                         selectedNodes = {};
+                        selectedBlocks = {};
                         contextLinkIds = [menuLinkId];
                         canvas.requestPaint();
                     }
@@ -4053,6 +4130,7 @@ Item {
                         }
                         selectedNodes = newSel;
                         selectedLinks = {};
+                        selectedBlocks = {};
                         canvas.requestPaint();
                         return;
                     }
@@ -4078,6 +4156,7 @@ Item {
                     } else {
                         selectedNodes = {};
                         selectedLinks = {};
+                        selectedBlocks = {};
                         dragNodeId = nodeIdDrag;
                         markHandPlaced(nodeIdDrag);
                         var c = toCanvas(mouse.x, mouse.y);
@@ -4093,11 +4172,39 @@ Item {
                     return;
                 }
 
-                var clickedLinkId = findLinkAt(mouse.x, mouse.y);
+                // A wire: a link or a red block line, whichever is nearer.
+                var clickedWire = wireAt(mouse.x, mouse.y);
+                var clickedLinkId = clickedWire.link;
+                var ctrlHeldWire = !!(mouse.modifiers & Qt.ControlModifier);
+                if (clickedWire.block) {
+                    var cb = clickedWire.block;
+                    var cbKey = blockKey(cb);
+                    var cbSig = {
+                        ruleId: cb.ruleId,
+                        source: cb.source,
+                        target: cb.target
+                    };
+                    if (ctrlHeldWire) {
+                        var newSelBlocks = Object.assign({}, selectedBlocks);
+                        if (newSelBlocks[cbKey])
+                            delete newSelBlocks[cbKey];
+                        else
+                            newSelBlocks[cbKey] = cbSig;
+                        selectedBlocks = newSelBlocks;
+                        selectedNodes = {};
+                    } else {
+                        var freshBlocks = {};
+                        freshBlocks[cbKey] = cbSig;
+                        selectedBlocks = freshBlocks;
+                        selectedLinks = {};
+                        selectedNodes = {};
+                    }
+                    canvas.requestPaint();
+                    return;
+                }
                 if (clickedLinkId >= 0) {
-                    var ctrlHeldLink = (mouse.modifiers & Qt.ControlModifier);
                     var clickedLink = findLinkData(clickedLinkId);
-                    if (ctrlHeldLink) {
+                    if (ctrlHeldWire) {
                         var newSelLinks = Object.assign({}, selectedLinks);
                         if (newSelLinks[clickedLinkId]) {
                             delete newSelLinks[clickedLinkId];
@@ -4111,6 +4218,7 @@ Item {
                             freshSel[clickedLinkId] = linkSig(clickedLink);
                         selectedLinks = freshSel;
                         selectedNodes = {};
+                        selectedBlocks = {};
                     }
                     canvas.requestPaint();
                     return;
@@ -4531,6 +4639,48 @@ Item {
         }
     }
 
+    // Shortcut help at the canvas's bottom-right (clear of the scroll bars):
+    // opens the list of every shortcut, same as ? and F1.
+    Rectangle {
+        id: helpButton
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.rightMargin: 12 + (vScrollBar.visible ? vScrollBar.width : 0)
+        anchors.bottomMargin: 12 + (hScrollBar.visible ? hScrollBar.height : 0)
+        width: 28
+        height: 28
+        radius: width / 2
+        color: Theme.bgPanel
+        border.width: 1
+        border.color: Theme.borderStrong
+
+        AbstractButton {
+            id: helpCell
+            anchors.fill: parent
+            hoverEnabled: true
+            focusPolicy: Qt.NoFocus   // the canvas keeps the keyboard
+            Accessible.name: "Keyboard shortcuts"
+            onClicked: graphView.showShortcuts()
+            background: Rectangle {
+                radius: width / 2
+                color: helpCell.down ? Theme.borderStrong : helpCell.hovered ? Theme.bgHover : "transparent"
+            }
+            contentItem: Text {
+                text: "?"
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+                font.family: Theme.fontMono
+                font.pixelSize: 13
+                font.weight: Font.Medium
+                color: helpCell.hovered ? Theme.textPrimary : Theme.textMuted
+            }
+            ZbTooltip {
+                visible: helpCell.hovered
+                text: "Keyboard shortcuts (? or F1)"
+            }
+        }
+    }
+
     Rectangle {
         id: breadcrumb
         visible: currentSubgraph !== ""
@@ -4799,6 +4949,7 @@ Item {
         var link = -1;
         var btn = "";
         var empty = false;
+        var blockUnder = null;
         var nodeUnder = -1;
         if (sx >= 0 && connectFromPortId < 0 && dragNodeId < 0 && !groupDragging) {
             port = findPortAt(sx, sy);
@@ -4810,13 +4961,17 @@ Item {
                 if (hit) {
                     btn = hit.nodeId + ":" + hit.button;
                 } else if (nodeUnder < 0) {
-                    link = findLinkAt(sx, sy);
-                    empty = link < 0;
+                    var wire = wireAt(sx, sy);
+                    link = wire.link;
+                    blockUnder = wire.block;
+                    empty = link < 0 && !blockUnder;
                 }
             }
         }
+        var blockKeyUnder = blockUnder ? blockKey(blockUnder) : "";
         var nodeChanged = nodeUnder !== hoveredNodeId;
-        var changed = nodeChanged || port !== hoveredPortId || link !== hoveredLinkId || btn !== hoveredButton;
+        var changed = nodeChanged || blockKeyUnder !== hoveredBlockKey || port !== hoveredPortId || link !== hoveredLinkId || btn !== hoveredButton;
+        hoveredBlockKey = blockKeyUnder;
         hoveredPortId = port;
         hoveredLinkId = link;
         hoveredButton = btn;
@@ -4850,6 +5005,11 @@ Item {
                     pinTip.y = tp.y + 4;
                     pinTip.open();
                 }
+            } else if (blockUnder) {
+                pinTip.text = "Do not connect: " + blockUnder.label + ". Click to select; Delete removes the rule.";
+                pinTip.x = sx + 12;
+                pinTip.y = sy + 16;
+                pinTip.open();
             } else {
                 pinTip.close();
             }
@@ -4950,11 +5110,11 @@ Item {
         ctx.stroke();
     }
 
-    // The wire nearest to the cursor within linkHitPx screen pixels, so a
+    // The link nearest to the cursor within linkHitPx screen pixels, so a
     // wire highlights (and can be clicked) from close by, not only when the
-    // cursor is exactly on it.
+    // cursor is exactly on it. { id, dist } (canvas units) or null.
     readonly property real linkHitPx: 10
-    function findLinkAt(sx, sy) {
+    function linkHit(sx, sy) {
         var c = toCanvas(sx, sy);
         var threshold = linkHitPx / zoom;
         var bestId = -1;
@@ -4978,7 +5138,15 @@ Item {
                 bestId = link.id;
             }
         }
-        return bestDist <= threshold ? bestId : -1;
+        return bestId >= 0 && bestDist <= threshold ? {
+            id: bestId,
+            dist: bestDist
+        } : null;
+    }
+
+    function findLinkAt(sx, sy) {
+        var h = linkHit(sx, sy);
+        return h ? h.id : -1;
     }
 
     function findLinkUnderNode(nodeId) {
@@ -5628,7 +5796,8 @@ Item {
             plugins: [],
             subgraphs: [],
             vdevs: [],
-            hide: []
+            hide: [],
+            blocks: []
         };
         var removed = {};
         var ids = selectedNodeIds();
@@ -5653,8 +5822,27 @@ Item {
             if (linkMatchesSig(l, selectedLinks[linkId]) && !removed[l.outputNodeId] && !removed[l.inputNodeId])
                 plan.links.push(l.id);
         }
+        // Selected block lines: their rules (one rule can cover several lines).
+        for (var bk in selectedBlocks) {
+            var sb = selectedBlocks[bk];
+            for (var bi2 = 0; bi2 < blockedPairs.length; bi2++) {
+                var live = blockedPairs[bi2];
+                if (live.ruleId === sb.ruleId && live.source === sb.source && live.target === sb.target) {
+                    var seen = false;
+                    for (var ri = 0; ri < plan.blocks.length; ri++) {
+                        if (plan.blocks[ri].ruleId === live.ruleId)
+                            seen = true;
+                    }
+                    if (!seen)
+                        plan.blocks.push({
+                            ruleId: live.ruleId,
+                            label: live.label
+                        });
+                }
+            }
+        }
         var destructive = plan.plugins.length + plan.subgraphs.length + plan.vdevs.length;
-        if (destructive + plan.hide.length + plan.links.length === 0)
+        if (destructive + plan.hide.length + plan.links.length + plan.blocks.length === 0)
             return;
         deletePlan = plan;
         if (destructive > 0)
@@ -5678,6 +5866,8 @@ Item {
             lines.push("Hide " + counted(plan.hide.length, "node", "nodes") + " (devices and app streams can\u2019t be removed)");
         if (plan.links.length > 0)
             lines.push("Disconnect " + counted(plan.links.length, "wire", "wires"));
+        if (plan.blocks.length > 0)
+            lines.push("Remove " + counted(plan.blocks.length, "do-not-connect rule", "do-not-connect rules"));
         return lines;
     }
 
@@ -5707,8 +5897,23 @@ Item {
             controller.delete_subgraph(plan.subgraphs[si].subgraphId);
         for (var vi = 0; vi < plan.vdevs.length; vi++)
             controller.remove_virtual_device(plan.vdevs[vi].vdevId);
+        if (plan.blocks.length > 0) {
+            // Removing a rule unblocks every pair it covers, not just the
+            // selected lines: say so when there are others.
+            var others = 0;
+            for (var oi = 0; oi < blockedPairs.length; oi++) {
+                for (var rj = 0; rj < plan.blocks.length; rj++) {
+                    if (blockedPairs[oi].ruleId === plan.blocks[rj].ruleId && !selectedBlocks[blockKey(blockedPairs[oi])])
+                        others++;
+                }
+            }
+            for (var bj = 0; bj < plan.blocks.length; bj++)
+                controller.remove_rule(plan.blocks[bj].ruleId);
+            showToast("Removed " + (plan.blocks.length === 1 ? "the rule \u201c" + plan.blocks[0].label + "\u201d" : counted(plan.blocks.length, "do-not-connect rule", "do-not-connect rules")) + (others > 0 ? " (it also unblocks " + counted(others, "other pair", "other pairs") + ")" : "") + ".");
+        }
         selectedNodes = {};
         selectedLinks = {};
+        selectedBlocks = {};
         if (plan.hide.length > 0)
             showToast("Hid " + counted(plan.hide.length, "node", "nodes") + ". Ctrl+Z or right-click \u203a Unhide all brings them back.");
         canvas.requestPaint();
@@ -5755,6 +5960,8 @@ Item {
         for (var k in selectedLinks)
             return true;
         for (var k2 in selectedNodes)
+            return true;
+        for (var k3 in selectedBlocks)
             return true;
         return false;
     }
@@ -5941,20 +6148,10 @@ Item {
     }
 
     function clearSelection() {
-        var hadSelection = false;
-        for (var k in selectedLinks) {
-            hadSelection = true;
-            break;
-        }
-        if (!hadSelection) {
-            for (var k2 in selectedNodes) {
-                hadSelection = true;
-                break;
-            }
-        }
-        if (hadSelection) {
+        if (hasSelection()) {
             selectedLinks = {};
             selectedNodes = {};
+            selectedBlocks = {};
             canvas.requestPaint();
         }
     }

@@ -7,14 +7,29 @@ ZbWindow {
     id: aboutWindow
     title: "About ZestBay"
     width: 420
-    height: 470
+    height: 570
     minimumWidth: 360
-    minimumHeight: 450
+    minimumHeight: 550
     visible: false
 
     required property var controller
 
     readonly property string sourceUrl: "https://github.com/lemonxah/zestbay"
+    readonly property string websiteUrl: "https://lemonxah.github.io/zestbay/"
+    readonly property string issuesUrl: sourceUrl + "/issues"
+
+    // New-issue pages on GitHub. They open in the browser for the person to
+    // review and submit; nothing is sent from here. A bug report starts with
+    // the version, install kind and Qt version filled in.
+    function bugReportUrl() {
+        var body = "ZestBay " + controller.get_app_version() + " (" + controller.get_install_kind() + "), Qt " + controller.get_qt_version()
+            + "\n\n**What happened?**\n\n\n**What did you expect?**\n\n\n**How can it be reproduced?**\n"
+        return issuesUrl + "/new?labels=bug&body=" + encodeURIComponent(body)
+    }
+    function featureRequestUrl() {
+        var body = "**What would you like ZestBay to do?**\n\n\n**Why would it help?**\n"
+        return issuesUrl + "/new?labels=enhancement&title=" + encodeURIComponent("Feature request: ") + "&body=" + encodeURIComponent(body)
+    }
     // No Theme token for this yet (spec §6.5): info-grid label column 96 px.
     readonly property int labelColumnWidth: 96
 
@@ -82,6 +97,24 @@ ZbWindow {
         }
     }
 
+    // An accent link that opens in the browser.
+    component LinkText: Text {
+        id: linkText
+        property string url
+        font.family: Theme.fontSans
+        font.pixelSize: Theme.sizeCaption
+        font.underline: linkArea.containsMouse
+        color: linkArea.containsMouse ? Theme.accentHover : Theme.accent
+        elide: Text.ElideRight
+        MouseArea {
+            id: linkArea
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: Qt.openUrlExternally(linkText.url)
+        }
+    }
+
     ColumnLayout {
         anchors.left: parent.left
         anchors.right: parent.right
@@ -143,25 +176,23 @@ ZbWindow {
                     value: "lemonxah"
                 }
                 InfoRow {
+                    label: "Website"
+                    link: true
+
+                    LinkText {
+                        width: parent.width
+                        text: "lemonxah.github.io/zestbay"
+                        url: aboutWindow.websiteUrl
+                    }
+                }
+                InfoRow {
                     label: "Source"
                     link: true
 
-                    Text {
+                    LinkText {
                         width: parent.width
                         text: "github.com/lemonxah/zestbay"
-                        font.family: Theme.fontSans
-                        font.pixelSize: Theme.sizeCaption
-                        font.underline: linkMouse.containsMouse
-                        color: linkMouse.containsMouse ? Theme.accentHover : Theme.accent
-                        elide: Text.ElideRight
-
-                        MouseArea {
-                            id: linkMouse
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: Qt.openUrlExternally(aboutWindow.sourceUrl)
-                        }
+                        url: aboutWindow.sourceUrl
                     }
                 }
                 InfoRow {
@@ -170,6 +201,39 @@ ZbWindow {
                     last: true
                 }
             }
+        }
+
+        // Both go to the GitHub issues, in the browser.
+        RowLayout {
+            Layout.fillWidth: true
+            Layout.topMargin: Theme.grid * 4
+            spacing: Theme.grid * 2
+
+            ZbButton {
+                Layout.fillWidth: true
+                text: "Report an issue"
+                onClicked: Qt.openUrlExternally(aboutWindow.bugReportUrl())
+                ZbTooltip {
+                    visible: parent.hovered
+                    text: "Open a new issue on GitHub, with your version filled in"
+                }
+            }
+            ZbButton {
+                Layout.fillWidth: true
+                text: "Request a feature"
+                onClicked: Qt.openUrlExternally(aboutWindow.featureRequestUrl())
+                ZbTooltip {
+                    visible: parent.hovered
+                    text: "Suggest a feature on GitHub"
+                }
+            }
+        }
+
+        LinkText {
+            Layout.alignment: Qt.AlignHCenter
+            Layout.topMargin: Theme.grid * 2
+            text: "Browse open issues"
+            url: aboutWindow.issuesUrl
         }
     }
 }
