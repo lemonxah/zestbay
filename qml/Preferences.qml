@@ -18,6 +18,9 @@ ZbWindow {
     signal pollIntervalChanged(int intervalMs)
     signal snapGapChanged(int px)
     signal snapToGridChanged(bool enabled)
+    // The canvas drag mode has no row here (it is switched on the canvas);
+    // this only reports its value after a reset to defaults.
+    signal dragModeChanged(string mode)
     signal gridSizeChanged(int px)
 
     property var prefs: ({})
@@ -122,6 +125,7 @@ ZbWindow {
         snapGapChanged(pref("snap_gap_px", 10));
         snapToGridChanged(pref("snap_to_grid", true));
         gridSizeChanged(pref("grid_size_px", 24));
+        dragModeChanged(pref("drag_mode", "grab"));
         Theme.mode = "system";
         themeSegmented.currentIndex = Qt.binding(() => prefsWindow.themeIndex());
     }

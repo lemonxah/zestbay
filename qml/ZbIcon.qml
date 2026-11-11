@@ -1,14 +1,16 @@
 import QtQuick
 import QtQuick.Shapes
 
-// A stroke glyph from Glyphs.icons, drawn at `size` px in `color`.
+// A glyph drawn at `size` px in `color`: a stroke glyph from Glyphs.icons,
+// or a filled one from Glyphs.traced (fill: true).
 Item {
     id: root
     property string name
     property color color: Theme.textIcon
     property real size: 14
 
-    readonly property var glyph: Glyphs.icons[name] || null
+    readonly property var glyph: Glyphs.icons[name] || Glyphs.traced[name] || null
+    readonly property bool filled: glyph !== null && glyph.fill === true
 
     implicitWidth: size
     implicitHeight: size
@@ -35,9 +37,9 @@ Item {
         }
 
         ShapePath {
-            strokeColor: root.color
-            strokeWidth: root.glyph ? root.glyph.sw : 1
-            fillColor: "transparent"
+            strokeColor: root.filled ? "transparent" : root.color
+            strokeWidth: root.glyph && root.glyph.sw ? root.glyph.sw : 1
+            fillColor: root.filled ? root.color : "transparent"
             capStyle: ShapePath.RoundCap
             joinStyle: ShapePath.RoundJoin
             PathSvg { path: root.glyph ? root.glyph.d : "" }

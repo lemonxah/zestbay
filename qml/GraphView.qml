@@ -107,6 +107,33 @@ Item {
     property var selectedNodes: ({})
     property bool groupDragging: false
 
+    // What a left-drag on empty canvas does: "grab" pans the view (the same
+    // as a middle-drag), "select" draws a selection box. Switched with the
+    // buttons at the canvas's top-left or with W; saved as the drag_mode
+    // preference.
+    property string dragMode: "grab"
+    // Left-drag pan in grab mode. grabMoved tells a drag from a click: a
+    // click on empty canvas clears the selection, a pan keeps it.
+    property bool grabPanning: false
+    property bool grabMoved: false
+    // The cursor is over empty canvas (no node, pin, button or wire).
+    property bool hoverEmpty: false
+    onDragModeChanged: updateCursor()
+
+    function setDragMode(mode) {
+        if ((mode !== "grab" && mode !== "select") || mode === dragMode)
+            return;
+        dragMode = mode;
+        controller.set_preference("drag_mode", mode);
+    }
+
+    function toggleDragMode() {
+        // Not in the middle of a left-drag: it would change meaning under the hand.
+        if (grabPanning || selectDragging)
+            return;
+        setDragMode(dragMode === "grab" ? "select" : "grab");
+    }
+
     property int contextNodeId: -1
     // Plugin port under the right-click that opened the node menu (-1: none).
     property int contextPortId: -1
@@ -3281,6 +3308,10 @@ Item {
             fitToView();
             event.accepted = true;
         }
+        if (event.key === Qt.Key_W && !event.isAutoRepeat && !(event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))) {
+            toggleDragMode();
+            event.accepted = true;
+        }
         if (event.key === Qt.Key_Escape) {
             if (placingNodeId >= 0) {
                 finishPlacing();
@@ -3316,11 +3347,16 @@ Item {
 
         property real lastX: 0
         property real lastY: 0
+        property real pressX: 0
+        property real pressY: 0
 
         onPressed: mouse => {
             graphView.forceActiveFocus();
             lastX = mouse.x;
             lastY = mouse.y;
+            pressX = mouse.x;
+            pressY = mouse.y;
+            grabPanning = false;
 
             // In-hand placement: a click drops the node where it currently sits.
             if (placingNodeId >= 0) {
@@ -3510,6 +3546,13 @@ Item {
                     return;
                 }
 
+                // Empty canvas: pan it (grab mode) or start a selection box.
+                if (dragMode === "grab") {
+                    grabPanning = true;
+                    grabMoved = false;
+                    updateCursor();
+                    return;
+                }
                 clearSelection();
                 selectDragging = true;
                 selectStartX = mouse.x;
@@ -3534,7 +3577,9 @@ Item {
                 return;
             }
 
-            if (mouse.buttons & Qt.MiddleButton) {
+            if ((mouse.buttons & Qt.MiddleButton) || (grabPanning && (mouse.buttons & Qt.LeftButton))) {
+                if (grabPanning && !grabMoved && (Math.abs(mouse.x - pressX) > 4 || Math.abs(mouse.y - pressY) > 4))
+                    grabMoved = true;
                 panX += mouse.x - lastX;
                 panY += mouse.y - lastY;
                 clampPan();
@@ -3664,6 +3709,14 @@ Item {
                 return;
             }
             if (mouse.button === Qt.LeftButton) {
+                if (grabPanning) {
+                    grabPanning = false;
+                    // A click (no drag) on empty canvas clears the selection.
+                    if (!grabMoved)
+                        clearSelection();
+                    updateCursor();
+                }
+
                 if (connectFromPortId >= 0) {
                     var targetId = findPortAt(mouse.x, mouse.y);
                     if (targetId >= 0 && targetId !== connectFromPortId) {
@@ -3747,12 +3800,86 @@ Item {
 
     // Inside a subgraph: "Graph › Mic Chain" at the top-left; "Graph" (or
     // Escape) goes back to the main graph.
+    // Drag mode switch at the canvas's top-left: what a left-drag on empty
+    // canvas does. The active mode is the accent-tinted cell; W toggles.
+    component ModeCell: AbstractButton {
+        id: cell
+        property string mode
+        property string iconName
+        property string tip
+        readonly property bool active: graphView.dragMode === mode
+        width: 28
+        height: 28
+        hoverEnabled: true
+        // Keep the keyboard on the canvas (W, Delete, Home, Esc).
+        focusPolicy: Qt.NoFocus
+        Accessible.name: tip
+        onClicked: graphView.setDragMode(mode)
+        background: Rectangle {
+            radius: Theme.radiusSmall
+            color: cell.active ? Theme.accentFaint : cell.hovered || cell.down ? Theme.bgHover : "transparent"
+            border.width: cell.active ? 1 : 0
+            border.color: Theme.accentRing
+        }
+        contentItem: Item {
+            ZbIcon {
+                anchors.centerIn: parent
+                name: cell.iconName
+                size: 18
+                color: cell.active ? Theme.accent : cell.hovered ? Theme.textIcon : Theme.textMuted
+            }
+        }
+        ZbTooltip {
+            visible: cell.hovered
+            text: cell.tip
+        }
+    }
+
     Rectangle {
-        id: breadcrumb
-        visible: currentSubgraph !== ""
+        id: modeSwitch
         anchors.left: parent.left
         anchors.top: parent.top
         anchors.margins: 12
+        height: 34
+        width: modeRow.implicitWidth + 6
+        radius: Theme.radiusControl
+        color: Theme.bgPanel
+        border.width: 1
+        border.color: Theme.borderStrong
+
+        // Presses on the pill itself never reach the canvas.
+        MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.AllButtons
+            hoverEnabled: true
+            cursorShape: Qt.ArrowCursor
+            onEntered: graphView.updateHover(-1, -1)
+        }
+
+        Row {
+            id: modeRow
+            anchors.centerIn: parent
+            spacing: 2
+            ModeCell {
+                mode: "grab"
+                iconName: "grab"
+                tip: "Grab: drag the canvas to move around (W)"
+            }
+            ModeCell {
+                mode: "select"
+                iconName: "select"
+                tip: "Select: drag a box around nodes and wires (W)"
+            }
+        }
+    }
+
+    Rectangle {
+        id: breadcrumb
+        visible: currentSubgraph !== ""
+        anchors.left: modeSwitch.right
+        anchors.leftMargin: 8
+        anchors.top: parent.top
+        anchors.topMargin: 12
         height: 34
         width: crumbRow.implicitWidth + 12
         radius: Theme.radiusControl
@@ -3888,21 +4015,26 @@ Item {
         var port = -1;
         var link = -1;
         var btn = "";
+        var empty = false;
         if (sx >= 0 && connectFromPortId < 0 && dragNodeId < 0 && !groupDragging) {
             port = findPortAt(sx, sy);
             if (port < 0) {
                 var hit = findButtonAt(sx, sy);
-                if (hit)
+                if (hit) {
                     btn = hit.nodeId + ":" + hit.button;
-                else if (findNodeAt(sx, sy) < 0)
+                } else if (findNodeAt(sx, sy) < 0) {
                     link = findLinkAt(sx, sy);
+                    empty = link < 0;
+                }
             }
         }
-        if (port !== hoveredPortId || link !== hoveredLinkId || btn !== hoveredButton) {
-            hoveredPortId = port;
-            hoveredLinkId = link;
-            hoveredButton = btn;
-            mouseArea.cursorShape = btn !== "" || port >= 0 ? Qt.PointingHandCursor : Qt.ArrowCursor;
+        var changed = port !== hoveredPortId || link !== hoveredLinkId || btn !== hoveredButton;
+        hoveredPortId = port;
+        hoveredLinkId = link;
+        hoveredButton = btn;
+        hoverEmpty = empty;
+        updateCursor();
+        if (changed) {
             if (port >= 0 && portPositions[port]) {
                 var pp = portPositions[port];
                 var sp = toScreen(pp.cx, pp.cy);
@@ -3927,6 +4059,20 @@ Item {
             }
             canvas.requestPaint();
         }
+    }
+
+    // Canvas cursor: a pointing hand over pins and node buttons; in grab mode
+    // an open hand over empty canvas and a closed one while panning.
+    function updateCursor() {
+        var shape = Qt.ArrowCursor;
+        if (grabPanning)
+            shape = Qt.ClosedHandCursor;
+        else if (hoveredButton !== "" || hoveredPortId >= 0)
+            shape = Qt.PointingHandCursor;
+        else if (dragMode === "grab" && hoverEmpty && placingNodeId < 0)
+            shape = Qt.OpenHandCursor;
+        if (mouseArea.cursorShape !== shape)
+            mouseArea.cursorShape = shape;
     }
 
     function portName(portId) {

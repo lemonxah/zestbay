@@ -36,6 +36,8 @@ ZbWindow {
                 graphView.gridSize = prefs.grid_size_px;
             if (prefs.snap_to_grid !== undefined)
                 graphView.snapToGrid = prefs.snap_to_grid;
+            if (prefs.drag_mode)
+                graphView.dragMode = prefs.drag_mode;
             if (prefs.start_minimized) {
                 controller.set_window_visible(false);
                 return;
@@ -1048,6 +1050,7 @@ ZbWindow {
         onSnapGapChanged: px => graphView.snapGap = px
         onSnapToGridChanged: enabled => graphView.snapToGrid = enabled
         onGridSizeChanged: px => graphView.gridSize = px
+        onDragModeChanged: mode => graphView.dragMode = mode
     }
 
     CpuOverlay {

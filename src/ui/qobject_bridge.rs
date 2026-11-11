@@ -5027,6 +5027,14 @@ impl qobject::AppController {
                     self.as_mut().rust_mut().prefs.snap_gap_px = v.clamp(0, 200);
                 }
             }
+            "drag_mode" => {
+                if matches!(val_str.as_str(), "grab" | "select") {
+                    self.as_mut().rust_mut().prefs.drag_mode = val_str.clone();
+                } else {
+                    log::warn!("Unknown drag mode '{}'", val_str);
+                    return;
+                }
+            }
             "theme" => {
                 if matches!(val_str.as_str(), "system" | "dark" | "light") {
                     self.as_mut().rust_mut().prefs.theme = val_str.clone();
@@ -6496,6 +6504,11 @@ struct Preferences {
     #[serde(default = "Preferences::default_grid_size_px")]
     pub grid_size_px: u32,
 
+    /// What a left-drag on empty canvas does: "grab" pans the view (like a
+    /// middle-drag), "select" draws a selection box.
+    #[serde(default = "Preferences::default_drag_mode")]
+    pub drag_mode: String,
+
     /// Effect plugins as passive PipeWire nodes, letting linked devices
     /// suspend when nothing else uses them (see plugin::PASSIVE_EFFECTS).
     #[serde(default)]
@@ -6561,6 +6574,9 @@ impl Preferences {
     fn default_snap_to_grid() -> bool {
         true
     }
+    fn default_drag_mode() -> String {
+        "grab".to_string()
+    }
     fn default_hide_unnamed_nodes() -> bool {
         true
     }
@@ -6586,6 +6602,7 @@ impl Default for Preferences {
             snap_gap_px: Self::default_snap_gap_px(),
             snap_to_grid: Self::default_snap_to_grid(),
             grid_size_px: Self::default_grid_size_px(),
+            drag_mode: Self::default_drag_mode(),
             passive_plugins: false,
             hide_unnamed_nodes: Self::default_hide_unnamed_nodes(),
             osc_enabled: false,

@@ -96,6 +96,7 @@ Carla is a full-featured plugin host and JACK patchbay. The differences are abou
 - MIDI bridge devices split into one node per device
 - Drag from a port to another port to connect; select wires (click, Ctrl+click, selection box) and press Delete to disconnect
 - Pan with middle-drag, zoom with the wheel (0.25x-3.0x), scroll bars, Fit to view (Home) and Reset zoom
+- **Grab / Select mode** (buttons at the canvas's top-left, or **W**): in Grab mode (the default) a left-drag on empty canvas pans, like a middle-drag; in Select mode it draws a selection box. The choice is remembered
 - Drag nodes, alone or as a group; **snap to grid** (on by default, adjustable grid size) or Shift-drag to snap next to other nodes with a configurable gap
 - **Pin** nodes so Auto layout never moves them; hide and unhide nodes
 - Auto layout that follows the signal flow (and the grid)
@@ -294,6 +295,7 @@ oscsend localhost 9000 /zestbay/session/load s "live"
 |-----|--------|
 | Ctrl+F | Search nodes and ports |
 | Home | Fit the graph to the view |
+| W | Switch between Grab mode (drag pans the canvas) and Select mode (drag draws a selection box) |
 | Delete / Backspace | Disconnect the selected wires |
 | Escape | Cancel a drag or placement, clear the selection, then leave a subgraph |
 | Shift (while dragging) | Snap to nearby nodes (when snap to grid is off) |
