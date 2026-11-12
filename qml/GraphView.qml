@@ -698,6 +698,11 @@ Item {
             }
         }
         portsByNode = newPorts;
+        // Links or ports changed under a plugin being dragged: re-plan.
+        if (insertPreview && dragNodeId >= 0) {
+            insertPreview = null;
+            updateInsertPreview(dragNodeId);
+        }
 
         var newConnected = {};
         for (var ci = 0; ci < links.length; ci++) {
@@ -2085,38 +2090,42 @@ Item {
         }
     }
 
-    // Confirmation dialog for inserting a plugin node onto a link
-    property int pendingInsertLinkId: -1
-    property int pendingInsertNodeId: -1
+    // Drag preview of dropping a plugin on a wire: the wires that would be
+    // split (remove: {linkId: true}) and the ghost wires that would replace
+    // them (add: [[outPortId, inPortId]]).  null when there is nothing to show.
+    property var insertPreview: null
 
-    ZbDialog {
-        id: insertConfirmDialog
-        title: "Insert plugin on link"
-        primaryText: "Insert"
-        secondaryText: "Cancel"
-        width: 380
-
-        Text {
-            width: parent ? parent.width : 320
-            text: "Insert this plugin between the connected nodes?"
-            wrapMode: Text.WordWrap
-            font.family: Theme.fontSans
-            font.pixelSize: Theme.sizeBody
-            color: Theme.textPrimary
+    function updateInsertPreview(nodeId) {
+        var linkId = -1;
+        var node = nodeId >= 0 ? findNodeData(nodeId) : null;
+        if (node && node.type === "Plugin")
+            linkId = findLinkUnderNode(nodeId);
+        if (linkId < 0) {
+            insertPreview = null;
+            return;
         }
-
-        onAccepted: {
-            if (pendingInsertLinkId >= 0 && pendingInsertNodeId >= 0) {
-                controller.insert_node_on_link(pendingInsertLinkId, pendingInsertNodeId);
-            }
-            pendingInsertLinkId = -1;
-            pendingInsertNodeId = -1;
+        if (insertPreview && insertPreview.linkId === linkId && insertPreview.nodeId === nodeId)
+            return;
+        var plan = null;
+        try {
+            var json = controller.insert_on_link_preview_json(linkId, nodeId);
+            plan = json ? JSON.parse(json) : null;
+        } catch (e) {
+            plan = null;
         }
-
-        onRejected: {
-            pendingInsertLinkId = -1;
-            pendingInsertNodeId = -1;
+        if (!plan) {
+            insertPreview = null;
+            return;
         }
+        var remove = {};
+        for (var i = 0; i < plan.remove.length; i++)
+            remove[plan.remove[i]] = true;
+        insertPreview = {
+            linkId: linkId,
+            nodeId: nodeId,
+            remove: remove,
+            add: plan.add
+        };
     }
 
     function persistHidden() {
@@ -3395,6 +3404,15 @@ Item {
                 var mt = portMediaTypes[link.outputPortId];
                 if (!mt || mt === "Unknown")
                     mt = portMediaTypes[link.inputPortId];
+                if (insertPreview && insertPreview.remove[link.id]) {
+                    // Will be split by the plugin being dropped: faded, dashed.
+                    ctx.save();
+                    ctx.globalAlpha = 0.3;
+                    ctx.setLineDash([3, 5]);
+                    drawBezier(ctx, fromPos.cx, fromPos.cy, toPos.cx, toPos.cy, signalColor(mt), Theme.wireWidth);
+                    ctx.restore();
+                    continue;
+                }
                 ctx.globalAlpha = accented || hovered ? 1 : (link.active === false ? 0.35 : Theme.wireOpacity);
                 drawBezier(ctx, fromPos.cx, fromPos.cy, toPos.cx, toPos.cy, accented ? Theme.accent : signalColor(mt), accented || hovered ? Theme.wireWidthActive : Theme.wireWidth);
             }
@@ -3477,6 +3495,34 @@ Item {
                 if (!p2)
                     continue;
                 drawNode(ctx, n2, p2.x, p2.y);
+            }
+
+            // ---- Insert preview: ghost wires through the dragged plugin ----
+            if (insertPreview) {
+                ctx.save();
+                ctx.setLineDash([6, 4]);
+                for (var gi = 0; gi < insertPreview.add.length; gi++) {
+                    var gOut = insertPreview.add[gi][0];
+                    var gIn = insertPreview.add[gi][1];
+                    var gFrom = newPortPositions[gOut];
+                    var gTo = newPortPositions[gIn];
+                    if (!gFrom || !gTo)
+                        continue;
+                    var gmt = portMediaTypes[gOut];
+                    if (!gmt || gmt === "Unknown")
+                        gmt = portMediaTypes[gIn];
+                    ctx.globalAlpha = 0.85;
+                    drawBezier(ctx, gFrom.cx, gFrom.cy, gTo.cx, gTo.cy, signalColor(gmt), Theme.wireWidthActive);
+                    // Pin dots where the ghost wire would connect.
+                    ctx.globalAlpha = 1;
+                    ctx.fillStyle = "" + signalColor(gmt);
+                    ctx.beginPath();
+                    ctx.arc(gFrom.cx, gFrom.cy, 3, 0, Math.PI * 2);
+                    ctx.moveTo(gTo.cx + 3, gTo.cy);
+                    ctx.arc(gTo.cx, gTo.cy, 3, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+                ctx.restore();
             }
 
             // ---- Drag wire: dashed, signal colour (red when blocking) ----
@@ -4342,6 +4388,7 @@ Item {
                     };
                     activeSnapLines = [];
                 }
+                updateInsertPreview(dragNodeId);
                 canvas.requestPaint();
                 return;
             }
@@ -4455,15 +4502,15 @@ Item {
                 }
 
                 if (dragNodeId >= 0) {
+                    // Dropping a plugin on a wire inserts it right away; the
+                    // ghost wires shown while dragging are the confirmation.
                     var linkUnder = findLinkUnderNode(dragNodeId);
                     if (linkUnder >= 0) {
                         var draggedNode = findNodeData(dragNodeId);
-                        if (draggedNode && draggedNode.type === "Plugin") {
-                            pendingInsertLinkId = linkUnder;
-                            pendingInsertNodeId = dragNodeId;
-                            insertConfirmDialog.open();
-                        }
+                        if (draggedNode && draggedNode.type === "Plugin")
+                            controller.insert_node_on_link(linkUnder, dragNodeId);
                     }
+                    insertPreview = null;
                     // Resolve overlap after dropping a single node
                     var droppedNode = findNodeData(dragNodeId);
                     if (droppedNode) {

@@ -11,9 +11,9 @@ bump new_version msg="":
     sed -i '0,/^version = ".*"/s//version = "{{new_version}}"/' Cargo.toml
     cargo update --workspace
     # Arch PKGBUILD
-    sed -i 's/^pkgver=.*/pkgver={{new_version}}/' pkg/zestbay/PKGBUILD
+    sed -i 's/^pkgver=.*/pkgver={{new_version}}/' pkg/zestbay/PKGBUILD pkg/zestins/PKGBUILD
     # RPM spec
-    sed -i 's/^Version:.*/Version:        {{new_version}}/' pkg/rpm/zestbay.spec
+    sed -i 's/^Version:.*/Version:        {{new_version}}/' pkg/rpm/zestbay.spec pkg/rpm/zestins.spec
     # Flatpak/AppStream metainfo: what Flathub and software centres show
     just metainfo-release {{new_version}} {{quote(msg)}}
     @echo "Bumped to {{new_version}}"
@@ -68,7 +68,7 @@ install: build
 # Bump, commit, tag, and push. Optional message: just release 0.5.0 "fix remapping"
 release new_version msg="":
     just bump {{new_version}} {{quote(msg)}}
-    git add Cargo.toml Cargo.lock pkg/zestbay/PKGBUILD pkg/rpm/zestbay.spec pkg/flatpak/io.github.lemonxah.ZestBay.metainfo.xml
+    git add Cargo.toml Cargo.lock pkg/zestbay/PKGBUILD pkg/zestins/PKGBUILD pkg/rpm/zestbay.spec pkg/rpm/zestins.spec pkg/flatpak/io.github.lemonxah.ZestBay.metainfo.xml
     if git diff --cached --quiet; then \
         echo "Version bump already committed; continuing release"; \
     else \
@@ -131,3 +131,25 @@ flatpak-lint:
 # Build a .deb inside an Ubuntu container (podman/docker): pkg/deb/zestbay_<version>-<image>_amd64.deb
 deb image="ubuntu:24.04":
     pkg/deb/build-deb.sh --container {{image}}
+
+# ---- Zestins (ZestBay's LV2 plugins, packaged separately) -------------------
+
+# Build zestins/build/zestins.lv2
+zestins:
+    make -C zestins
+
+# Install the Zestins bundle into ~/.lv2 (for trying them without a package)
+zestins-install:
+    make -C zestins install
+
+# Remove the Zestins bundle from ~/.lv2
+zestins-uninstall:
+    make -C zestins uninstall
+
+# Build the Zestins .deb inside an Ubuntu container: pkg/deb/zestins_<version>-<image>_amd64.deb
+zestins-deb image="ubuntu:24.04":
+    pkg/deb/build-zestins-deb.sh --container {{image}}
+
+# Build the Zestins .rpm inside a Fedora container: pkg/rpm/rpmbuild/RPMS/
+zestins-rpm image="fedora:latest":
+    pkg/rpm/build-zestins-rpm.sh --container {{image}}

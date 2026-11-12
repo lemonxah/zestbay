@@ -87,6 +87,9 @@ pub mod qobject {
         fn insert_node_on_link(self: Pin<&mut Self>, link_id: u32, node_id: u32);
 
         #[qinvokable]
+        fn insert_on_link_preview_json(self: Pin<&mut Self>, link_id: u32, node_id: u32) -> QString;
+
+        #[qinvokable]
         fn get_layout_json(self: Pin<&mut Self>) -> QString;
 
         #[qinvokable]
@@ -2650,160 +2653,59 @@ impl qobject::AppController {
         }
     }
 
+    /// What dropping plugin `node_id` on `link_id` would do, for the drag
+    /// preview: `{"remove": [link ids], "add": [[out port, in port], ...]}`,
+    /// or `""` when it can't be inserted there.
+    pub fn insert_on_link_preview_json(self: Pin<&mut Self>, link_id: u32, node_id: u32) -> QString {
+        let Some(ref graph) = self.rust().graph else {
+            return QString::from("");
+        };
+        let Ok(plan) = plan_insert_on_link(graph, link_id, node_id) else {
+            return QString::from("");
+        };
+        let add: Vec<[u32; 2]> = plan
+            .rewires
+            .iter()
+            .flat_map(|r| [[r.upstream_out, r.plugin_in], [r.plugin_out, r.downstream_in]])
+            .collect();
+        let json = serde_json::json!({ "remove": plan.links_to_remove, "add": add });
+        QString::from(&json.to_string())
+    }
+
     pub fn insert_node_on_link(mut self: Pin<&mut Self>, link_id: u32, node_id: u32) {
         let graph = self.rust().graph.clone();
         let Some(ref graph) = graph else { return };
 
-        let Some(link) = graph.get_link(link_id) else {
-            log::warn!("insert_node_on_link: link {} not found", link_id);
-            return;
-        };
-
-        let Some(node) = graph.get_node(node_id) else {
-            log::warn!("insert_node_on_link: node {} not found", node_id);
-            return;
-        };
-
-        if link.output_node_id == node_id || link.input_node_id == node_id {
-            log::warn!(
-                "insert_node_on_link: node {} is already part of link {}, ignoring",
-                node_id,
-                link_id
-            );
-            return;
-        }
-
-        if node.node_type != Some(NodeType::Plugin) {
-            log::warn!(
-                "insert_node_on_link: node {} is not an LV2 plugin, ignoring",
-                node_id
-            );
-            return;
-        }
-
-        let node_ports = graph.get_ports_for_node(node_id);
-        let mut node_inputs: Vec<_> = node_ports
-            .iter()
-            .filter(|p| {
-                p.direction == PortDirection::Input
-                    && p.media_type == Some(crate::pipewire::MediaType::Audio)
-            })
-            .collect();
-        let mut node_outputs: Vec<_> = node_ports
-            .iter()
-            .filter(|p| {
-                p.direction == PortDirection::Output
-                    && p.media_type == Some(crate::pipewire::MediaType::Audio)
-            })
-            .collect();
-
-        if node_inputs.is_empty() || node_outputs.is_empty() {
-            log::warn!(
-                "insert_node_on_link: node {} has no audio input/output ports",
-                node_id
-            );
-            return;
-        }
-
-        node_inputs.sort_by(|a, b| crate::pipewire::state::natural_cmp(&a.name, &b.name));
-        node_outputs.sort_by(|a, b| crate::pipewire::state::natural_cmp(&a.name, &b.name));
-
-        let upstream_out = link.output_port_id;
-        let downstream_in = link.input_port_id;
-
-        let upstream_node_id = link.output_node_id;
-        let downstream_node_id = link.input_node_id;
-
-        let upstream_ports: Vec<_> = graph
-            .get_ports_for_node(upstream_node_id)
-            .into_iter()
-            .filter(|p| {
-                p.direction == PortDirection::Output
-                    && p.media_type == Some(crate::pipewire::MediaType::Audio)
-            })
-            .collect();
-        let downstream_ports: Vec<_> = graph
-            .get_ports_for_node(downstream_node_id)
-            .into_iter()
-            .filter(|p| {
-                p.direction == PortDirection::Input
-                    && p.media_type == Some(crate::pipewire::MediaType::Audio)
-            })
-            .collect();
-
-        // Only audio links can take an audio plugin; a MIDI link would be
-        // disconnected and replaced by links that cannot work.
-        if !upstream_ports.iter().any(|p| p.id == upstream_out)
-            || !downstream_ports.iter().any(|p| p.id == downstream_in)
-        {
-            log::warn!(
-                "insert_node_on_link: link {} is not an audio link, ignoring",
-                link_id
-            );
-            return;
-        }
-
-        let upstream_idx = upstream_ports
-            .iter()
-            .position(|p| p.id == upstream_out)
-            .unwrap_or(0);
-        let downstream_idx = downstream_ports
-            .iter()
-            .position(|p| p.id == downstream_in)
-            .unwrap_or(0);
-
-        let all_links = graph.get_all_links();
-        let mut links_to_remove = Vec::new();
-        let mut rewire_pairs: Vec<(u32, usize, u32, usize)> = Vec::new();
-
-        for existing in &all_links {
-            if existing.output_node_id == upstream_node_id
-                && existing.input_node_id == downstream_node_id
-            {
-                let u_idx = upstream_ports
-                    .iter()
-                    .position(|p| p.id == existing.output_port_id);
-                let d_idx = downstream_ports
-                    .iter()
-                    .position(|p| p.id == existing.input_port_id);
-                if let (Some(ui), Some(di)) = (u_idx, d_idx) {
-                    links_to_remove.push(existing.id);
-                    rewire_pairs.push((existing.output_port_id, ui, existing.input_port_id, di));
-                }
+        let plan = match plan_insert_on_link(graph, link_id, node_id) {
+            Ok(plan) => plan,
+            Err(why) => {
+                log::warn!("insert_node_on_link: {}", why);
+                return;
             }
-        }
-
-        if links_to_remove.is_empty() {
-            links_to_remove.push(link_id);
-            rewire_pairs.push((upstream_out, upstream_idx, downstream_in, downstream_idx));
-        }
+        };
 
         if let Some(ref tx) = self.rust().cmd_tx {
-            for lid in &links_to_remove {
+            for lid in &plan.links_to_remove {
                 let _ = tx.send(PwCommand::Disconnect { link_id: *lid });
             }
-
-            let max_in = node_inputs.len() - 1;
-            let max_out = node_outputs.len() - 1;
-            for (up_port, up_idx, down_port, down_idx) in &rewire_pairs {
-                let in_idx = *up_idx.min(&max_in);
-                let out_idx = *down_idx.min(&max_out);
-
+            for r in &plan.rewires {
                 let _ = tx.send(PwCommand::Connect {
-                    output_port_id: *up_port,
-                    input_port_id: node_inputs[in_idx].id,
+                    output_port_id: r.upstream_out,
+                    input_port_id: r.plugin_in,
                 });
                 let _ = tx.send(PwCommand::Connect {
-                    output_port_id: node_outputs[out_idx].id,
-                    input_port_id: *down_port,
+                    output_port_id: r.plugin_out,
+                    input_port_id: r.downstream_in,
                 });
             }
         }
 
+        let upstream_node_id = plan.upstream_node_id;
+        let downstream_node_id = plan.downstream_node_id;
         log::info!(
             "insert_node_on_link: inserted node {} on {} links between nodes {} and {}",
             node_id,
-            links_to_remove.len(),
+            plan.links_to_remove.len(),
             upstream_node_id,
             downstream_node_id
         );
@@ -2812,45 +2714,37 @@ impl qobject::AppController {
         type NewLinkData = (Node, Node, Port, Port, Node, Node, Port, Port);
         let mut new_link_data: Vec<NewLinkData> = Vec::new();
 
-        {
-            let max_in = node_inputs.len() - 1;
-            let max_out = node_outputs.len() - 1;
+        for r in &plan.rewires {
+            if let (Some(source_node), Some(target_node), Some(out_port), Some(in_port)) = (
+                graph.get_node(upstream_node_id),
+                graph.get_node(downstream_node_id),
+                graph.get_port(r.upstream_out),
+                graph.get_port(r.downstream_in),
+            ) {
+                rule_data.push((source_node, target_node, out_port, in_port));
+            }
 
-            for (up_port_id, up_idx, down_port_id, down_idx) in &rewire_pairs {
-                if let (Some(source_node), Some(target_node), Some(out_port), Some(in_port)) = (
-                    graph.get_node(upstream_node_id),
-                    graph.get_node(downstream_node_id),
-                    graph.get_port(*up_port_id),
-                    graph.get_port(*down_port_id),
-                ) {
-                    rule_data.push((source_node, target_node, out_port, in_port));
-                }
-
-                let in_idx = *up_idx.min(&max_in);
-                let out_idx = *down_idx.min(&max_out);
-
-                if let (Some(up_node), Some(ins_node), Some(up_port), Some(ins_in_port)) = (
-                    graph.get_node(upstream_node_id),
-                    graph.get_node(node_id),
-                    graph.get_port(*up_port_id),
-                    graph.get_port(node_inputs[in_idx].id),
-                ) && let (Some(ins_node2), Some(dn_node), Some(ins_out_port), Some(dn_port)) = (
-                    graph.get_node(node_id),
-                    graph.get_node(downstream_node_id),
-                    graph.get_port(node_outputs[out_idx].id),
-                    graph.get_port(*down_port_id),
-                ) {
-                    new_link_data.push((
-                        up_node,
-                        ins_node,
-                        up_port,
-                        ins_in_port,
-                        ins_node2,
-                        dn_node,
-                        ins_out_port,
-                        dn_port,
-                    ));
-                }
+            if let (Some(up_node), Some(ins_node), Some(up_port), Some(ins_in_port)) = (
+                graph.get_node(upstream_node_id),
+                graph.get_node(node_id),
+                graph.get_port(r.upstream_out),
+                graph.get_port(r.plugin_in),
+            ) && let (Some(ins_node2), Some(dn_node), Some(ins_out_port), Some(dn_port)) = (
+                graph.get_node(node_id),
+                graph.get_node(downstream_node_id),
+                graph.get_port(r.plugin_out),
+                graph.get_port(r.downstream_in),
+            ) {
+                new_link_data.push((
+                    up_node,
+                    ins_node,
+                    up_port,
+                    ins_in_port,
+                    ins_node2,
+                    dn_node,
+                    ins_out_port,
+                    dn_port,
+                ));
             }
         }
 
@@ -6724,6 +6618,106 @@ fn save_preferences(prefs: &Preferences) {
     if write_config("preferences.json", json.as_bytes(), false) {
         log::debug!("save_preferences: written");
     }
+}
+
+
+/// One audio wire rerouted through an inserted plugin.
+struct InsertRewire {
+    upstream_out: u32,
+    plugin_in: u32,
+    plugin_out: u32,
+    downstream_in: u32,
+}
+
+/// The links removed and created when plugin `node_id` is dropped on `link_id`.
+struct InsertPlan {
+    upstream_node_id: u32,
+    downstream_node_id: u32,
+    links_to_remove: Vec<u32>,
+    rewires: Vec<InsertRewire>,
+}
+
+/// Plan inserting plugin `node_id` on audio link `link_id`: every audio link
+/// between the same two nodes is split, the n-th upstream / downstream
+/// channel going through the plugin's n-th input / output (clamped to the
+/// ones it has).
+fn plan_insert_on_link(graph: &GraphState, link_id: u32, node_id: u32) -> Result<InsertPlan, String> {
+    use crate::pipewire::MediaType;
+    let link = graph
+        .get_link(link_id)
+        .ok_or_else(|| format!("link {} not found", link_id))?;
+    let node = graph
+        .get_node(node_id)
+        .ok_or_else(|| format!("node {} not found", node_id))?;
+    if link.output_node_id == node_id || link.input_node_id == node_id {
+        return Err(format!("node {} is already part of link {}", node_id, link_id));
+    }
+    if node.node_type != Some(NodeType::Plugin) {
+        return Err(format!("node {} is not a plugin", node_id));
+    }
+
+    let audio_ports = |nid: u32, dir: PortDirection| -> Vec<Port> {
+        graph
+            .get_ports_for_node(nid)
+            .into_iter()
+            .filter(|p| p.direction == dir && p.media_type == Some(MediaType::Audio))
+            .collect()
+    };
+    let mut node_inputs = audio_ports(node_id, PortDirection::Input);
+    let mut node_outputs = audio_ports(node_id, PortDirection::Output);
+    if node_inputs.is_empty() || node_outputs.is_empty() {
+        return Err(format!("node {} has no audio input/output ports", node_id));
+    }
+    node_inputs.sort_by(|a, b| crate::pipewire::state::natural_cmp(&a.name, &b.name));
+    node_outputs.sort_by(|a, b| crate::pipewire::state::natural_cmp(&a.name, &b.name));
+
+    let upstream_node_id = link.output_node_id;
+    let downstream_node_id = link.input_node_id;
+    let upstream_ports = audio_ports(upstream_node_id, PortDirection::Output);
+    let downstream_ports = audio_ports(downstream_node_id, PortDirection::Input);
+
+    // Only audio links can take an audio plugin; a MIDI link would be
+    // disconnected and replaced by links that cannot work.
+    let upstream_idx = upstream_ports.iter().position(|p| p.id == link.output_port_id);
+    let downstream_idx = downstream_ports.iter().position(|p| p.id == link.input_port_id);
+    let (Some(upstream_idx), Some(downstream_idx)) = (upstream_idx, downstream_idx) else {
+        return Err(format!("link {} is not an audio link", link_id));
+    };
+
+    let mut links_to_remove = Vec::new();
+    let mut pairs: Vec<(u32, usize, u32, usize)> = Vec::new();
+    for existing in graph.get_all_links() {
+        if existing.output_node_id == upstream_node_id && existing.input_node_id == downstream_node_id {
+            let u_idx = upstream_ports.iter().position(|p| p.id == existing.output_port_id);
+            let d_idx = downstream_ports.iter().position(|p| p.id == existing.input_port_id);
+            if let (Some(ui), Some(di)) = (u_idx, d_idx) {
+                links_to_remove.push(existing.id);
+                pairs.push((existing.output_port_id, ui, existing.input_port_id, di));
+            }
+        }
+    }
+    if links_to_remove.is_empty() {
+        links_to_remove.push(link_id);
+        pairs.push((link.output_port_id, upstream_idx, link.input_port_id, downstream_idx));
+    }
+
+    let max_in = node_inputs.len() - 1;
+    let max_out = node_outputs.len() - 1;
+    let rewires = pairs
+        .into_iter()
+        .map(|(up_port, up_idx, down_port, down_idx)| InsertRewire {
+            upstream_out: up_port,
+            plugin_in: node_inputs[up_idx.min(max_in)].id,
+            plugin_out: node_outputs[down_idx.min(max_out)].id,
+            downstream_in: down_port,
+        })
+        .collect();
+    Ok(InsertPlan {
+        upstream_node_id,
+        downstream_node_id,
+        links_to_remove,
+        rewires,
+    })
 }
 
 #[cfg(test)]

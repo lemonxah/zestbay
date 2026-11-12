@@ -11,6 +11,9 @@ pub mod ui_bridge_client;
 pub mod urid;
 pub mod worker;
 
+#[cfg(test)]
+mod tests;
+
 pub use types::*;
 
 thread_local! {

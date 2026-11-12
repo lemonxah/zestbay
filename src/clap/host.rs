@@ -14,8 +14,10 @@ use std::time::{Duration, Instant};
 
 use clap_sys::audio_buffer::clap_audio_buffer;
 use clap_sys::events::{
-    CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_MIDI, CLAP_EVENT_PARAM_VALUE, clap_event_header,
-    clap_event_midi, clap_event_param_value, clap_input_events, clap_output_events,
+    CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_MIDI, CLAP_EVENT_MIDI_SYSEX, CLAP_EVENT_NOTE_OFF,
+    CLAP_EVENT_NOTE_ON, CLAP_EVENT_PARAM_VALUE, clap_event_header, clap_event_midi,
+    clap_event_midi_sysex, clap_event_note, clap_event_param_value, clap_input_events,
+    clap_output_events,
 };
 use clap_sys::ext::params::{
     CLAP_PARAM_RESCAN_ALL, CLAP_PARAM_RESCAN_INFO, CLAP_PARAM_RESCAN_VALUES, clap_host_params,
@@ -120,8 +122,8 @@ pub struct ClapPluginInstance {
 
     /// Whether this plugin accepts MIDI input (has note input ports)
     pub has_midi_in: bool,
-    /// Whether this plugin produces MIDI output (has note output ports)
-    pub has_midi_out: bool,
+    /// Names of the plugin's note output ports (one MIDI output each).
+    pub midi_output_names: Vec<String>,
 
     /// Channel count of each CLAP audio port.
     input_port_channels: Vec<usize>,
@@ -362,7 +364,7 @@ impl ClapPluginInstance {
 
             // Query note ports (MIDI capability)
             let mut has_midi_in = false;
-            let mut has_midi_out = false;
+            let mut midi_output_names = Vec::new();
             if let Some(get_ext) = plugin_ref.get_extension {
                 let ext = get_ext(
                     plugin_ptr,
@@ -373,7 +375,18 @@ impl ClapPluginInstance {
                         &*(ext as *const clap_sys::ext::note_ports::clap_plugin_note_ports);
                     if let Some(count_fn) = note_ports.count {
                         has_midi_in = count_fn(plugin_ptr, true) > 0;
-                        has_midi_out = count_fn(plugin_ptr, false) > 0;
+                        for index in 0..count_fn(plugin_ptr, false) {
+                            let mut info: clap_sys::ext::note_ports::clap_note_port_info =
+                                std::mem::zeroed();
+                            let ok = note_ports
+                                .get
+                                .is_some_and(|get| get(plugin_ptr, index, false, &mut info));
+                            midi_output_names.push(if ok {
+                                CStr::from_ptr(info.name.as_ptr()).to_string_lossy().into_owned()
+                            } else {
+                                String::new()
+                            });
+                        }
                     }
                 }
             }
@@ -385,12 +398,12 @@ impl ClapPluginInstance {
             }
 
             log::info!(
-                "CLAP: {} — audio {}/{}, midi_in={}, midi_out={}",
+                "CLAP: {} — audio {}/{}, midi_in={}, midi_outs={}",
                 plugin_info.name,
                 audio_input_channels,
                 audio_output_channels,
                 has_midi_in,
-                has_midi_out,
+                midi_output_names.len(),
             );
 
             // Query params
@@ -486,7 +499,7 @@ impl ClapPluginInstance {
                 audio_input_channels,
                 audio_output_channels,
                 has_midi_in,
-                has_midi_out,
+                midi_output_names,
                 input_port_channels,
                 output_port_channels,
                 params,
@@ -520,6 +533,7 @@ impl ClapPluginInstance {
         outputs: &mut [&mut [f32]],
         sample_count: usize,
         midi_events: &[crate::midi::processing::RawMidiEvent],
+        midi_out: &mut crate::midi::processing::MidiSink,
     ) {
         threading::mark_audio_thread();
         let n = sample_count.min(MAX_BLOCK);
@@ -528,14 +542,24 @@ impl ClapPluginInstance {
         }
         if !self.gate.enter() {
             threading::passthrough(inputs, outputs, n);
+            midi_out.thru(midi_events);
             return;
         }
         self.process_count.fetch_add(1, Ordering::Relaxed);
         self.host_data.flush_requested.store(false, Ordering::Relaxed);
 
-        let ran = unsafe { self.process_locked(inputs, outputs, n, midi_events) };
-        if !ran || self.bypassed.load(Ordering::Relaxed) {
+        // While bypassed the plugin still runs, but its MIDI output is
+        // replaced by the input (like its audio).
+        let bypassed = self.bypassed.load(Ordering::Relaxed);
+        let sink: *mut crate::midi::processing::MidiSink = if bypassed {
+            std::ptr::null_mut()
+        } else {
+            midi_out
+        };
+        let ran = unsafe { self.process_locked(inputs, outputs, n, midi_events, sink) };
+        if !ran || bypassed {
             threading::passthrough(inputs, outputs, n);
+            midi_out.thru(midi_events);
         }
         self.gate.leave();
     }
@@ -546,6 +570,7 @@ impl ClapPluginInstance {
         outputs: &mut [&mut [f32]],
         n: usize,
         midi_events: &[crate::midi::processing::RawMidiEvent],
+        midi_out: *mut crate::midi::processing::MidiSink,
     ) -> bool {
         unsafe {
             let plugin = self.plugin;
@@ -608,6 +633,7 @@ impl ClapPluginInstance {
                 id_index,
                 slots: &port_updates.control_inputs,
                 last_applied: rt.last_applied.as_mut_ptr(),
+                midi: midi_out,
             };
             let out_events = out_ctx.as_clap();
 
@@ -810,6 +836,8 @@ impl ClapPluginInstance {
             id_index,
             slots: &port_updates.control_inputs,
             last_applied: rt.last_applied.as_mut_ptr(),
+            // flush() runs outside a process cycle: no MIDI output to collect
+            midi: std::ptr::null_mut(),
         };
         let out_events = out_ctx.as_clap();
         // While active, flush is an audio-thread call; the gate guarantees
@@ -1046,13 +1074,77 @@ unsafe extern "C" fn input_events_get(
     }
 }
 
-// ---- Output events: plugin-originated parameter changes → slots ----
+// ---- Output events: plugin-originated parameter changes → slots,
+// ---- notes / MIDI → the filter's MIDI outputs ----
 
 struct OutputEvents<'a> {
     id_index: &'a [(clap_id, usize)],
     slots: &'a [PortSlot],
     /// RT-private last-applied values (so the change isn't echoed back).
     last_applied: *mut f64,
+    /// MIDI output of the current block, or null when not collected.
+    midi: *mut crate::midi::processing::MidiSink,
+}
+
+/// MIDI bytes for a CLAP note on/off event (None for wildcard keys).
+fn note_event_to_midi(on: bool, ev: &clap_event_note) -> Option<[u8; 3]> {
+    if !(0..128).contains(&ev.key) {
+        return None;
+    }
+    let channel = ev.channel.clamp(0, 15) as u8;
+    let velocity = (ev.velocity.clamp(0.0, 1.0) * 127.0).round() as u8;
+    Some(if on {
+        // Velocity 0 would read as a note off
+        [0x90 | channel, ev.key as u8, velocity.max(1)]
+    } else {
+        [0x80 | channel, ev.key as u8, velocity]
+    })
+}
+
+/// Size of a short MIDI message from its status byte.
+fn midi_message_len(status: u8) -> usize {
+    match status & 0xF0 {
+        0xC0 | 0xD0 => 2,
+        0xF0 => match status {
+            0xF1 | 0xF3 => 2,
+            0xF2 => 3,
+            _ => 1,
+        },
+        _ => 3,
+    }
+}
+
+/// Forward a plugin output event that carries MIDI to `sink`.
+///
+/// # Safety
+/// `event` must point to a complete event of the type its header names.
+unsafe fn push_midi_output(sink: &mut crate::midi::processing::MidiSink, event: *const clap_event_header) {
+    unsafe {
+        let hdr = &*event;
+        match hdr.type_ {
+            CLAP_EVENT_NOTE_ON | CLAP_EVENT_NOTE_OFF => {
+                let ev = &*(event as *const clap_event_note);
+                if let Some(msg) = note_event_to_midi(hdr.type_ == CLAP_EVENT_NOTE_ON, ev) {
+                    sink.push(ev.port_index.max(0) as usize, hdr.time, &msg);
+                }
+            }
+            CLAP_EVENT_MIDI => {
+                let ev = &*(event as *const clap_event_midi);
+                if ev.data[0] & 0x80 != 0 {
+                    let len = midi_message_len(ev.data[0]);
+                    sink.push(ev.port_index as usize, hdr.time, &ev.data[..len]);
+                }
+            }
+            CLAP_EVENT_MIDI_SYSEX => {
+                let ev = &*(event as *const clap_event_midi_sysex);
+                if !ev.buffer.is_null() && ev.size > 0 {
+                    let data = std::slice::from_raw_parts(ev.buffer, ev.size as usize);
+                    sink.push(ev.port_index as usize, hdr.time, data);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 impl OutputEvents<'_> {
@@ -1074,6 +1166,12 @@ unsafe extern "C" fn output_events_try_push(
         }
         let ctx = &*((*list).ctx as *const OutputEvents);
         let hdr = &*event;
+        if hdr.space_id == CLAP_CORE_EVENT_SPACE_ID
+            && hdr.type_ != CLAP_EVENT_PARAM_VALUE
+            && let Some(sink) = ctx.midi.as_mut()
+        {
+            push_midi_output(sink, event);
+        }
         if hdr.space_id == CLAP_CORE_EVENT_SPACE_ID && hdr.type_ == CLAP_EVENT_PARAM_VALUE {
             let ev = &*(event as *const clap_event_param_value);
             if let Ok(pos) = ctx.id_index.binary_search_by_key(&ev.param_id, |&(id, _)| id) {
@@ -1335,6 +1433,7 @@ mod tests {
             id_index: &index,
             slots: &s,
             last_applied: last.as_mut_ptr(),
+            midi: std::ptr::null_mut(),
         };
         let out = ctx.as_clap();
         let ev = clap_event_param_value {
@@ -1351,6 +1450,53 @@ mod tests {
         assert_eq!(s[1].value.load(), 0.5);
         assert_eq!(last[1], 0.5);
         assert_eq!(s[0].value.load(), 0.0);
+    }
+
+    #[test]
+    fn output_note_and_midi_events_reach_their_ports() {
+        use crate::midi::processing::MidiSink;
+        let s = slots(&[]);
+        let mut last: Vec<f64> = Vec::new();
+        let mut sink = MidiSink::new(3);
+        sink.begin_cycle();
+        sink.set_block(0, 256);
+        let ctx = OutputEvents {
+            id_index: &[],
+            slots: &s,
+            last_applied: last.as_mut_ptr(),
+            midi: &mut sink,
+        };
+        let out = ctx.as_clap();
+        let note = clap_event_note {
+            header: event_header::<clap_event_note>(CLAP_EVENT_NOTE_ON, 10),
+            note_id: -1,
+            port_index: 2,
+            channel: 3,
+            key: 60,
+            velocity: 1.0,
+        };
+        let midi = clap_event_midi {
+            header: event_header::<clap_event_midi>(CLAP_EVENT_MIDI, 20),
+            port_index: 1,
+            data: [0xC5, 7, 0],
+        };
+        let sysex_bytes = [0xF0u8, 0x7D, 0x01, 0xF7];
+        let sysex = clap_event_midi_sysex {
+            header: event_header::<clap_event_midi_sysex>(CLAP_EVENT_MIDI_SYSEX, 30),
+            port_index: 0,
+            buffer: sysex_bytes.as_ptr(),
+            size: 4,
+        };
+        unsafe {
+            assert!(output_events_try_push(&out, &note.header));
+            assert!(output_events_try_push(&out, &midi.header));
+            assert!(output_events_try_push(&out, &sysex.header));
+        }
+        // header(16) + control(16 + data, padded to 8)
+        assert_eq!(&sink.output(2)[32..35], &[0x93, 60, 127]);
+        assert_eq!(&sink.output(1)[32..34], &[0xC5, 7]);
+        assert_eq!(&sink.output(0)[32..36], &sysex_bytes);
+        assert_eq!(sink.output(1).len(), 16 + 24);
     }
 
     #[test]

@@ -487,6 +487,9 @@ struct InlineEventList {
     vtbl: *const IEventListVtbl,
     events: Vec<Event>,
     used_count: i32,
+    /// For the output list: where `addEvent` sends MIDI during `process`
+    /// (null outside of it, or while bypassed).
+    sink: *mut crate::midi::processing::MidiSink,
 }
 
 static INLINE_EL_VTBL: IEventListVtbl = IEventListVtbl {
@@ -549,9 +552,87 @@ unsafe extern "system" fn iel_get_event(
     }
 }
 
-unsafe extern "system" fn iel_add_event(_this: *mut IEventList, _e: *mut Event) -> tresult {
-    // Output events from plugin — ignored (no MIDI output routing yet).
-    kResultOk
+unsafe extern "system" fn iel_add_event(this: *mut IEventList, e: *mut Event) -> tresult {
+    unsafe {
+        if this.is_null() || e.is_null() {
+            return kInvalidArgument;
+        }
+        let el = this as *mut InlineEventList;
+        if let Some(sink) = (*el).sink.as_mut() {
+            push_midi_output(sink, &*e);
+        }
+        kResultOk
+    }
+}
+
+#[inline]
+fn unit_to_7bit(v: f32) -> u8 {
+    (v.clamp(0.0, 1.0) * 127.0).round() as u8
+}
+
+/// Convert a plugin output event to MIDI bytes (None for events without a
+/// MIDI equivalent).  SysEx data events are handled by `push_midi_output`.
+fn event_to_midi(e: &Event) -> Option<([u8; 3], usize)> {
+    use Event_::EventTypes_ as T;
+    let ch = |c: i16| c.clamp(0, 15) as u8;
+    let key = |p: i16| (0..128).contains(&p).then_some(p as u8);
+    unsafe {
+        match e.r#type as u32 {
+            t if t == T::kNoteOnEvent => {
+                let ev = e.__field0.noteOn;
+                // Velocity 0 would read as a note off
+                Some(([0x90 | ch(ev.channel), key(ev.pitch)?, unit_to_7bit(ev.velocity).max(1)], 3))
+            }
+            t if t == T::kNoteOffEvent => {
+                let ev = e.__field0.noteOff;
+                Some(([0x80 | ch(ev.channel), key(ev.pitch)?, unit_to_7bit(ev.velocity)], 3))
+            }
+            t if t == T::kPolyPressureEvent => {
+                let ev = e.__field0.polyPressure;
+                Some(([0xA0 | ch(ev.channel), key(ev.pitch)?, unit_to_7bit(ev.pressure)], 3))
+            }
+            t if t == T::kLegacyMIDICCOutEvent => {
+                let ev = e.__field0.midiCCOut;
+                let c = (ev.channel as i16).clamp(0, 15) as u8;
+                let v = (ev.value as u8) & 0x7F;
+                let v2 = (ev.value2 as u8) & 0x7F;
+                match ev.controlNumber as u32 {
+                    n if n < 128 => Some(([0xB0 | c, n as u8, v], 3)),
+                    n if n == ControllerNumbers_::kAfterTouch => Some(([0xD0 | c, v, 0], 2)),
+                    n if n == ControllerNumbers_::kPitchBend => Some(([0xE0 | c, v, v2], 3)),
+                    n if n == ControllerNumbers_::kCtrlProgramChange => {
+                        Some(([0xC0 | c, v, 0], 2))
+                    }
+                    n if n == ControllerNumbers_::kCtrlPolyPressure => {
+                        Some(([0xA0 | c, v, v2], 3))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Forward one plugin output event to `sink` on its event bus.
+///
+/// # Safety
+/// A SysEx data event's `bytes` must be valid for `size` bytes.
+unsafe fn push_midi_output(sink: &mut crate::midi::processing::MidiSink, e: &Event) {
+    let port = e.busIndex.max(0) as usize;
+    let frame = e.sampleOffset.max(0) as u32;
+    if e.r#type as u32 == Event_::EventTypes_::kDataEvent {
+        let data = unsafe { e.__field0.data };
+        if data.r#type == DataEvent_::DataTypes_::kMidiSysEx
+            && !data.bytes.is_null()
+            && data.size > 0
+        {
+            let bytes = unsafe { std::slice::from_raw_parts(data.bytes, data.size as usize) };
+            sink.push(port, frame, bytes);
+        }
+    } else if let Some((msg, len)) = event_to_midi(e) {
+        sink.push(port, frame, &msg[..len]);
+    }
 }
 
 impl InlineEventList {
@@ -560,6 +641,7 @@ impl InlineEventList {
             vtbl: &INLINE_EL_VTBL,
             events: vec![unsafe { std::mem::zeroed() }; MAX_MIDI_EVENTS],
             used_count: 0,
+            sink: std::ptr::null_mut(),
         }
     }
 
@@ -932,8 +1014,8 @@ pub struct Vst3PluginInstance {
 
     /// Whether this plugin accepts MIDI input (has event input bus)
     pub has_midi_in: bool,
-    /// Whether this plugin produces MIDI output (has event output bus)
-    pub has_midi_out: bool,
+    /// Names of the plugin's event output buses (one MIDI output each).
+    pub midi_output_names: Vec<String>,
 
     input_bus_channels: Vec<usize>,
     output_bus_channels: Vec<usize>,
@@ -1161,7 +1243,16 @@ impl Vst3PluginInstance {
             let n_event_in = component.getBusCount(K_EVENT, K_INPUT);
             let n_event_out = component.getBusCount(K_EVENT, K_OUTPUT);
             let has_midi_in = n_event_in > 0;
-            let has_midi_out = n_event_out > 0;
+            let midi_output_names: Vec<String> = (0..n_event_out)
+                .map(|idx| {
+                    let mut info: BusInfo = std::mem::zeroed();
+                    if component.getBusInfo(K_EVENT, K_OUTPUT, idx, &mut info) == kResultOk {
+                        read_string128(&info.name)
+                    } else {
+                        String::new()
+                    }
+                })
+                .collect();
             for idx in 0..n_event_in {
                 component.activateBus(K_EVENT, K_INPUT, idx, 1);
             }
@@ -1170,12 +1261,12 @@ impl Vst3PluginInstance {
             }
 
             log::info!(
-                "VST3: {} — audio {}/{}, midi_in={}, midi_out={}",
+                "VST3: {} — audio {}/{}, midi_in={}, midi_outs={}",
                 plugin_info.name,
                 audio_input_channels,
                 audio_output_channels,
                 has_midi_in,
-                has_midi_out,
+                midi_output_names.len(),
             );
 
             // Parameters
@@ -1268,7 +1359,7 @@ impl Vst3PluginInstance {
                 audio_input_channels,
                 audio_output_channels,
                 has_midi_in,
-                has_midi_out,
+                midi_output_names,
                 input_bus_channels,
                 output_bus_channels,
                 params,
@@ -1354,6 +1445,7 @@ impl Vst3PluginInstance {
         outputs: &mut [&mut [f32]],
         sample_count: usize,
         midi_events: &[crate::midi::processing::RawMidiEvent],
+        midi_out: &mut crate::midi::processing::MidiSink,
     ) {
         threading::mark_audio_thread();
         let n = sample_count.min(MAX_BLOCK);
@@ -1362,11 +1454,21 @@ impl Vst3PluginInstance {
         }
         if !self.gate.enter() {
             threading::passthrough(inputs, outputs, n);
+            midi_out.thru(midi_events);
             return;
         }
-        unsafe { self.process_locked(inputs, outputs, n, midi_events) };
-        if !self.active || self.bypassed.load(Ordering::Relaxed) {
+        // While bypassed the plugin still runs, but its MIDI output is
+        // replaced by the input (like its audio).
+        let bypassed = self.bypassed.load(Ordering::Relaxed);
+        let sink: *mut crate::midi::processing::MidiSink = if bypassed {
+            std::ptr::null_mut()
+        } else {
+            midi_out
+        };
+        unsafe { self.process_locked(inputs, outputs, n, midi_events, sink) };
+        if !self.active || bypassed {
             threading::passthrough(inputs, outputs, n);
+            midi_out.thru(midi_events);
         }
         self.gate.leave();
     }
@@ -1377,6 +1479,7 @@ impl Vst3PluginInstance {
         outputs: &mut [&mut [f32]],
         n: usize,
         midi_events: &[crate::midi::processing::RawMidiEvent],
+        midi_out: *mut crate::midi::processing::MidiSink,
     ) {
         if !self.active {
             return;
@@ -1451,9 +1554,11 @@ impl Vst3PluginInstance {
             &mut rt.output_event_list as *mut InlineEventList as *mut IEventList;
         process_data.processContext = std::ptr::null_mut();
 
+        rt.output_event_list.sink = midi_out;
         unsafe {
             processor.process(&mut process_data);
         }
+        rt.output_event_list.sink = std::ptr::null_mut();
 
         // Plugin-originated changes → slots (synced to the controller by
         // `sync_controller` on the main thread).

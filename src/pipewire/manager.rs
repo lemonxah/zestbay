@@ -1483,10 +1483,7 @@ impl Host {
             .ports
             .iter()
             .any(|p| p.port_type == crate::plugin::types::PluginPortType::AtomInput);
-        let has_midi_out = plugin_info
-            .ports
-            .iter()
-            .any(|p| p.port_type == crate::plugin::types::PluginPortType::AtomOutput);
+        let midi_outputs = inst.midi_output_names.clone();
         let instance_rc = Rc::new(RefCell::new(inst));
 
         let filter_config = crate::lv2::filter::FilterConfig {
@@ -1496,7 +1493,7 @@ impl Host {
             audio_outputs: plugin_info.audio_outputs,
             sample_rate: sr as u32,
             has_midi_in,
-            has_midi_out,
+            midi_outputs,
         };
         let filter = crate::lv2::filter::Lv2FilterNode::new(
             &self.core,
@@ -1546,7 +1543,7 @@ impl Host {
             audio_inputs: inst.audio_input_channels,
             audio_outputs: inst.audio_output_channels,
             has_midi_in: inst.has_midi_in,
-            has_midi_out: inst.has_midi_out,
+            midi_outputs: inst.midi_output_names.clone(),
         };
         let instance_rc = Rc::new(RefCell::new(inst));
         let filter = crate::clap::filter::ClapFilterNode::new(
@@ -1597,7 +1594,7 @@ impl Host {
             audio_inputs: inst.audio_input_channels,
             audio_outputs: inst.audio_output_channels,
             has_midi_in: inst.has_midi_in,
-            has_midi_out: inst.has_midi_out,
+            midi_outputs: inst.midi_output_names.clone(),
         };
         let instance_rc = Rc::new(RefCell::new(inst));
         let filter = crate::vst3::filter::Vst3FilterNode::new(
@@ -1648,7 +1645,7 @@ impl Host {
             audio_inputs: inst.audio_input_channels,
             audio_outputs: inst.audio_output_channels,
             has_midi_in: inst.has_midi_in,
-            has_midi_out: inst.has_midi_out,
+            midi_outputs: Vec::new(),
         };
         let instance_rc = Rc::new(RefCell::new(inst));
         let filter = crate::vst2::filter::Vst2FilterNode::new(
@@ -1698,7 +1695,7 @@ impl Host {
             audio_inputs: inst.audio_input_channels,
             audio_outputs: inst.audio_output_channels,
             has_midi_in: inst.has_midi_in,
-            has_midi_out: inst.has_midi_out,
+            midi_outputs: Vec::new(),
         };
         let instance_rc = Rc::new(RefCell::new(inst));
         let filter = crate::ladspa::filter::LadspaFilterNode::new(

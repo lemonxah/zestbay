@@ -11,7 +11,7 @@
   lv2,
   suil,
   gtk3,
-  xorg,
+  libx11,
   dbus,
   ladspa-header,
   copyDesktopItems,
@@ -43,6 +43,8 @@ rustPlatform.buildRustPackage {
       (root + "/fonts")
       (root + "/images")
       (root + "/LICENSE")
+      # Sources of the Zestins plugins, which the LV2 host tests build
+      (root + "/zestins")
     ];
   };
 
@@ -68,7 +70,7 @@ rustPlatform.buildRustPackage {
     lv2
     suil
     gtk3
-    xorg.libX11
+    libx11
     dbus
   ];
 
