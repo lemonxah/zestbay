@@ -1,0 +1,27 @@
+# Maintainer: lemonxah <lemonxah@gmail.com>
+# Zestins: ZestBay's own LV2 plugins, built from the zestins/ folder of the
+# ZestBay release with the same version.
+pkgname=zestins
+pkgver=1.2.6
+pkgrel=1
+pkgdesc="LV2 plugins from ZestBay: utility, meter, EQ, gate, compressor, delay, reverb, tone generator, synth and MIDI tools"
+arch=('x86_64')
+url="https://github.com/lemonxah/zestbay"
+license=('MIT')
+groups=('lv2-plugins' 'pro-audio')
+depends=('glibc' 'libx11')
+makedepends=('lv2' 'pkgconf')
+optdepends=('zestbay: PipeWire patchbay that hosts these plugins')
+source=("zestbay-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "zestbay-$pkgver/zestins"
+  make
+}
+
+package() {
+  cd "zestbay-$pkgver/zestins"
+  make install DESTDIR="$pkgdir" LV2_DIR=/usr/lib/lv2
+  install -Dm644 ../LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
