@@ -8,7 +8,9 @@ use pipewire::core::CoreRc;
 use super::host::Lv2PluginInstance;
 use super::types::*;
 use crate::midi::filter::ResolvedMappings;
-use crate::midi::rt::{FilterMain, FilterPorts, FilterRt, FilterShared, new_filter_halves};
+use crate::midi::rt::{
+    FilterMain, FilterPorts, FilterRt, FilterShared, add_midi_ports, new_filter_halves,
+};
 use crate::plugin::cpu_stats::global_cpu_tracker;
 
 pub struct Lv2FilterNode {
@@ -30,8 +32,8 @@ pub struct FilterConfig {
     #[allow(dead_code)] // set by callers; not yet consumed by the filter
     pub sample_rate: u32,
     pub has_midi_in: bool,
-    #[allow(dead_code)] // set by callers; not yet consumed by the filter
-    pub has_midi_out: bool,
+    /// Names of the plugin's MIDI outputs (empty: the MIDI out is a thru).
+    pub midi_outputs: Vec<String>,
 }
 
 #[repr(C)]
@@ -114,7 +116,7 @@ impl Lv2FilterNode {
             inputs: Vec::with_capacity(config.audio_inputs),
             outputs: Vec::with_capacity(config.audio_outputs),
             midi_in: std::ptr::null_mut(),
-            midi_out: std::ptr::null_mut(),
+            midi_outs: Vec::new(),
         };
 
         for i in 0..config.audio_inputs {
@@ -153,37 +155,16 @@ impl Lv2FilterNode {
             ports.outputs.push(port_data);
         }
 
-        // MIDI input port
-        let port_name = CString::new("midi_in").unwrap();
-        ports.midi_in = unsafe {
-            add_port(
-                filter,
-                libspa::sys::SPA_DIRECTION_INPUT,
-                &port_name,
-                b"8 bit raw midi\0",
-            )
-        };
-        if ports.midi_in.is_null() {
-            log::error!("Failed to add MIDI input port for {}", config.display_name);
-        }
-
-        // MIDI output port
-        let port_name = CString::new("midi_out").unwrap();
-        ports.midi_out = unsafe {
-            add_port(
-                filter,
-                libspa::sys::SPA_DIRECTION_OUTPUT,
-                &port_name,
-                b"8 bit raw midi\0",
-            )
-        };
-        if ports.midi_out.is_null() {
-            log::error!("Failed to add MIDI output port for {}", config.display_name);
-        }
+        add_midi_ports(
+            &mut ports,
+            &config.display_name,
+            &config.midi_outputs,
+            |direction, name| unsafe { add_port(filter, direction, name, b"8 bit raw midi\0") },
+        );
 
         let cpu_slot =
             global_cpu_tracker().register(config.instance_id, config.display_name.clone());
-        let (main, rt) = new_filter_halves(ports, config.has_midi_in, cpu_slot);
+        let (main, rt) = new_filter_halves(ports, config.has_midi_in, config.midi_outputs.len(), cpu_slot);
 
         let user_data = Box::into_raw(Box::new(FilterData {
             shared: main.shared.clone(),
@@ -378,7 +359,7 @@ unsafe extern "C" fn on_process(
         let rt = &mut *fd.rt.get();
         let instance_ptr = fd.instance_ptr;
 
-        rt.run_cycle(position, |inputs, outputs, n_samples, midi_events| {
+        rt.run_cycle(position, |inputs, outputs, n_samples, midi_events, midi_out| {
             // Aliasing invariant: the main thread owns the instance through an
             // Rc<RefCell<..>> and may borrow it while we run, so it must only
             // call methods that touch atomics (set_parameter / set_bypassed /
@@ -386,7 +367,7 @@ unsafe extern "C" fn on_process(
             // filter is disconnected.  The `&mut` here is created per block
             // and never outlives the `process` call.
             let inst = &mut *instance_ptr;
-            inst.process(inputs, outputs, n_samples, midi_events);
+            inst.process(inputs, outputs, n_samples, midi_events, midi_out);
             inst.last_worker_ns
         });
     }

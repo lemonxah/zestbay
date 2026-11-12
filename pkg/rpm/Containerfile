@@ -4,8 +4,9 @@
 ARG BASE=fedora:latest
 FROM ${BASE}
 
-# Install the spec's BuildRequires, so this stays in step with zestbay.spec
-COPY zestbay.spec /tmp/zestbay.spec
+# Install the specs' BuildRequires, so this stays in step with zestbay.spec
+# and zestins.spec (also used by build-zestins-rpm.sh)
+COPY zestbay.spec zestins.spec /tmp/
 RUN dnf -y install rpm-build 'dnf-command(builddep)' \
-    && dnf -y builddep /tmp/zestbay.spec \
+    && dnf -y builddep /tmp/zestbay.spec /tmp/zestins.spec \
     && dnf clean all

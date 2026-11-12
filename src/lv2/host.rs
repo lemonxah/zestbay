@@ -155,6 +155,34 @@ fn produced_sequence_len(buf: &[u8], sequence_type_urid: u32) -> Option<usize> {
     }
 }
 
+/// Call `f(frame, bytes)` for every `midi:MidiEvent` in the atom sequence a
+/// plugin wrote to an output port.  RT-safe.
+fn for_each_midi_event(
+    buf: &[u8],
+    sequence_type_urid: u32,
+    midi_event_urid: u32,
+    mut f: impl FnMut(u32, &[u8]),
+) {
+    let Some(total) = produced_sequence_len(buf, sequence_type_urid) else {
+        return;
+    };
+    // atom header(8) + sequence body header(8); events: frames(8) + atom(8 + body)
+    let mut pos = 16;
+    while pos + 16 <= total {
+        let frames = i64::from_ne_bytes(buf[pos..pos + 8].try_into().unwrap());
+        let size = read_u32(buf, pos + 8) as usize;
+        let type_ = read_u32(buf, pos + 12);
+        let body = pos + 16;
+        if size > total - body {
+            break;
+        }
+        if type_ == midi_event_urid && size > 0 {
+            f(frames.clamp(0, u32::MAX as i64) as u32, &buf[body..body + size]);
+        }
+        pos = (body + size + 7) & !7;
+    }
+}
+
 /// Fill an input atom port with queued UI atoms (at frame 0) followed by
 /// MIDI events.  RT-safe: no allocation, no blocking.  Returns the total
 /// atom size written (header included).
@@ -282,6 +310,10 @@ pub struct Lv2PluginInstance {
     pub control_outputs: Vec<ControlPort>,
     pub atom_in_bufs: Vec<AtomBuf>,
     pub atom_out_bufs: Vec<AtomBuf>,
+    /// Names of the atom outputs that carry `midi:MidiEvent`, in port order.
+    pub midi_output_names: Vec<String>,
+    /// Index into `atom_out_bufs` of each MIDI output.
+    midi_out_slots: Vec<usize>,
     pub port_updates: SharedPortUpdates,
     atom_sequence_urid: u32,
     atom_chunk_urid: u32,
@@ -428,6 +460,9 @@ impl Lv2PluginInstance {
         let mut control_outputs = Vec::new();
         let mut atom_in_bufs = Vec::new();
         let mut atom_out_bufs = Vec::new();
+        let mut midi_output_names = Vec::new();
+        let mut midi_out_slots = Vec::new();
+        let midi_event_node = world.new_uri(MIDI_EVENT_URI);
 
         for port_info in &plugin_info.ports {
             match port_info.port_type {
@@ -474,6 +509,13 @@ impl Lv2PluginInstance {
                     atom_in_bufs.push(AtomBuf::new(port_info.index, ATOM_BUF_SIZE));
                 }
                 Lv2PortType::AtomOutput => {
+                    let carries_midi = plugin
+                        .port_by_index(port_info.index)
+                        .is_some_and(|port| port.supports_event(&midi_event_node));
+                    if carries_midi {
+                        midi_out_slots.push(atom_out_bufs.len());
+                        midi_output_names.push(port_info.name.clone());
+                    }
                     atom_out_bufs.push(AtomBuf::new(port_info.index, ATOM_BUF_SIZE));
                 }
             }
@@ -687,6 +729,8 @@ impl Lv2PluginInstance {
             control_outputs,
             atom_in_bufs,
             atom_out_bufs,
+            midi_output_names,
+            midi_out_slots,
             port_updates,
             atom_sequence_urid,
             atom_chunk_urid,
@@ -709,6 +753,7 @@ impl Lv2PluginInstance {
         outputs: &mut [&mut [f32]],
         sample_count: usize,
         midi_events: &[crate::midi::processing::RawMidiEvent],
+        midi_out: &mut crate::midi::processing::MidiSink,
     ) {
         let sample_count = sample_count.min(MAX_BLOCK);
 
@@ -800,6 +845,20 @@ impl Lv2PluginInstance {
                         *sample = 0.0;
                     }
                 }
+            }
+        }
+
+        // Plugin MIDI outputs → filter MIDI ports (input thru when bypassed)
+        if self.bypassed.load(Ordering::Relaxed) {
+            midi_out.thru(midi_events);
+        } else {
+            for (port, &slot) in self.midi_out_slots.iter().enumerate() {
+                for_each_midi_event(
+                    self.atom_out_bufs[slot].bytes(),
+                    self.atom_sequence_urid,
+                    self.midi_event_urid,
+                    |frame, data| midi_out.push(port, frame, data),
+                );
             }
         }
 
@@ -1028,6 +1087,36 @@ mod tests {
         // Size larger than the buffer → rejected
         write_u32(&mut buf, 0, 1000);
         assert_eq!(produced_sequence_len(&buf, 5), None);
+    }
+
+    #[test]
+    fn midi_events_are_read_from_output_sequence() {
+        // A plugin-written sequence: MIDI(type 2) at 3, other atom(9), MIDI at 40
+        let mut buf = vec![0u8; 128];
+        init_atom_input(&mut buf, 5);
+        let mut pos = 16;
+        for (frames, type_, body) in [
+            (3i64, 2u32, &[0x90u8, 60, 100][..]),
+            (10, 9, &[1, 2, 3, 4, 5, 6, 7, 8, 9][..]),
+            (40, 2, &[0xC1, 4][..]),
+        ] {
+            buf[pos..pos + 8].copy_from_slice(&frames.to_ne_bytes());
+            write_u32(&mut buf, pos + 8, body.len() as u32);
+            write_u32(&mut buf, pos + 12, type_);
+            buf[pos + 16..pos + 16 + body.len()].copy_from_slice(body);
+            pos = (pos + 16 + body.len() + 7) & !7;
+        }
+        write_u32(&mut buf, 0, (pos - 8) as u32);
+
+        let mut seen = Vec::new();
+        for_each_midi_event(&buf, 5, 2, |frame, data| seen.push((frame, data.to_vec())));
+        assert_eq!(seen, vec![(3, vec![0x90, 60, 100]), (40, vec![0xC1, 4])]);
+
+        // An untouched output (plugin wrote nothing) yields no events
+        init_atom_output(&mut buf, 7);
+        let mut count = 0;
+        for_each_midi_event(&buf, 5, 2, |_, _| count += 1);
+        assert_eq!(count, 0);
     }
 
     fn make_atom(type_: u32, body: &[u8]) -> Vec<u8> {

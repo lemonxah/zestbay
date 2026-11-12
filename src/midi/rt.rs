@@ -17,8 +17,9 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use super::filter::ResolvedMappings;
 use super::processing::{
-    LearnFlags, MAX_MIDI_EVENTS, MidiProcessingState, RawMidiEvent, RtEvent, chunk_midi_events,
-    extract_midi_events, process_midi_buffer, write_midi_output,
+    LearnFlags, MAX_MIDI_EVENTS, MidiProcessingState, MidiSink, RawMidiEvent, RtEvent,
+    chunk_midi_events, extract_midi_events, process_midi_buffer, write_midi_output,
+    write_midi_sequence,
 };
 use crate::plugin::cpu_stats::PluginTimingSlot;
 
@@ -183,13 +184,43 @@ pub struct FilterPorts {
     pub inputs: Vec<*mut std::ffi::c_void>,
     pub outputs: Vec<*mut std::ffi::c_void>,
     pub midi_in: *mut std::ffi::c_void,
-    pub midi_out: *mut std::ffi::c_void,
+    /// One port per plugin MIDI output, or a single MIDI thru port when the
+    /// plugin has none (see `midi_out_port_names`).
+    pub midi_outs: Vec<*mut std::ffi::c_void>,
 }
 
-/// Create the two halves of a filter.
+/// Add the MIDI ports of a plugin filter: `midi_in`, plus one output per
+/// name in `plugin_midi_outputs` (or a single thru `midi_out` when empty).
+/// `add_port` adds a "8 bit raw midi" port to the (not yet connected)
+/// filter and returns its port data, or null.
+pub fn add_midi_ports(
+    ports: &mut FilterPorts,
+    display_name: &str,
+    plugin_midi_outputs: &[String],
+    mut add_port: impl FnMut(libspa::sys::spa_direction, &std::ffi::CString) -> *mut std::ffi::c_void,
+) {
+    let name = std::ffi::CString::new("midi_in").unwrap();
+    ports.midi_in = add_port(libspa::sys::SPA_DIRECTION_INPUT, &name);
+    if ports.midi_in.is_null() {
+        log::error!("Failed to add MIDI input port for {}", display_name);
+    }
+    for out_name in super::processing::midi_out_port_names(plugin_midi_outputs) {
+        // midi_out_port_names strips NULs
+        let name = std::ffi::CString::new(out_name.as_str()).unwrap();
+        let port = add_port(libspa::sys::SPA_DIRECTION_OUTPUT, &name);
+        if port.is_null() {
+            log::error!("Failed to add MIDI output port '{}' for {}", out_name, display_name);
+        }
+        ports.midi_outs.push(port);
+    }
+}
+
+/// Create the two halves of a filter.  `plugin_midi_outs` is the number of
+/// MIDI outputs the plugin has (0 = the filter's MIDI out is a thru).
 pub fn new_filter_halves(
     ports: FilterPorts,
     has_midi_in: bool,
+    plugin_midi_outs: usize,
     cpu_slot: Arc<PluginTimingSlot>,
 ) -> (FilterMain, FilterRt) {
     let shared = Arc::new(FilterShared {
@@ -219,6 +250,7 @@ pub fn new_filter_halves(
         ports,
         has_midi_in,
         cpu_slot,
+        midi_sink: MidiSink::new(plugin_midi_outs),
         midi_state: MidiProcessingState::new(),
         events: producer,
         midi_events: [RawMidiEvent::EMPTY; MAX_MIDI_EVENTS],
@@ -336,6 +368,8 @@ pub struct FilterRt {
     ports: FilterPorts,
     has_midi_in: bool,
     cpu_slot: Arc<PluginTimingSlot>,
+    /// MIDI the plugin emits on its MIDI outputs (no ports = thru mode).
+    midi_sink: MidiSink,
     midi_state: MidiProcessingState,
     events: rtrb::Producer<RtEvent>,
     /// Port buffers for the current cycle with their capacity in frames.
@@ -355,8 +389,9 @@ pub struct FilterRt {
 
 impl FilterRt {
     /// Run one PipeWire process cycle.  `process` is called once per block of
-    /// at most `MAX_BLOCK` frames with (inputs, outputs, frames, midi events)
-    /// and returns the worker time (ns) spent on behalf of that block.
+    /// at most `MAX_BLOCK` frames with (inputs, outputs, frames, midi events,
+    /// MIDI output sink) and returns the worker time (ns) spent on behalf of
+    /// that block.
     ///
     /// # Safety
     /// Must be called from the filter's RT process callback with the
@@ -366,7 +401,7 @@ impl FilterRt {
         position: *mut libspa::sys::spa_io_position,
         mut process: F,
     ) where
-        F: FnMut(&[&[f32]], &mut [&mut [f32]], usize, &[RawMidiEvent]) -> u64,
+        F: FnMut(&[&[f32]], &mut [&mut [f32]], usize, &[RawMidiEvent], &mut MidiSink) -> u64,
     {
         if self.shared.shutting_down.load(Ordering::Acquire) || position.is_null() {
             return;
@@ -412,7 +447,12 @@ impl FilterRt {
                 self.shared.mappings.rt_exit(epoch);
             }
 
-            write_midi_output(self.ports.midi_out, midi_in_buf);
+            // Without plugin MIDI outputs the MIDI out port is a thru.
+            if self.midi_sink.port_count() == 0
+                && let Some(&out) = self.ports.midi_outs.first()
+            {
+                write_midi_output(out, midi_in_buf);
+            }
 
             for (i, port) in self.ports.inputs.iter().enumerate() {
                 let (p, cap) = dsp_buffer(*port, n_samples, false);
@@ -426,7 +466,9 @@ impl FilterRt {
         let n_in = self.in_bufs.len();
         let t0 = std::time::Instant::now();
         let mut worker_ns = 0u64;
+        self.midi_sink.begin_cycle();
         for (start, len) in block_chunks(n_samples, MAX_BLOCK) {
+            self.midi_sink.set_block(start, len);
             self.in_slices.clear();
             self.out_slices.clear();
             let scratch = self.scratch.as_mut_ptr();
@@ -473,6 +515,7 @@ impl FilterRt {
                 &mut self.out_slices,
                 len,
                 &self.chunk_events[..n_ev],
+                &mut self.midi_sink,
             );
             self.out_slices.clear();
 
@@ -493,6 +536,13 @@ impl FilterRt {
         }
         self.in_slices.clear();
         self.out_slices.clear();
+
+        for i in 0..self.midi_sink.port_count() {
+            if let Some(&port) = self.ports.midi_outs.get(i) {
+                // SAFETY: port data of a MIDI output port, RT callback
+                unsafe { write_midi_sequence(port, self.midi_sink.output(i)) };
+            }
+        }
 
         let elapsed = t0.elapsed().as_nanos() as u64;
         self.cpu_slot

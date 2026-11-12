@@ -326,6 +326,24 @@ pub fn copy_sequence_bounded(input: &[u8], out: &mut [u8]) -> usize {
 ///   for a "8 bit raw midi" input port
 /// - Must be called from the PipeWire RT process callback
 pub unsafe fn write_midi_output(out_port: *mut std::ffi::c_void, in_buf: *const std::ffi::c_void) {
+    let input: &[u8] = if in_buf.is_null() {
+        &[]
+    } else {
+        unsafe {
+            let pod = in_buf as *const libspa::sys::spa_pod;
+            std::slice::from_raw_parts(in_buf as *const u8, 8 + (*pod).size as usize)
+        }
+    };
+    unsafe { write_midi_sequence(out_port, input) };
+}
+
+/// Write the spa_pod_sequence in `seq` (or an empty one) to a MIDI output
+/// port, keeping only whole controls that fit the port buffer.
+///
+/// # Safety
+/// - `out_port` must be null or a port_data pointer of a "8 bit raw midi" output port
+/// - Must be called from the PipeWire RT process callback
+pub unsafe fn write_midi_sequence(out_port: *mut std::ffi::c_void, seq: &[u8]) {
     if out_port.is_null() {
         return;
     }
@@ -339,13 +357,7 @@ pub unsafe fn write_midi_output(out_port: *mut std::ffi::c_void, in_buf: *const 
             let d = &mut *(*sb).datas;
             if !d.data.is_null() {
                 let out = std::slice::from_raw_parts_mut(d.data as *mut u8, d.maxsize as usize);
-                let input: &[u8] = if in_buf.is_null() {
-                    &[]
-                } else {
-                    let pod = in_buf as *const libspa::sys::spa_pod;
-                    std::slice::from_raw_parts(in_buf as *const u8, 8 + (*pod).size as usize)
-                };
-                let n = copy_sequence_bounded(input, out);
+                let n = copy_sequence_bounded(seq, out);
                 if !d.chunk.is_null() {
                     (*d.chunk).offset = 0;
                     (*d.chunk).size = n as u32;
@@ -356,6 +368,155 @@ pub unsafe fn write_midi_output(out_port: *mut std::ffi::c_void, in_buf: *const 
         }
         pipewire::sys::pw_filter_queue_buffer(out_port, b);
     }
+}
+
+/// Bytes reserved per plugin MIDI output and cycle (events beyond are dropped).
+pub const MIDI_OUT_CAPACITY: usize = 32 * 1024;
+
+/// MIDI a plugin emitted on one output during a cycle, kept as a ready to
+/// copy spa_pod_sequence.  Preallocated; `push` never allocates.
+pub struct MidiOutBuffer {
+    buf: Box<[u8]>,
+    len: usize,
+    last_offset: u32,
+}
+
+impl MidiOutBuffer {
+    pub fn new(capacity: usize) -> Self {
+        let mut b = Self {
+            buf: vec![0u8; capacity.max(SEQ_HEADER_SIZE)].into_boxed_slice(),
+            len: 0,
+            last_offset: 0,
+        };
+        b.clear();
+        b
+    }
+
+    /// Reset to an empty sequence.
+    pub fn clear(&mut self) {
+        write_u32(&mut self.buf, 0, 8);
+        write_u32(&mut self.buf, 4, libspa::sys::SPA_TYPE_Sequence);
+        write_u32(&mut self.buf, 8, 0);
+        write_u32(&mut self.buf, 12, 0);
+        self.len = SEQ_HEADER_SIZE;
+        self.last_offset = 0;
+    }
+
+    /// Append a MIDI message at frame `offset` of the cycle.  Offsets are
+    /// kept non-decreasing (an earlier one is moved to the last offset), as
+    /// sequence readers expect.  Returns false when the buffer is full.
+    pub fn push(&mut self, offset: u32, data: &[u8]) -> bool {
+        if data.is_empty() {
+            return true;
+        }
+        let size = CONTROL_HEADER_SIZE + data.len();
+        let padded = (size + 7) & !7;
+        if padded > self.buf.len() - self.len {
+            return false;
+        }
+        let offset = offset.max(self.last_offset);
+        let at = self.len;
+        write_u32(&mut self.buf, at, offset);
+        write_u32(&mut self.buf, at + 4, libspa::sys::SPA_CONTROL_Midi);
+        write_u32(&mut self.buf, at + 8, data.len() as u32);
+        write_u32(&mut self.buf, at + 12, libspa::sys::SPA_TYPE_Bytes);
+        self.buf[at + 16..at + size].copy_from_slice(data);
+        self.buf[at + size..at + padded].fill(0);
+        self.len += padded;
+        self.last_offset = offset;
+        write_u32(&mut self.buf, 0, (self.len - 8) as u32);
+        true
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+}
+
+/// Collects the MIDI a plugin produces on its MIDI outputs during one cycle.
+/// The plugin host pushes events with block-relative frames; the filter
+/// sets the block position and writes one sequence per output port.
+pub struct MidiSink {
+    outs: Vec<MidiOutBuffer>,
+    block_start: u32,
+    block_len: u32,
+}
+
+impl MidiSink {
+    /// A sink for `ports` plugin MIDI outputs (0 = the plugin has none).
+    pub fn new(ports: usize) -> Self {
+        Self {
+            outs: (0..ports).map(|_| MidiOutBuffer::new(MIDI_OUT_CAPACITY)).collect(),
+            block_start: 0,
+            block_len: 0,
+        }
+    }
+
+    pub fn port_count(&self) -> usize {
+        self.outs.len()
+    }
+
+    pub fn begin_cycle(&mut self) {
+        for o in &mut self.outs {
+            o.clear();
+        }
+    }
+
+    pub fn set_block(&mut self, start: usize, len: usize) {
+        self.block_start = start as u32;
+        self.block_len = len as u32;
+    }
+
+    /// Queue a MIDI message the plugin emitted on output `port` at `frame`
+    /// of the current block.  Unknown ports and full buffers drop it.
+    pub fn push(&mut self, port: usize, frame: u32, data: &[u8]) {
+        let frame = frame.min(self.block_len.saturating_sub(1));
+        if let Some(o) = self.outs.get_mut(port) {
+            o.push(self.block_start + frame, data);
+        }
+    }
+
+    /// Forward input events to the first output (used while bypassed).
+    pub fn thru(&mut self, events: &[RawMidiEvent]) {
+        for e in events {
+            let n = (e.size as usize).min(e.data.len());
+            self.push(0, e.offset, &e.data[..n]);
+        }
+    }
+
+    pub fn output(&self, port: usize) -> &[u8] {
+        self.outs.get(port).map_or(&[], |o| o.as_bytes())
+    }
+}
+
+/// Port names for a plugin's MIDI outputs, given the plugin's own names.
+/// No outputs or a single one gives `midi_out` (a single output keeps the
+/// name the passthrough port always had, so saved links still connect);
+/// several use the plugin's names, made unique, with `midi_out_N` fallbacks.
+pub fn midi_out_port_names(plugin_names: &[String]) -> Vec<String> {
+    if plugin_names.len() <= 1 {
+        return vec!["midi_out".to_string()];
+    }
+    let mut used: Vec<String> = vec!["midi_in".to_string()];
+    let mut out = Vec::with_capacity(plugin_names.len());
+    for (i, name) in plugin_names.iter().enumerate() {
+        let clean: String = name.chars().filter(|c| *c != '\0').collect();
+        let clean = clean.trim();
+        let base = if clean.is_empty() {
+            format!("midi_out_{}", i + 1)
+        } else {
+            clean.to_string()
+        };
+        let mut candidate = base.clone();
+        let mut n = 2;
+        while used.iter().any(|u| u == &candidate) {
+            candidate = format!("{} {}", base, n);
+            n += 1;
+        }
+        used.push(candidate.clone());
+        out.push(candidate);
+    }
+    out
 }
 
 /// A single raw MIDI event extracted from a PipeWire DSP buffer.
@@ -931,5 +1092,99 @@ mod tests {
         assert_eq!(copy.offset, 42);
         assert_eq!(copy.data, [0x90, 60, 100]);
         assert_eq!(copy.size, 3);
+    }
+
+    /// (offset, bytes) of every control in a sequence built by MidiOutBuffer.
+    fn controls(seq: &[u8]) -> Vec<(u32, Vec<u8>)> {
+        let end = 8 + read_u32(seq, 0) as usize;
+        let mut pos = SEQ_HEADER_SIZE;
+        let mut v = Vec::new();
+        while pos + CONTROL_HEADER_SIZE <= end {
+            assert_eq!(read_u32(seq, pos + 4), libspa::sys::SPA_CONTROL_Midi);
+            assert_eq!(read_u32(seq, pos + 12), libspa::sys::SPA_TYPE_Bytes);
+            let n = read_u32(seq, pos + 8) as usize;
+            v.push((read_u32(seq, pos), seq[pos + 16..pos + 16 + n].to_vec()));
+            pos += (CONTROL_HEADER_SIZE + n + 7) & !7;
+        }
+        assert_eq!(pos, end);
+        v
+    }
+
+    #[test]
+    fn midi_out_buffer_builds_sequence() {
+        let mut b = MidiOutBuffer::new(256);
+        assert_eq!(b.as_bytes().len(), SEQ_HEADER_SIZE);
+        assert!(b.push(5, &[0x90, 60, 100]));
+        assert!(b.push(9, &[0xF0, 1, 2, 3, 4, 5, 0xF7]));
+        // An earlier offset is moved up so the sequence stays ordered
+        assert!(b.push(2, &[0x80, 60, 0]));
+        assert_eq!(
+            controls(b.as_bytes()),
+            vec![
+                (5, vec![0x90, 60, 100]),
+                (9, vec![0xF0, 1, 2, 3, 4, 5, 0xF7]),
+                (9, vec![0x80, 60, 0]),
+            ]
+        );
+        // The result survives the bounded copy used to fill port buffers
+        let mut out = vec![0u8; 1024];
+        let n = copy_sequence_bounded(b.as_bytes(), &mut out);
+        assert_eq!(&out[..n], b.as_bytes());
+        b.clear();
+        assert!(controls(b.as_bytes()).is_empty());
+    }
+
+    #[test]
+    fn midi_out_buffer_drops_when_full() {
+        let mut b = MidiOutBuffer::new(SEQ_HEADER_SIZE + 24);
+        assert!(b.push(0, &[0x90, 60, 100]));
+        assert!(!b.push(1, &[0x90, 61, 100]));
+        assert_eq!(controls(b.as_bytes()).len(), 1);
+    }
+
+    #[test]
+    fn midi_sink_rebases_blocks_and_ports() {
+        let mut sink = MidiSink::new(2);
+        sink.begin_cycle();
+        sink.set_block(0, 64);
+        sink.push(1, 10, &[0x90, 60, 100]);
+        sink.set_block(64, 32);
+        sink.push(1, 3, &[0x80, 60, 0]);
+        // Frames past the block are clamped into its last frame
+        sink.push(0, 500, &[0xB0, 7, 1]);
+        // Unknown port: dropped
+        sink.push(2, 0, &[0x90, 1, 1]);
+        assert_eq!(controls(sink.output(0)), vec![(95, vec![0xB0, 7, 1])]);
+        assert_eq!(
+            controls(sink.output(1)),
+            vec![(10, vec![0x90, 60, 100]), (67, vec![0x80, 60, 0])]
+        );
+        sink.begin_cycle();
+        assert!(controls(sink.output(1)).is_empty());
+    }
+
+    #[test]
+    fn midi_sink_thru_goes_to_first_port() {
+        let mut sink = MidiSink::new(2);
+        sink.begin_cycle();
+        sink.set_block(0, 128);
+        sink.thru(&[RawMidiEvent { offset: 4, data: [0xC0, 3, 0], size: 2 }]);
+        assert_eq!(controls(sink.output(0)), vec![(4, vec![0xC0, 3])]);
+        assert!(controls(sink.output(1)).is_empty());
+    }
+
+    #[test]
+    fn midi_out_port_names_rules() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(midi_out_port_names(&[]), s(&["midi_out"]));
+        assert_eq!(midi_out_port_names(&s(&["Arp Out"])), s(&["midi_out"]));
+        assert_eq!(
+            midi_out_port_names(&s(&["MIDI Program 1", "MIDI Program 2"])),
+            s(&["MIDI Program 1", "MIDI Program 2"])
+        );
+        assert_eq!(
+            midi_out_port_names(&s(&["Out", "Out", "", "midi_in"])),
+            s(&["Out", "Out 2", "midi_out_3", "midi_in 2"])
+        );
     }
 }

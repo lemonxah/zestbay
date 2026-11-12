@@ -13,6 +13,8 @@
       in
       {
         packages.default = pkgs.callPackage ./default.nix { };
+        # ZestBay's LV2 plugins, a separate package: nix build .#zestins
+        packages.zestins = pkgs.callPackage ./zestins.nix { };
 
         devShells.default = pkgs.mkShell {
           inputsFrom = [ self.packages.${system}.default ];
