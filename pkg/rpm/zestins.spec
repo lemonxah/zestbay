@@ -36,3 +36,7 @@ make -C zestins install DESTDIR=%{buildroot} LV2_DIR=%{_libdir}/lv2
 %files
 %license LICENSE
 %{_libdir}/lv2/zestins.lv2/
+
+%changelog
+* Fri Nov 13 2026 Ryno Kotze <lemon.xah@gmail.com> - 1.2.6-1
+- First packaged release of Zestins

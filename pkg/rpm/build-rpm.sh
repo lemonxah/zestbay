@@ -61,6 +61,7 @@ tar -czf "$RPMBUILD_DIR/SOURCES/zestbay-${VERSION}.tar.gz" \
     --exclude=./target --exclude=./repo --exclude=./.flatpak-builder \
     --exclude=./build-dir --exclude=./builddir --exclude=./dist \
     --exclude=./pkg/rpm/rpmbuild --exclude='./pkg/deb/zestbay_*' \
+    --exclude=./zestins/build \
     --transform "s,^\.,${TARBALL_DIR}," \
     .
 

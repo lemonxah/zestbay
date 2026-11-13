@@ -60,7 +60,8 @@ pub struct Descriptor {
 
 pub type DescriptorFn = unsafe extern "C" fn(c_ulong) -> *const Descriptor;
 
-/// A dlopen'ed LADSPA library. Closed on drop.
+/// A dlopen'ed LADSPA library. Closed on drop. ZestBay's built-in plugins
+/// come as a library with no handle (see `builtin`).
 pub struct Library {
     handle: *mut c_void,
     entry: DescriptorFn,
@@ -72,6 +73,12 @@ impl Library {
     /// architecture.
     pub unsafe fn open(path: &std::path::Path) -> Option<Self> {
         use std::os::unix::ffi::OsStrExt;
+        if super::builtin::is_builtin_library(path) {
+            return Some(Self {
+                handle: std::ptr::null_mut(),
+                entry: super::builtin::descriptor,
+            });
+        }
         let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
         let handle = unsafe { libc::dlopen(c_path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
         if handle.is_null() {
@@ -98,7 +105,9 @@ impl Library {
 
 impl Drop for Library {
     fn drop(&mut self) {
-        unsafe { libc::dlclose(self.handle) };
+        if !self.handle.is_null() {
+            unsafe { libc::dlclose(self.handle) };
+        }
     }
 }
 

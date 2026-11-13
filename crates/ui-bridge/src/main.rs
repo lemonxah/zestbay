@@ -5,6 +5,9 @@
 //! no GTK), matching the approach used by Carla. This avoids GLX/EGL conflicts
 //! that occur when Qt6/Wayland and X11/GLX coexist in the same process.
 //!
+//! KXStudio external UIs are hosted here too: they open a window of their
+//! own, so the bridge only shows them and drives them with `run()`.
+//!
 //! Communication with the host is via stdin/stdout newline-delimited JSON.
 //! When stdin reaches EOF (host exited or crashed) all windows are closed
 //! and the bridge exits.
@@ -18,6 +21,7 @@ use std::io::Write;
 use std::os::raw::{c_char, c_int, c_long, c_uint, c_ulong};
 use std::ptr;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // ---------------------------------------------------------------------------
 // X11 FFI
@@ -136,6 +140,11 @@ const LV2_UI_IDLE_INTERFACE: &CStr = c"http://lv2plug.in/ns/extensions/ui#idleIn
 const LV2_URID_MAP_URI: &CStr = c"http://lv2plug.in/ns/ext/urid#map";
 const LV2_OPTIONS_URI: &CStr = c"http://lv2plug.in/ns/ext/options#options";
 
+const LV2_UI_EXTERNAL: &str = "http://kxstudio.sf.net/ns/lv2ext/external-ui#Widget";
+const LV2_UI_EXTERNAL_OLD: &str = "http://lv2plug.in/ns/extensions/ui#external";
+const LV2_EXTERNAL_UI_HOST_URI: &CStr = c"http://kxstudio.sf.net/ns/lv2ext/external-ui#Host";
+const LV2_EXTERNAL_UI_DEPRECATED_URI: &CStr = c"http://lv2plug.in/ns/extensions/ui#external";
+
 #[repr(C)]
 struct LV2Feature {
     uri: *const c_char,
@@ -179,6 +188,21 @@ struct LV2UiIdleInterface {
 #[repr(C)]
 struct LV2Option {
     context: u32, subject: u32, key: u32, size: u32, type_: u32, value: *const c_void,
+}
+
+/// `LV2_External_UI_Widget`: what an external UI hands back as its widget.
+#[repr(C)]
+struct ExternalUiWidget {
+    run: Option<unsafe extern "C" fn(*mut ExternalUiWidget)>,
+    show: Option<unsafe extern "C" fn(*mut ExternalUiWidget)>,
+    hide: Option<unsafe extern "C" fn(*mut ExternalUiWidget)>,
+}
+
+/// `LV2_External_UI_Host`.
+#[repr(C)]
+struct ExternalUiHost {
+    ui_closed: Option<unsafe extern "C" fn(controller: *mut c_void)>,
+    plugin_human_id: *const c_char,
 }
 
 // ---------------------------------------------------------------------------
@@ -276,6 +300,8 @@ fn take_line(buf: &mut Vec<u8>) -> Option<Vec<u8>> {
 /// port write belongs to.
 struct UiController {
     instance_id: u64,
+    /// An external UI reported its own window closed.
+    ui_closed: AtomicBool,
 }
 
 /// Everything one UI references.  Always boxed and never moved while the
@@ -295,8 +321,57 @@ struct PluginUiWindow {
     resize: LV2UIResize,
     sample_rate: f32,
     options: [LV2Option; 2],
+    /// Set for an external UI (which has no host window or display).
+    external: *mut ExternalUiWidget,
+    external_host: ExternalUiHost,
+    human_id: CString,
     features: Vec<LV2Feature>,
     feature_ptrs: Vec<*const LV2Feature>,
+}
+
+/// `ui_closed` of the external-UI host: noted here, acted on by the main
+/// loop (this usually runs inside the UI's `run()`).
+unsafe extern "C" fn external_ui_closed(controller: *mut c_void) {
+    if controller.is_null() {
+        return;
+    }
+    let ctrl = unsafe { &*(controller as *const UiController) };
+    ctrl.ui_closed.store(true, Ordering::Release);
+}
+
+/// Load the UI library at `binary` and find the descriptor for `ui_uri`.
+/// The library stays loaded on success.
+unsafe fn load_ui_descriptor(
+    binary: &CStr,
+    ui_uri: &CStr,
+) -> Result<(*mut c_void, *const LV2UI_Descriptor), String> {
+    unsafe {
+        let lib = libc::dlopen(binary.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
+        if lib.is_null() {
+            return Err(format!("dlopen failed: {:?}", binary));
+        }
+
+        let desc_sym = libc::dlsym(lib, c"lv2ui_descriptor".as_ptr());
+        if desc_sym.is_null() {
+            libc::dlclose(lib);
+            return Err("No lv2ui_descriptor symbol".into());
+        }
+
+        let lv2ui_descriptor_fn: unsafe extern "C" fn(c_uint) -> *const LV2UI_Descriptor =
+            std::mem::transmute(desc_sym);
+
+        for idx in 0..100u32 {
+            let desc = lv2ui_descriptor_fn(idx);
+            if desc.is_null() {
+                break;
+            }
+            if !(*desc).uri.is_null() && CStr::from_ptr((*desc).uri) == ui_uri {
+                return Ok((lib, desc));
+            }
+        }
+        libc::dlclose(lib);
+        Err("UI descriptor not found".into())
+    }
 }
 
 unsafe extern "C" fn port_write_callback(
@@ -347,7 +422,7 @@ unsafe extern "C" fn ui_resize_callback(
 
 fn open_ui(msg: HostMessage, windows: &mut HashMap<u64, Box<PluginUiWindow>>) -> BridgeMessage {
     let HostMessage::Open {
-        instance_id, plugin_uri, ui_uri, bundle_path, binary_path,
+        instance_id, plugin_uri, ui_uri, ui_type_uri, bundle_path, binary_path,
         title, control_values, urid_map, sample_rate, ..
     } = msg else {
         unreachable!()
@@ -374,6 +449,16 @@ fn open_ui(msg: HostMessage, windows: &mut HashMap<u64, Box<PluginUiWindow>>) ->
     ) else {
         return failed("invalid path or URI".into());
     };
+
+    if ui_type_uri == LV2_UI_EXTERNAL || ui_type_uri == LV2_UI_EXTERNAL_OLD {
+        let names = UiNames {
+            plugin_uri: c_plugin_uri,
+            bundle: c_bundle,
+            binary: c_binary,
+            ui_uri: c_ui_uri,
+        };
+        return open_external_ui(instance_id, names, title, control_values, sample_rate, windows);
+    }
 
     unsafe {
         // Open our own X11 display (clean, no GTK/Qt/Wayland interference)
@@ -442,7 +527,7 @@ fn open_ui(msg: HostMessage, windows: &mut HashMap<u64, Box<PluginUiWindow>>) ->
             idle_iface: None,
             closed: false,
             _lib: ptr::null_mut(),
-            controller: UiController { instance_id },
+            controller: UiController { instance_id, ui_closed: AtomicBool::new(false) },
             urid_map: LV2UridMap { handle: ptr::null_mut(), map: urid_map_callback },
             resize: LV2UIResize { handle: ptr::null_mut(), ui_resize: ui_resize_callback },
             sample_rate,
@@ -451,6 +536,9 @@ fn open_ui(msg: HostMessage, windows: &mut HashMap<u64, Box<PluginUiWindow>>) ->
                             value: ptr::null() },
                 LV2Option { context: 0, subject: 0, key: 0, size: 0, type_: 0, value: ptr::null() },
             ],
+            external: ptr::null_mut(),
+            external_host: ExternalUiHost { ui_closed: None, plugin_human_id: ptr::null() },
+            human_id: CString::default(),
             features: Vec::new(),
             feature_ptrs: Vec::new(),
         });
@@ -471,37 +559,13 @@ fn open_ui(msg: HostMessage, windows: &mut HashMap<u64, Box<PluginUiWindow>>) ->
             .collect();
 
         // Load UI binary
-        let lib = libc::dlopen(c_binary.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
-        if lib.is_null() {
-            destroy_display();
-            return failed(format!("dlopen failed: {:?}", c_binary));
-        }
-
-        let desc_sym = libc::dlsym(lib, c"lv2ui_descriptor".as_ptr());
-        if desc_sym.is_null() {
-            libc::dlclose(lib);
-            destroy_display();
-            return failed("No lv2ui_descriptor symbol".into());
-        }
-
-        let lv2ui_descriptor_fn: unsafe extern "C" fn(c_uint) -> *const LV2UI_Descriptor =
-            std::mem::transmute(desc_sym);
-
-        let mut ui_descriptor: *const LV2UI_Descriptor = ptr::null();
-        for idx in 0..100u32 {
-            let desc = lv2ui_descriptor_fn(idx);
-            if desc.is_null() { break; }
-            if CStr::from_ptr((*desc).uri) == c_ui_uri.as_c_str() {
-                ui_descriptor = desc;
-                break;
+        let (lib, ui_descriptor) = match load_ui_descriptor(&c_binary, &c_ui_uri) {
+            Ok(found) => found,
+            Err(error) => {
+                destroy_display();
+                return failed(error);
             }
-        }
-
-        if ui_descriptor.is_null() {
-            libc::dlclose(lib);
-            destroy_display();
-            return failed("UI descriptor not found".into());
-        }
+        };
 
         // Instantiate
         let mut widget: *mut c_void = ptr::null_mut();
@@ -570,6 +634,128 @@ fn open_ui(msg: HostMessage, windows: &mut HashMap<u64, Box<PluginUiWindow>>) ->
     }
 }
 
+/// The C strings a UI is opened with.
+struct UiNames {
+    plugin_uri: CString,
+    bundle: CString,
+    binary: CString,
+    ui_uri: CString,
+}
+
+/// Open a KXStudio external UI.  It has no host window: the UI shows its
+/// own, and reports that window being closed through `external_ui_closed`.
+fn open_external_ui(
+    instance_id: u64,
+    names: UiNames,
+    title: String,
+    control_values: Vec<(usize, f32)>,
+    sample_rate: f32,
+    windows: &mut HashMap<u64, Box<PluginUiWindow>>,
+) -> BridgeMessage {
+    let failed = |error: String| BridgeMessage::OpenFailed { instance_id, error };
+
+    unsafe {
+        let sr_urid = map_uri("http://lv2plug.in/ns/ext/parameters#sampleRate");
+        let float_urid = map_uri("http://lv2plug.in/ns/ext/atom#Float");
+        let mut win = Box::new(PluginUiWindow {
+            display: ptr::null_mut(),
+            host_window: 0,
+            child_window: 0,
+            wm_delete: 0,
+            ui_handle: ptr::null_mut(),
+            descriptor: ptr::null(),
+            idle_iface: None,
+            closed: false,
+            _lib: ptr::null_mut(),
+            controller: UiController { instance_id, ui_closed: AtomicBool::new(false) },
+            urid_map: LV2UridMap { handle: ptr::null_mut(), map: urid_map_callback },
+            resize: LV2UIResize { handle: ptr::null_mut(), ui_resize: ui_resize_callback },
+            sample_rate,
+            options: [
+                LV2Option { context: 0, subject: 0, key: sr_urid, size: 4, type_: float_urid,
+                            value: ptr::null() },
+                LV2Option { context: 0, subject: 0, key: 0, size: 0, type_: 0, value: ptr::null() },
+            ],
+            external: ptr::null_mut(),
+            external_host: ExternalUiHost { ui_closed: Some(external_ui_closed), plugin_human_id: ptr::null() },
+            human_id: CString::new(title).unwrap_or_default(),
+            features: Vec::new(),
+            feature_ptrs: Vec::new(),
+        });
+        win.options[0].value = &win.sample_rate as *const f32 as *const c_void;
+        win.external_host.plugin_human_id = win.human_id.as_ptr();
+        let host = &mut win.external_host as *mut ExternalUiHost as *mut c_void;
+        win.features = vec![
+            LV2Feature { uri: LV2_URID_MAP_URI.as_ptr(), data: &mut win.urid_map as *mut _ as *mut c_void },
+            LV2Feature { uri: LV2_OPTIONS_URI.as_ptr(), data: win.options.as_ptr() as *mut c_void },
+            LV2Feature { uri: LV2_EXTERNAL_UI_HOST_URI.as_ptr(), data: host },
+            LV2Feature { uri: LV2_EXTERNAL_UI_DEPRECATED_URI.as_ptr(), data: host },
+            LV2Feature { uri: LV2_UI_IDLE_INTERFACE.as_ptr(), data: ptr::null_mut() },
+        ];
+        win.feature_ptrs = win
+            .features
+            .iter()
+            .map(|f| f as *const LV2Feature)
+            .chain(std::iter::once(ptr::null()))
+            .collect();
+
+        let (lib, descriptor) = match load_ui_descriptor(&names.binary, &names.ui_uri) {
+            Ok(found) => found,
+            Err(error) => return failed(error),
+        };
+        let Some(instantiate_fn) = (*descriptor).instantiate else {
+            libc::dlclose(lib);
+            return failed("UI cannot be instantiated".into());
+        };
+
+        let mut widget: *mut c_void = ptr::null_mut();
+        let controller_ptr = &mut win.controller as *mut UiController as *mut c_void;
+        let ui_handle = instantiate_fn(
+            descriptor,
+            names.plugin_uri.as_ptr(),
+            names.bundle.as_ptr(),
+            port_write_callback,
+            controller_ptr,
+            &mut widget,
+            win.feature_ptrs.as_ptr(),
+        );
+        if ui_handle.is_null() {
+            libc::dlclose(lib);
+            return failed("UI instantiate returned null".into());
+        }
+        let widget = widget as *mut ExternalUiWidget;
+        if widget.is_null() {
+            if let Some(cleanup) = (*descriptor).cleanup {
+                cleanup(ui_handle);
+            }
+            // Don't dlclose — the UI may have left statics or threads behind
+            return failed("External UI gave no widget".into());
+        }
+
+        if let Some(port_event_fn) = (*descriptor).port_event {
+            for &(port_index, value) in &control_values {
+                port_event_fn(
+                    ui_handle, port_index as c_uint,
+                    std::mem::size_of::<f32>() as c_uint,
+                    0, &value as *const f32 as *const c_void,
+                );
+            }
+        }
+
+        if let Some(show) = (*widget).show {
+            show(widget);
+        }
+
+        win.ui_handle = ui_handle;
+        win.descriptor = descriptor;
+        win.external = widget;
+        win._lib = lib;
+        windows.insert(instance_id, win);
+
+        BridgeMessage::Opened { instance_id }
+    }
+}
+
 fn find_child_window(display: *mut c_void, parent: c_ulong) -> c_ulong {
     unsafe {
         let mut root: c_ulong = 0;
@@ -592,7 +778,8 @@ fn find_child_window(display: *mut c_void, parent: c_ulong) -> c_ulong {
 
 fn idle_window(win: &mut PluginUiWindow) {
     unsafe {
-        while XPending(win.display) > 0 {
+        // An external UI has no display of ours to pump.
+        while !win.display.is_null() && XPending(win.display) > 0 {
             let mut event: XEvent = std::mem::zeroed();
             XNextEvent(win.display, &mut event);
 
@@ -635,11 +822,32 @@ fn idle_window(win: &mut PluginUiWindow) {
         {
             win.closed = true;
         }
+
+        // An external UI does its own event handling and drawing in run().
+        if !win.external.is_null()
+            && !win.closed
+            && !win.controller.ui_closed.load(Ordering::Acquire)
+            && let Some(run) = (*win.external).run
+        {
+            run(win.external);
+        }
+        if win.controller.ui_closed.load(Ordering::Acquire) {
+            win.closed = true;
+        }
     }
 }
 
 fn close_window(win: &mut PluginUiWindow) {
     unsafe {
+        // An external UI that closed its own window is not asked to hide it.
+        if !win.external.is_null()
+            && !win.ui_handle.is_null()
+            && !win.controller.ui_closed.load(Ordering::Acquire)
+            && let Some(hide) = (*win.external).hide
+        {
+            hide(win.external);
+        }
+        win.external = ptr::null_mut();
         if !win.ui_handle.is_null()
             && !win.descriptor.is_null()
             && let Some(cleanup) = (*win.descriptor).cleanup

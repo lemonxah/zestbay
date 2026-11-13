@@ -8,7 +8,7 @@ QtObject {
 
     property bool patchbay_enabled: true
     property bool patchbay_exclusive: true
-    property int active_plugin_count: 3
+    property int active_plugin_count: 6
     property int node_count: nodes.length
     property int link_count: links.length
     property string cpu_usage: "1.4%"
@@ -59,8 +59,21 @@ QtObject {
         { id: 40, name: "Speakers", type: "Sink", layoutKey: "Sink:Speakers", ready: true },
         { id: 41, name: "Headphones", type: "Sink", layoutKey: "Sink:Headphones", ready: true },
         { id: 50, name: "Mic Chain", type: "Subgraph", subgraphId: "sg-1", layoutKey: "Subgraph:sg-1", ready: true,
-          memberCount: 1, missing: 0, inputs: 1, outputs: 2, asSink: false, asSource: true }
+          memberCount: 1, missing: 0, inputs: 1, outputs: 2, asSink: false, asSource: true },
+        // Built-in meters: one shown as a card, two snapped onto a port
+        // (their cards are hidden; see get_hidden_json / get_docked_meters_json).
+        { id: 60, name: "Meter (2 ch)", type: "Plugin", layoutKey: "LADSPA:Meter (2 ch)", pluginFormat: "LADSPA", pluginHasUi: false, meterChannels: 2, ready: true },
+        { id: 61, name: "Daw Sink in meter", type: "Plugin", layoutKey: "LADSPA:Daw Sink in meter", pluginFormat: "LADSPA", pluginHasUi: false, meterChannels: 2, ready: true },
+        { id: 62, name: "Microphone out meter", type: "Plugin", layoutKey: "LADSPA:Microphone out meter", pluginFormat: "LADSPA", pluginHasUi: false, meterChannels: 1, ready: true }
     ]
+    function meterPorts(base, channels) {
+        var a = []
+        for (var i = 0; i < channels; i++) {
+            a.push({ id: base + 1 + i, name: "input_" + i, direction: "Input", mediaType: "Audio" })
+            a.push({ id: base + 11 + i, name: "output_" + i, direction: "Output", mediaType: "Audio" })
+        }
+        return a
+    }
     // Inside "Mic Chain": its plugin between the Input and Output nodes.
     property var subNodes: [
         { id: 11, name: "LSP Gate Mono", type: "Plugin", layoutKey: "LV2:LSP Gate Mono", pluginFormat: "LV2", pluginHasUi: true, ready: true },
@@ -98,13 +111,17 @@ QtObject {
         50: [{ id: 5001, name: "MONO", direction: "Input", mediaType: "Audio" },
              { id: 5003, name: "FL", direction: "Output", mediaType: "Audio" },
              { id: 5004, name: "FR", direction: "Output", mediaType: "Audio" }],
+        60: meterPorts(6000, 2),
+        61: meterPorts(6100, 2),
+        62: meterPorts(6200, 1),
         51: [{ id: 5101, name: "MONO", direction: "Output", mediaType: "Audio" }],
         52: [{ id: 5201, name: "FL", direction: "Input", mediaType: "Audio" },
              { id: 5202, name: "FR", direction: "Input", mediaType: "Audio" }]
     })
     property var links: (function() {
-        var l = [[101, 1001], [1010, 2001], [1011, 2002], [1203, 2101], [1204, 2102], [1303, 2101], [1304, 2102],
-                 [201, 5001], [5003, 2201], [5004, 2202], [2003, 3010], [2004, 3011], [2103, 3012], [2104, 3013],
+        var l = [[101, 1001], [1010, 6101], [1011, 6102], [6111, 2001], [6112, 2002], [1203, 2101], [1204, 2102],
+                 [1303, 6001], [1304, 6002], [6011, 2101], [6012, 2102],
+                 [201, 6201], [6211, 5001], [5003, 2201], [5004, 2202], [2003, 3010], [2004, 3011], [2103, 3012], [2104, 3013],
                  [2203, 3014], [2204, 3015], [3003, 4001], [3004, 4002], [301, 3016]]
         var out = []
         for (var i = 0; i < l.length; i++) out.push({ id: 9000 + i, outputPortId: l[i][0], inputPortId: l[i][1], active: true })
@@ -117,7 +134,8 @@ QtObject {
         "MidiBridge:Roland": [48, 48], "Source:Microphone": [48, 168], "Source:Headset": [48, 288], "Source:Webcam": [48, 408],
         "LV2:Pianoteq 9": [312, 48], "LV2:LSP Gate Mono": [312, 96], "StreamOut:Firefox": [312, 408], "StreamOut:Spotify": [312, 528],
         "Sink:Daw Sink": [576, 48], "Sink:Media Sink": [576, 192], "Sink:Comms Sink": [576, 336],
-        "LV2:LSP Mixer": [840, 96], "Sink:Speakers": [1104, 120], "Sink:Headphones": [1104, 264]
+        "LV2:LSP Mixer": [840, 96], "Sink:Speakers": [1104, 120], "Sink:Headphones": [1104, 264],
+        "LADSPA:Meter (2 ch)": [576, 480], "LADSPA:Daw Sink in meter": [576, 600], "LADSPA:Microphone out meter": [576, 648]
     })
 
     // ---- Dialog data ----------------------------------------------------
@@ -209,7 +227,20 @@ QtObject {
     function get_viewport_json() { return JSON.stringify({ panX: 16, panY: 8, zoom: 1 }) }
     function get_layout_json() { return JSON.stringify(layout) }
     function get_default_node() { return "Sink:Speakers" }
-    function get_hidden_json() { return "[]" }
+    function get_hidden_json() { return JSON.stringify(["LADSPA:Daw Sink in meter", "LADSPA:Microphone out meter"]) }
+    function get_docked_meters_json() {
+        return JSON.stringify({ "LADSPA:Daw Sink in meter": "dest", "LADSPA:Microphone out meter": "source" })
+    }
+    function save_docked_meters(j) {}
+    // Levels (linear, 1.0 = 0 dBFS) with a slow wobble so the bars look alive.
+    function meter_levels_json() {
+        var t = Date.now() / 1000
+        var w = function(base, f) { return base * (1 + 0.08 * Math.sin(t * f)) }
+        return JSON.stringify({ "60": [w(0.42, 3.1), w(0.37, 2.7)], "61": [w(0.62, 2.3), w(0.55, 1.9)], "62": [w(0.2, 4.0)] })
+    }
+    function add_meter(channels) { return "" }
+    function rename_meter(id, name) { return "" }
+    function remove_plugin(id) {}
     function get_pinned_json() { return JSON.stringify(["LV2:Pianoteq 9", "LV2:LSP Mixer", "Sink:Speakers"]) }
     function get_nodes_json() { return JSON.stringify(view === "" ? nodes : subNodes) }
     function get_links_json() { return JSON.stringify(view === "" ? links : subLinks) }
@@ -230,7 +261,10 @@ QtObject {
     function get_plugin_cpu_json() {
         return JSON.stringify([{ id: 10, name: "Pianoteq 9", dspPercent: 1.8 + Math.random() * 0.4, avgUs: 410, lastUs: 380, calls: 100 },
                                { id: 30, name: "LSP Mixer x4 Stereo", dspPercent: 0.09, avgUs: 12, lastUs: 11, calls: 100 },
-                               { id: 11, name: "LSP Gate Mono", dspPercent: 0.03, avgUs: 4, lastUs: 4, calls: 100 }])
+                               { id: 11, name: "LSP Gate Mono", dspPercent: 0.03, avgUs: 4, lastUs: 4, calls: 100 },
+                               { id: 61, name: "Daw Sink in meter", isMeter: true, dspPercent: 0.01, avgUs: 1, lastUs: 1, calls: 100 },
+                               { id: 60, name: "Meter (2 ch)", isMeter: true, dspPercent: 0.01, avgUs: 1, lastUs: 1, calls: 100 },
+                               { id: 62, name: "Microphone out meter", isMeter: true, dspPercent: 0.0, avgUs: 0, lastUs: 0, calls: 100 }])
     }
     function get_app_version() { return "1.0.0" }
     function get_qt_version() { return "6.12.0" }

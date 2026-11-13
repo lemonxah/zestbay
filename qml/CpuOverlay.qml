@@ -25,6 +25,42 @@ ZbWindow {
     property var pluginData: []
     property real totalPluginDsp: 0.0
 
+    // Built-in meters are one "Meters (N)" row (and one chart series);
+    // clicking it lists them underneath. The last poll is kept so the list
+    // can be rebuilt on a click without polling (polling takes the stats).
+    property bool metersExpanded: false
+    property var lastRows: []      // non-meter rows + the meters row
+    property var lastMeters: []
+
+    // Table rows: the plugins and the meters row by DSP %, then (when
+    // expanded) the meters right under it, marked `child`.
+    function buildRows() {
+        var rows = []
+        for (var i = 0; i < lastRows.length; i++) {
+            rows.push(lastRows[i])
+            if (lastRows[i].isGroup && metersExpanded) {
+                var ms = lastMeters.slice()
+                ms.sort(function(a, b) { return (b.dspPercent || 0) - (a.dspPercent || 0) })
+                for (var m = 0; m < ms.length; m++) {
+                    ms[m].child = true
+                    ms[m].slot = lastRows[i].slot
+                    rows.push(ms[m])
+                }
+            }
+        }
+        // A new array resets the list to the top; keep where the user
+        // scrolled to (clamped, in case the list got shorter).
+        var keepY = pluginCpuList.contentY
+        pluginData = rows
+        var maxY = Math.max(0, rows.length * Theme.rowTable - pluginCpuList.height)
+        pluginCpuList.contentY = Math.min(keepY, maxY)
+    }
+
+    function toggleMeters() {
+        metersExpanded = !metersExpanded
+        buildRows()
+    }
+
     // Series state. Plain JS objects mutated in place; `revision` is bumped
     // after every poll so bindings that read them re-evaluate.
     //   series: { key, name, slot (-1 = folded into Other), points: [{t, v}],
@@ -109,8 +145,25 @@ ZbWindow {
         var now = Date.now()
         var hist = []
         try { hist = JSON.parse(controller.get_cpu_history()) || [] } catch (e) { hist = [] }
+        var all = []
+        try { all = JSON.parse(controller.get_plugin_cpu_json()) || [] } catch (e) { all = [] }
+        // Meters fold into one row: their summed load.
         var plugins = []
-        try { plugins = JSON.parse(controller.get_plugin_cpu_json()) || [] } catch (e) { plugins = [] }
+        var meters = []
+        for (var a = 0; a < all.length; a++)
+            (all[a].isMeter ? meters : plugins).push(all[a])
+        if (meters.length > 0) {
+            var group = { id: "meters", name: "Meters (" + meters.length + ")", isGroup: true,
+                          dspPercent: 0, avgUs: 0, lastUs: 0, calls: 0, workerPercent: 0 }
+            for (var mi = 0; mi < meters.length; mi++) {
+                group.dspPercent += meters[mi].dspPercent || 0
+                group.avgUs += meters[mi].avgUs || 0
+                group.lastUs += meters[mi].lastUs || 0
+                group.calls += meters[mi].calls || 0
+            }
+            group.dspPercent = Math.round(group.dspPercent * 100) / 100
+            plugins.push(group)
+        }
 
         for (var k = 0; k < seriesOrder.length; k++)
             seriesByKey[seriesOrder[k]].live = false
@@ -166,7 +219,9 @@ ZbWindow {
         }
 
         plugins.sort(function(a, b) { return (b.dspPercent || 0) - (a.dspPercent || 0) })
-        pluginData = plugins
+        lastRows = plugins
+        lastMeters = meters
+        buildRows()
         totalPluginDsp = total
         lastPollT = now
         revision++
@@ -653,15 +708,27 @@ ZbWindow {
                             spacing: tableCard.colGap
 
                             // Plugin: series dot + name (+ async worker line).
+                            // The meters row has a chevron; meters under it
+                            // are indented, with a hollow dot.
                             RowLayout {
                                 Layout.fillWidth: true
                                 Layout.preferredWidth: 0
+                                Layout.leftMargin: row.plugin.child ? 22 : 0
                                 spacing: 8
+                                ZbIcon {
+                                    visible: !!row.plugin.isGroup
+                                    name: "chevronRight"
+                                    size: 12
+                                    color: Theme.textIcon
+                                    rotation: cpuOverlay.metersExpanded ? 90 : 0
+                                }
                                 Rectangle {
                                     width: 8
                                     height: 8
                                     radius: 4
-                                    color: row.seriesColour
+                                    color: row.plugin.child ? "transparent" : row.seriesColour
+                                    border.width: row.plugin.child ? 1.5 : 0
+                                    border.color: row.seriesColour
                                 }
                                 ColumnLayout {
                                     Layout.fillWidth: true
@@ -672,8 +739,8 @@ ZbWindow {
                                         elide: Text.ElideRight
                                         font.family: Theme.fontSans
                                         font.pixelSize: Theme.sizeBody
-                                        font.weight: Font.Medium
-                                        color: Theme.textPrimary
+                                        font.weight: row.plugin.child ? Font.Normal : Font.Medium
+                                        color: row.plugin.child ? Theme.textSecondary : Theme.textPrimary
                                     }
                                     Text {
                                         visible: row.hasWorker
@@ -730,6 +797,14 @@ ZbWindow {
                                     color: Theme.textMuted
                                 }
                             }
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            enabled: !!row.plugin.isGroup
+                            visible: enabled
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: cpuOverlay.toggleMeters()
                         }
 
                         ZbDivider {

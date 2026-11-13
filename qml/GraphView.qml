@@ -656,6 +656,12 @@ Item {
             } catch (e) {
                 hiddenNodes = {};
             }
+            try {
+                var docked = JSON.parse(controller.get_docked_meters_json());
+                dockedMeters = docked && typeof docked === "object" && !Array.isArray(docked) ? docked : {};
+            } catch (e) {
+                dockedMeters = {};
+            }
             hiddenLoaded = true;
         }
         if (!pinnedLoaded) {
@@ -681,6 +687,7 @@ Item {
             nodes = [];
             links = [];
         }
+        updateMeterNodeIds();
         refreshPresetInfo();
         try {
             blockedPairs = JSON.parse(controller.get_blocked_pairs_json());
@@ -944,8 +951,8 @@ Item {
             if (!anode)
                 // node vanished — forget it
                 continue;
-            if (nodeIsPinned(anode) || !isFresh(anode.id))
-                // pinned or settled — it stays where it is
+            if (nodeIsPinned(anode) || !isFresh(anode.id) || nodeIdIsHidden(anode.id))
+                // pinned, settled or hidden — it stays where it is
                 continue;
             if (placeNearPeer(anode))
                 continue;
@@ -963,7 +970,7 @@ Item {
             if (awaitingLinkPlacement[bid])
                 continue;
             var bnode = findNodeData(parseInt(bid));
-            if (!bnode || nodeIsPinned(bnode))
+            if (!bnode || nodeIsPinned(bnode) || nodeIdIsHidden(bnode.id))
                 continue;
             if (!isFresh(bnode.id)) {
                 delete autoPlaced[bid];
@@ -976,6 +983,7 @@ Item {
         }
 
         noteAppeared(appeared);
+        processPendingMeterAttach();
 
         // A restored viewport (or one saved on a bigger screen) may show none of
         // the graph; bring it back into view once, on the first populated refresh.
@@ -1000,12 +1008,22 @@ Item {
     // (peer's left edge) is left of the output end (source's right edge).
     // Equivalent to the link line's angle atan2(dy, dx) being outside ±90°.
     // A small tolerance ignores near-vertical links between stacked nodes.
+    // Hidden nodes (including snapped meters) take no part in placement:
+    // they are not obstacles, anchors or reasons to move, and they are not
+    // moved themselves, so nothing jumps because of a card you can't see.
+    function nodeIdIsHidden(nodeId) {
+        var n = findNodeData(nodeId);
+        return !!(n && n.layoutKey && hiddenNodes[n.layoutKey]);
+    }
+
     function nodeHasBackwardLink(nodeId) {
         for (var li = 0; li < links.length; li++) {
             var l = links[li];
             if (l.outputNodeId !== nodeId && l.inputNodeId !== nodeId)
                 continue;
             if (l.outputNodeId === l.inputNodeId)
+                continue;
+            if (nodeIdIsHidden(l.outputNodeId) || nodeIdIsHidden(l.inputNodeId))
                 continue;
             var fromPos = nodePositions[l.outputNodeId];
             var toPos = nodePositions[l.inputNodeId];
@@ -1030,9 +1048,13 @@ Item {
         return !!a && Date.now() - a.t <= settleWindowMs;
     }
 
+    // Linked to a visible node (links to hidden ones don't count).
     function nodeHasLinks(nodeId) {
         for (var li = 0; li < links.length; li++) {
-            if (links[li].outputNodeId === nodeId || links[li].inputNodeId === nodeId)
+            var l = links[li];
+            if (l.outputNodeId === nodeId && !nodeIdIsHidden(l.inputNodeId))
+                return true;
+            if (l.inputNodeId === nodeId && !nodeIdIsHidden(l.outputNodeId))
                 return true;
         }
         return false;
@@ -1167,27 +1189,9 @@ Item {
         return kindAnchor(node);
     }
 
-    function findConnectedPeerPosition(nodeId) {
-        // Look through current links to find any node already positioned
-        // that is connected to this node
-        for (var li = 0; li < links.length; li++) {
-            var link = links[li];
-            var peerId = -1;
-            if (link.outputNodeId === nodeId && link.inputNodeId in nodePositions) {
-                peerId = link.inputNodeId;
-            } else if (link.inputNodeId === nodeId && link.outputNodeId in nodePositions) {
-                peerId = link.outputNodeId;
-            }
-            if (peerId >= 0) {
-                return nodePositions[peerId];
-            }
-        }
-        return null;
-    }
-
     function resolveNodeOverlap(node, skipIds) {
         var pos = nodePositions[node.id];
-        if (!pos)
+        if (!pos || nodeIdIsHidden(node.id))
             return;
         var h = calculateNodeHeight(node);
         var w = getNodeWidth(node.id) || minNodeWidth;
@@ -1200,6 +1204,8 @@ Item {
                 if (other.id === node.id)
                     continue;
                 if (skipIds && skipIds[other.id])
+                    continue;
+                if (other.layoutKey && hiddenNodes[other.layoutKey])
                     continue;
                 var opos = nodePositions[other.id];
                 if (!opos)
@@ -1427,6 +1433,7 @@ Item {
         viewportSaveTimer.restart()
 
     readonly property bool contextIsPlugin: contextNode !== null && contextNode.type === "Plugin"
+    readonly property bool contextIsMeter: contextNode !== null && isMeterNode(contextNode)
     readonly property bool contextCanBeDefault: contextNode !== null && (contextNode.type === "Sink" || contextNode.type === "Duplex" || contextNode.type === "Plugin")
 
     // Device / sink: Hide · Pin · — · Set as default.
@@ -1467,6 +1474,39 @@ Item {
         ZbMenuSeparator {
             visible: contextIsSubgraph
             height: visible ? implicitHeight : 0
+        }
+
+        ZbMenuItem {
+            readonly property int snapped: contextNode ? metersSnappedOn(contextNode.id).length : 0
+            text: snapped > 1 ? "Unsnap " + snapped + " meters" : "Unsnap meter"
+            visible: snapped > 0
+            height: visible ? implicitHeight : 0
+            onTriggered: unsnapMetersOn(contextNode.id)
+        }
+
+        ZbMenuItem {
+            readonly property int snapped: contextNode ? metersSnappedOn(contextNode.id).length : 0
+            text: snapped > 1 ? "Remove " + snapped + " snapped meters" : "Remove snapped meter"
+            destructive: true
+            visible: snapped > 0
+            height: visible ? implicitHeight : 0
+            onTriggered: removeMetersOn(contextNode.id)
+        }
+
+        ZbMenuItem {
+            readonly property int count: contextNode ? audioPortsOf(contextNode.id, false).length : 0
+            text: "Meter inputs" + (count > 0 ? " (" + count + ")" : "")
+            visible: canMeterPorts(contextNode, false)
+            height: visible ? implicitHeight : 0
+            onTriggered: addMetersTo(contextNode, false)
+        }
+
+        ZbMenuItem {
+            readonly property int count: contextNode ? audioPortsOf(contextNode.id, true).length : 0
+            text: "Meter outputs" + (count > 0 ? " (" + count + ")" : "")
+            visible: canMeterPorts(contextNode, true)
+            height: visible ? implicitHeight : 0
+            onTriggered: addMetersTo(contextNode, true)
         }
 
         ZbMenuItem {
@@ -1538,8 +1578,24 @@ Item {
         }
 
         ZbMenuItem {
+            text: "Snap to source port"
+            visible: contextIsMeter
+            enabled: contextIsMeter && canSnapMeter(contextNode, "source")
+            height: visible ? implicitHeight : 0
+            onTriggered: snapMeter(contextNode, "source")
+        }
+
+        ZbMenuItem {
+            text: "Snap to destination port"
+            visible: contextIsMeter
+            enabled: contextIsMeter && canSnapMeter(contextNode, "dest")
+            height: visible ? implicitHeight : 0
+            onTriggered: snapMeter(contextNode, "dest")
+        }
+
+        ZbMenuItem {
             text: "Open UI\u2026"
-            visible: contextIsPlugin
+            visible: contextIsPlugin && !contextIsMeter
             enabled: contextIsPlugin && contextNode.pluginHasUi !== false
             height: visible ? implicitHeight : 0
             onTriggered: {
@@ -1554,7 +1610,7 @@ Item {
         }
 
         ZbMenuItem {
-            text: "Remove plugin"
+            text: contextIsMeter ? "Remove meter" : "Remove plugin"
             destructive: true
             visible: contextIsPlugin
             height: visible ? implicitHeight : 0
@@ -1661,7 +1717,7 @@ Item {
         }
 
         ZbMenuItem {
-            readonly property var attached: contextPortId >= 0 ? linksOfPort(contextPortId) : []
+            readonly property var attached: contextPortId >= 0 ? visibleLinksOfPort(contextPortId) : []
             text: attached.length > 1 ? "Disconnect " + attached.length + " links" : "Disconnect"
             enabled: attached.length > 0
             onTriggered: {
@@ -1732,6 +1788,47 @@ Item {
                 }
                 graphView.openPluginBrowser();
             }
+        }
+
+        // Built-in meters: added here, never through the plugin browser.
+        ZbMenu {
+            title: "Add meter"
+            ZbMenuItem {
+                text: "1 channel (mono)"
+                onTriggered: graphView.addMeter(1)
+            }
+            ZbMenuItem {
+                text: "2 channels (stereo)"
+                onTriggered: graphView.addMeter(2)
+            }
+            ZbMenuItem {
+                text: "3 channels"
+                onTriggered: graphView.addMeter(3)
+            }
+            ZbMenuItem {
+                text: "4 channels"
+                onTriggered: graphView.addMeter(4)
+            }
+            ZbMenuItem {
+                text: "5 channels"
+                onTriggered: graphView.addMeter(5)
+            }
+            ZbMenuItem {
+                text: "6 channels"
+                onTriggered: graphView.addMeter(6)
+            }
+            ZbMenuItem {
+                text: "8 channels (7.1)"
+                onTriggered: graphView.addMeter(8)
+            }
+        }
+
+        ZbMenuItem {
+            readonly property int snapped: graphView.snappedMeterCount()
+            text: snapped > 1 ? "Unsnap all " + snapped + " meters" : "Unsnap meter"
+            visible: snapped > 0
+            height: visible ? implicitHeight : 0
+            onTriggered: graphView.unsnapAllMeters()
         }
 
         ZbMenuItem {
@@ -2135,6 +2232,17 @@ Item {
                 arr.push(k);
         }
         controller.save_hidden(JSON.stringify(arr));
+        // A snapped meter is a hidden one: shown again (Unhide all, undo),
+        // it is no longer snapped.
+        var pruned = false;
+        for (var dk in dockedMeters) {
+            if (!hiddenNodes[dk]) {
+                delete dockedMeters[dk];
+                pruned = true;
+            }
+        }
+        if (pruned)
+            persistDocked();
     }
 
     function persistPinned() {
@@ -2597,12 +2705,663 @@ Item {
 
     // Visible ports, collapse state and height of a node card. Plugins with
     // many trailing unconnected ports fold them into one "n more" row.
+    // ---- Built-in meters ----------------------------------------------
+    // A meter node is a plugin node (so it can be dropped on wires, removed,
+    // saved...) drawn without presets or footer: one level bar per channel
+    // in its port rows. The canvas draws the bar tracks; the live levels are
+    // items over the canvas (meterLayer), so levels never repaint the canvas.
+    function isMeterNode(n) {
+        return !!n && n.type === "Plugin" && (n.meterChannels || 0) > 0;
+    }
+
+    // Node ids of the meter nodes, changed only when that set changes.
+    property var meterNodeIds: []
+    // Where the last paint put each drawn meter node: nodeId -> {sx, sy (screen),
+    // w, h, zoom, alpha, channels}. Hidden or undrawn meters are absent.
+    property var meterFrames: ({})
+    // Latest levels: nodeId -> [linear level per channel].
+    property var meterLevels: ({})
+
+    readonly property real meterFloorDb: -60
+    readonly property real meterHotFrac: (-12 - meterFloorDb) / -meterFloorDb
+    readonly property real meterClipFrac: (-3 - meterFloorDb) / -meterFloorDb
+
+    // 0..1 along the bar for a linear level (-60 dBFS .. 0 dBFS).
+    function levelFraction(level) {
+        if (!(level > 0))
+            return 0;
+        var db = 20 * Math.log(level) / Math.LN10;
+        return Math.max(0, Math.min(1, (db - meterFloorDb) / -meterFloorDb));
+    }
+
+    // Audio, or not yet known (a port's format can settle after it shows).
+    function isAudioRow(port) {
+        return port.mediaType !== "Midi" && port.mediaType !== "Video";
+    }
+
+    // Port rows of a meter node's audio inputs: channel k's bar is in row
+    // meterRows(node)[k].
+    function meterRows(node) {
+        var ins = nodeLayout(node).inputs;
+        var rows = [];
+        for (var i = 0; i < ins.length; i++) {
+            if (isAudioRow(ins[i]))
+                rows.push(i);
+        }
+        return rows;
+    }
+
+    // The bar in port row `row` of a meter card `nw` wide, in card coordinates.
+    function meterBarRect(nw, row) {
+        var rowH = Theme.nodePortRow;
+        var h = Math.max(4, Math.round(rowH * 0.32));
+        var x0 = Theme.nodePadX + 14;
+        var x1 = nw - Theme.nodePadX;
+        return {
+            x: x0,
+            y: Theme.nodeHeader + Theme.nodePortsTop + row * rowH + (rowH - h) / 2,
+            w: x1 - x0,
+            h: h
+        };
+    }
+
+    function updateMeterNodeIds() {
+        var ids = [];
+        for (var i = 0; i < nodes.length; i++) {
+            if (isMeterNode(nodes[i]))
+                ids.push(nodes[i].id);
+        }
+        if (ids.join(",") !== meterNodeIds.join(","))
+            meterNodeIds = ids;
+        if (ids.length === 0)
+            meterLevels = {};
+    }
+
+    // ---- Snapped meters --------------------------------------------------
+    // A meter can be snapped onto either end of the wire it sits on: its
+    // card is hidden (it is a hidden node, so it is out of the way for
+    // clicks, selection and layout) and each channel's level is drawn under
+    // the port it snapped to, which then stands for the meter's own port:
+    //   "source": the output feeding the meter stands for the meter's
+    //             output (its outgoing wires start there);
+    //   "dest":   the input the meter feeds stands for the meter's input
+    //             (its incoming wires end there).
+    // Connecting to such a port connects to the meter's port instead, and
+    // wires on it that skip the meter are drawn dashed. The meter still
+    // runs in PipeWire.
+    property var dockedMeters: ({})   // layoutKey -> "source" | "dest"
+    // Bars to draw this paint, by "meterId:channel" (stable while the graph is).
+    property var dockBarIds: []
+    property var dockBarFrames: ({})
+    // Snapped-to port id -> the meter port it stands for (this paint).
+    property var snapRedirect: ({})
+
+    // A snapped meter's own wire into or out of the port it snapped to:
+    // both ends at that port, so it is neither drawn nor clickable.
+    function isSnapInternal(fromPos, toPos) {
+        return (fromPos.alias || toPos.alias) && fromPos.cx === toPos.cx && fromPos.cy === toPos.cy;
+    }
+
+    // Snapped meters that had their port at some point this session, and
+    // the ones that have it now (layoutKey -> true). One that loses its port
+    // (wire removed, device gone) is unsnapped after orphanTimer's grace, so
+    // it comes back as a card instead of staying hidden with no way to it.
+    // Meters that never had their port yet (just after start, before links
+    // arrive) are left alone.
+    property var snapSeenAnchored: ({})
+    property var snapAnchored: ({})
+
+    function orphanedSnaps() {
+        var keys = [];
+        for (var k in dockedMeters) {
+            if (snapSeenAnchored[k] && !snapAnchored[k])
+                keys.push(k);
+        }
+        return keys;
+    }
+
+    function unsnapOrphans() {
+        var keys = orphanedSnaps();
+        for (var i = 0; i < keys.length; i++) {
+            delete snapSeenAnchored[keys[i]];
+            setMeterSnapped(keys[i], "");
+        }
+        if (keys.length > 0)
+            showToast(keys.length > 1 ? keys.length + " meters unsnapped: the ports they were snapped to went away" : "Meter unsnapped: the port it was snapped to went away");
+    }
+
+    // Every snapped meter (including any whose port is missing), as one
+    // undo step.
+    function snappedMeterCount() {
+        var n = 0;
+        for (var k in dockedMeters)
+            n++;
+        return n;
+    }
+
+    function unsnapAllMeters() {
+        var parts = [];
+        for (var k in dockedMeters) {
+            parts.push({
+                kind: "snap",
+                label: "unsnap meter",
+                key: k,
+                side: "",
+                prevSide: dockedMeters[k]
+            });
+        }
+        for (var i = 0; i < parts.length; i++)
+            setMeterSnapped(parts[i].key, "");
+        if (parts.length > 0)
+            pushUndo({
+                kind: "group",
+                label: parts.length > 1 ? "unsnap " + parts.length + " meters" : "unsnap meter",
+                parts: parts
+            });
+    }
+
+    // Dragging a meter card over a node it is wired to: the snap that
+    // dropping it there makes, {meterId, nodeId, side, ports: [snapped-to
+    // port ids]}, or null. Drawn as an accent ring on the node and preview
+    // bars on those ports.
+    property var snapPreview: null
+
+    // The snap for dropping `meter` at screen (sx, sy): onto the node under
+    // the cursor, if that node feeds the meter (source) or is fed by it
+    // (dest), the snap is valid, and every bar would land on that node.
+    function meterSnapCandidate(meter, sx, sy) {
+        if (!isMeterNode(meter))
+            return null;
+        var c = toCanvas(sx, sy);
+        var targetId = -1;
+        for (var i = nodes.length - 1; i >= 0; i--) {
+            var n = nodes[i];
+            if (n.id === meter.id || (n.layoutKey && hiddenNodes[n.layoutKey]))
+                continue;
+            var pos = nodePositions[n.id];
+            if (pos && c.x >= pos.x && c.x <= pos.x + getNodeWidth(n.id) && c.y >= pos.y && c.y <= pos.y + calculateNodeHeight(n)) {
+                targetId = n.id;
+                break;
+            }
+        }
+        if (targetId < 0)
+            return null;
+        var chans = meterChannelPorts(meter);
+        var sides = ["source", "dest"];
+        for (var si = 0; si < sides.length; si++) {
+            var side = sides[si];
+            if (!canSnapMeter(meter, side))
+                continue;
+            var ports = [];
+            var ok = true;
+            for (var k = 0; k < chans.length; k++) {
+                var a = side === "source" ? chans[k].src : (chans[k].dests.length > 0 ? chans[k].dests[0] : -1);
+                if (a < 0)
+                    continue;
+                if (getPortNodeId(a) !== targetId) {
+                    ok = false;
+                    break;
+                }
+                ports.push(a);
+            }
+            if (ok && ports.length > 0)
+                return {
+                    meterId: meter.id,
+                    nodeId: targetId,
+                    side: side,
+                    ports: ports
+                };
+        }
+        return null;
+    }
+
+    // A snapped bar under the label of the port whose pin is at (cx, cy),
+    // in scene coordinates: ending at the label's right edge for outputs,
+    // starting at its left edge for inputs.
+    readonly property real dockBarW: 64
+    readonly property real dockBarH: 3
+    function dockBarRect(cx, cy, output) {
+        return {
+            x: output ? cx - Theme.nodePadX - dockBarW : cx + Theme.nodePadX,
+            y: cy + Theme.nodePortRow / 2 - dockBarH - 2,
+            w: dockBarW,
+            h: dockBarH
+        };
+    }
+
+    // Connect out → in in place of `oldLink` (a wire that skipped a meter):
+    // the new wire goes through the meter, the old one is removed. One undo
+    // step.
+    function connectReplacing(outPort, inPort, oldLink) {
+        var parts = [];
+        if (!findLinkByPorts(outPort, inPort)) {
+            var on = getPortNodeId(outPort);
+            var inn = getPortNodeId(inPort);
+            markHandPlaced(on);
+            markHandPlaced(inn);
+            controller.connect_ports(outPort, inPort);
+            parts.push({
+                kind: "connect",
+                label: "connect",
+                links: [
+                    {
+                        o: outPort,
+                        i: inPort,
+                        onKey: uniqueKeyById[on] || "",
+                        innKey: uniqueKeyById[inn] || ""
+                    }
+                ]
+            });
+        }
+        var rec = linkRecord(oldLink);
+        controller.disconnect_link(oldLink.id);
+        parts.push({
+            kind: "disconnect",
+            label: "disconnect",
+            links: [rec]
+        });
+        pushUndo({
+            kind: "group",
+            label: "route through meter",
+            parts: parts
+        });
+    }
+
+    // ---- Metering a node's inputs or outputs ---------------------------
+    // "Meter inputs/outputs" on a node: one meter per (up to) 8 of its audio
+    // ports, each snapped onto the node, with every wire on those ports
+    // moved onto the meter (port → meter → old destinations for outputs,
+    // old sources → meter → port for inputs). Meters are created
+    // asynchronously, so each one waits here until its node and ports
+    // exist: {name, hostId, side, hostPorts, t, hidden}.
+    property var pendingMeterAttach: []
+
+    function audioPortsOf(nodeId, outputs) {
+        var sp = getSortedPorts(nodeId);
+        var ports = (outputs ? sp.outputs : sp.inputs).filter(isAudioRow);
+        var ids = [];
+        for (var i = 0; i < ports.length; i++)
+            ids.push(ports[i].id);
+        return ids;
+    }
+
+    // Meter sizes covering n ports: 8s, then the largest that fits (1..6).
+    function meterChunks(n) {
+        var out = [];
+        while (n > 0) {
+            var c = n >= 8 ? 8 : Math.min(n, 6);
+            out.push(c);
+            n -= c;
+        }
+        return out;
+    }
+
+    function canMeterPorts(node, outputs) {
+        return !!node && !isMeterNode(node) && node.type !== "Subgraph" && node.type !== "SubgraphInput" && node.type !== "SubgraphOutput" && audioPortsOf(node.id, outputs).length > 0;
+    }
+
+    function addMetersTo(node, outputs) {
+        if (!canMeterPorts(node, outputs))
+            return;
+        var ports = audioPortsOf(node.id, outputs);
+        var chunks = meterChunks(ports.length);
+        var start = 0;
+        var jobs = pendingMeterAttach.slice();
+        for (var i = 0; i < chunks.length; i++) {
+            var name = controller.add_meter(chunks[i]);
+            if (name)
+                jobs.push({
+                    name: name,
+                    hostId: node.id,
+                    side: outputs ? "source" : "dest",
+                    hostPorts: ports.slice(start, start + chunks[i]),
+                    t: Date.now(),
+                    hidden: false
+                });
+            start += chunks[i];
+        }
+        pendingMeterAttach = jobs;
+    }
+
+    function processPendingMeterAttach() {
+        if (pendingMeterAttach.length === 0)
+            return;
+        var keep = [];
+        var changed = false;
+        for (var i = 0; i < pendingMeterAttach.length; i++) {
+            var job = pendingMeterAttach[i];
+            var meter = null;
+            for (var ni = 0; ni < nodes.length; ni++) {
+                if (isMeterNode(nodes[ni]) && nodes[ni].name === job.name) {
+                    meter = nodes[ni];
+                    break;
+                }
+            }
+            var host = findNodeData(job.hostId);
+            if (!host || (!meter && Date.now() - job.t > 15000)) {
+                showToast("Could not meter " + (host ? host.name : "the node") + ": the meter did not start");
+                continue;
+            }
+            if (!meter || !meter.layoutKey) {
+                keep.push(job);
+                continue;
+            }
+            // Hidden and snapped from the moment it shows up; its card waits
+            // beside the host for when it is unsnapped.
+            if (!job.hidden) {
+                job.hidden = true;
+                hiddenNodes[meter.layoutKey] = true;
+                dockedMeters[meter.layoutKey] = job.side;
+                var a = adjacentAnchor(meter, host, job.side === "dest");
+                nodePositions[meter.id] = findFreeSpot(meter, a.x, a.y, a.dir, false);
+                markHandPlaced(meter.id);
+                delete autoPlaced[meter.id];
+                changed = true;
+            }
+            var ins = audioPortsOf(meter.id, false);
+            var outs = audioPortsOf(meter.id, true);
+            if (ins.length < job.hostPorts.length || outs.length < job.hostPorts.length) {
+                if (Date.now() - job.t > 15000)
+                    showToast("Could not wire the meter on " + host.name + ": its ports did not appear");
+                else
+                    keep.push(job);
+                continue;
+            }
+            // Wire: new paths first, then drop the old ones (no gap).
+            var drop = [];
+            for (var k = 0; k < job.hostPorts.length; k++) {
+                var hp = job.hostPorts[k];
+                var olds = [];
+                for (var li = 0; li < links.length; li++) {
+                    var l = links[li];
+                    if (job.side === "source" ? l.outputPortId === hp : l.inputPortId === hp)
+                        olds.push(l);
+                }
+                if (job.side === "source") {
+                    controller.connect_ports(hp, ins[k]);
+                    for (var o = 0; o < olds.length; o++)
+                        controller.connect_ports(outs[k], olds[o].inputPortId);
+                } else {
+                    controller.connect_ports(outs[k], hp);
+                    for (var o2 = 0; o2 < olds.length; o2++)
+                        controller.connect_ports(olds[o2].outputPortId, ins[k]);
+                }
+                drop = drop.concat(olds);
+            }
+            for (var d = 0; d < drop.length; d++)
+                controller.disconnect_link(drop[d].id);
+            renameMeter(meter, snapMeterName(host.id, job.side, job.hostPorts));
+        }
+        pendingMeterAttach = keep;
+        if (changed) {
+            hiddenNodes = hiddenNodes;
+            dockedMeters = dockedMeters;
+            persistHidden();
+            persistDocked();
+            persistLayout();
+            canvas.requestPaint();
+        }
+    }
+
+    // Remove the meters snapped onto a node. Removing a meter joins the
+    // wires on its two sides, so the node's wiring is as before.
+    function removeMetersOn(nodeId) {
+        var keys = metersSnappedOn(nodeId);
+        for (var i = 0; i < keys.length; i++) {
+            var m = findNodeByLayoutKey(keys[i]);
+            if (m)
+                controller.remove_plugin(m.id);
+        }
+        // The hidden/snapped entries go once the nodes are gone (an orphaned
+        // snap is cleared by orphanTimer), so no card flashes up meanwhile.
+    }
+
+    // The port a new wire on `portId` should really use.
+    function snapTargetPort(portId) {
+        var r = snapRedirect[portId];
+        return r !== undefined ? r : portId;
+    }
+
+    function persistDocked() {
+        controller.save_docked_meters(JSON.stringify(dockedMeters));
+    }
+
+    function isDockedMeter(n) {
+        return isMeterNode(n) && !!n.layoutKey && !!hiddenNodes[n.layoutKey] && !!dockedMeters[n.layoutKey];
+    }
+
+    // Per channel: the meter's input and output port, the ports feeding the
+    // input (srcs; src is the first or -1) and the ports its output feeds.
+    function meterChannelPorts(node) {
+        var sp = getSortedPorts(node.id);
+        var ins = sp.inputs.filter(isAudioRow);
+        var outs = sp.outputs.filter(isAudioRow);
+        var chans = [];
+        for (var k = 0; k < Math.max(ins.length, outs.length); k++) {
+            var c = {
+                inPort: ins[k] ? ins[k].id : -1,
+                outPort: outs[k] ? outs[k].id : -1,
+                src: -1,
+                srcs: [],
+                dests: []
+            };
+            for (var i = 0; i < links.length; i++) {
+                var l = links[i];
+                if (c.inPort >= 0 && l.inputPortId === c.inPort)
+                    c.srcs.push(l.outputPortId);
+                if (c.outPort >= 0 && l.outputPortId === c.outPort)
+                    c.dests.push(l.inputPortId);
+            }
+            c.src = c.srcs.length > 0 ? c.srcs[0] : -1;
+            chans.push(c);
+        }
+        return chans;
+    }
+
+    // Can this meter snap to `side`? The snapped-to port stands for one
+    // meter port, so it must be unambiguous: snapping to the source needs
+    // each channel fed by at most one port (and fed, if it feeds anything);
+    // snapping to the destination needs each channel to feed at most one
+    // port (and feed one, if it is fed). Otherwise a wire would vanish.
+    // At least one channel needs the port its bar would sit on.
+    function canSnapMeter(node, side) {
+        if (!isMeterNode(node) || !node.layoutKey)
+            return false;
+        var chans = meterChannelPorts(node);
+        var any = false;
+        for (var k = 0; k < chans.length; k++) {
+            var c = chans[k];
+            if (side === "source") {
+                if (c.srcs.length > 1 || (c.dests.length > 0 && c.srcs.length === 0))
+                    return false;
+                if (c.srcs.length === 1)
+                    any = true;
+            } else {
+                if (c.dests.length > 1 || (c.srcs.length > 0 && c.dests.length === 0))
+                    return false;
+                if (c.dests.length === 1)
+                    any = true;
+            }
+        }
+        return any;
+    }
+
+    // ---- Meter names -----------------------------------------------------
+    // A snapped meter is named after where it sits ("Daw Sink in meter",
+    // "Pianoteq 9 out 9-16 meter") and gets its default name back when
+    // unsnapped, unless the user named it. A plugin's layout key holds its
+    // name, so a rename moves the meter's hidden/snapped/pinned entries to
+    // the new key, and remembers old -> new for undo entries made before.
+    property var meterKeyAlias: ({})
+
+    function resolveMeterKey(key) {
+        var seen = 0;
+        while (meterKeyAlias[key] !== undefined && seen++ < 32)
+            key = meterKeyAlias[key];
+        return key;
+    }
+
+    function isAutoMeterName(name) {
+        return /^Meter \(\d ch\)( #\d+)?$/.test(name) || / (in|out)( \d+(-\d+)?)? meter( #\d+)?$/.test(name);
+    }
+
+    // "<host> in|out[ a-b] meter" for bars on `anchorPorts` of host `hostId`.
+    function snapMeterName(hostId, side, anchorPorts) {
+        var host = findNodeData(hostId);
+        if (!host)
+            return "";
+        var all = audioPortsOf(hostId, side === "source");
+        var idx = [];
+        for (var i = 0; i < anchorPorts.length; i++) {
+            var at = all.indexOf(anchorPorts[i]);
+            if (at >= 0)
+                idx.push(at + 1);
+        }
+        idx.sort(function (a, b) {
+            return a - b;
+        });
+        var range = "";
+        if (idx.length > 0 && idx.length < all.length)
+            range = " " + (idx.length === 1 ? idx[0] : idx[0] + "-" + idx[idx.length - 1]);
+        return host.name + " " + (side === "source" ? "out" : "in") + range + " meter";
+    }
+
+    // The name for `meter` snapped to `side`, from its current wiring.
+    function snapMeterNameFromLinks(meter, side) {
+        var chans = meterChannelPorts(meter);
+        var anchors = [];
+        var hostId = -1;
+        for (var k = 0; k < chans.length; k++) {
+            var a = side === "source" ? chans[k].src : (chans[k].dests.length > 0 ? chans[k].dests[0] : -1);
+            if (a < 0)
+                continue;
+            var nid = getPortNodeId(a);
+            if (hostId < 0)
+                hostId = nid;
+            if (nid === hostId)
+                anchors.push(a);
+        }
+        return hostId >= 0 ? snapMeterName(hostId, side, anchors) : "";
+    }
+
+    // Rename `meter` (to its default name when `base` is "") and move its
+    // layout-key entries along.
+    function renameMeter(meter, base) {
+        if (!meter || !isAutoMeterName(meter.name))
+            return;
+        // Snapped but its host is not known yet: keep the name for now.
+        if (base === "" && meter.layoutKey && dockedMeters[meter.layoutKey])
+            return;
+        var oldKey = meter.layoutKey;
+        var name = controller.rename_meter(meter.id, base);
+        if (!name || !oldKey || name === meter.name)
+            return;
+        var newKey = oldKey.substring(0, oldKey.indexOf(":") + 1) + name;
+        var maps = [hiddenNodes, dockedMeters, pinnedNodes, snapSeenAnchored, snapAnchored];
+        for (var i = 0; i < maps.length; i++) {
+            if (maps[i][oldKey] !== undefined) {
+                maps[i][newKey] = maps[i][oldKey];
+                delete maps[i][oldKey];
+            }
+        }
+        meterKeyAlias[oldKey] = newKey;
+        delete meterKeyAlias[newKey];
+        meter.name = name;
+        meter.layoutKey = newKey;
+        hiddenNodes = hiddenNodes;
+        dockedMeters = dockedMeters;
+        pinnedNodes = pinnedNodes;
+        persistDocked();
+        persistHidden();
+        persistPinned();
+    }
+
+    function setMeterSnapped(key, side) {
+        key = resolveMeterKey(key);
+        if (side) {
+            dockedMeters[key] = side;
+            hiddenNodes[key] = true;
+        } else {
+            delete dockedMeters[key];
+            delete hiddenNodes[key];
+        }
+        dockedMeters = dockedMeters;
+        hiddenNodes = hiddenNodes;
+        persistDocked();
+        persistHidden();
+        var meter = findNodeByLayoutKey(key);
+        if (meter)
+            renameMeter(meter, side ? snapMeterNameFromLinks(meter, side) : "");
+        canvas.requestPaint();
+    }
+
+    function snapMeter(node, side) {
+        if (!canSnapMeter(node, side))
+            return;
+        delete selectedNodes[node.id];
+        setMeterSnapped(node.layoutKey, side);
+        pushUndo({
+            kind: "snap",
+            label: "snap meter",
+            key: node.layoutKey,
+            side: side
+        });
+    }
+
+    // Layout keys of the meters snapped onto `nodeId`'s ports.
+    function metersSnappedOn(nodeId) {
+        var keys = [];
+        for (var id in dockBarFrames) {
+            var f = dockBarFrames[id];
+            if (f.nodeId === nodeId && keys.indexOf(f.meterKey) < 0)
+                keys.push(f.meterKey);
+        }
+        return keys;
+    }
+
+    function unsnapMetersOn(nodeId) {
+        var keys = metersSnappedOn(nodeId);
+        var parts = [];
+        for (var i = 0; i < keys.length; i++) {
+            parts.push({
+                kind: "snap",
+                label: "unsnap meter",
+                key: keys[i],
+                side: "",
+                prevSide: dockedMeters[keys[i]]
+            });
+            setMeterSnapped(keys[i], "");
+        }
+        if (parts.length > 0)
+            pushUndo({
+                kind: "group",
+                label: parts.length > 1 ? "unsnap " + parts.length + " meters" : "unsnap meter",
+                parts: parts
+            });
+    }
+
+    function addMeter(channels) {
+        if (contextCanvasPos)
+            pendingPluginPosition = {
+                x: contextCanvasPos.x,
+                y: contextCanvasPos.y
+            };
+        var name = controller.add_meter(channels);
+        if (name) {
+            pendingPluginName = name;
+        } else {
+            pendingPluginPosition = null;
+            pendingPluginName = "";
+        }
+    }
+
     function computeNodeLayout(node, sorted) {
         var ins = sorted.inputs;
         var outs = sorted.outputs;
         var hiddenIn = 0;
         var hiddenOut = 0;
-        if (node.type === "Plugin") {
+        var meter = isMeterNode(node);
+        if (node.type === "Plugin" && !meter) {
             hiddenIn = ins.length - visiblePortCount(ins);
             hiddenOut = outs.length - visiblePortCount(outs);
             if (hiddenIn < collapseMinHidden)
@@ -2616,9 +3375,9 @@ Item {
         var visOut = expandable && !expanded ? outs.slice(0, outs.length - hiddenOut) : outs;
         var rows = Math.max(visIn.length, visOut.length, 1);
         var h = Theme.nodeHeader + Theme.nodePortsTop + Theme.nodePortRow * (rows + (expandable ? 1 : 0)) + Theme.nodePortsBottom + 2;
-        if (node.type === "Plugin" || node.type === "Subgraph")
+        if ((node.type === "Plugin" && !meter) || node.type === "Subgraph")
             h += Theme.nodeFooter;
-        if (node.type === "Plugin")
+        if (node.type === "Plugin" && !meter)
             h += Theme.nodePresetRow;
         return {
             inputs: visIn,
@@ -2865,6 +3624,8 @@ Item {
         var bestDist = hitRadius + 1;
         for (var pid in portPositions) {
             var pp = portPositions[pid];
+            if (pp.alias)
+                continue;
             var screenX = pp.cx * zoom + panX;
             var screenY = pp.cy * zoom + panY;
             var dx = sx - screenX;
@@ -2900,6 +3661,30 @@ Item {
         for (var i = 0; i < links.length; i++) {
             if (links[i].outputPortId === portId || links[i].inputPortId === portId)
                 out.push(links[i].id);
+        }
+        return out;
+    }
+
+    // The wires drawn at `portId`. For a port a meter is snapped to: its own
+    // wires except the meter's link to it, plus the meter port's wires that
+    // are drawn there (so Disconnect never cuts the meter out of the port).
+    function visibleLinksOfPort(portId) {
+        var meterPort = snapRedirect[portId];
+        if (meterPort === undefined)
+            return linksOfPort(portId);
+        var meterNode = getPortNodeId(meterPort);
+        var out = [];
+        var own = linksOfPort(portId);
+        for (var i = 0; i < own.length; i++) {
+            var l = findLinkData(own[i]);
+            if (l && l.outputNodeId !== meterNode && l.inputNodeId !== meterNode)
+                out.push(own[i]);
+        }
+        var viaMeter = linksOfPort(meterPort);
+        for (var j = 0; j < viaMeter.length; j++) {
+            var m = findLinkData(viaMeter[j]);
+            if (m && m.outputPortId !== portId && m.inputPortId !== portId && out.indexOf(viaMeter[j]) < 0)
+                out.push(viaMeter[j]);
         }
         return out;
     }
@@ -3133,6 +3918,8 @@ Item {
                 nodeId: n.id
             };
         if (n.type !== "Plugin" && n.type !== "Subgraph")
+            return null;
+        if (isMeterNode(n))
             return null;
         if (n.type === "Plugin") {
             var pr = presetRects(n, pos.x, pos.y, calculateNodeHeight(n));
@@ -3391,6 +4178,61 @@ Item {
                 }
             }
 
+            // ---- Snapped meters: the snapped-to port stands for the meter's
+            // port (wires drawn there), bars, wires that skip the meter ----
+            var newDockFrames = {};
+            var newDockIds = [];
+            var newRedirect = {};
+            var bypassLinks = {};
+            for (var dmi = 0; dmi < nodes.length; dmi++) {
+                var dm = nodes[dmi];
+                if (!isDockedMeter(dm))
+                    continue;
+                var toSource = dockedMeters[dm.layoutKey] === "source";
+                var dchans = meterChannelPorts(dm);
+                for (var dk = 0; dk < dchans.length; dk++) {
+                    var dc = dchans[dk];
+                    var anchorId = toSource ? dc.src : (dc.dests.length > 0 ? dc.dests[0] : -1);
+                    // The meter port the snapped-to port stands for.
+                    var meterPort = toSource ? dc.outPort : dc.inPort;
+                    var anchor = newPortPositions[anchorId];
+                    if (!anchor || anchor.alias || meterPort < 0)
+                        continue;
+                    newPortPositions[meterPort] = {
+                        cx: anchor.cx,
+                        cy: anchor.cy,
+                        nodeId: anchor.nodeId,
+                        z: anchor.z,
+                        alias: true
+                    };
+                    // If wiring changed after the snap and the meter's other
+                    // side now has several wires, draw those at the
+                    // snapped-to port too, so none vanish.
+                    var otherPort = toSource ? dc.inPort : dc.outPort;
+                    if (otherPort >= 0 && (toSource ? dc.srcs.length : dc.dests.length) > 1)
+                        newPortPositions[otherPort] = newPortPositions[meterPort];
+                    if (newRedirect[anchorId] === undefined)
+                        newRedirect[anchorId] = meterPort;
+                    // Other wires on the snapped-to port don't pass the meter.
+                    for (var bl = 0; bl < links.length; bl++) {
+                        var blk = links[bl];
+                        if (toSource ? (blk.outputPortId === anchorId && blk.inputPortId !== dc.inPort) : (blk.inputPortId === anchorId && blk.outputPortId !== dc.outPort))
+                            bypassLinks[blk.id] = true;
+                    }
+                    var dkey = dm.id + ":" + dk;
+                    newDockIds.push(dkey);
+                    newDockFrames[dkey] = {
+                        meterId: dm.id,
+                        meterKey: dm.layoutKey,
+                        channel: dk,
+                        nodeId: anchor.nodeId,
+                        output: toSource,
+                        cx: anchor.cx,
+                        cy: anchor.cy
+                    };
+                }
+            }
+
             // ---- Pass 2: wires, behind the nodes --------------------------
             ctx.lineCap = "round";
             for (var li = 0; li < links.length; li++) {
@@ -3398,6 +4240,10 @@ Item {
                 var fromPos = newPortPositions[link.outputPortId];
                 var toPos = newPortPositions[link.inputPortId];
                 if (!fromPos || !toPos)
+                    continue;
+                // A snapped meter's own wire into or out of the port it
+                // snapped to starts and ends there: nothing to draw.
+                if (isSnapInternal(fromPos, toPos))
                     continue;
                 var accented = !!selectedLinks[link.id] || !!selectedNodes[fromPos.nodeId] || !!selectedNodes[toPos.nodeId];
                 var hovered = link.id === hoveredLinkId;
@@ -3414,7 +4260,12 @@ Item {
                     continue;
                 }
                 ctx.globalAlpha = accented || hovered ? 1 : (link.active === false ? 0.35 : Theme.wireOpacity);
+                // Skips a meter snapped to one of its ports: dashed.
+                if (bypassLinks[link.id])
+                    ctx.setLineDash([5, 4]);
                 drawBezier(ctx, fromPos.cx, fromPos.cy, toPos.cx, toPos.cy, accented ? Theme.accent : signalColor(mt), accented || hovered ? Theme.wireWidthActive : Theme.wireWidth);
+                if (bypassLinks[link.id])
+                    ctx.setLineDash([]);
             }
             ctx.globalAlpha = 1;
 
@@ -3487,6 +4338,7 @@ Item {
             blockGeom = newBlockGeom;
 
             // ---- Pass 3: node cards ---------------------------------------
+            var newMeterFrames = {};
             for (var ni2 = 0; ni2 < nodes.length; ni2++) {
                 var n2 = nodes[ni2];
                 if (n2.layoutKey && hiddenNodes[n2.layoutKey])
@@ -3495,6 +4347,32 @@ Item {
                 if (!p2)
                     continue;
                 drawNode(ctx, n2, p2.x, p2.y);
+                if (isMeterNode(n2))
+                    newMeterFrames[n2.id] = {
+                        sx: panX + p2.x * zoom,
+                        sy: panY + p2.y * zoom,
+                        w: getNodeWidth(n2.id),
+                        h: calculateNodeHeight(n2),
+                        zoom: zoom,
+                        alpha: (nodeMatchesSearch(n2) ? 1 : 0.35) * (snapPreview && snapPreview.meterId === n2.id ? 0.45 : 1),
+                        channels: n2.meterChannels,
+                        rows: meterRows(n2)
+                    };
+            }
+
+            // ---- Snap preview: where the dragged meter's bars will go -----
+            if (snapPreview) {
+                ctx.save();
+                ctx.fillStyle = "" + Theme.accent;
+                for (var spi = 0; spi < snapPreview.ports.length; spi++) {
+                    var spp = newPortPositions[snapPreview.ports[spi]];
+                    if (!spp)
+                        continue;
+                    var spr = dockBarRect(spp.cx, spp.cy, snapPreview.side === "source");
+                    roundRectPath(ctx, spr.x, spr.y, spr.w, spr.h, spr.h / 2);
+                    ctx.fill();
+                }
+                ctx.restore();
             }
 
             // ---- Insert preview: ghost wires through the dragged plugin ----
@@ -3588,7 +4466,167 @@ Item {
 
             ctx.restore();
             portPositions = newPortPositions;
+            meterFrames = newMeterFrames;
+            dockBarFrames = newDockFrames;
+            snapRedirect = newRedirect;
+            var anchoredNow = {};
+            for (var dfk in newDockFrames) {
+                anchoredNow[newDockFrames[dfk].meterKey] = true;
+                snapSeenAnchored[newDockFrames[dfk].meterKey] = true;
+            }
+            snapAnchored = anchoredNow;
+            if (orphanedSnaps().length > 0 && !orphanTimer.running)
+                orphanTimer.start();
+            if (newDockIds.join(",") !== dockBarIds.join(","))
+                dockBarIds = newDockIds;
             updateScrollBars();
+        }
+    }
+
+    // Live meter levels over the canvas (see isMeterNode): one item per
+    // meter node at the place the last paint drew it, so level changes
+    // never repaint the canvas.
+    Item {
+        id: meterLayer
+        anchors.fill: parent
+        clip: true
+
+        Repeater {
+            model: graphView.meterNodeIds
+            delegate: Item {
+                id: meterCard
+                required property var modelData
+                readonly property var frame: graphView.meterFrames[modelData] || null
+                readonly property var levels: graphView.meterLevels[modelData] || []
+                visible: frame !== null
+                x: frame ? frame.sx : 0
+                y: frame ? frame.sy : 0
+                width: frame ? frame.w : 0
+                height: frame ? frame.h : 0
+                scale: frame ? frame.zoom : 1
+                transformOrigin: Item.TopLeft
+                opacity: frame ? frame.alpha : 1
+
+                Repeater {
+                    model: meterCard.frame ? meterCard.frame.channels : 0
+                    delegate: Item {
+                        id: bar
+                        required property int index
+                        readonly property var rect: graphView.meterBarRect(meterCard.width, meterCard.frame.rows[index] !== undefined ? meterCard.frame.rows[index] : index)
+                        readonly property real frac: graphView.levelFraction(meterCard.levels[index] || 0)
+                        x: rect.x
+                        y: rect.y
+                        width: rect.w
+                        height: rect.h
+                        clip: true
+
+                        // Green up to -12 dBFS, amber to -3, red above.
+                        Rectangle {
+                            width: bar.width * Math.min(bar.frac, graphView.meterHotFrac)
+                            height: bar.height
+                            radius: bar.height / 2
+                            color: Theme.meterLow
+                        }
+                        Rectangle {
+                            x: bar.width * graphView.meterHotFrac
+                            width: bar.width * Math.max(0, Math.min(bar.frac, graphView.meterClipFrac) - graphView.meterHotFrac)
+                            height: bar.height
+                            color: Theme.meterHot
+                        }
+                        Rectangle {
+                            x: bar.width * graphView.meterClipFrac
+                            width: bar.width * Math.max(0, bar.frac - graphView.meterClipFrac)
+                            height: bar.height
+                            color: Theme.meterClip
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Levels of snapped meters: a thin bar under the label of the port each
+    // channel is snapped to (outputs: ending at the label's right edge;
+    // inputs: starting at its left edge).
+    Item {
+        id: dockBarLayer
+        anchors.fill: parent
+        clip: true
+
+        Repeater {
+            model: graphView.dockBarIds
+            delegate: Item {
+                id: dockBar
+                required property var modelData
+                readonly property var frame: graphView.dockBarFrames[modelData] || null
+                readonly property real level: {
+                    var lv = frame ? graphView.meterLevels[frame.meterId] : null;
+                    return lv && frame ? (lv[frame.channel] || 0) : 0;
+                }
+                readonly property real frac: graphView.levelFraction(level)
+                readonly property real barW: graphView.dockBarW
+                readonly property var rect: frame ? graphView.dockBarRect(frame.cx, frame.cy, frame.output) : null
+                visible: frame !== null
+                // Scene geometry, then scaled like the canvas.
+                x: rect ? graphView.panX + rect.x * graphView.zoom : 0
+                y: rect ? graphView.panY + rect.y * graphView.zoom : 0
+                width: graphView.dockBarW
+                height: graphView.dockBarH
+                scale: graphView.zoom
+                transformOrigin: Item.TopLeft
+                clip: true
+
+                Rectangle {
+                    anchors.fill: parent
+                    radius: height / 2
+                    color: Theme.meterTrack
+                }
+                // Fills left to right, like the bars on a meter card.
+                Item {
+                    width: parent.width
+                    height: parent.height
+                    Rectangle {
+                        width: dockBar.barW * Math.min(dockBar.frac, graphView.meterHotFrac)
+                        height: parent.height
+                        radius: height / 2
+                        color: Theme.meterLow
+                    }
+                    Rectangle {
+                        x: dockBar.barW * graphView.meterHotFrac
+                        width: dockBar.barW * Math.max(0, Math.min(dockBar.frac, graphView.meterClipFrac) - graphView.meterHotFrac)
+                        height: parent.height
+                        color: Theme.meterHot
+                    }
+                    Rectangle {
+                        x: dockBar.barW * graphView.meterClipFrac
+                        width: dockBar.barW * Math.max(0, dockBar.frac - graphView.meterClipFrac)
+                        height: parent.height
+                        color: Theme.meterClip
+                    }
+                }
+            }
+        }
+    }
+
+    // Grace before unsnapping meters that lost their port: rides out wires
+    // that are briefly re-made (a plugin reload, a rule reconnecting).
+    Timer {
+        id: orphanTimer
+        interval: 1500
+        onTriggered: graphView.unsnapOrphans()
+    }
+
+    // ~20 updates a second while there are meters and the window is shown.
+    Timer {
+        interval: 50
+        repeat: true
+        running: graphView.meterNodeIds.length > 0 && graphView.visible && graphView.Window.window !== null && graphView.Window.window.visibility !== Window.Minimized && graphView.Window.window.visibility !== Window.Hidden
+        onTriggered: {
+            try {
+                graphView.meterLevels = JSON.parse(controller.meter_levels_json());
+            } catch (e) {
+                graphView.meterLevels = {};
+            }
         }
     }
 
@@ -3598,6 +4636,7 @@ Item {
         var nw = getNodeWidth(node.id);
         var nh = calculateNodeHeight(node);
         var isPlugin = node.type === "Plugin";
+        var isMeter = isMeterNode(node);
         var isSubgraph = node.type === "Subgraph";
         var selected = !!selectedNodes[node.id];
         var isDefault = defaultNodeKey !== "" && node.layoutKey === defaultNodeKey;
@@ -3607,8 +4646,11 @@ Item {
         var portsTop = hdr + Theme.nodePortsTop;
 
         ctx.save();
-        // Search: non-matching nodes dim to 35 %.
+        // Search: non-matching nodes dim to 35 %. A meter about to snap
+        // onto another node fades.
         var baseAlpha = nodeMatchesSearch(node) ? 1 : 0.35;
+        if (snapPreview && snapPreview.meterId === node.id)
+            baseAlpha *= 0.45;
 
         // Shadow (layered rects, cheap) and selection halo.
         ctx.fillStyle = "" + Theme.shadowNode;
@@ -3666,6 +4708,16 @@ Item {
         ctx.lineWidth = 1;
         ctx.stroke();
         ctx.globalAlpha = baseAlpha;
+        // The node a dragged meter will snap onto: accent fill and ring.
+        if (snapPreview && snapPreview.nodeId === node.id) {
+            roundRectPath(ctx, nx, ny, nw, nh, Theme.radiusCard);
+            ctx.fillStyle = "" + Theme.accentFaint;
+            ctx.fill();
+            roundRectPath(ctx, nx - 3, ny - 3, nw + 6, nh + 6, Theme.radiusCard + 3);
+            ctx.strokeStyle = "" + Theme.accent;
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
 
         // Header: category chip, title, tags; hairline below.
         var chip = Theme.nodeChip;
@@ -3697,7 +4749,7 @@ Item {
         ctx.restore();
 
         var tagRight = pr.x - 4;
-        if (isPlugin && node.pluginFormat)
+        if (isPlugin && node.pluginFormat && !isMeter)
             tagRight = drawTag(ctx, node.pluginFormat, tagRight, ny + hdr / 2) - 6;
         if (isSubgraph) {
             var present = (node.memberCount || 0) - (node.missing || 0);
@@ -3725,21 +4777,35 @@ Item {
         var labelW = both ? (nw - 2 * Theme.nodePadX - 8) / 2 : nw - 2 * Theme.nodePadX;
         ctx.font = fontSpec(400, Theme.sizeMono, true);
         ctx.textBaseline = "middle";
+        var meterChannel = 0;
         for (var i = 0; i < lay.inputs.length; i++) {
             var pin = lay.inputs[i];
             var py = ny + portsTop + i * rowH + rowH / 2;
             ctx.fillStyle = "" + Theme.textSecondary;
             ctx.textAlign = "left";
-            ctx.fillText(elide(ctx, pin.name, labelW), nx + Theme.nodePadX, py);
+            // Meter audio rows: the channel number, then the bar's track
+            // (the level itself is drawn by meterLayer).
+            var meterRow = isMeter && isAudioRow(pin);
+            if (meterRow)
+                meterChannel++;
+            ctx.fillText(meterRow ? "" + meterChannel : elide(ctx, pin.name, labelW), nx + Theme.nodePadX, py);
+            if (meterRow) {
+                var mb = meterBarRect(nw, i);
+                roundRectPath(ctx, nx + mb.x, ny + mb.y, mb.w, mb.h, mb.h / 2);
+                ctx.fillStyle = "" + Theme.meterTrack;
+                ctx.fill();
+            }
             drawPin(ctx, pin, node.id, nx, py, selected);
         }
         for (var o = 0; o < lay.outputs.length; o++) {
             var pout = lay.outputs[o];
             var pyo = ny + portsTop + o * rowH + rowH / 2;
-            ctx.font = fontSpec(400, Theme.sizeMono, true);
-            ctx.fillStyle = "" + Theme.textSecondary;
-            ctx.textAlign = "right";
-            ctx.fillText(elide(ctx, pout.name, labelW), nx + nw - Theme.nodePadX, pyo);
+            if (!isMeter) {
+                ctx.font = fontSpec(400, Theme.sizeMono, true);
+                ctx.fillStyle = "" + Theme.textSecondary;
+                ctx.textAlign = "right";
+                ctx.fillText(elide(ctx, pout.name, labelW), nx + nw - Theme.nodePadX, pyo);
+            }
             drawPin(ctx, pout, node.id, nx + nw, pyo, selected);
         }
 
@@ -3791,7 +4857,7 @@ Item {
         }
 
         // Plugin preset row: selected preset (menu) and Save.
-        if (isPlugin) {
+        if (isPlugin && !isMeter) {
             var pinfo = presetInfo[node.id] || {
                 name: "",
                 isDefault: false,
@@ -3831,7 +4897,7 @@ Item {
         }
 
         // Plugin footer: On / UI / Params; hairline above.
-        if (isPlugin) {
+        if (isPlugin && !isMeter) {
             ctx.fillStyle = "" + Theme.borderHairline;
             ctx.fillRect(nx + 1, ny + nh - Theme.nodeFooter, nw - 2, 1);
             var bypassed = isNodeBypassed(node);
@@ -4181,7 +5247,10 @@ Item {
                         return;
                     }
 
-                    if (nodeIsSelected) {
+                    // A meter that is the only selected node drags on its
+                    // own, so it can be snapped onto a node by dropping it.
+                    var loneMeter = nodeIsSelected && isMeterNode(findNodeData(nodeIdDrag)) && selectedNodeIds().length === 1;
+                    if (nodeIsSelected && !loneMeter) {
                         groupDragging = true;
                         for (var agid in selectedNodes) {
                             if (selectedNodes[agid])
@@ -4389,6 +5458,11 @@ Item {
                     activeSnapLines = [];
                 }
                 updateInsertPreview(dragNodeId);
+                var draggedMeter = findNodeData(dragNodeId);
+                snapPreview = isMeterNode(draggedMeter) ? meterSnapCandidate(draggedMeter, mouse.x, mouse.y) : null;
+                // Snapping wins over dropping on a wire.
+                if (snapPreview)
+                    insertPreview = null;
                 canvas.requestPaint();
                 return;
             }
@@ -4464,16 +5538,27 @@ Item {
                     var targetId = findPortAt(mouse.x, mouse.y);
                     if (targetId >= 0 && targetId !== connectFromPortId) {
                         var targetDir = getPortDirection(targetId);
-                        var fromNodeId = getPortNodeId(connectFromPortId);
-                        var toNodeId = getPortNodeId(targetId);
-                        if (targetDir !== connectFromDir && fromNodeId !== toNodeId) {
-                            var why = blockedReasonFor(connectFromPortId, connectFromDir, targetId);
+                        // A port a meter is snapped to stands for the meter's
+                        // port: the wire goes through the meter.
+                        var fromPort = snapTargetPort(connectFromPortId);
+                        var toPort = snapTargetPort(targetId);
+                        var fromNodeId = getPortNodeId(fromPort);
+                        var toNodeId = getPortNodeId(toPort);
+                        if (targetDir !== connectFromDir && fromNodeId !== toNodeId && fromPort !== toPort) {
+                            var why = blockedReasonFor(fromPort, connectFromDir, toPort);
+                            var outP = connectFromDir === "Output" ? fromPort : toPort;
+                            var inP = connectFromDir === "Output" ? toPort : fromPort;
+                            var origOut = connectFromDir === "Output" ? connectFromPortId : targetId;
+                            var origIn = connectFromDir === "Output" ? targetId : connectFromPortId;
+                            // Re-connecting a pair whose wire skips a meter
+                            // snapped there: route it through the meter.
+                            var skipping = (outP !== origOut || inP !== origIn) ? findLinkByPorts(origOut, origIn) : null;
                             if (why !== "") {
                                 showToast("Blocked by rule " + why + ". Remove the block to connect.");
-                            } else if (connectFromDir === "Output") {
-                                connectPorts(connectFromPortId, targetId);
+                            } else if (skipping) {
+                                connectReplacing(outP, inP, skipping);
                             } else {
-                                connectPorts(targetId, connectFromPortId);
+                                connectPorts(outP, inP);
                             }
                         }
                     }
@@ -4501,14 +5586,32 @@ Item {
                     canvas.requestPaint();
                 }
 
-                if (dragNodeId >= 0) {
+                if (dragNodeId >= 0 && snapPreview && snapPreview.meterId === dragNodeId) {
+                    // A meter dropped on a node it is wired to snaps onto it.
+                    // Its card goes back to where the drag started, which is
+                    // where it reappears when unsnapped.
+                    var sp = snapPreview;
+                    snapPreview = null;
+                    insertPreview = null;
+                    if (dragStartPos)
+                        nodePositions[dragNodeId] = {
+                            x: dragStartPos.x,
+                            y: dragStartPos.y
+                        };
+                    snapMeter(findNodeData(dragNodeId), sp.side);
+                    persistLayout();
+                    canvas.requestPaint();
+                } else if (dragNodeId >= 0) {
                     // Dropping a plugin on a wire inserts it right away; the
                     // ghost wires shown while dragging are the confirmation.
+                    var rewire = null;
                     var linkUnder = findLinkUnderNode(dragNodeId);
                     if (linkUnder >= 0) {
                         var draggedNode = findNodeData(dragNodeId);
-                        if (draggedNode && draggedNode.type === "Plugin")
+                        if (draggedNode && draggedNode.type === "Plugin") {
+                            rewire = insertRewireEntry(linkUnder, dragNodeId);
                             controller.insert_node_on_link(linkUnder, dragNodeId);
+                        }
                     }
                     insertPreview = null;
                     // Resolve overlap after dropping a single node
@@ -4516,16 +5619,29 @@ Item {
                     if (droppedNode) {
                         resolveNodeOverlap(droppedNode);
                     }
+                    var moved = null;
                     if (dragStartPos) {
                         var movedFrom = {};
                         movedFrom[dragNodeId] = dragStartPos;
-                        recordMove("move", movedFrom);
+                        moved = moveEntry("move", movedFrom);
                     }
+                    // The move and the rewiring undo together, as one step.
+                    if (rewire && moved)
+                        pushUndo({
+                            kind: "group",
+                            label: "insert node",
+                            parts: [moved, rewire]
+                        });
+                    else if (rewire)
+                        pushUndo(rewire);
+                    else if (moved)
+                        pushUndo(moved);
                     persistLayout();
                     canvas.requestPaint();
                 }
                 dragNodeId = -1;
                 dragStartPos = null;
+                snapPreview = null;
 
                 if (selectDragging) {
                     selectDragging = false;
@@ -5171,7 +6287,7 @@ Item {
             var link = links[li];
             var fromPos = portPositions[link.outputPortId];
             var toPos = portPositions[link.inputPortId];
-            if (!fromPos || !toPos)
+            if (!fromPos || !toPos || isSnapInternal(fromPos, toPos))
                 continue;
             // The curve stays inside its control polygon's box.
             var ctrl = bezierCtrl(fromPos.cx, toPos.cx);
@@ -5223,7 +6339,12 @@ Item {
                 continue;
             var fromPos = portPositions[link.outputPortId];
             var toPos = portPositions[link.inputPortId];
-            if (!fromPos || !toPos)
+            if (!fromPos || !toPos || isSnapInternal(fromPos, toPos))
+                continue;
+            // Nor a wire drawn at this node's ports: one of a meter snapped
+            // onto it (its end really is the meter, but splicing the node
+            // in there would loop it through its own meter).
+            if (fromPos.nodeId === nodeId || toPos.nodeId === nodeId)
                 continue;
             var ctrlDist = bezierCtrl(fromPos.cx, toPos.cx);
             var cx1 = fromPos.cx + ctrlDist;
@@ -5320,7 +6441,7 @@ Item {
             var link = links[li];
             var fromPos = portPositions[link.outputPortId];
             var toPos = portPositions[link.inputPortId];
-            if (fromPos && toPos) {
+            if (fromPos && toPos && !isSnapInternal(fromPos, toPos)) {
                 if (bezierIntersectsRect(fromPos.cx, fromPos.cy, toPos.cx, toPos.cy, rx, ry, rw, rh)) {
                     result[link.id] = linkSig(link);
                 }
@@ -5563,6 +6684,14 @@ Item {
     // Record a move of the nodes in `fromById` (nodeId -> {x, y} before) to
     // where they are now. Nodes that did not move are left out.
     function recordMove(verb, fromById) {
+        var entry = moveEntry(verb, fromById);
+        if (entry)
+            pushUndo(entry);
+        return entry;
+    }
+
+    // The history entry recordMove would push, without pushing it.
+    function moveEntry(verb, fromById) {
         var items = [];
         for (var id in fromById) {
             var nid = parseInt(id);
@@ -5585,13 +6714,73 @@ Item {
         }
         if (items.length === 0)
             return null;
-        var entry = {
+        return {
             kind: "move",
             label: verb + " " + plural(items.length, "node", "nodes"),
             items: items
         };
-        pushUndo(entry);
-        return entry;
+    }
+
+    // A record of a wire by its two ports, for wires that may not exist yet.
+    function portLinkRecord(outPort, inPort) {
+        return {
+            o: outPort,
+            i: inPort,
+            onKey: uniqueKeyById[getPortNodeId(outPort)] || "",
+            innKey: uniqueKeyById[getPortNodeId(inPort)] || ""
+        };
+    }
+
+    // The history entry for inserting plugin `nodeId` on wire `linkId`:
+    // the wires it removes and the ones it makes through the plugin. Taken
+    // before the insert, while the removed wires still exist.
+    function insertRewireEntry(linkId, nodeId) {
+        var plan = null;
+        try {
+            var json = controller.insert_on_link_preview_json(linkId, nodeId);
+            plan = json ? JSON.parse(json) : null;
+        } catch (e) {
+            plan = null;
+        }
+        if (!plan)
+            return null;
+        var removed = [];
+        for (var ri = 0; ri < plan.remove.length; ri++) {
+            var l = findLinkData(plan.remove[ri]);
+            if (l)
+                removed.push(linkRecord(l));
+        }
+        var added = [];
+        for (var ai = 0; ai < plan.add.length; ai++)
+            added.push(portLinkRecord(plan.add[ai][0], plan.add[ai][1]));
+        if (removed.length === 0 && added.length === 0)
+            return null;
+        return {
+            kind: "rewire",
+            label: "insert node",
+            removed: removed,
+            added: added
+        };
+    }
+
+    // Make (or remove) the recorded wires that are not (or are) there.
+    // Returns how many changed.
+    function applyLinkRecords(recs, make) {
+        var done = 0;
+        for (var li = 0; li < recs.length; li++) {
+            var rec = recs[li];
+            if (!linkRecordValid(rec))
+                continue;
+            var live = findLinkByPorts(rec.o, rec.i);
+            if (make && !live) {
+                controller.connect_ports(rec.o, rec.i);
+                done++;
+            } else if (!make && live) {
+                controller.disconnect_link(live.id);
+                done++;
+            }
+        }
+        return done;
     }
 
     function linkRecord(link) {
@@ -5690,22 +6879,30 @@ Item {
             }
             hiddenNodes = hiddenNodes;
             persistHidden();
+        } else if (entry.kind === "snap") {
+            // side "" = an unsnap; undoing it snaps back to prevSide.
+            var snapTo = undoing ? (entry.side ? "" : entry.prevSide) : entry.side;
+            setMeterSnapped(entry.key, snapTo || "");
+            done++;
+        } else if (entry.kind === "group") {
+            // Parts were done in order, so they are undone in reverse.
+            for (var pi = 0; pi < entry.parts.length; pi++) {
+                var part = entry.parts[undoing ? entry.parts.length - 1 - pi : pi];
+                done += applyHistory(part, undoing);
+            }
+        } else if (entry.kind === "rewire") {
+            // Take the wires down first, then put the others back.
+            if (undoing) {
+                done += applyLinkRecords(entry.added, false);
+                done += applyLinkRecords(entry.removed, true);
+            } else {
+                done += applyLinkRecords(entry.removed, false);
+                done += applyLinkRecords(entry.added, true);
+            }
         } else {
             // "connect" / "disconnect": undoing one is doing the other.
             var make = (entry.kind === "disconnect") === undoing;
-            for (var li = 0; li < entry.links.length; li++) {
-                var rec = entry.links[li];
-                if (!linkRecordValid(rec))
-                    continue;
-                var live = findLinkByPorts(rec.o, rec.i);
-                if (make && !live) {
-                    controller.connect_ports(rec.o, rec.i);
-                    done++;
-                } else if (!make && live) {
-                    controller.disconnect_link(live.id);
-                    done++;
-                }
-            }
+            done += applyLinkRecords(entry.links, make);
         }
         canvas.requestPaint();
         return done;
@@ -5771,7 +6968,7 @@ Item {
         var allLinks = {};
         for (var li = 0; li < links.length; li++) {
             var l = links[li];
-            if (portPositions[l.outputPortId] && portPositions[l.inputPortId])
+            if (portPositions[l.outputPortId] && portPositions[l.inputPortId] && !isSnapInternal(portPositions[l.outputPortId], portPositions[l.inputPortId]))
                 allLinks[l.id] = linkSig(l);
         }
         selectedNodes = allNodes;

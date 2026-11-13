@@ -157,7 +157,177 @@ const LV2_UI_GTK4: &str = "http://lv2plug.in/ns/extensions/ui#Gtk4UI";
 const LV2_UI_X11: &str = "http://lv2plug.in/ns/extensions/ui#X11UI";
 const LV2_UI_QT5: &str = "http://lv2plug.in/ns/extensions/ui#Qt5UI";
 
+/// KXStudio external UI: the UI opens a window of its own.
+const LV2_UI_EXTERNAL: &str = "http://kxstudio.sf.net/ns/lv2ext/external-ui#Widget";
+/// The same, under its old URI.
+const LV2_UI_EXTERNAL_OLD: &str = "http://lv2plug.in/ns/extensions/ui#external";
+
+const LV2_EXTERNAL_UI_HOST_URI: &CStr = c"http://kxstudio.sf.net/ns/lv2ext/external-ui#Host";
+const LV2_EXTERNAL_UI_DEPRECATED_URI: &CStr = c"http://lv2plug.in/ns/extensions/ui#external";
+const LV2_UI_PORT_MAP_URI: &CStr = c"http://lv2plug.in/ns/extensions/ui#portMap";
+const LV2_UI_IDLE_FEATURE_URI: &CStr = c"http://lv2plug.in/ns/extensions/ui#idleInterface";
+
 const HOST_TYPE_URI: &str = "http://lv2plug.in/ns/extensions/ui#Gtk3UI";
+
+/// UI types in the order they are preferred.  Embeddable kinds first; an
+/// external UI is the fallback for plugins that have nothing else.
+const UI_PREFERENCE: [&str; 7] = [
+    LV2_UI_GTK3,
+    LV2_UI_X11,
+    LV2_UI_EXTERNAL,
+    LV2_UI_EXTERNAL_OLD,
+    LV2_UI_QT5,
+    LV2_UI_GTK2,
+    LV2_UI_GTK4,
+];
+
+/// `LV2UI_Descriptor`.
+#[repr(C)]
+struct Lv2UiDescriptor {
+    uri: *const c_char,
+    instantiate: Option<
+        unsafe extern "C" fn(
+            descriptor: *const Lv2UiDescriptor,
+            plugin_uri: *const c_char,
+            bundle_path: *const c_char,
+            write_function: Option<SuilPortWriteFunc>,
+            controller: *mut c_void,
+            widget: *mut *mut c_void,
+            features: *const *const lv2_raw::core::LV2Feature,
+        ) -> *mut c_void,
+    >,
+    cleanup: Option<unsafe extern "C" fn(handle: *mut c_void)>,
+    port_event: Option<
+        unsafe extern "C" fn(
+            handle: *mut c_void,
+            port_index: c_uint,
+            buffer_size: c_uint,
+            format: c_uint,
+            buffer: *const c_void,
+        ),
+    >,
+    extension_data: Option<unsafe extern "C" fn(uri: *const c_char) -> *const c_void>,
+}
+
+/// `LV2_External_UI_Widget`: what an external UI hands back as its widget.
+#[repr(C)]
+struct ExternalUiWidget {
+    run: Option<unsafe extern "C" fn(*mut ExternalUiWidget)>,
+    show: Option<unsafe extern "C" fn(*mut ExternalUiWidget)>,
+    hide: Option<unsafe extern "C" fn(*mut ExternalUiWidget)>,
+}
+
+/// `LV2_External_UI_Host`.
+#[repr(C)]
+struct ExternalUiHost {
+    ui_closed: Option<unsafe extern "C" fn(controller: *mut c_void)>,
+    plugin_human_id: *const c_char,
+}
+
+/// `LV2UI_Port_Map`.
+#[repr(C)]
+struct Lv2UiPortMap {
+    handle: *mut c_void,
+    port_index: Option<SuilPortIndexFunc>,
+}
+
+/// The UI a plugin is opened with.
+struct SelectedUi {
+    uri: String,
+    type_uri: &'static str,
+    bundle_path: String,
+    binary_path: String,
+}
+
+impl SelectedUi {
+    fn is_external(&self) -> bool {
+        self.type_uri == LV2_UI_EXTERNAL || self.type_uri == LV2_UI_EXTERNAL_OLD
+    }
+}
+
+/// Whether a UI asks for instance-access or data-access, which hand it
+/// pointers into the plugin instance (so it can only use them in-process).
+#[derive(Default)]
+struct UiInstanceAccess {
+    /// It cannot work without.
+    required: bool,
+    /// It works without, but uses it when given (often for its displays).
+    optional: bool,
+}
+
+/// Checked per UI: a bundle often has several UIs that differ here.
+fn ui_instance_access(world: &lilv::World, ui_uri: &str) -> UiInstanceAccess {
+    let ui = world.new_uri(ui_uri);
+    // A UI's own data file (its feature lines) may not be loaded until
+    // asked for.
+    let _ = world.load_resource(&ui);
+    let features = [
+        world.new_uri("http://lv2plug.in/ns/ext/instance-access"),
+        world.new_uri("http://lv2plug.in/ns/ext/data-access"),
+    ];
+    let asks = |predicate: &str| {
+        let predicate = world.new_uri(predicate);
+        features
+            .iter()
+            .any(|feature| world.ask(Some(&ui), Some(&predicate), Some(feature)))
+    };
+    UiInstanceAccess {
+        required: asks("http://lv2plug.in/ns/lv2core#requiredFeature"),
+        optional: asks("http://lv2plug.in/ns/lv2core#optionalFeature"),
+    }
+}
+
+/// The long-standing X11 routing test: does any TTL file in the bundle
+/// mention instance-access alongside a requiredFeature?  Coarse (it covers
+/// every UI in the bundle), but it is what X11 UIs have been routed by.
+fn bundle_mentions_instance_access(bundle: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(std::path::Path::new(bundle)) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry.path().extension().is_some_and(|e| e == "ttl")
+            && std::fs::read_to_string(entry.path()).is_ok_and(|content| {
+                content.contains("instance-access") && content.contains("requiredFeature")
+            })
+    })
+}
+
+/// The plugin's most preferred UI (see `UI_PREFERENCE`), whatever order
+/// the plugin lists its UIs in.
+fn select_ui(world: &lilv::World, plugin: &lilv::plugin::Plugin) -> Option<SelectedUi> {
+    let uis = plugin.uis()?;
+    let uis: Vec<_> = uis.iter().collect();
+    for type_uri in UI_PREFERENCE {
+        let class = world.new_uri(type_uri);
+        for ui in &uis {
+            if !ui.is_a(&class) {
+                continue;
+            }
+            let Some(uri) = ui.uri().as_uri().map(String::from) else {
+                continue;
+            };
+            let Some(bundle_path) = ui.bundle_uri().and_then(|n| n.path().map(|(_, p)| p)) else {
+                continue;
+            };
+            let Some(binary_path) = ui.binary_uri().and_then(|n| n.path().map(|(_, p)| p)) else {
+                continue;
+            };
+            // LV2 hands UIs their bundle path with a trailing separator.
+            let bundle_path = if bundle_path.ends_with('/') {
+                bundle_path
+            } else {
+                format!("{bundle_path}/")
+            };
+            return Some(SelectedUi {
+                uri,
+                type_uri,
+                bundle_path,
+                binary_path,
+            });
+        }
+    }
+    None
+}
 
 /// Feature data handed to an in-process plugin UI.  The UI may keep
 /// pointers into it for its whole lifetime, so it is heap-allocated and
@@ -168,6 +338,10 @@ struct UiHostFeatures {
     data_access: Option<LV2ExtensionDataFeature>,
     sample_rate: f32,
     options: [Lv2Option; 2],
+    /// External-UI host data, set up by `enable_external_ui`.
+    external_host: ExternalUiHost,
+    human_id: CString,
+    port_map: Lv2UiPortMap,
     features: Vec<lv2_raw::core::LV2Feature>,
     feature_ptrs: Vec<*const lv2_raw::core::LV2Feature>,
 }
@@ -205,6 +379,15 @@ impl UiHostFeatures {
                     value: ptr::null(),
                 },
             ],
+            external_host: ExternalUiHost {
+                ui_closed: None,
+                plugin_human_id: ptr::null(),
+            },
+            human_id: CString::default(),
+            port_map: Lv2UiPortMap {
+                handle: ptr::null_mut(),
+                port_index: None,
+            },
             features: Vec::new(),
             feature_ptrs: Vec::new(),
         });
@@ -234,13 +417,50 @@ impl UiHostFeatures {
             data: b.options.as_ptr() as *mut c_void,
         });
         b.features = features;
-        b.feature_ptrs = b
+        b.rebuild_ptrs();
+        b
+    }
+
+    fn rebuild_ptrs(&mut self) {
+        self.feature_ptrs = self
             .features
             .iter()
             .map(|f| f as *const _)
             .chain(std::iter::once(ptr::null()))
             .collect();
-        b
+    }
+
+    /// Add the features an external UI is given: the external-UI host
+    /// (under both its URIs), a port map, and idle support.  `controller`
+    /// is what `ui_closed` is called back with.
+    fn enable_external_ui(&mut self, controller: *mut c_void, human_id: &str) {
+        self.human_id = CString::new(human_id).unwrap_or_default();
+        self.external_host = ExternalUiHost {
+            ui_closed: Some(external_ui_closed),
+            plugin_human_id: self.human_id.as_ptr(),
+        };
+        self.port_map = Lv2UiPortMap {
+            handle: controller,
+            port_index: Some(port_index_callback),
+        };
+        let host = &mut self.external_host as *mut ExternalUiHost as *mut c_void;
+        self.features.push(lv2_raw::core::LV2Feature {
+            uri: LV2_EXTERNAL_UI_HOST_URI.as_ptr(),
+            data: host,
+        });
+        self.features.push(lv2_raw::core::LV2Feature {
+            uri: LV2_EXTERNAL_UI_DEPRECATED_URI.as_ptr(),
+            data: host,
+        });
+        self.features.push(lv2_raw::core::LV2Feature {
+            uri: LV2_UI_PORT_MAP_URI.as_ptr(),
+            data: &mut self.port_map as *mut Lv2UiPortMap as *mut c_void,
+        });
+        self.features.push(lv2_raw::core::LV2Feature {
+            uri: LV2_UI_IDLE_FEATURE_URI.as_ptr(),
+            data: ptr::null_mut(),
+        });
+        self.rebuild_ptrs();
     }
 
     fn as_ptr(&self) -> *const *const lv2_raw::core::LV2Feature {
@@ -253,6 +473,10 @@ struct UiController {
     cmd_tx: Sender<PwCommand>,
     symbol_to_index: Vec<(String, usize)>,
     port_updates: Option<super::types::SharedPortUpdates>,
+    /// The UI's closing flag (shared with its timer).
+    closing: Arc<AtomicBool>,
+    /// An external UI reported its window closed.
+    ui_closed: AtomicBool,
 }
 
 unsafe extern "C" fn port_write_callback(
@@ -321,19 +545,69 @@ unsafe extern "C" fn port_index_callback(
     u32::MAX
 }
 
+/// Where port events and `run()` go.
+#[derive(Clone, Copy)]
+enum UiTarget {
+    /// Closed.
+    None,
+    Suil(*mut c_void),
+    External {
+        descriptor: *const Lv2UiDescriptor,
+        handle: *mut c_void,
+        widget: *mut ExternalUiWidget,
+    },
+}
+
+impl UiTarget {
+    fn is_none(&self) -> bool {
+        matches!(self, UiTarget::None)
+    }
+
+    unsafe fn port_event(&self, port_index: c_uint, size: c_uint, format: c_uint, buffer: *const c_void) {
+        unsafe {
+            match *self {
+                UiTarget::None => {}
+                UiTarget::Suil(instance) => {
+                    suil_instance_port_event(instance, port_index, size, format, buffer)
+                }
+                UiTarget::External {
+                    descriptor, handle, ..
+                } => {
+                    if let Some(port_event) = (*descriptor).port_event {
+                        port_event(handle, port_index, size, format, buffer);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// An open UI: a suil UI in a GTK window, or an external UI with a window
+/// of its own.
+enum WindowKind {
+    Suil {
+        gtk_window: *mut c_void,
+        suil_instance: *mut c_void,
+        suil_host: *mut c_void,
+    },
+    External {
+        descriptor: *const Lv2UiDescriptor,
+        handle: *mut c_void,
+        widget: *mut ExternalUiWidget,
+    },
+}
+
 struct WindowState {
-    gtk_window: *mut c_void,
-    suil_instance: *mut c_void,
-    suil_host: *mut c_void,
+    kind: WindowKind,
     controller_ptr: *mut c_void,
     timer_data: *mut UiTimerData,
     timer_source_id: c_uint,
-    /// Feature data the UI may reference; freed after the suil instance.
+    /// Feature data the UI may reference; freed after the UI.
     _features: Box<UiHostFeatures>,
 }
 
 struct UiTimerData {
-    suil_instance: *mut c_void,
+    target: UiTarget,
     port_updates: super::types::SharedPortUpdates,
     atom_event_transfer_urid: u32,
     idle_iface: Option<&'static Lv2UiIdleInterface>,
@@ -373,8 +647,7 @@ fn forward_sequence_events(td: &UiTimerData, port_index: usize, data: &[u8]) {
         }
 
         unsafe {
-            suil_instance_port_event(
-                td.suil_instance,
+            td.target.port_event(
                 port_index as c_uint,
                 atom_total as c_uint,
                 td.atom_event_transfer_urid as c_uint,
@@ -393,15 +666,14 @@ unsafe extern "C" fn ui_timer_callback(data: *mut c_void) -> c_int {
     }
     // SAFETY: we need mutable access for the prev_control caches
     let td = unsafe { &mut *(data as *mut UiTimerData) };
-    if td.closing.load(Ordering::Acquire) || td.suil_instance.is_null() {
+    if td.closing.load(Ordering::Acquire) || td.target.is_none() {
         td.timer_removed.store(true, Ordering::Release);
         return 0;
     }
 
-    let suil_instance = td.suil_instance;
+    let target = td.target;
     let send_port_event = |port_index: usize, value: f32| unsafe {
-        suil_instance_port_event(
-            suil_instance,
+        target.port_event(
             port_index as c_uint,
             std::mem::size_of::<f32>() as c_uint,
             0,
@@ -457,6 +729,13 @@ unsafe extern "C" fn ui_timer_callback(data: *mut c_void) -> c_int {
             }
             return 0;
         }
+    }
+
+    // An external UI does its own event handling and drawing in run().
+    if let UiTarget::External { widget, .. } = td.target
+        && let Some(run) = unsafe { (*widget).run }
+    {
+        unsafe { run(widget) };
     }
 
     1
@@ -752,7 +1031,14 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
             instance_id
         );
         unsafe {
-            gtk_window_present(ws.gtk_window);
+            match ws.kind {
+                WindowKind::Suil { gtk_window, .. } => gtk_window_present(gtk_window),
+                WindowKind::External { widget, .. } => {
+                    if let Some(show) = (*widget).show {
+                        show(widget);
+                    }
+                }
+            }
         }
         return;
     }
@@ -785,90 +1071,52 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
         }
     }
 
-    let ui_class_x11 = world.new_uri(LV2_UI_X11);
-    let ui_class_gtk2 = world.new_uri(LV2_UI_GTK2);
-    let ui_class_gtk3 = world.new_uri(LV2_UI_GTK3);
-    let ui_class_gtk4 = world.new_uri(LV2_UI_GTK4);
-    let ui_class_qt5 = world.new_uri(LV2_UI_QT5);
-
-    let preferred_types = [
-        (&ui_class_gtk3, LV2_UI_GTK3),
-        (&ui_class_x11, LV2_UI_X11),
-        (&ui_class_qt5, LV2_UI_QT5),
-        (&ui_class_gtk2, LV2_UI_GTK2),
-        (&ui_class_gtk4, LV2_UI_GTK4),
-    ];
-
-    let mut found_ui: Option<(String, String, String, String)> = None;
-
-    if let Some(uis) = plugin.uis() {
-        for ui in uis.iter() {
-            for (class_node, type_uri) in &preferred_types {
-                if ui.is_a(class_node) {
-                    let ui_uri = match ui.uri().as_uri() {
-                        Some(u) => u.to_string(),
-                        None => continue,
-                    };
-                    let bundle_path = match ui.bundle_uri() {
-                        Some(node) => match node.path() {
-                            Some((_host, path)) => path,
-                            None => continue,
-                        },
-                        None => continue,
-                    };
-                    let binary_path = match ui.binary_uri() {
-                        Some(node) => match node.path() {
-                            Some((_host, path)) => path,
-                            None => continue,
-                        },
-                        None => continue,
-                    };
-                    found_ui = Some((ui_uri, type_uri.to_string(), bundle_path, binary_path));
-                    break;
-                }
-            }
-            if found_ui.is_some() {
-                break;
-            }
-        }
-    }
-
-    let (ui_uri, ui_type_uri, bundle_path, binary_path) = match found_ui {
-        Some(f) => f,
-        None => {
-            log::error!("No supported UI found for plugin: {}", req.plugin_uri);
-            send_ui_error(
-                &req,
-                format!("No supported UI found for plugin: {}", req.plugin_uri),
-            );
-            return;
-        }
+    let Some(selected) = select_ui(&world, &plugin) else {
+        log::error!("No supported UI found for plugin: {}", req.plugin_uri);
+        send_ui_error(
+            &req,
+            format!("No supported UI found for plugin: {}", req.plugin_uri),
+        );
+        return;
     };
+    let is_external = selected.is_external();
 
     log::info!(
         "Opening UI: uri={}, type={}, bundle={}, binary={}",
-        ui_uri,
-        ui_type_uri,
-        bundle_path,
-        binary_path
+        selected.uri,
+        selected.type_uri,
+        selected.bundle_path,
+        selected.binary_path
     );
 
     let cstrings = (
         CString::new(HOST_TYPE_URI),
         CString::new(req.plugin_uri.as_str()),
-        CString::new(ui_uri),
-        CString::new(ui_type_uri),
-        CString::new(bundle_path),
-        CString::new(binary_path),
+        CString::new(selected.uri),
+        CString::new(selected.type_uri),
+        CString::new(selected.bundle_path),
+        CString::new(selected.binary_path),
     );
-    let (host_type, c_plugin_uri, c_ui_uri, c_ui_type_uri, c_bundle_path, c_binary_path) =
-        match cstrings {
-            (Ok(a), Ok(b), Ok(c), Ok(d), Ok(e), Ok(f)) => (a, b, c, d, e, f),
-            _ => {
-                log::error!("CString error while opening UI for {}", req.plugin_uri);
-                return;
+    let names = match cstrings {
+        (Ok(host_type), Ok(plugin_uri), Ok(ui_uri), Ok(ui_type_uri), Ok(bundle_path), Ok(binary_path)) => {
+            UiCStrings {
+                host_type,
+                plugin_uri,
+                ui_uri,
+                ui_type_uri,
+                bundle_path,
+                binary_path,
             }
-        };
+        }
+        _ => {
+            log::error!("CString error while opening UI for {}", req.plugin_uri);
+            return;
+        }
+    };
+
+    // Shared by the timer, the controller (an external UI closing itself)
+    // and `closing_flags` (GTK destroying the window).
+    let closing_flag = Arc::new(AtomicBool::new(false));
 
     let has_atom_inputs = !req.port_updates.atom_inputs.is_empty();
     let controller = Box::new(UiController {
@@ -880,25 +1128,115 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
         } else {
             None
         },
+        closing: closing_flag.clone(),
+        ui_closed: AtomicBool::new(false),
     });
     let controller_ptr = Box::into_raw(controller) as *mut c_void;
-    let free_controller = || unsafe {
-        drop(Box::from_raw(controller_ptr as *mut UiController));
-    };
 
-    let features = UiHostFeatures::new(
+    let mut features = UiHostFeatures::new(
         &req.urid_mapper,
         req.extension_data_fn,
         req.lv2_handle,
         req.sample_rate,
     );
 
+    let opened = unsafe {
+        if is_external {
+            features.enable_external_ui(controller_ptr, &plugin_name);
+            open_external_ui(&req, &names, controller_ptr, &features)
+        } else {
+            open_suil_ui(&req, &plugin_name, &names, controller_ptr, &features)
+        }
+    };
+    let Some(opened) = opened else {
+        unsafe { drop(Box::from_raw(controller_ptr as *mut UiController)) };
+        return;
+    };
+
+    if let Ok(mut flags) = closing_flags().lock() {
+        flags.insert(instance_id, closing_flag.clone());
+    }
+
+    // Start receiving plugin → UI atom output.
+    for atom_out in req.port_updates.atom_outputs.iter() {
+        atom_out.set_listening(true);
+    }
+
+    let atom_event_transfer_urid = req
+        .urid_mapper
+        .map("http://lv2plug.in/ns/ext/atom#eventTransfer");
+    let n_control_outputs = req.port_updates.control_outputs.len();
+    let n_control_inputs = req.port_updates.control_inputs.len();
+    let timer_data = Box::into_raw(Box::new(UiTimerData {
+        target: opened.target,
+        port_updates: req.port_updates.clone(),
+        atom_event_transfer_urid,
+        idle_iface: opened.idle_iface,
+        ui_handle: opened.ui_handle,
+        closing: closing_flag,
+        instance_id,
+        timer_removed: AtomicBool::new(false),
+        // Initialize with NaN so the first tick always sends all values
+        prev_control_outputs: vec![f32::NAN; n_control_outputs],
+        prev_control_inputs: vec![f32::NAN; n_control_inputs],
+    }));
+    let timer_source_id =
+        unsafe { g_timeout_add(33, Some(ui_timer_callback), timer_data as *mut c_void) };
+
+    state.windows.insert(
+        instance_id,
+        WindowState {
+            kind: opened.kind,
+            controller_ptr,
+            timer_data,
+            timer_source_id,
+            _features: features,
+        },
+    );
+
+    open_ui_set().lock().unwrap().insert(instance_id);
+
+    log::info!("Plugin UI window opened for instance {}", instance_id);
+
+    let _ = req
+        .event_tx
+        .send(PwEvent::Plugin(PluginEvent::PluginUiOpened { instance_id }));
+}
+
+/// The C strings a UI is opened with.
+struct UiCStrings {
+    host_type: CString,
+    plugin_uri: CString,
+    ui_uri: CString,
+    ui_type_uri: CString,
+    bundle_path: CString,
+    binary_path: CString,
+}
+
+/// A UI that has been created and shown, before the host starts its timer.
+struct OpenedUi {
+    kind: WindowKind,
+    target: UiTarget,
+    idle_iface: Option<&'static Lv2UiIdleInterface>,
+    ui_handle: *mut c_void,
+}
+
+/// Open an embeddable UI (GTK3, X11, ...) through suil inside a GTK window.
+/// On failure the error has been reported and nothing is left to free but
+/// the controller, which stays the caller's.
+unsafe fn open_suil_ui(
+    req: &OpenUiRequest,
+    plugin_name: &str,
+    names: &UiCStrings,
+    controller_ptr: *mut c_void,
+    features: &UiHostFeatures,
+) -> Option<OpenedUi> {
+    let instance_id = req.instance_id;
     unsafe {
         let window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
         if window.is_null() {
-            free_controller();
             log::error!("Failed to create GTK window for instance {}", instance_id);
-            return;
+            return None;
         }
 
         let title = CString::new(format!("ZestBay — {}", plugin_name))
@@ -914,9 +1252,8 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
         );
         if host.is_null() {
             gtk_widget_destroy(window);
-            free_controller();
             log::error!("Failed to create suil host for instance {}", instance_id);
-            return;
+            return None;
         }
 
         // Catch DPF/Pugl crashes during suil_instance_new (GTK thread only).
@@ -925,12 +1262,12 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
             suil_instance_new(
                 host,
                 controller_ptr,
-                host_type.as_ptr(),
-                c_plugin_uri.as_ptr(),
-                c_ui_uri.as_ptr(),
-                c_ui_type_uri.as_ptr(),
-                c_bundle_path.as_ptr(),
-                c_binary_path.as_ptr(),
+                names.host_type.as_ptr(),
+                names.plugin_uri.as_ptr(),
+                names.ui_uri.as_ptr(),
+                names.ui_type_uri.as_ptr(),
+                names.bundle_path.as_ptr(),
+                names.binary_path.as_ptr(),
                 features.as_ptr(),
             )
         } else {
@@ -947,24 +1284,22 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
             );
             suil_host_free(host);
             gtk_widget_destroy(window);
-            free_controller();
             send_ui_error(
-                &req,
+                req,
                 "Plugin UI crashed during instantiation. This plugin's UI framework (DPF/Pugl) is not yet fully supported.".into(),
             );
-            return;
+            return None;
         }
 
         if instance.is_null() {
             suil_host_free(host);
             gtk_widget_destroy(window);
-            free_controller();
             log::error!(
                 "Failed to create suil instance for instance {}",
                 instance_id
             );
-            send_ui_error(&req, "Failed to create suil instance".into());
-            return;
+            send_ui_error(req, "Failed to create suil instance".into());
+            return None;
         }
 
         let widget = suil_instance_get_widget(instance);
@@ -972,23 +1307,14 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
             suil_instance_free(instance);
             suil_host_free(host);
             gtk_widget_destroy(window);
-            free_controller();
             log::error!("Failed to get UI widget for instance {}", instance_id);
-            return;
+            return None;
         }
 
         gtk_container_add(window, widget);
 
-        for &(port_index, value) in &req.control_values {
-            let val = value;
-            suil_instance_port_event(
-                instance,
-                port_index as c_uint,
-                std::mem::size_of::<f32>() as c_uint,
-                0,
-                &val as *const f32 as *const c_void,
-            );
-        }
+        let target = UiTarget::Suil(instance);
+        send_control_values(target, &req.control_values);
 
         let destroy_signal = c"destroy";
         let id_data = Box::into_raw(Box::new(instance_id));
@@ -1006,10 +1332,6 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
 
         gtk_widget_show_all(window);
 
-        let atom_event_transfer_urid = req
-            .urid_mapper
-            .map("http://lv2plug.in/ns/ext/atom#eventTransfer");
-
         let idle_iface: Option<&'static Lv2UiIdleInterface> = {
             let ext = suil_instance_extension_data(instance, LV2_UI_IDLE_INTERFACE.as_ptr());
             if ext.is_null() {
@@ -1018,60 +1340,191 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
                 Some(&*(ext as *const Lv2UiIdleInterface))
             }
         };
-        let ui_handle = suil_instance_get_handle(instance);
-
         if idle_iface.is_some() {
             log::info!("Plugin supports ui:idleInterface");
         }
 
-        let closing_flag = Arc::new(AtomicBool::new(false));
-        if let Ok(mut flags) = closing_flags().lock() {
-            flags.insert(instance_id, closing_flag.clone());
-        }
-
-        // Start receiving plugin → UI atom output.
-        for atom_out in req.port_updates.atom_outputs.iter() {
-            atom_out.set_listening(true);
-        }
-
-        let n_control_outputs = req.port_updates.control_outputs.len();
-        let n_control_inputs = req.port_updates.control_inputs.len();
-        let timer_data = Box::into_raw(Box::new(UiTimerData {
-            suil_instance: instance,
-            port_updates: req.port_updates.clone(),
-            atom_event_transfer_urid,
-            idle_iface,
-            ui_handle,
-            closing: closing_flag,
-            instance_id,
-            timer_removed: AtomicBool::new(false),
-            // Initialize with NaN so the first tick always sends all values
-            prev_control_outputs: vec![f32::NAN; n_control_outputs],
-            prev_control_inputs: vec![f32::NAN; n_control_inputs],
-        }));
-        let timer_source_id = g_timeout_add(33, Some(ui_timer_callback), timer_data as *mut c_void);
-
-        state.windows.insert(
-            instance_id,
-            WindowState {
+        Some(OpenedUi {
+            kind: WindowKind::Suil {
                 gtk_window: window,
                 suil_instance: instance,
                 suil_host: host,
-                controller_ptr,
-                timer_data,
-                timer_source_id,
-                _features: features,
             },
-        );
-
-        open_ui_set().lock().unwrap().insert(instance_id);
-
-        log::info!("Plugin UI window opened for instance {}", instance_id);
-
-        let _ = req
-            .event_tx
-            .send(PwEvent::Plugin(PluginEvent::PluginUiOpened { instance_id }));
+            target,
+            idle_iface,
+            ui_handle: suil_instance_get_handle(instance),
+        })
     }
+}
+
+/// The last `dlerror()` message.
+fn dl_error() -> String {
+    let err = unsafe { libc::dlerror() };
+    if err.is_null() {
+        "unknown error".into()
+    } else {
+        unsafe { CStr::from_ptr(err) }.to_string_lossy().into_owned()
+    }
+}
+
+/// Open a KXStudio external UI: the plugin's UI library is loaded directly
+/// (suil does not host this kind) and the UI shows a window of its own.
+/// The timer drives it with `run()`; it reports its window being closed
+/// through `external_ui_closed`.
+unsafe fn open_external_ui(
+    req: &OpenUiRequest,
+    names: &UiCStrings,
+    controller_ptr: *mut c_void,
+    features: &UiHostFeatures,
+) -> Option<OpenedUi> {
+    let instance_id = req.instance_id;
+    let fail = |message: String| -> Option<OpenedUi> {
+        log::error!("External UI for instance {}: {}", instance_id, message);
+        send_ui_error(req, message);
+        None
+    };
+
+    unsafe {
+        // Same path as the plugin's DSP binary for many plugins: dlopen then
+        // hands back the copy already loaded, which instance-access needs.
+        let lib = libc::dlopen(names.binary_path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
+        if lib.is_null() {
+            return fail(format!("Cannot load the plugin UI library: {}", dl_error()));
+        }
+        let sym = libc::dlsym(lib, c"lv2ui_descriptor".as_ptr());
+        if sym.is_null() {
+            libc::dlclose(lib);
+            return fail("The plugin UI library has no lv2ui_descriptor".into());
+        }
+        let get_descriptor: unsafe extern "C" fn(u32) -> *const Lv2UiDescriptor =
+            std::mem::transmute(sym);
+        let mut descriptor: *const Lv2UiDescriptor = ptr::null();
+        for index in 0u32.. {
+            let d = get_descriptor(index);
+            if d.is_null() {
+                break;
+            }
+            if !(*d).uri.is_null() && CStr::from_ptr((*d).uri) == names.ui_uri.as_c_str() {
+                descriptor = d;
+                break;
+            }
+        }
+        if descriptor.is_null() {
+            libc::dlclose(lib);
+            return fail(format!(
+                "The plugin UI library does not provide {}",
+                names.ui_uri.to_string_lossy()
+            ));
+        }
+        let Some(instantiate) = (*descriptor).instantiate else {
+            libc::dlclose(lib);
+            return fail("The plugin UI cannot be instantiated".into());
+        };
+        // From here on the library stays loaded: UI toolkits commonly leave
+        // threads and exit handlers behind, and unloading them under those
+        // crashes.  A later open reuses the loaded copy.
+
+        let mut widget: *mut c_void = ptr::null_mut();
+        arm_crash_guard();
+        let handle = if sigsetjmp(&raw mut CRASH_JUMP_BUF, 1) == 0 {
+            instantiate(
+                descriptor,
+                names.plugin_uri.as_ptr(),
+                names.bundle_path.as_ptr(),
+                Some(port_write_callback),
+                controller_ptr,
+                &mut widget,
+                features.as_ptr(),
+            )
+        } else {
+            ptr::null_mut()
+        };
+        disarm_crash_guard();
+        if CRASH_CAUGHT.load(Ordering::SeqCst) {
+            return fail("The plugin UI crashed while opening".into());
+        }
+        if handle.is_null() {
+            return fail("The plugin UI failed to open".into());
+        }
+        let widget = widget as *mut ExternalUiWidget;
+        if widget.is_null() {
+            if let Some(cleanup) = (*descriptor).cleanup {
+                cleanup(handle);
+            }
+            return fail("The plugin UI did not give a window to show".into());
+        }
+
+        let target = UiTarget::External {
+            descriptor,
+            handle,
+            widget,
+        };
+        send_control_values(target, &req.control_values);
+
+        if let Some(show) = (*widget).show {
+            arm_crash_guard();
+            if sigsetjmp(&raw mut CRASH_JUMP_BUF, 1) == 0 {
+                show(widget);
+            }
+            disarm_crash_guard();
+            if CRASH_CAUGHT.load(Ordering::SeqCst) {
+                // The UI is in an unknown state: leave it be rather than
+                // clean up into the crash.
+                return fail("The plugin UI crashed while showing its window".into());
+            }
+        }
+        log::info!("External plugin UI shown for instance {}", instance_id);
+
+        Some(OpenedUi {
+            kind: WindowKind::External {
+                descriptor,
+                handle,
+                widget,
+            },
+            target,
+            idle_iface: None,
+            ui_handle: handle,
+        })
+    }
+}
+
+/// Give a freshly opened UI the current control values.
+unsafe fn send_control_values(target: UiTarget, values: &[(usize, f32)]) {
+    for &(port_index, value) in values {
+        unsafe {
+            target.port_event(
+                port_index as c_uint,
+                std::mem::size_of::<f32>() as c_uint,
+                0,
+                &value as *const f32 as *const c_void,
+            );
+        }
+    }
+}
+
+/// `ui_closed` of the external-UI host: the user closed the UI's own
+/// window.  The UI is cleaned up from the GTK command loop, never from
+/// inside this callback (it usually runs inside the UI's `run()`).
+unsafe extern "C" fn external_ui_closed(controller: *mut c_void) {
+    if controller.is_null() {
+        return;
+    }
+    let ctrl = unsafe { &*(controller as *const UiController) };
+    ctrl.ui_closed.store(true, Ordering::Release);
+    // A close already under way (the host's, or an earlier call) needs no
+    // second one.
+    if ctrl.closing.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    log::info!(
+        "External plugin UI closed by the user for instance {}",
+        ctrl.instance_id
+    );
+    send_gtk_command(GtkCommand::Close {
+        instance_id: ctrl.instance_id,
+        destroyed_by_gtk: false,
+        ack: None,
+    });
 }
 
 fn handle_close_window(state: &mut GtkThreadState, instance_id: u64, destroyed_by_gtk: bool) {
@@ -1090,14 +1543,37 @@ fn handle_close_window(state: &mut GtkThreadState, instance_id: u64, destroyed_b
             g_source_remove(ws.timer_source_id);
         }
 
-        if !destroyed_by_gtk {
-            gtk_widget_destroy(ws.gtk_window);
+        (*ws.timer_data).target = UiTarget::None;
+
+        match ws.kind {
+            WindowKind::Suil {
+                gtk_window,
+                suil_instance,
+                suil_host,
+            } => {
+                if !destroyed_by_gtk {
+                    gtk_widget_destroy(gtk_window);
+                }
+                suil_instance_free(suil_instance);
+                suil_host_free(suil_host);
+            }
+            WindowKind::External {
+                descriptor,
+                handle,
+                widget,
+            } => {
+                // A UI that closed its own window is not asked to hide it.
+                let ctrl = &*(ws.controller_ptr as *const UiController);
+                if !ctrl.ui_closed.load(Ordering::Acquire)
+                    && let Some(hide) = (*widget).hide
+                {
+                    hide(widget);
+                }
+                if let Some(cleanup) = (*descriptor).cleanup {
+                    cleanup(handle);
+                }
+            }
         }
-
-        (*ws.timer_data).suil_instance = ptr::null_mut();
-
-        suil_instance_free(ws.suil_instance);
-        suil_host_free(ws.suil_host);
 
         let timer_data = Box::from_raw(ws.timer_data);
         for atom_out in timer_data.port_updates.atom_outputs.iter() {
@@ -1216,65 +1692,39 @@ pub fn open_plugin_ui(
         if let Some(name) = plugin.name().as_str() {
             display_name = name.to_string();
         }
-        let ui_class_x11 = world.new_uri(LV2_UI_X11);
-        let ui_class_gtk3 = world.new_uri(LV2_UI_GTK3);
-        let ui_class_gtk2 = world.new_uri(LV2_UI_GTK2);
-
-        if let Some(uis) = plugin.uis() {
-            // Check for any UI type
-            for ui in uis.iter() {
-                for (class_node, type_uri) in [
-                    (&ui_class_x11, LV2_UI_X11),
-                    (&ui_class_gtk3, LV2_UI_GTK3),
-                    (&ui_class_gtk2, LV2_UI_GTK2),
-                ] {
-                    if ui.is_a(class_node) {
-                        let ui_uri = ui.uri().as_uri().map(String::from).unwrap_or_default();
-                        let bundle_path = ui.bundle_uri()
-                            .and_then(|n| n.path().map(|(_, p)| p))
-                            .unwrap_or_default();
-                        let binary_path = ui.binary_uri()
-                            .and_then(|n| n.path().map(|(_, p)| p))
-                            .unwrap_or_default();
-                        ui_info = Some((ui_uri, type_uri.to_string(), bundle_path, binary_path));
-                        break;
-                    }
-                }
-                if ui_info.is_some() { break; }
-            }
-        }
+        ui_info = select_ui(&world, &plugin)
+            .map(|ui| (ui.uri, ui.type_uri.to_string(), ui.bundle_path, ui.binary_path));
     }
 
-    let is_x11_ui = ui_info.as_ref().is_some_and(|(_, t, _, _)| t == LV2_UI_X11);
-
-    // Check if the UI requires instance-access (can only work in-process).
-    // We check by scanning the bundle's TTL files for the instance-access URI
-    // in a requiredFeature context.
-    let needs_instance_access = ui_info.as_ref().is_some_and(|(_, _, bundle, _)| {
-        let bundle_dir = std::path::Path::new(bundle);
-        if let Ok(entries) = std::fs::read_dir(bundle_dir) {
-            for entry in entries.flatten() {
-                if entry.path().extension().is_some_and(|e| e == "ttl")
-                    && let Ok(content) = std::fs::read_to_string(entry.path())
-                    && content.contains("instance-access")
-                    && content.contains("requiredFeature")
-                {
-                    return true;
-                }
-            }
-        }
-        false
-    });
-
-    // For X11 UIs that DON'T need instance-access, use the bridge process
-    // (avoids GLX/EGL conflicts on Wayland). Plugins that need instance-access
-    // must run in-process via suil/GTK.
-    if is_x11_ui
-        && !needs_instance_access
+    // X11 and external UIs can run in the bridge process (which keeps their
+    // GLX/OpenGL away from ZestBay's own on Wayland), unless they need the
+    // plugin instance itself: then they must run in-process via the GTK
+    // thread.  The bridge also relays only control values to the UI, not
+    // atom messages from the plugin.
+    let ui_type = ui_info.as_ref().map(|(_, t, _, _)| t.as_str());
+    let is_x11_ui = ui_type == Some(LV2_UI_X11);
+    let is_external_ui = ui_type.is_some_and(|t| t == LV2_UI_EXTERNAL || t == LV2_UI_EXTERNAL_OLD);
+    let bridgeable_type = is_x11_ui || is_external_ui;
+    let access = ui_info
+        .as_ref()
+        .map(|(ui_uri, _, _, _)| ui_instance_access(&world, ui_uri))
+        .unwrap_or_default();
+    let needs_instance = if is_x11_ui {
+        // Unchanged for X11 UIs (they work as routed), except that one whose
+        // own description requires the instance always gets it.
+        access.required
+            || ui_info
+                .as_ref()
+                .is_some_and(|(_, _, bundle, _)| bundle_mentions_instance_access(bundle))
+    } else {
+        access.required || access.optional || !port_updates.atom_outputs.is_empty()
+    };
+    if bridgeable_type
+        && !needs_instance
         && let Some((ref ui_uri, ref ui_type_uri, ref bundle_path, ref binary_path)) = ui_info
     {
         let opened = with_bridge(&event_tx, &cmd_tx, |client| {
-            log::info!("Using UI bridge for X11 plugin: {}", plugin_uri);
+            log::info!("Using UI bridge for {} ({})", plugin_uri, ui_type_uri);
             client.open_ui(
                 instance_id,
                 plugin_uri,
@@ -1292,7 +1742,7 @@ pub fn open_plugin_ui(
         if opened == Some(true) {
             return;
         }
-        log::warn!("UI bridge not available, falling back to in-process for X11 UI");
+        log::warn!("UI bridge not available, falling back to an in-process UI");
     }
 
     // For GTK UIs (or X11 fallback), use the old suil/GTK path

@@ -21,10 +21,16 @@ const SCAN_RATE: f64 = 48000.0;
 static CACHE: ScanCache = ScanCache::new();
 
 pub fn cached_plugin(uri: &str) -> Option<PluginInfo> {
+    if let Some(info) = super::builtin::info(uri) {
+        return Some(info.clone());
+    }
     CACHE.get(uri)
 }
 
 pub fn find_plugin(uri: &str) -> Option<PluginInfo> {
+    if let Some(info) = super::builtin::info(uri) {
+        return Some(info.clone());
+    }
     CACHE.find(uri, || {
         scan_discovered(&discover_plugins(), &|| {});
     })
@@ -84,7 +90,7 @@ pub(crate) fn scan_ladspa_file(path: &Path, plugins: &mut Vec<PluginInfo>) {
 }
 
 /// `None` for descriptors the host cannot use.
-unsafe fn describe(path: &Path, desc: &Descriptor) -> Option<PluginInfo> {
+pub(super) unsafe fn describe(path: &Path, desc: &Descriptor) -> Option<PluginInfo> {
     unsafe {
         let label = abi::cstr(desc.label);
         let port_count = desc.port_count as usize;

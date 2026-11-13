@@ -1315,6 +1315,11 @@ impl Host {
                 _ => ("lv2", quantum),
             };
             let uri = req.plugin_uri.clone();
+            // ZestBay's own built-in plugins need no isolation check.
+            if crate::ladspa::builtin::is_builtin_uri(&uri) {
+                req.probe = ProbeStatus::Done(crate::plugin::sandbox::ProbeOutcome::Ok);
+                continue;
+            }
             // CLAP/VST3: hand the probe the library path so the child doesn't scan.
             let lib = req
                 .scan_info
@@ -1696,7 +1701,11 @@ impl Host {
             audio_outputs: inst.audio_output_channels,
             has_midi_in: inst.has_midi_in,
             midi_outputs: Vec::new(),
+            // Built-in meters are audio only: no MIDI in or thru.
+            midi_ports: !crate::ladspa::builtin::is_builtin_uri(&req.plugin_uri),
         };
+        let meter_levels = crate::ladspa::builtin::meter_channels(&req.plugin_uri)
+            .map(|_| inst.port_updates.clone());
         let instance_rc = Rc::new(RefCell::new(inst));
         let filter = crate::ladspa::filter::LadspaFilterNode::new(
             &self.core,
@@ -1712,6 +1721,10 @@ impl Host {
         self.ladspa_filters
             .borrow_mut()
             .insert(req.instance_id, filter);
+        // A built-in meter: the graph reads its levels.
+        if let Some(updates) = meter_levels {
+            crate::ladspa::builtin::register(req.instance_id, updates);
+        }
         Ok(())
     }
 
@@ -1761,6 +1774,7 @@ impl Host {
             drop(inst);
             true
         } else if self.ladspa_instances.borrow().contains_key(&instance_id) {
+            crate::ladspa::builtin::unregister(instance_id);
             let filter = self.ladspa_filters.borrow_mut().remove(&instance_id);
             drop(filter);
             let inst = self.ladspa_instances.borrow_mut().remove(&instance_id);

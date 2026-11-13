@@ -22,7 +22,7 @@ Item {
         // Theme lives in the qml/ directory, not visible from here.
         Qt.createQmlObject('import QtQuick; import "' + qmlDir + '"; QtObject { Component.onCompleted: Theme.mode = "'
                            + mode + '" }', root)
-        var isMain = target === "main" || target === "main-presets" || target === "main-sessions" || target === "main-portmenu"
+        var isMain = target === "main" || target.indexOf("main-") === 0
         var file = isMain ? "main.qml" : target + ".qml"
         var c = Qt.createComponent(qmlDir + file)
         if (c.status !== Component.Ready) {
@@ -33,8 +33,13 @@ Item {
         var w = isMain ? c.createObject(null) : c.createObject(null, { controller: controller })
         if (target === "PluginParams") w.openForNode(30)
         else if (!isMain && w.open) w.open()
+        // The CPU window with its meters row expanded.
+        if (target === "CpuOverlay") {
+            w.metersExpanded = true
+            w.height += 180   // room for the meters listed under their row
+        }
         w.visible = true
-        if (target === "main-sessions" || target === "main-portmenu") {
+        if (target === "main-sessions" || target === "main-portmenu" || target === "main-metermenu" || target === "main-nodemeters") {
             // The whole window with the session dropdown / a port's menu open.
             menuShot.win = w
             menuShot.kind = target
@@ -95,6 +100,26 @@ Item {
                 var btn = menu.parent
                 menu.popup(btn, 0, btn.height + 6)
                 menuMirror.hostOffset = btn.mapToItem(graph, 0, btn.height + 6)
+            } else if (kind === "main-metermenu") {
+                // The canvas menu, with its Add meter submenu opened next.
+                menu = root.findMenu(graph, "Add plugin\u2026")
+                if (!menu) { console.warn("no canvas menu"); Qt.quit(); return }
+                menu.popup(graph, 700, 110)
+                menuMirror.hostOffset = Qt.point(menu.x, menu.y)
+                subShot.menu = menu
+                subShot.graph = graph
+                subShot.win = win
+                subShot.start()
+                return
+            } else if (kind === "main-nodemeters") {
+                // Daw Sink's node menu: its snapped meter and Meter inputs/outputs.
+                graph.contextNodeId = 20
+                graph.contextNode = graph.findNodeData(20)
+                menu = root.findMenu(graph, "Hide")
+                if (!menu) { console.warn("no node menu"); Qt.quit(); return }
+                var np = graph.nodePositions[20]
+                menu.popup(graph, (np.x + graph.getNodeWidth(20)) * graph.zoom + graph.panX + 12, np.y * graph.zoom + graph.panY + 8)
+                menuMirror.hostOffset = Qt.point(menu.x, menu.y)
             } else {
                 graph.contextNodeId = 30
                 graph.contextNode = graph.findNodeData(30)
@@ -112,27 +137,65 @@ Item {
         }
     }
 
+    // Move an open menu's own items into the graph view at (x, y).
+    function mirrorMenu(menu, graph, x, y, z) {
+        var bg = menu.background, ct = menu.contentItem
+        var bw = menu.width, bh = menu.height
+        var cx = menu.leftPadding, cy = menu.topPadding
+        var cw = ct.width, ch = ct.height
+        bg.parent = graph
+        ct.parent = graph
+        bg.z = z
+        ct.z = z + 1
+        bg.x = x; bg.y = y; bg.width = bw; bg.height = bh
+        ct.x = x + cx; ct.y = y + cy; ct.width = cw; ct.height = ch
+    }
+
     Timer {
         id: menuMirror
         property var menu
         property var graph
         property var win
         property point hostOffset
+        // A submenu shown beside `menu`, and where.
+        property var sub: null
+        property point subOffset
         interval: 600
         onTriggered: {
-            var bg = menu.background, ct = menu.contentItem
-            var bw = menu.width, bh = menu.height
-            var cx = menu.leftPadding, cy = menu.topPadding
-            var cw = ct.width, ch = ct.height
-            bg.parent = graph
-            ct.parent = graph
-            bg.z = 100000
-            ct.z = 100001
-            bg.x = hostOffset.x; bg.y = hostOffset.y; bg.width = bw; bg.height = bh
-            ct.x = hostOffset.x + cx; ct.y = hostOffset.y + cy; ct.width = cw; ct.height = ch
+            root.mirrorMenu(menu, graph, hostOffset.x, hostOffset.y, 100000)
+            if (sub)
+                root.mirrorMenu(sub, graph, subOffset.x, subOffset.y, 100010)
             grab.win = win
             grab.interval = 500
             grab.start()
+        }
+    }
+
+    // Open the submenu of the entry that has one, beside the open menu.
+    Timer {
+        id: subShot
+        property var menu
+        property var graph
+        property var win
+        interval: 600
+        onTriggered: {
+            var entry = null
+            for (var k = 0; k < menu.count; k++) {
+                var it = menu.itemAt(k)
+                if (it && it.subMenu) { entry = it; break }
+            }
+            if (!entry) { console.warn("no submenu entry"); Qt.quit(); return }
+            var sub = entry.subMenu
+            entry.highlighted = true
+            var ey = entry.mapToItem(menu.contentItem, 0, 0).y + menu.y + menu.topPadding - sub.topPadding
+            var sx = menu.x + menu.width - 6
+            sub.popup(graph, sx, ey)
+            menuMirror.menu = menu
+            menuMirror.sub = sub
+            menuMirror.subOffset = Qt.point(sx, ey)
+            menuMirror.graph = graph
+            menuMirror.win = win
+            menuMirror.start()
         }
     }
 

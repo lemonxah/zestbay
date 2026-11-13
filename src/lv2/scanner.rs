@@ -160,7 +160,17 @@ pub fn scan_plugins_with_world(world: &World) -> Vec<Lv2PluginInfo> {
     let ui_gtk4 = world.new_uri("http://lv2plug.in/ns/extensions/ui#Gtk4UI");
     let ui_x11 = world.new_uri("http://lv2plug.in/ns/extensions/ui#X11UI");
     let ui_qt5 = world.new_uri("http://lv2plug.in/ns/extensions/ui#Qt5UI");
-    let ui_classes = [&ui_gtk3, &ui_x11, &ui_qt5, &ui_gtk2, &ui_gtk4];
+    let ui_external = world.new_uri("http://kxstudio.sf.net/ns/lv2ext/external-ui#Widget");
+    let ui_external_old = world.new_uri("http://lv2plug.in/ns/extensions/ui#external");
+    let ui_classes = [
+        &ui_gtk3,
+        &ui_x11,
+        &ui_qt5,
+        &ui_gtk2,
+        &ui_gtk4,
+        &ui_external,
+        &ui_external_old,
+    ];
 
     let mut plugins = Vec::new();
 

@@ -90,5 +90,5 @@ cat <<MSG
 Uploaded. Next:
   - Watch your email for Launchpad's accept/reject notices.
   - Builds: https://launchpad.net/~$(echo "${PPA#ppa:}" | cut -d/ -f1)/+archive/ubuntu/$(echo "${PPA#ppa:}" | cut -d/ -f2)/+packages
-  - Once "Published", test: sudo apt update && sudo apt install zestbay
+  - Once "Published", test: sudo apt update && sudo apt install zestbay zestins
 MSG

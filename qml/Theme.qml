@@ -89,6 +89,11 @@ QtObject {
     readonly property color sigAudio: dark ? "#63b3ff" : "#2a78d6"
     readonly property color sigMidi:  dark ? "#e879b5" : "#d55181"
     readonly property color sigVideo: dark ? "#f0a040" : "#c98500"
+    // ─── Level meters (built-in meter nodes) ────────────────────────────
+    readonly property color meterLow:   dark ? "#199e70" : "#1baf7a"   // below -12 dBFS
+    readonly property color meterHot:   dark ? "#c98500" : "#eda100"   // -12 .. -3 dBFS
+    readonly property color meterClip:  textDestructive                // -3 dBFS and up
+    readonly property color meterTrack: bgSubtle
     readonly property real wireOpacity: dark ? 0.8 : 0.85
     readonly property real wireWidth: 1.75
     readonly property real wireWidthActive: 2.25

@@ -101,6 +101,13 @@ pub mod qobject {
         #[qinvokable]
         fn save_hidden(self: Pin<&mut Self>, json: QString);
 
+        /// Meters snapped onto a port: {layoutKey: "source" | "dest"}.
+        #[qinvokable]
+        fn get_docked_meters_json(self: Pin<&mut Self>) -> QString;
+
+        #[qinvokable]
+        fn save_docked_meters(self: Pin<&mut Self>, json: QString);
+
         #[qinvokable]
         fn get_pinned_json(self: Pin<&mut Self>) -> QString;
 
@@ -112,6 +119,22 @@ pub mod qobject {
 
         #[qinvokable]
         fn add_plugin(self: Pin<&mut Self>, uri: QString) -> QString;
+
+        /// Add a built-in meter with 1..6 or 8 channels; returns its display name
+        /// ("" on failure), like `add_plugin`.
+        #[qinvokable]
+        fn add_meter(self: Pin<&mut Self>, channels: i32) -> QString;
+
+        /// Rename a built-in meter to `base_name` made unique (" #2"...), or
+        /// back to its default name when `base_name` is empty. Returns the
+        /// name it now has ("" if the node is not a meter).
+        #[qinvokable]
+        fn rename_meter(self: Pin<&mut Self>, node_id: u32, base_name: QString) -> QString;
+
+        /// Levels of every running meter, by PipeWire node id:
+        /// {"<nodeId>": [linear level per channel]}.
+        #[qinvokable]
+        fn meter_levels_json(self: Pin<&mut Self>) -> QString;
 
         #[qinvokable]
         fn remove_plugin(self: Pin<&mut Self>, node_id: u32);
@@ -3370,6 +3393,14 @@ impl qobject::AppController {
         write_config_json_text("hidden.json", &json.to_string());
     }
 
+    pub fn get_docked_meters_json(self: Pin<&mut Self>) -> QString {
+        QString::from(&read_config_json_text("docked-meters.json", "{}"))
+    }
+
+    pub fn save_docked_meters(self: Pin<&mut Self>, json: QString) {
+        write_config_json_text("docked-meters.json", &json.to_string());
+    }
+
     pub fn get_pinned_json(self: Pin<&mut Self>) -> QString {
         QString::from(&read_config_json_text("pinned.json", "[]"))
     }
@@ -3404,6 +3435,69 @@ impl qobject::AppController {
         } else {
             QString::from("[]")
         }
+    }
+
+    pub fn add_meter(self: Pin<&mut Self>, channels: i32) -> QString {
+        let Ok(channels) = usize::try_from(channels) else {
+            return QString::from("");
+        };
+        if !crate::ladspa::builtin::CHANNEL_COUNTS.contains(&channels) {
+            return QString::from("");
+        }
+        let uri = crate::ladspa::builtin::meter_uri(channels);
+        self.add_plugin(QString::from(&uri))
+    }
+
+    pub fn rename_meter(mut self: Pin<&mut Self>, node_id: u32, base_name: QString) -> QString {
+        let Some(instance_id) = self.find_instance_id_for_node(node_id) else {
+            return QString::from("");
+        };
+        let Some((uri, current, others)) = self.rust().plugin_manager.as_ref().and_then(|mgr| {
+            let info = mgr.get_instance(instance_id)?;
+            let others: Vec<String> = mgr
+                .active_instances()
+                .values()
+                .filter(|i| i.id != instance_id)
+                .map(|i| i.display_name.clone())
+                .collect();
+            Some((info.plugin_uri.clone(), info.display_name.clone(), others))
+        }) else {
+            return QString::from("");
+        };
+        if !crate::ladspa::builtin::is_builtin_uri(&uri) {
+            return QString::from("");
+        }
+        let base = base_name.to_string().trim().to_string();
+        let base = if base.is_empty() {
+            crate::ladspa::builtin::info(&uri)
+                .map(|i| i.name.clone())
+                .unwrap_or_else(|| "Meter".to_string())
+        } else {
+            base
+        };
+        let mut name = base.clone();
+        let mut n = 2;
+        while others.contains(&name) {
+            name = format!("{base} #{n}");
+            n += 1;
+        }
+        if name != current {
+            self.as_mut().rename_plugin(node_id, QString::from(&name));
+        }
+        QString::from(&name)
+    }
+
+    pub fn meter_levels_json(self: Pin<&mut Self>) -> QString {
+        let levels = crate::ladspa::builtin::levels();
+        let mut out = serde_json::Map::new();
+        if let Some(ref mgr) = self.rust().plugin_manager {
+            for (instance_id, values) in levels {
+                if let Some(node_id) = mgr.get_instance(instance_id).and_then(|i| i.pw_node_id) {
+                    out.insert(node_id.to_string(), serde_json::json!(values));
+                }
+            }
+        }
+        QString::from(&serde_json::Value::Object(out).to_string())
     }
 
     pub fn add_plugin(mut self: Pin<&mut Self>, uri: QString) -> QString {
@@ -3554,9 +3648,16 @@ impl qobject::AppController {
         QString::from(&display_name)
     }
 
-    pub fn remove_plugin(self: Pin<&mut Self>, node_id: u32) {
+    pub fn remove_plugin(mut self: Pin<&mut Self>, node_id: u32) {
         let instance_id = self.find_instance_id_for_node(node_id);
         if let Some(instance_id) = instance_id {
+            // Taken while the plugin's wires still exist.
+            let bridge = self
+                .rust()
+                .graph
+                .as_ref()
+                .map(|g| plan_bridge_on_remove(g, node_id))
+                .unwrap_or_default();
             if let Some(ref tx) = self.rust().cmd_tx {
                 log::info!(
                     "Remove plugin: node_id={} instance_id={}",
@@ -3565,6 +3666,7 @@ impl qobject::AppController {
                 );
                 let _ = tx.send(PwCommand::RemovePlugin { instance_id });
             }
+            self.as_mut().connect_bridge(&bridge);
         } else {
             log::warn!(
                 "remove_plugin: no LV2 instance found for node_id={}",
@@ -4478,9 +4580,19 @@ impl qobject::AppController {
             .and_then(|mgr| mgr.instance_id_for_stable_id(&sid));
 
         if let Some(instance_id) = instance_id {
+            let bridge = self
+                .rust()
+                .plugin_manager
+                .as_ref()
+                .and_then(|mgr| mgr.get_instance(instance_id))
+                .and_then(|info| info.pw_node_id)
+                .zip(self.rust().graph.as_ref())
+                .map(|(nid, g)| plan_bridge_on_remove(g, nid))
+                .unwrap_or_default();
             if let Some(ref tx) = self.rust().cmd_tx {
                 let _ = tx.send(PwCommand::RemovePlugin { instance_id });
             }
+            self.as_mut().connect_bridge(&bridge);
             let name = self
                 .rust()
                 .plugin_manager
@@ -5000,12 +5112,22 @@ impl qobject::AppController {
         use crate::plugin::cpu_stats::global_cpu_tracker;
 
         let snapshots = global_cpu_tracker().take_all_snapshots();
+        let is_meter = |id: u64| {
+            self.rust()
+                .plugin_manager
+                .as_ref()
+                .and_then(|mgr| mgr.get_instance(id))
+                .is_some_and(|info| crate::ladspa::builtin::is_builtin_uri(&info.plugin_uri))
+        };
+        // Built-in meters are flagged: the CPU window bundles them into one
+        // collapsible "Meters" row.
         let items: Vec<serde_json::Value> = snapshots
             .into_iter()
             .map(|(id, name, snap)| {
                 serde_json::json!({
                     "id": id,
                     "name": name,
+                    "isMeter": is_meter(id),
                     "dspPercent": (snap.dsp_percent * 100.0).round() / 100.0,
                     "avgUs": snap.avg_ns / 1000,
                     "lastUs": snap.last_ns / 1000,
@@ -5314,6 +5436,15 @@ impl qobject::AppController {
         };
         if changed {
             tray.refresh();
+        }
+    }
+
+    /// Make the wires `plan_bridge_on_remove` planned, as if by hand (so
+    /// block rules and auto-learn apply as usual).
+    fn connect_bridge(mut self: Pin<&mut Self>, pairs: &[(u32, u32)]) {
+        for &(out_port, in_port) in pairs {
+            log::info!("Bridging removed plugin: {} -> {}", out_port, in_port);
+            self.as_mut().connect_ports(out_port, in_port);
         }
     }
 
@@ -6297,6 +6428,9 @@ fn node_to_json(
 
             val["pluginFormat"] = serde_json::json!(format_str);
             val["pluginHasUi"] = serde_json::json!(has_ui);
+            if let Some(channels) = crate::ladspa::builtin::meter_channels(&instance.plugin_uri) {
+                val["meterChannels"] = serde_json::json!(channels);
+            }
             val["pluginBypassed"] = serde_json::json!(instance.bypassed);
         }
     }
@@ -6620,6 +6754,53 @@ fn save_preferences(prefs: &Preferences) {
     }
 }
 
+
+/// The wires that keep audio flowing when plugin `node_id` is removed: for
+/// a plugin with as many audio inputs as outputs, whatever fed its n-th
+/// input is wired to whatever its n-th output fed. Pairs already wired,
+/// and pairs within one node, are left out.
+fn plan_bridge_on_remove(graph: &GraphState, node_id: u32) -> Vec<(u32, u32)> {
+    use crate::pipewire::MediaType;
+    let audio_ports = |dir: PortDirection| -> Vec<Port> {
+        let mut ports: Vec<Port> = graph
+            .get_ports_for_node(node_id)
+            .into_iter()
+            .filter(|p| p.direction == dir && p.media_type == Some(MediaType::Audio))
+            .collect();
+        ports.sort_by(|a, b| crate::pipewire::state::natural_cmp(&a.name, &b.name));
+        ports
+    };
+    let inputs = audio_ports(PortDirection::Input);
+    let outputs = audio_ports(PortDirection::Output);
+    if inputs.is_empty() || inputs.len() != outputs.len() {
+        return Vec::new();
+    }
+
+    let links = graph.get_all_links();
+    let mut pairs: Vec<(u32, u32)> = Vec::new();
+    for (inp, out) in inputs.iter().zip(outputs.iter()) {
+        let feeds: Vec<_> = links
+            .iter()
+            .filter(|l| l.input_port_id == inp.id && l.output_node_id != node_id)
+            .collect();
+        let fed: Vec<_> = links
+            .iter()
+            .filter(|l| l.output_port_id == out.id && l.input_node_id != node_id)
+            .collect();
+        for up in &feeds {
+            for down in &fed {
+                let pair = (up.output_port_id, down.input_port_id);
+                let wired = links
+                    .iter()
+                    .any(|l| l.output_port_id == pair.0 && l.input_port_id == pair.1);
+                if up.output_node_id != down.input_node_id && !wired && !pairs.contains(&pair) {
+                    pairs.push(pair);
+                }
+            }
+        }
+    }
+    pairs
+}
 
 /// One audio wire rerouted through an inserted plugin.
 struct InsertRewire {

@@ -37,6 +37,9 @@ pub struct FilterConfig {
     pub has_midi_in: bool,
     /// Names of the plugin's MIDI outputs (empty: the MIDI out is a thru).
     pub midi_outputs: Vec<String>,
+    /// Give the node its MIDI ports (`midi_in` for CC mappings, and the
+    /// MIDI out). False for the built-in meters, which are audio only.
+    pub midi_ports: bool,
 }
 
 #[repr(C)]
@@ -158,12 +161,14 @@ impl LadspaFilterNode {
             ports.outputs.push(port_data);
         }
 
-        add_midi_ports(
-            &mut ports,
-            &config.display_name,
-            &config.midi_outputs,
-            |direction, name| unsafe { add_port(filter, direction, name, b"8 bit raw midi\0") },
-        );
+        if config.midi_ports {
+            add_midi_ports(
+                &mut ports,
+                &config.display_name,
+                &config.midi_outputs,
+                |direction, name| unsafe { add_port(filter, direction, name, b"8 bit raw midi\0") },
+            );
+        }
 
         let cpu_slot =
             global_cpu_tracker().register(config.instance_id, config.display_name.clone());
