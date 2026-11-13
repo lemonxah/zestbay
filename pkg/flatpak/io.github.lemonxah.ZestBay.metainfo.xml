@@ -22,6 +22,7 @@
       <li>Patchbay rules that restore your routing whenever devices or applications appear, learned automatically from the connections you make</li>
       <li>Exclusive or non-exclusive rule enforcement, and a default target for applications without a rule</li>
       <li>Map hardware MIDI controllers to plugin parameters with one-click learn</li>
+      <li>Built-in level meters: put one on any wire, or snap it onto a device's ports to see where sound is flowing</li>
       <li>Plugins, parameters, links, MIDI mappings and node layout persist across restarts</li>
       <li>System tray with start-minimized, so routing rules keep working in the background</li>
     </ul>
@@ -77,6 +78,10 @@
     <screenshot>
       <caption>Plugin parameters with MIDI learn</caption>
       <image>https://raw.githubusercontent.com/lemonxah/zestbay/main/docs/screenshots/parameters.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Level meters: a meter on a wire, and meters snapped onto a sink's inputs and a microphone's output</caption>
+      <image>https://raw.githubusercontent.com/lemonxah/zestbay/main/docs/screenshots/meters-crop.png</image>
     </screenshot>
     <screenshot>
       <caption>Per-plugin DSP load and process CPU</caption>

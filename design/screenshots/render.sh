@@ -48,6 +48,15 @@ shot dark  main-portmenu port-menu        "$DARK"
 # Tight crops of those two for the website.
 [ -f "$OUT/sessions.png" ] && magick "$OUT/sessions.png" -crop 1180x430+0+0 +repage "$OUT/sessions-crop.png"
 [ -f "$OUT/port-menu.png" ] && magick "$OUT/port-menu.png" -crop 700x640+1700+300 +repage "$OUT/port-menu-crop.png"
+# Level meters: the canvas menu's Add meter submenu, and a node's meter items.
+shot dark  main-metermenu  meter-menu     "$DARK"
+shot dark  main-nodemeters node-meters    "$DARK"
+# Crops for the website: the meters on the canvas (a meter card, and bars
+# snapped onto Daw Sink's inputs and the Microphone's output), the Add meter
+# submenu, and Daw Sink's node menu with its meter items.
+[ -f "$OUT/main-dark.png" ] && magick "$OUT/main-dark.png" -crop 1500x1150+110+195 +repage "$OUT/meters-crop.png"
+[ -f "$OUT/meter-menu.png" ] && magick "$OUT/meter-menu.png" -crop 890x1075+1385+315 +repage "$OUT/meter-menu-crop.png"
+[ -f "$OUT/node-meters.png" ] && magick "$OUT/node-meters.png" -crop 860x540+1165+200 +repage "$OUT/node-meters-crop.png"
 # Dialog content is captured without the window's padding; add it back.
 shot dark  RuleEditor    rules            "$DARK" 48
 shot dark  PluginBrowser add-plugin       "$DARK" 48

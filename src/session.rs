@@ -27,6 +27,7 @@ const SESSION_ENTRIES: &[&str] = &[
     "default_node.txt",
     "layout.json",
     "hidden.json",
+    "docked-meters.json",
     "pinned.json",
     "viewport.json",
     "plugin-state",

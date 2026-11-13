@@ -129,6 +129,28 @@ in the order they first appear. **A slot is never reassigned** when a series
 goes away. Beyond eight series, fold the rest into "Other" (`chartOther`). `chartGrid` for
 gridlines, `chartBaseline` for the zero line, crosshair `textMuted` dashed 2/3.
 
+Built-in level meters are one series and one table row, "Meters (n)"; clicking
+the row lists each meter under it (indented, hollow dot in the row's colour).
+
+### 2.6 Level meters
+
+| Token | Meaning |
+|---|---|
+| `meterLow` | level bar up to −12 dBFS |
+| `meterHot` | −12 to −3 dBFS |
+| `meterClip` (= `textDestructive`) | −3 dBFS and up |
+| `meterTrack` (= `bgSubtle`) | the empty bar |
+
+The bar spans −60 to 0 dBFS (peak, falling 20 dB/s). On a meter card each
+channel's bar fills its port row between the channel number and the output
+pin. A meter snapped onto a port draws a 64 × 3 px bar under that port's
+label, ending at the label's right edge for outputs and starting at its left
+edge for inputs. The live fill is drawn over the canvas (never repainting it);
+the canvas draws only the track. While a meter is dragged onto a node it can
+snap to, that node gets an `accentFaint` fill and a 2 px `accent` ring, the
+meter card fades to 45 %, and the bars to be are previewed in `accent`. Wires
+on a snapped-to port that skip the meter are dashed 5/4.
+
 ---
 
 ## 3. Typography

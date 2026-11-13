@@ -50,6 +50,7 @@ if [ ! -f "$ORIG" ]; then
         --exclude=./.flatpak-builder --exclude=./repo --exclude=./dist --exclude=./.claude \
         --exclude=./debian --exclude=./pkg/deb/ppa --exclude='./pkg/deb/*.deb' \
         --exclude='./pkg/deb/zestbay_*' --exclude=./pkg/rpm/rpmbuild --exclude=./vendor \
+        --exclude=./zestins/build \
         . | tar -x -C "$SRC"
     (cd "$SRC" && cargo vendor --locked vendor >/dev/null)
     # dpkg-source drops *.orig files when unpacking, which would break cargo's

@@ -1,15 +1,16 @@
 name: RPM packages
 
-# Builds the .rpm. On a published release the file is attached to it; a
-# manual run attaches it to the release named in "tag", or with no tag just
-# keeps it as a run artifact.
+# Builds the .rpms (zestbay, and zestins: its LV2 plugins, a package of
+# their own). On a published release the files are attached to it; a
+# manual run attaches them to the release named in "tag", or with no tag
+# just keeps them as run artifacts.
 on:
   release:
     types: [published]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to build and attach the .rpm to (e.g. v1.1.2); empty builds the selected branch without attaching"
+        description: "Release tag to build and attach the .rpms to (e.g. v1.1.2); empty builds the selected branch without attaching"
         required: false
         default: ""
 
@@ -45,16 +46,21 @@ jobs:
       - name: Build .rpm
         run: pkg/rpm/build-rpm.sh --container "${{ matrix.image }}"
 
+      - name: Build zestins .rpm
+        run: pkg/rpm/build-zestins-rpm.sh --container "${{ matrix.image }}"
+
       - uses: actions/upload-artifact@v7
         with:
           name: rpm-${{ strategy.job-index }}
-          # Just the package, not the debuginfo/debugsource ones rpmbuild also makes
+          # Just the packages, not the debuginfo/debugsource ones rpmbuild also makes
           # No wildcard in the directory part, or the artifact keeps an x86_64/ folder
-          path: pkg/rpm/rpmbuild/RPMS/x86_64/zestbay-[0-9]*.rpm
+          path: |
+            pkg/rpm/rpmbuild/RPMS/x86_64/zestbay-[0-9]*.rpm
+            pkg/rpm/rpmbuild/RPMS/x86_64/zestins-[0-9]*.rpm
           if-no-files-found: error
 
   publish:
-    name: Attach .rpm to release
+    name: Attach .rpms to release
     needs: rpm
     if: github.event_name == 'release' || inputs.tag != ''
     runs-on: ubuntu-24.04

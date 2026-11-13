@@ -44,3 +44,16 @@ Description: PipeWire patchbay and audio routing manager
  ZestBay is a PipeWire patchbay application with LV2, CLAP, and VST3
  plugin hosting, MIDI mapping, and a visual node-graph editor for
  routing audio and MIDI between applications and devices.
+
+Package: zestins
+Architecture: amd64 arm64
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+Enhances: zestbay
+Provides: lv2-plugin
+Description: LV2 plugins from ZestBay
+ Zestins are the LV2 plugins that come with ZestBay: utility (gain,
+ balance, mute, polarity, mono), meter, EQ, gate, compressor, delay,
+ reverb, tone generator, a simple synth, a MIDI switch and a MIDI utility.
+ Each has an X11 UI and works in any LV2 host.

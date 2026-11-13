@@ -9,6 +9,10 @@ Menu {
     padding: 6
     font.family: Theme.fontSans
     font.pixelSize: Theme.sizeBody
+    // Entries Qt makes itself (a nested ZbMenu's entry) look like ours.
+    delegate: ZbMenuItem {}
+    // Submenus open beside their entry, slightly overlapping it.
+    overlap: 6
 
     background: Item {
         implicitWidth: Theme.menuWidth

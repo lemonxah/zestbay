@@ -1,6 +1,7 @@
 name: Debian packages
 
-# Builds the .deb packages and the plain executables. On a published release
+# Builds the .deb packages (zestbay, and zestins: its LV2 plugins, a package
+# of their own) and the plain executables. On a published release
 # the files are attached to it; a manual run attaches them to the release
 # named in "tag", or with no tag just keeps them as run artifacts.
 on:
@@ -46,6 +47,9 @@ jobs:
 
       - name: Build .deb
         run: pkg/deb/build-deb.sh --container "${{ matrix.image }}"
+
+      - name: Build zestins .deb
+        run: pkg/deb/build-zestins-deb.sh --container "${{ matrix.image }}"
 
       # Built on the oldest supported Debian (oldest glibc) so they run on as many distros as possible
       - name: Package the executables

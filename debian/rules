@@ -26,6 +26,9 @@ override_dh_auto_configure:
 override_dh_auto_build:
 	cargo --version
 	cargo build --workspace --release --offline --locked
+	$(MAKE) -C zestins BUILD=$(CURDIR)/target/zestins \
+	  CFLAGS="$(shell dpkg-buildflags --get CFLAGS)" \
+	  LDFLAGS="$(shell dpkg-buildflags --get LDFLAGS)"
 
 override_dh_auto_test:
 
@@ -36,6 +39,10 @@ override_dh_auto_install:
 	install -Dm644 images/logo/zestbay-launcher.svg debian/zestbay/usr/share/icons/hicolor/scalable/apps/zestbay.svg
 	install -Dm644 images/zesticon.png debian/zestbay/usr/share/icons/hicolor/256x256/apps/zestbay.png
 	install -Dm644 images/zesttray.png debian/zestbay/usr/share/icons/hicolor/256x256/apps/zestbay-tray.png
+	$(MAKE) -C zestins BUILD=$(CURDIR)/target/zestins install \
+	  CFLAGS="$(shell dpkg-buildflags --get CFLAGS)" \
+	  LDFLAGS="$(shell dpkg-buildflags --get LDFLAGS)" \
+	  DESTDIR=$(CURDIR)/debian/zestins LV2_DIR=/usr/lib/lv2
 
 # Rust binaries: dwz has nothing useful to do and can fail on them
 override_dh_dwz:

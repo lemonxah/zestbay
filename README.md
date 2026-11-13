@@ -22,7 +22,7 @@
 
 ## What is ZestBay?
 
-ZestBay is a visual audio routing tool for PipeWire on Linux. It lets you see every audio node in your system (applications, hardware devices, virtual sinks), connect and disconnect ports with drag-and-drop, host LV2, LADSPA, VST2, VST3, and CLAP effects plugins inline, define patchbay rules that automatically restore your routing (or keep things apart) whenever devices or apps appear, group plugin chains into reusable subgraphs, and create virtual devices.
+ZestBay is a visual audio routing tool for PipeWire on Linux. It lets you see every audio node in your system (applications, hardware devices, virtual sinks), connect and disconnect ports with drag-and-drop, host LV2, LADSPA, VST2, VST3, and CLAP effects plugins inline, watch levels with built-in meters on any node or port, define patchbay rules that automatically restore your routing (or keep things apart) whenever devices or apps appear, group plugin chains into reusable subgraphs, and create virtual devices.
 
 ## Screenshots
 
@@ -43,6 +43,14 @@ ZestBay is a visual audio routing tool for PipeWire on Linux. It lets you see ev
     <td><img src="docs/screenshots/presets.png" alt="Preset dropdown on a plugin node" width="320"></td>
     <td valign="top"><strong>Plugin presets</strong><br>Every plugin node has a preset dropdown and a Save button. Save a plugin's settings once, then pick them on any other instance, or make one the default so new instances start from it. See <a href="#plugin-presets">Plugin Presets</a>.</td>
   </tr>
+  <tr>
+    <td><img src="docs/screenshots/meters-crop.png" alt="Level meters: a meter card, and meters snapped onto Daw Sink's inputs and the Microphone's output"></td>
+    <td valign="top"><strong>Level meters</strong><br>Add a meter from the canvas menu and see each channel's level right in the graph, or snap it onto the port it meters so the bars sit under that port's name (here under Daw Sink's inputs and the Microphone's output). Right-click a node → <em>Meter inputs</em> or <em>Meter outputs</em> meters all its ports at once. See <a href="#level-meters">Level Meters</a>.</td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/meter-menu-crop.png" alt="Canvas menu with the Add meter submenu" width="360"></td>
+    <td><img src="docs/screenshots/node-meters-crop.png" alt="A node's menu with Unsnap meter, Remove snapped meter, Meter inputs and Meter outputs"></td>
+  </tr>
 </table>
 
 <p align="center">
@@ -59,12 +67,13 @@ ZestBay is a visual audio routing tool for PipeWire on Linux. It lets you see ev
 qpwgraph is a straightforward PipeWire graph editor. ZestBay goes further:
 
 - **LV2, LADSPA, VST2, VST3, and CLAP plugin hosting** -- Insert effects (EQ, compressor, reverb, etc.) directly into the PipeWire graph without needing a DAW or separate plugin host. ZestBay creates real PipeWire filter nodes with RT-safe DSP processing. Comprehensive LV2 extension support (URID, worker, state, log, options, buf-size, data-access, instance-access) means most LV2 plugins load without issues. VST2, VST3, and CLAP plugins are hosted with parameter, state, and native UI support. LADSPA plugins are hosted with parameters and bypass (the format has no UI or state API).
-- **Native plugin UIs** -- Open the original plugin interfaces. LV2 UIs (GTK3, X11, Qt5, GTK2, GTK4) via suil, VST2, VST3, and CLAP UIs via embedded X11 windows. A persistent GTK thread manages LV2 plugin windows without the crash-on-reopen issues common in LV2 hosts.
+- **Native plugin UIs** -- Open the original plugin interfaces. LV2 UIs (GTK3, X11, Qt5, GTK2, GTK4) via suil, plus KXStudio external UIs (the plugin opens its own window), VST2, VST3, and CLAP UIs via embedded X11 windows. A persistent GTK thread manages LV2 plugin windows without the crash-on-reopen issues common in LV2 hosts.
 - **Plugin presets** -- Save a plugin's settings as named presets, pick them from a dropdown on the plugin node, and apply them to any other instance of that plugin instead of re-entering every value. One preset per plugin can be the default, so new instances start from it. For LV2 plugins a preset also keeps the plugin's saved state (for example the LSP Mixer's channel names), not just the knob positions. See [Plugin Presets](#plugin-presets).
 - **MIDI parameter control** -- Map hardware MIDI controllers to any plugin parameter with one-click learn. Continuous, toggle, and momentary modes with RT-safe processing.
 - **Crash-safe plugin loading** -- Every plugin is test-loaded in a separate process before it runs inside ZestBay, plugin discovery runs in the background so startup isn't held up, and if a restore still crashes the next start enters safe mode and offers the last known-good plugin set.
 - **Per-plugin CPU load** -- A CPU usage window shows each plugin's DSP load over time, so you can see which effect is costing you.
-- **Quick wiring** -- Drag a plugin onto a wire to insert it into that connection, and set a default node so app streams without a rule are routed there.
+- **Built-in level meters** -- Put a meter on any wire, or snap it onto a node's port so the level shows under the port's name, to see where sound is flowing and what is silent. See [Level Meters](#level-meters).
+- **Quick wiring** -- Drag a plugin onto a wire to insert it into that connection (Ctrl+Z takes it out again), remove a plugin and the wires on either side are joined back up, and set a default node so app streams without a rule are routed there.
 - **Auto-connect rules with learning and blocking** -- Manually connect two ports and ZestBay creates a patchbay rule; disconnect them and the rule updates. Block rules keep a source from ever reaching a target.
 - **Subgraphs and virtual devices** -- Group a plugin chain into one block, reuse it as a template, offer it to apps as a microphone or speaker, and create virtual sinks and sources without editing PipeWire config.
 - **Full session persistence** -- Plugin instances, their parameters and state, bypass, wiring, MIDI mappings, subgraphs, virtual devices, layout, pins, viewport, window geometry, hidden nodes and rules all survive restarts.
@@ -111,26 +120,73 @@ Carla is a full-featured plugin host and JACK patchbay. The differences are abou
 **Wiring**
 - Drag from a port to another port to connect. Wires highlight and can be clicked from a few pixels away, so you don't have to hit them exactly
 - Right-drag from one port to another to **block** the pair; blocked pairs are drawn as red dashed lines with a ⊘. Hover one to highlight it, click it to select it (Ctrl+click to add more) and press **Delete** to remove the rule that blocks it. A rule can cover several pairs; the toast says when removing it frees others too
-- Drag a plugin onto a wire to insert it into that connection
+- Drag a plugin onto a wire to insert it into that connection; Ctrl+Z takes it out again and puts the original wire back. A node never offers to drop onto its own wires, including those of a meter snapped onto it
+- **Removing a plugin keeps the audio flowing**: when a plugin with as many audio inputs as outputs is removed, whatever fed its n-th input is wired to whatever its n-th output fed
 - **Default node**: right-click a sink or plugin → Set as default; app streams without a rule are routed there
 
 **Selecting and editing**
 - Select nodes and wires with a click, Ctrl+click or a selection box; boxes started with **Shift** or **Ctrl** add to the selection, **Ctrl+A** selects all nodes and wires. Neither a box nor Ctrl+A takes block lines, so Delete can't remove a rule by accident
 - **Delete** disconnects the selected wires, removes the selected plugins, subgraphs and virtual devices (after a confirmation), hides the selected devices and app streams, and removes the selected block rules
 - Arrow keys nudge the selected nodes one grid step
-- **Undo / redo** (Ctrl+Z, Ctrl+Shift+Z) for node moves, Auto layout, wires you connect or disconnect, and hidden nodes
+- **Undo / redo** (Ctrl+Z, Ctrl+Shift+Z) for node moves, Auto layout, wires you connect or disconnect, a plugin dropped onto a wire, snapping and unsnapping meters, and hidden nodes
 - Drag nodes, alone or as a group; **snap to grid** (on by default, adjustable grid size) or Shift-drag to snap next to other nodes with a configurable gap
 - **Pin** nodes so Auto layout never moves them; hide and unhide nodes
 - Right-click menus for nodes, wires, block lines, ports and the canvas; right-click a port's name or pin to **rename** it or **disconnect** everything on it (see [Renaming nodes and ports](#renaming-nodes-and-ports))
 
 **Layout and density**
 - **Auto layout** follows the signal flow (and the grid): the button at the canvas's top-right, **L**, or the canvas menu. Pinned nodes stay put and the toast tells you how many did; **Shift+click / Shift+L** lays out pinned nodes too, and when every node is pinned it offers to do so
+- **Hidden nodes stay out of the way**: hidden nodes, snapped meters included, are never obstacles or anchors when nodes are placed, and are never moved themselves, so nothing jumps because of a card you can't see
 - **New nodes find a tidy spot**: a stream that a rule connects goes beside the node it is wired to, stacked with the others in that column; a node without wires goes with its own kind (sources left, sinks right) inside the part of the graph you are looking at. Only the newcomer moves, and only in its first seconds; anything you placed or pinned stays put. A new node pulses once, and if it appeared outside the view a marker at the edge points to it (click to go there)
 - **Two densities** (toolbar, or Preferences › Graph), each Compact / Normal / Spacious or any pixel value:
   - **Graph density** (node spacing, 4–96 px): how far apart nodes are. It sets the room Auto layout and newly placed nodes leave around each node.
   - **Card density** (card row height, 16–32 px): how big the node cards are. Compact packs more nodes on screen, Spacious makes ports easier to hit; text sizes stay. Cards that end up overlapping are pushed apart (Ctrl+Z undoes it).
 
   The toolbar menus can re-space the whole graph with Auto layout.
+
+### Level Meters
+
+ZestBay has its own level meters. A meter is a small built-in plugin (nothing to install) that passes audio through untouched and shows each channel's level as a bar right in the graph, so you can see where sound is coming from and which links are silent. There is no window to open.
+
+<p align="center">
+  <img src="docs/screenshots/meters-crop.png" alt="A meter card between Spotify and Media Sink, and meters snapped onto Daw Sink's inputs and the Microphone's output" width="720">
+</p>
+
+**Add a meter**
+- Right-click empty canvas → **Add meter** → **1 channel (mono)**, **2 channels (stereo)**, 3, 4, 5, 6 or **8 channels (7.1)**. It appears where you clicked. Meters are not in Add plugin.
+- Wire it by hand, or drag it onto a wire to splice it into that connection, like any plugin.
+- Each row of the card is one channel: input pin, channel number, level bar, output pin. The bar shows the peak level from −60 to 0 dBFS: green up to −12 dBFS, amber up to −3 dBFS, red above. It falls back at 20 dB a second.
+- A meter has no UI, presets or On/UI/Params buttons. Rename, hide, pin or group it like any other plugin; **Remove meter** (right-click) removes it and joins the wires it sat between.
+
+**Snap a meter onto a port**
+
+A meter can sit on either end of the wire it is on, so the level shows on the node you care about instead of on a card of its own.
+- **Drag** the meter card onto the node that feeds it, or onto the node it feeds. While you drag, that node lights up with an accent ring and preview bars on the ports the levels will go to; let go to snap.
+- Or right-click the meter → **Snap to source port** or **Snap to destination port**.
+
+Snapped, the card is hidden and each channel's bar sits under the name of the port it snapped to. The meter is named after that place ("Daw Sink in meter", "Pianoteq 9 out 9-16 meter"); a name you gave it yourself is kept. The meter keeps running in PipeWire.
+- **The snapped-to port stands for the meter's port.** Drag a new wire to or from it and the wire goes through the meter.
+- **Wires that skip the meter are dashed.** Any other wire on that port, one that does not pass through the meter, is drawn dashed. Connect the same pair again and the dashed wire is replaced by one through the meter (one undo step).
+- **What can snap:** snapping to the source needs each channel to be fed by one port; snapping to the destination needs each channel to feed one port. Otherwise the menu item is greyed out and no node lights up while you drag.
+
+**Meter a whole node**
+
+Right-click any node → **Meter inputs (n)** or **Meter outputs (n)**. ZestBay adds one meter for every (up to) 8 of its audio ports (two ports get a stereo meter, Pianoteq's 16 outputs get two 8-channel meters), snaps them onto the node and moves every wire on those ports onto the meters, so the audio goes through them without a gap. Ports with nothing connected are metered too.
+
+<p align="center">
+  <img src="docs/screenshots/node-meters-crop.png" alt="Daw Sink's node menu: Unsnap meter, Remove snapped meter, Meter inputs (2), Meter outputs (2)" width="430">
+  <img src="docs/screenshots/meter-menu-crop.png" alt="The canvas menu with the Add meter submenu open" width="300">
+</p>
+
+**Take meters off again**
+- Right-click the node a meter is snapped onto → **Unsnap meter** (or **Unsnap n meters**) brings the cards back where they were; **Remove snapped meter(s)** removes them and rejoins the wires.
+- Right-click empty canvas → **Unsnap all n meters**. **Unhide all** also brings them back.
+- **Ctrl+Z** undoes a snap or an unsnap.
+- If the port a meter is snapped to goes away (its wire removed, the device unplugged), the meter is unsnapped a moment later and its card shows again, instead of staying hidden with no way to reach it.
+
+**Good to know**
+- A meter costs next to nothing: one peak per channel per audio cycle. The **CPU usage** window lists all meters as one **Meters (n)** row; click it to see each meter under it.
+- Snapped meters are saved with the session (`docked-meters.json`) and come back snapped after a restart.
+- Meters snapped to a source and to a destination look the same on the wires: lines are drawn straight from the source port to wherever the meter sends audio.
 
 ### Plugin Hosting (LV2, LADSPA, VST2, VST3, CLAP)
 - Browse, search, and filter all installed plugins by name, author, category, format or URI/ID; hide incompatible ones
@@ -140,7 +196,7 @@ Carla is a full-featured plugin host and JACK patchbay. The differences are abou
 - Parameters window: sliders and toggles, per-parameter reset, MIDI learn
 - **Manage plugins** window: every active plugin with its parameters, bypass state and Reset params
 - Native plugin UI support:
-  - **LV2**: GTK3, X11, Qt5, GTK2, GTK4 via suil; UIs that don't need direct access to the plugin instance can run in the separate `zestbay-ui-bridge` process
+  - **LV2**: GTK3, X11, Qt5, GTK2, GTK4 via suil, and KXStudio external UIs (x42 meters, Carla, Yoshimi, ...), which are loaded directly and open their own window. When a plugin has several UIs, ZestBay picks GTK3, then X11, then an external UI, then Qt5, GTK2 and GTK4. X11 and external UIs that don't need direct access to the plugin instance run in the separate `zestbay-ui-bridge` process, so a crashing UI can't take ZestBay down; whether a UI needs that access is read from that UI's own description. Qt5 UIs need suil's `qt5_in_gtk3` module installed, and GTK2 and GTK4 UIs only work where suil can show them inside GTK3
   - **VST2**: Embedded X11 editors with idle callbacks and resize support
   - **VST3**: Embedded X11 windows with IPlugFrame resize support
   - **CLAP**: Embedded X11 windows with GUI resize and timer support
@@ -150,7 +206,7 @@ Carla is a full-featured plugin host and JACK patchbay. The differences are abou
 - **Persistent LSP input names**: rename channels in an LSP Mixer LV2 editor and the names appear on the corresponding node input ports within about a second. Names are saved with the plugin state and restored after restarting ZestBay. Stereo channels show L/R suffixes; routing keeps its stable port identifiers.
 - **Crash protection**: each plugin is test-loaded in a separate process before it runs in ZestBay, so a crashing plugin is skipped instead of taking the app down. If a restore still crashes, the next start enters safe mode and offers the last known-good plugin set
 - **Presets** per plugin: save a plugin's settings once and reuse them on any other instance (see [Plugin Presets](#plugin-presets))
-- **CPU usage** window: per-plugin DSP load over time
+- **CPU usage** window: per-plugin DSP load over time; all [level meters](#level-meters) share one **Meters (n)** row, which you click to see each one
 - Optional "Let idle devices sleep" (passive effects) so a device linked only through plugins can suspend
 
 ### Renaming nodes and ports
@@ -349,7 +405,7 @@ Press **?** or **F1** (or use the **?** button at the canvas's bottom-right, or 
 | Delete / Backspace | Disconnect the selected wires; remove the selected plugins, subgraphs and virtual devices (asks first); hide the other selected nodes; remove the selected block rules |
 | Arrow keys | Move the selected nodes one grid step (1 px without snap to grid, 10 px with Shift) |
 | Shift (while dragging a node) | Snap to nearby nodes (when snap to grid is off) |
-| Ctrl+Z / Ctrl+Shift+Z (or Ctrl+Y) | Undo / redo node moves, Auto layout, connecting and disconnecting wires, hiding nodes |
+| Ctrl+Z / Ctrl+Shift+Z (or Ctrl+Y) | Undo / redo node moves, Auto layout, connecting and disconnecting wires, dropping a plugin onto a wire, snapping and unsnapping meters, hiding nodes |
 | Double-click | Open a subgraph |
 
 **Layout and application**
@@ -390,6 +446,7 @@ Everything is saved to `~/.config/zestbay/` (`~/.var/app/io.github.lemonxah.Zest
 | `midi_mappings.json` | MIDI CC/note-to-parameter mappings |
 | `layout.json` | Node positions in the graph view |
 | `pinned.json`, `hidden.json` | Pinned and hidden nodes |
+| `docked-meters.json` | Meters snapped onto a port, and to which side |
 | `default_node.txt` | The default node for unruled app streams |
 | `viewport.json` | Pan and zoom state |
 
@@ -409,6 +466,7 @@ each release's own libraries, so it installs cleanly on both.
 sudo add-apt-repository ppa:lemonxah/tools
 sudo apt update
 sudo apt install zestbay
+sudo apt install zestins    # optional: ZestBay's own LV2 plugins
 ```
 
 Updates then arrive through the normal `apt upgrade`. To remove it:
@@ -426,6 +484,7 @@ with apt, which pulls in the dependencies:
 
 ```bash
 sudo apt install ./zestbay_<version>-debian13_amd64.deb
+sudo apt install ./zestins_<version>-debian13_amd64.deb   # optional: ZestBay's own LV2 plugins
 ```
 
 The package is built per release, so use the one that matches your Debian
@@ -440,7 +499,9 @@ each release.
   `pkg/zestbay-git/` PKGBUILDs in this repo are only for building a tagged
   release or the latest commit yourself.
 - **Flatpak**: `io.github.lemonxah.ZestBay` -- see [`pkg/flatpak/README.md`](pkg/flatpak/README.md) to build it locally or make a single-file bundle (`just flatpak`, `just flatpak-bundle`).
-- **Fedora/RPM, Nix, and the Debian/PPA packaging**: in `pkg/rpm/`, `pkg/nix/` and `pkg/deb/` (plus `debian/` for the PPA).
+- **Fedora**: each release has `zestbay-<version>-1.fc<NN>.x86_64.rpm` and `zestins-<version>-1.fc<NN>.x86_64.rpm`, built for the current Fedora release: `sudo dnf install ./zestbay-*.rpm ./zestins-*.rpm`.
+- **Zestins on Arch**: build `pkg/zestins/` (or `pkg/zestins-git/`) with `makepkg -si`.
+- **Fedora/RPM, Nix, and the Debian/PPA packaging**: in `pkg/rpm/`, `pkg/nix/` and `pkg/deb/` (plus `debian/` for the PPA). `pkg/deb/build-zestins-deb.sh` and `pkg/rpm/build-zestins-rpm.sh` (`just zestins-deb`, `just zestins-rpm`) build the Zestins packages; the PPA builds both from the one source package.
 - **From source**: see below; `just install` builds and installs to `/usr`.
 
 ## Building from source
@@ -539,6 +600,17 @@ Command-line options:
 `RUST_LOG=debug zestbay` shows detailed logs.
 
 ## Installing plugins
+
+### Zestins: ZestBay's own LV2 plugins
+
+Zestins are small, dependency-free LV2 plugins that come with ZestBay and also work in any other LV2 host: Utility (gain, balance, mute, polarity, mono), Meter, EQ, Gate, Compressor, Delay, Reverb, Tone Generator, a simple Synth, MIDI Switch and MIDI Utility, each with an X11 UI. They are a separate package, `zestins`, so install it alongside ZestBay (see [Installation](#installation)), or build them from this repository:
+
+```sh
+make -C zestins            # build/zestins.lv2
+make -C zestins install    # into ~/.lv2; ZestBay finds them on its next plugin scan
+```
+
+Details and the list of plugin URIs are in [`zestins/README.md`](zestins/README.md). (The [level meters](#level-meters) are different: they are built into ZestBay itself and need no package.)
 
 ZestBay scans for LV2, LADSPA, VST2, VST3 and CLAP plugins when it starts, so restart it
 after adding plugins. Where plugins go depends on which version you run

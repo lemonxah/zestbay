@@ -67,14 +67,20 @@ impl PluginManager {
         &self.available_plugins
     }
 
+    /// A catalog plugin, or one of ZestBay's built-ins (which the catalog,
+    /// and so the browser, never lists).
     pub fn find_plugin(&self, uri: &str) -> Option<&PluginInfo> {
-        self.available_plugins.iter().find(|p| p.uri == uri)
+        self.available_plugins
+            .iter()
+            .find(|p| p.uri == uri)
+            .or_else(|| crate::ladspa::builtin::info(uri))
     }
 
     pub fn find_plugin_with_format(&self, uri: &str, format: PluginFormat) -> Option<&PluginInfo> {
         self.available_plugins
             .iter()
             .find(|p| p.uri == uri && p.format == format)
+            .or_else(|| crate::ladspa::builtin::info(uri).filter(|p| p.format == format))
     }
 
     // ----- Active instances -----

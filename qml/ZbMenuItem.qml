@@ -93,7 +93,15 @@ MenuItem {
     }
 
     indicator: Item {}
-    arrow: Item {}
+    // Submenu entries (a ZbMenu inside a ZbMenu) get a right chevron.
+    arrow: ZbIcon {
+        x: control.width - width - control.rightPadding
+        y: (control.height - height) / 2
+        visible: control.subMenu !== null
+        name: "chevronRight"
+        size: 12
+        color: control.enabled ? Theme.textIcon : Theme.textDisabled
+    }
 
     background: Rectangle {
         implicitHeight: Theme.menuItemHeight
