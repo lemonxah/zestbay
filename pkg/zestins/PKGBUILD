@@ -2,7 +2,7 @@
 # Zestins: ZestBay's own LV2 plugins, built from the zestins/ folder of the
 # ZestBay release with the same version.
 pkgname=zestins
-pkgver=1.2.6
+pkgver=1.2.7
 pkgrel=1
 pkgdesc="LV2 plugins from ZestBay: utility, meter, EQ, gate, compressor, delay, reverb, tone generator, synth and MIDI tools"
 arch=('x86_64')
