@@ -1,7 +1,7 @@
 # Zestins: ZestBay's own LV2 plugins, built from the zestins/ folder of the
 # ZestBay source with the same version.
 Name:           zestins
-Version:        1.2.6
+Version:        1.2.7
 Release:        1%{?dist}
 Summary:        LV2 plugins from ZestBay
 
