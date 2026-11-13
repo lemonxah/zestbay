@@ -63,12 +63,25 @@ jobs:
           cp LICENSE "$dir/"
           tar -czf "$dir.tar.gz" "$dir"
 
+      - name: Package the zestins bundle
+        if: matrix.image == 'debian:12'
+        run: |
+          version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          dir="zestins-${version}-x86_64-linux"
+          mkdir "$dir"
+          cp -r target/zestins-deb-debian-12/zestins.lv2 "$dir/"
+          strip --strip-unneeded "$dir"/zestins.lv2/*.so
+          cp LICENSE zestins/README.md "$dir/"
+          tar -czf "$dir.tar.gz" "$dir"
+
       - name: Upload the executables
         if: matrix.image == 'debian:12'
         uses: actions/upload-artifact@v7
         with:
           name: executables-x86_64-linux
-          path: zestbay-*-x86_64-linux.tar.gz
+          path: |
+            zestbay-*-x86_64-linux.tar.gz
+            zestins-*-x86_64-linux.tar.gz
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v7

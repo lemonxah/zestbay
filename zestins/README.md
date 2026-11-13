@@ -38,8 +38,9 @@ Zestins is packaged separately from ZestBay, with the same version:
 | Ubuntu (PPA `ppa:lemonxah/tools`) | `sudo apt install zestins` |
 | Debian 12 / 13 | `sudo apt install ./zestins_<version>-debian13_amd64.deb` from the release page |
 | Fedora | `sudo dnf install ./zestins-<version>-1.fc<NN>.x86_64.rpm` from the release page |
-| Arch Linux | `makepkg -si` in `pkg/zestins/` (or `pkg/zestins-git/`) |
-| Any distro | `make install` below |
+| Arch Linux (AUR) | `paru -S zestins`, or `makepkg -si` in `pkg/zestins/` (or `pkg/zestins-git/`) |
+| Any distro (prebuilt) | copy `zestins.lv2` from `zestins-<version>-x86_64-linux.tar.gz` on the release page to `~/.lv2/` |
+| Any distro (source) | `make install` below |
 
 The packages install the bundle to `/usr/lib/lv2/zestins.lv2` (`%{_libdir}/lv2`
 on Fedora). They are built by `pkg/deb/build-zestins-deb.sh`,

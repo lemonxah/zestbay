@@ -500,7 +500,8 @@ each release.
   release or the latest commit yourself.
 - **Flatpak**: `io.github.lemonxah.ZestBay` -- see [`pkg/flatpak/README.md`](pkg/flatpak/README.md) to build it locally or make a single-file bundle (`just flatpak`, `just flatpak-bundle`).
 - **Fedora**: each release has `zestbay-<version>-1.fc<NN>.x86_64.rpm` and `zestins-<version>-1.fc<NN>.x86_64.rpm`, built for the current Fedora release: `sudo dnf install ./zestbay-*.rpm ./zestins-*.rpm`.
-- **Zestins on Arch**: build `pkg/zestins/` (or `pkg/zestins-git/`) with `makepkg -si`.
+- **Zestins on Arch**: `zestins` on the AUR (e.g. `paru -S zestins`), or build `pkg/zestins/` (or `pkg/zestins-git/`) with `makepkg -si`.
+- **Zestins on any distro**: each release has `zestins-<version>-x86_64-linux.tar.gz` with a prebuilt `zestins.lv2` bundle; copy it to `~/.lv2/` or `/usr/lib/lv2/`.
 - **Fedora/RPM, Nix, and the Debian/PPA packaging**: in `pkg/rpm/`, `pkg/nix/` and `pkg/deb/` (plus `debian/` for the PPA). `pkg/deb/build-zestins-deb.sh` and `pkg/rpm/build-zestins-rpm.sh` (`just zestins-deb`, `just zestins-rpm`) build the Zestins packages; the PPA builds both from the one source package.
 - **From source**: see below; `just install` builds and installs to `/usr`.
 
