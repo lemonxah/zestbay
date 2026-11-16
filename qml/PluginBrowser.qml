@@ -55,14 +55,13 @@ ZbWindow {
     property var categories: []
     property string selectedCategory: "All"
     property string selectedFormat: "All"
-    property bool showCompatibleOnly: true
 
     function loadPlugins() {
+        var scanned = []
         try {
-            allPlugins = JSON.parse(controller.get_available_plugins_json())
-        } catch(e) {
-            allPlugins = []
-        }
+            scanned = JSON.parse(controller.get_available_plugins_json())
+        } catch(e) {}
+        allPlugins = scanned.filter(p => p.compatible !== false)
 
         var catSet = {}
         for (var i = 0; i < allPlugins.length; i++) {
@@ -107,7 +106,6 @@ ZbWindow {
         } catch (e) {}
         for (var i = 0; i < list.length; i++) {
             list[i].isTemplate = true
-            list[i].compatible = true
         }
         templates = list
     }
@@ -135,9 +133,6 @@ ZbWindow {
         }
         for (var i = 0; i < allPlugins.length; i++) {
             var p = allPlugins[i]
-
-            if (showCompatibleOnly && !p.compatible)
-                continue
 
             if (selectedFormat !== "All" && (p.format || "LV2") !== selectedFormat)
                 continue
@@ -174,7 +169,7 @@ ZbWindow {
             chooseTemplate(plugin)
             return
         }
-        if (!plugin || !plugin.uri || plugin.compatible === false)
+        if (!plugin || !plugin.uri)
             return
         var addedName = controller.add_plugin(plugin.uri)
         pluginBrowser.addedPlugin = true
@@ -246,7 +241,6 @@ ZbWindow {
             }
         }
 
-        // Filter row: format · count · spacer · category · compatible only
         RowLayout {
             Layout.fillWidth: true
             spacing: 12
@@ -312,17 +306,6 @@ ZbWindow {
                     }
                 }
             }
-
-            ZbSwitch {
-                compact: true
-                visible: !pluginBrowser.showingTemplates
-                text: "Compatible only"
-                checked: pluginBrowser.showCompatibleOnly
-                onToggled: {
-                    pluginBrowser.showCompatibleOnly = checked
-                    pluginBrowser.filterPlugins()
-                }
-            }
         }
 
         // Plugin list card
@@ -355,7 +338,6 @@ ZbWindow {
                     required property var modelData
                     readonly property var plugin: modelData || {}
                     readonly property bool active: ListView.isCurrentItem
-                    readonly property bool isCompatible: plugin.compatible !== false
 
                     readonly property bool isTemplate: !!plugin.isTemplate
                     readonly property string metaText: {
@@ -397,7 +379,6 @@ ZbWindow {
                         ColumnLayout {
                             Layout.fillWidth: true
                             spacing: 4
-                            opacity: row.isCompatible ? 1 : 0.5
 
                             RowLayout {
                                 Layout.fillWidth: true
@@ -452,12 +433,6 @@ ZbWindow {
                         }
 
                         ZbBadge {
-                            visible: !row.isCompatible
-                            text: "incompatible"
-                            tone: "danger"
-                        }
-
-                        ZbBadge {
                             id: uiBadge
                             readonly property string twinFormat: row.plugin.uiTwinFormat || ""
                             visible: row.plugin.hasUi === false
@@ -488,8 +463,7 @@ ZbWindow {
 
                         ZbButton {
                             text: row.isTemplate ? "Insert" : "Add"
-                            kind: row.active && row.isCompatible ? "primary" : "ghost"
-                            enabled: row.isCompatible
+                            kind: row.active ? "primary" : "ghost"
                             onClicked: pluginBrowser.addPlugin(row.plugin)
                         }
                     }
