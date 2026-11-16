@@ -96,6 +96,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.2.8" date="2026-11-16">
+      <description>
+        <p>Mulitple bug fixes, plugin scans on add plugin auto if its been long since it scanned and a manual scan button</p>
+      </description>
+    </release>
     <release version="1.2.7" date="2026-11-13">
       <description>
         <p>Level meters, external LV2 UIs</p>
