@@ -15,6 +15,8 @@ QtObject {
     // Background plugin scan (status bar): finished.
     property bool plugins_scanning: false
     property real plugin_scan_progress: -1
+    property bool plugins_rescanning: false
+    property real plugin_rescan_progress: 0
     signal graph_changed()
     signal error_occurred(string message)
     signal show_window_requested()
@@ -248,6 +250,8 @@ QtObject {
     function get_rules_json() { return JSON.stringify(rules) }
     function get_node_names_json() { return JSON.stringify(nodes.map(function(n) { return { name: n.name, type: n.type, mediaType: n.mediaType || "Audio" } })) }
     function get_available_plugins_json() { return JSON.stringify(plugins) }
+    function rescan_plugins() {}
+    function rescan_plugins_if_stale() {}
     function get_active_plugins_json() {
         return JSON.stringify([{ instanceId: 30, stableId: "s30", displayName: params.displayName, pluginUri: params.pluginUri, format: "LV2", bypassed: false, parameters: params.parameters }])
     }

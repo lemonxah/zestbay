@@ -536,6 +536,7 @@ pub fn run_probe_main(args: &[String]) -> ! {
                 has_ui: false,
                 format: crate::lv2::PluginFormat::Lv2,
                 library_path: String::new(),
+                ladspa_ids: Vec::new(),
             };
             eprintln!(
                 "probe: LV2 plugin found: {} (ports: {} audio_in, {} audio_out, {} ctrl_in)",
@@ -663,6 +664,7 @@ fn probe_plugin_info(
         compatible: true,
         has_ui: false,
         library_path: library_path.to_string(),
+        ladspa_ids: Vec::new(),
     }
 }
 

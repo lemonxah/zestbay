@@ -257,6 +257,7 @@ pub(crate) fn scan_clap_file(path: &Path, plugins: &mut Vec<PluginInfo>) {
                 compatible: true,
                 has_ui,
                 library_path: path_str.to_string(),
+                ladspa_ids: Vec::new(),
             });
         }
 
@@ -339,6 +340,7 @@ mod tests {
             compatible: true,
             has_ui: false,
             library_path: format!("/x/{uri}.clap"),
+            ladspa_ids: Vec::new(),
         }
     }
 

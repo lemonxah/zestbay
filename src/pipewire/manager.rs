@@ -708,6 +708,21 @@ impl Host {
                     self.patch_queued_add(instance_id, |req| req.bypassed = bypassed);
                 }
             }
+            PwCommand::RenamePlugin {
+                instance_id,
+                display_name,
+            } => {
+                let live = match self.meta.borrow_mut().get_mut(&instance_id) {
+                    Some(meta) => {
+                        meta.display_name = display_name.clone();
+                        true
+                    }
+                    None => false,
+                };
+                if !live {
+                    self.patch_queued_add(instance_id, |req| req.display_name = display_name);
+                }
+            }
             PwCommand::StartMidiLearn {
                 instance_id,
                 port_index,
@@ -2855,6 +2870,7 @@ fn build_plugin_info(
         has_ui: false,
         format: crate::lv2::PluginFormat::Lv2,
         library_path: String::new(),
+        ladspa_ids: Vec::new(),
     })
 }
 

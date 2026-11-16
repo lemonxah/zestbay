@@ -182,6 +182,7 @@ fn describe(path: &Path, loaded: &LoadedEffect) -> PluginInfo {
             compatible: loaded.can_process(),
             has_ui: (*raw).flags & HAS_EDITOR != 0,
             library_path: path.to_string_lossy().into_owned(),
+            ladspa_ids: Vec::new(),
         }
     }
 }

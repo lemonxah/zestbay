@@ -235,6 +235,8 @@ pub struct PluginInfo {
     /// Empty for LV2 (which uses lilv for discovery).
     #[serde(default)]
     pub library_path: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ladspa_ids: Vec<u64>,
 }
 
 impl PluginInfo {
@@ -875,6 +877,7 @@ mod tests {
             compatible: true,
             has_ui: false,
             library_path: String::new(),
+            ladspa_ids: Vec::new(),
         };
         assert!(info.is_effect());
         assert!(!info.is_instrument());
@@ -898,6 +901,7 @@ mod tests {
             compatible: true,
             has_ui: false,
             library_path: String::new(),
+            ladspa_ids: Vec::new(),
         };
         assert!(info.is_instrument());
         assert!(!info.is_effect());
@@ -921,6 +925,7 @@ mod tests {
             compatible: true,
             has_ui: false,
             library_path: String::new(),
+            ladspa_ids: Vec::new(),
         };
         assert!(info.is_analyser());
         assert!(!info.is_effect());

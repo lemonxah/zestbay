@@ -187,6 +187,11 @@ pub(super) unsafe fn describe(path: &Path, desc: &Descriptor) -> Option<PluginIn
             compatible: ai + ao > 0,
             has_ui: false,
             library_path: path.to_string_lossy().into_owned(),
+            ladspa_ids: if desc.unique_id != 0 {
+                vec![desc.unique_id as u64]
+            } else {
+                Vec::new()
+            },
         })
     }
 }
