@@ -66,7 +66,7 @@ ZestBay is a visual audio routing tool for PipeWire on Linux. It lets you see ev
 
 qpwgraph is a straightforward PipeWire graph editor. ZestBay goes further:
 
-- **LV2, LADSPA, VST2, VST3, and CLAP plugin hosting** -- Insert effects (EQ, compressor, reverb, etc.) directly into the PipeWire graph without needing a DAW or separate plugin host. ZestBay creates real PipeWire filter nodes with RT-safe DSP processing. Comprehensive LV2 extension support (URID, worker, state, log, options, buf-size, data-access, instance-access) means most LV2 plugins load without issues. VST2, VST3, and CLAP plugins are hosted with parameter, state, and native UI support. LADSPA plugins are hosted with parameters and bypass (the format has no UI or state API).
+- **LV2, LADSPA, VST2, VST3, and CLAP plugin hosting** -- Insert effects (EQ, compressor, reverb, etc.) directly into the PipeWire graph without needing a DAW or separate plugin host. ZestBay creates real PipeWire filter nodes with RT-safe DSP processing. Comprehensive LV2 extension support (URID, worker, state, log, options, buf-size, data-access, instance-access) means most LV2 plugins load without issues. VST2, VST3, and CLAP plugins are hosted with parameter, state, and native UI support. LADSPA plugins are hosted with parameters and bypass (the format has no UI or state API); when the LV2 build of the same plugin is installed and has a UI, Add plugin marks the LADSPA entry "UI in LV2 version".
 - **Native plugin UIs** -- Open the original plugin interfaces. LV2 UIs (GTK3, X11, Qt5, GTK2, GTK4) via suil, plus KXStudio external UIs (the plugin opens its own window), VST2, VST3, and CLAP UIs via embedded X11 windows. A persistent GTK thread manages LV2 plugin windows without the crash-on-reopen issues common in LV2 hosts.
 - **Plugin presets** -- Save a plugin's settings as named presets, pick them from a dropdown on the plugin node, and apply them to any other instance of that plugin instead of re-entering every value. One preset per plugin can be the default, so new instances start from it. For LV2 plugins a preset also keeps the plugin's saved state (for example the LSP Mixer's channel names), not just the knob positions. See [Plugin Presets](#plugin-presets).
 - **MIDI parameter control** -- Map hardware MIDI controllers to any plugin parameter with one-click learn. Continuous, toggle, and momentary modes with RT-safe processing.
@@ -122,7 +122,7 @@ Carla is a full-featured plugin host and JACK patchbay. The differences are abou
 - Right-drag from one port to another to **block** the pair; blocked pairs are drawn as red dashed lines with a ⊘. Hover one to highlight it, click it to select it (Ctrl+click to add more) and press **Delete** to remove the rule that blocks it. A rule can cover several pairs; the toast says when removing it frees others too
 - Drag a plugin onto a wire to insert it into that connection; Ctrl+Z takes it out again and puts the original wire back. A node never offers to drop onto its own wires, including those of a meter snapped onto it
 - **Removing a plugin keeps the audio flowing**: when a plugin with as many audio inputs as outputs is removed, whatever fed its n-th input is wired to whatever its n-th output fed
-- **Default node**: right-click a sink or plugin → Set as default; app streams without a rule are routed there
+- **Default node**: right-click a sink or plugin → Set as default; app streams without a rule, or whose rule targets are all missing, are routed there
 
 **Selecting and editing**
 - Select nodes and wires with a click, Ctrl+click or a selection box; boxes started with **Shift** or **Ctrl** add to the selection, **Ctrl+A** selects all nodes and wires. Neither a box nor Ctrl+A takes block lines, so Delete can't remove a rule by accident
@@ -164,7 +164,7 @@ A meter can sit on either end of the wire it is on, so the level shows on the no
 - Or right-click the meter → **Snap to source port** or **Snap to destination port**.
 
 Snapped, the card is hidden and each channel's bar sits under the name of the port it snapped to. The meter is named after that place ("Daw Sink in meter", "Pianoteq 9 out 9-16 meter"); a name you gave it yourself is kept. The meter keeps running in PipeWire.
-- **The snapped-to port stands for the meter's port.** Drag a new wire to or from it and the wire goes through the meter.
+- **The snapped-to port stands for the meter's port.** Drag a new wire to or from it and the wire goes through the meter. Patchbay rules and the default node do the same: a rule or default that connects to that port connects through the meter, and a wire through the meter counts as a wire to the port.
 - **Wires that skip the meter are dashed.** Any other wire on that port, one that does not pass through the meter, is drawn dashed. Connect the same pair again and the dashed wire is replaced by one through the meter (one undo step).
 - **What can snap:** snapping to the source needs each channel to be fed by one port; snapping to the destination needs each channel to feed one port. Otherwise the menu item is greyed out and no node lights up while you drag.
 
@@ -181,7 +181,7 @@ Right-click any node → **Meter inputs (n)** or **Meter outputs (n)**. ZestBay 
 - Right-click the node a meter is snapped onto → **Unsnap meter** (or **Unsnap n meters**) brings the cards back where they were; **Remove snapped meter(s)** removes them and rejoins the wires.
 - Right-click empty canvas → **Unsnap all n meters**. **Unhide all** also brings them back.
 - **Ctrl+Z** undoes a snap or an unsnap.
-- If the port a meter is snapped to goes away (its wire removed, the device unplugged), the meter is unsnapped a moment later and its card shows again, instead of staying hidden with no way to reach it.
+- If the port a meter is snapped to goes away (its wire removed, the device unplugged), the meter stays snapped. After a few seconds its card shows again so you can still reach it, and it goes back under the port by itself once the wire is back (the device returns, PipeWire restarts). Right-click the card → **Unsnap meter** to keep it as a card.
 
 **Good to know**
 - A meter costs next to nothing: one peak per channel per audio cycle. The **CPU usage** window lists all meters as one **Meters (n)** row; click it to see each meter under it.
@@ -613,8 +613,8 @@ make -C zestins install    # into ~/.lv2; ZestBay finds them on its next plugin 
 
 Details and the list of plugin URIs are in [`zestins/README.md`](zestins/README.md). (The [level meters](#level-meters) are different: they are built into ZestBay itself and need no package.)
 
-ZestBay scans for LV2, LADSPA, VST2, VST3 and CLAP plugins when it starts, so restart it
-after adding plugins. Where plugins go depends on which version you run
+ZestBay scans for LV2, LADSPA, VST2, VST3 and CLAP plugins when it starts; after adding
+plugins, press **Rescan** in Add plugin (or restart). Where plugins go depends on which version you run
 (**About** shows *Install: Native* or *Install: Flatpak*).
 
 For faster startup, saved plugins can restore without waiting for the full
@@ -623,6 +623,11 @@ VST3 libraries are scanned in up to four isolated processes at a time. Saved
 plugins start directly from their stored descriptors and library paths; LV2
 plugins use their saved URIs. Older configs and missing paths fall back to
 discovery, then gain updated paths automatically for the next launch.
+
+Plugins installed while ZestBay is running show up without a restart: **Add
+plugin** has a **Rescan** button, and opening Add plugin rescans in the
+background by itself when the last scan is more than 10 minutes old. Running
+plugins are not touched by a rescan.
 
 ### Native version (distro package or built from source)
 

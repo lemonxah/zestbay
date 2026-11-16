@@ -252,6 +252,7 @@ pub(crate) fn scan_vst3_bundle(bundle_path: &Path, plugins: &mut Vec<PluginInfo>
                 // at instantiation time via IEditController::createView().
                 has_ui: true,
                 library_path: bundle_str.to_string(),
+                ladspa_ids: Vec::new(),
             });
         }
 

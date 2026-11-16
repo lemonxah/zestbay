@@ -26,6 +26,18 @@ pub struct PatchbayManager {
     /// Recent rule-enforced disconnects per (output port, input port), used to
     /// break destroy/relink loops.
     recent_destroys: HashMap<(ObjectId, ObjectId), Vec<Instant>>,
+    redirects: HashMap<ObjectId, ObjectId>,
+    redirect_origins: HashMap<ObjectId, ObjectId>,
+    standby_ports: HashSet<ObjectId>,
+}
+
+const MAX_REDIRECT_HOPS: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    Ungoverned,
+    Authorized,
+    Unauthorized,
 }
 
 impl PatchbayManager {
@@ -39,7 +51,143 @@ impl PatchbayManager {
             rules_dirty: false,
             default_target: None,
             recent_destroys: HashMap::new(),
+            redirects: HashMap::new(),
+            redirect_origins: HashMap::new(),
+            standby_ports: HashSet::new(),
         }
+    }
+
+    pub fn set_port_redirects(
+        &mut self,
+        redirects: HashMap<ObjectId, ObjectId>,
+        standby_ports: HashSet<ObjectId>,
+    ) {
+        self.redirect_origins = redirects.iter().map(|(from, to)| (*to, *from)).collect();
+        self.redirects = redirects;
+        self.standby_ports = standby_ports;
+    }
+
+    fn physical_port(&self, port_id: ObjectId) -> ObjectId {
+        let mut id = port_id;
+        for _ in 0..MAX_REDIRECT_HOPS {
+            match self.redirects.get(&id) {
+                Some(next) if *next != id => id = *next,
+                _ => break,
+            }
+        }
+        id
+    }
+
+    fn logical_port(&self, port_id: ObjectId) -> ObjectId {
+        let mut id = port_id;
+        for _ in 0..MAX_REDIRECT_HOPS {
+            match self.redirect_origins.get(&id) {
+                Some(prev) if *prev != id => id = *prev,
+                _ => break,
+            }
+        }
+        id
+    }
+
+    fn is_redirect_internal(&self, output_port_id: ObjectId, input_port_id: ObjectId) -> bool {
+        let node_of = |port_id: ObjectId| self.graph.get_port(port_id).map(|p| p.node_id);
+        let joins = |anchor: ObjectId, other: ObjectId| {
+            self.redirects
+                .get(&anchor)
+                .and_then(|stand_in| node_of(*stand_in))
+                .is_some_and(|meter_node| node_of(other) == Some(meter_node))
+        };
+        joins(output_port_id, input_port_id) || joins(input_port_id, output_port_id)
+    }
+
+    fn skips_redirect(&self, output_port_id: ObjectId, input_port_id: ObjectId) -> bool {
+        (self.redirects.contains_key(&output_port_id)
+            || self.redirects.contains_key(&input_port_id))
+            && !self.is_redirect_internal(output_port_id, input_port_id)
+    }
+
+    pub fn rename_node(&mut self, old: &str, new: &str) -> bool {
+        if old == new {
+            return false;
+        }
+        let is_plugin = |t: Option<NodeType>| matches!(t, None | Some(NodeType::Plugin));
+        let mut changed = false;
+        for rule in &mut self.rules {
+            if rule.source_pattern == old && is_plugin(rule.source_node_type) {
+                rule.source_pattern = new.to_string();
+                changed = true;
+            }
+            if rule.target_pattern == old && is_plugin(rule.target_node_type) {
+                rule.target_pattern = new.to_string();
+                changed = true;
+            }
+        }
+        if !changed {
+            return false;
+        }
+        let mut merged: Vec<AutoConnectRule> = Vec::with_capacity(self.rules.len());
+        for rule in std::mem::take(&mut self.rules) {
+            let twin = merged.iter_mut().find(|m| {
+                m.source_pattern == rule.source_pattern
+                    && m.source_node_type == rule.source_node_type
+                    && m.target_pattern == rule.target_pattern
+                    && m.target_node_type == rule.target_node_type
+                    && m.action == rule.action
+                    && m.enabled == rule.enabled
+                    && m.port_mappings.is_empty() == rule.port_mappings.is_empty()
+            });
+            match twin {
+                Some(existing) => {
+                    for mapping in rule.port_mappings {
+                        if !existing.port_mappings.contains(&mapping) {
+                            existing.port_mappings.push(mapping);
+                        }
+                    }
+                    if existing.target_node_id.is_none() {
+                        existing.target_node_id = rule.target_node_id;
+                    }
+                }
+                None => merged.push(rule),
+            }
+        }
+        self.rules = merged;
+        self.rules_dirty = true;
+        true
+    }
+
+    pub fn forget_plugin_node(&mut self, name: &str) -> bool {
+        let is_plugin = |t: Option<NodeType>| t == Some(NodeType::Plugin);
+        let before = self.rules.len();
+        self.rules.retain(|r| {
+            !((r.source_pattern == name && is_plugin(r.source_node_type))
+                || (r.target_pattern == name && is_plugin(r.target_node_type)))
+        });
+        let changed = self.rules.len() != before;
+        if changed {
+            self.rules_dirty = true;
+        }
+        changed
+    }
+
+    pub fn forget_absent_plugin_nodes(
+        &mut self,
+        is_candidate: impl Fn(&str) -> bool,
+        present: &HashSet<String>,
+    ) -> bool {
+        let is_plugin = |t: Option<NodeType>| t == Some(NodeType::Plugin);
+        let stale = |pattern: &str, node_type: Option<NodeType>| {
+            is_plugin(node_type) && is_candidate(pattern) && !present.contains(pattern)
+        };
+        let before = self.rules.len();
+        self.rules.retain(|r| {
+            !(stale(&r.source_pattern, r.source_node_type)
+                || stale(&r.target_pattern, r.target_node_type))
+        });
+        let changed = self.rules.len() != before;
+        if changed {
+            self.rules_dirty = true;
+        }
+        changed
     }
 
     pub fn set_rules(&mut self, rules: Vec<AutoConnectRule>) {
@@ -300,19 +448,36 @@ impl PatchbayManager {
 
     /// `is_blocked` for a port pair given by id.
     fn ports_blocked(&self, output_port_id: ObjectId, input_port_id: ObjectId) -> bool {
-        let (Some(out), Some(inp)) = (
-            self.graph.get_port(output_port_id),
-            self.graph.get_port(input_port_id),
-        ) else {
-            return false;
-        };
-        let (Some(source), Some(target)) = (
-            self.graph.get_node(out.node_id),
-            self.graph.get_node(inp.node_id),
-        ) else {
-            return false;
-        };
-        self.is_blocked(&source, &target, &out, &inp)
+        self.blocking_rule_for_ports(output_port_id, input_port_id)
+            .is_some()
+    }
+
+    pub fn blocking_rule_for_ports(
+        &self,
+        output_port_id: ObjectId,
+        input_port_id: ObjectId,
+    ) -> Option<&AutoConnectRule> {
+        self.blocking_rule_between(output_port_id, input_port_id)
+            .or_else(|| {
+                let logical_out = self.logical_port(output_port_id);
+                let logical_in = self.logical_port(input_port_id);
+                if (logical_out, logical_in) == (output_port_id, input_port_id) {
+                    return None;
+                }
+                self.blocking_rule_between(logical_out, logical_in)
+            })
+    }
+
+    fn blocking_rule_between(
+        &self,
+        output_port_id: ObjectId,
+        input_port_id: ObjectId,
+    ) -> Option<&AutoConnectRule> {
+        let out = self.graph.get_port(output_port_id)?;
+        let inp = self.graph.get_port(input_port_id)?;
+        let source = self.graph.get_node(out.node_id)?;
+        let target = self.graph.get_node(inp.node_id)?;
+        self.blocking_rule(&source, &target, &out, &inp)
     }
 
     pub fn snapshot_current_connections(&mut self) {
@@ -535,6 +700,7 @@ impl PatchbayManager {
         self.clean_incompatible_mappings();
 
         let mut commands = Vec::new();
+        let mut wanted: Vec<(ObjectId, ObjectId)> = Vec::new();
         let nodes = self.graph.get_all_nodes();
 
         for node in &nodes {
@@ -561,47 +727,63 @@ impl PatchbayManager {
                 })
                 .collect();
 
-            if matching_rules.is_empty() {
-                // No rules match this source — use the default target if set,
-                // but only for application streams (StreamOutput), not hardware
-                // sources like microphones or other node types.
+            let rule_targets: Vec<(&AutoConnectRule, &Node)> = matching_rules
+                .iter()
+                .filter_map(|rule| {
+                    self.find_matching_target(rule, &nodes, node.id)
+                        .map(|target| (*rule, target))
+                })
+                .collect();
+
+            if rule_targets.is_empty() {
                 if node.node_type == Some(NodeType::StreamOutput)
                     && let Some(target) = self.default_target_node(&nodes, node.id)
                 {
-                    // Auto-connect by port matching (no explicit port mappings)
                     let target_ports = self.graph.get_input_ports(target.id);
                     for source_port in &output_ports {
                         if let Some(target_port) =
                             self.find_matching_port(source_port, &target_ports)
-                            && self
-                                .graph
-                                .find_link(source_port.id, target_port.id)
-                                .is_none()
                         {
-                            commands.push(PwCommand::Connect {
-                                output_port_id: source_port.id,
-                                input_port_id: target_port.id,
-                            });
+                            wanted.push((source_port.id, target_port.id));
                         }
                     }
                 }
             } else {
-                for rule in &matching_rules {
-                    if let Some(target) = self.find_matching_target(rule, &nodes, node.id) {
-                        commands.extend(self.generate_connections(rule, target, &output_ports));
-                    }
+                for (rule, target) in rule_targets {
+                    wanted.extend(self.generate_connections(rule, target, &output_ports));
                 }
             }
         }
 
-        // Block rules win over connect rules and the default node.
-        commands.retain(|c| match c {
-            PwCommand::Connect {
-                output_port_id,
-                input_port_id,
-            } => !self.ports_blocked(*output_port_id, *input_port_id),
-            _ => true,
-        });
+        let mut requested: HashSet<(ObjectId, ObjectId)> = HashSet::new();
+        for (logical_out, logical_in) in wanted {
+            if self.ports_blocked(logical_out, logical_in) {
+                continue;
+            }
+            let pair = (
+                self.physical_port(logical_out),
+                self.physical_port(logical_in),
+            );
+            if self.graph.find_link(pair.0, pair.1).is_some() {
+                continue;
+            }
+            let rerouted = pair != (logical_out, logical_in);
+            if rerouted
+                && !self.exclusive
+                && self.graph.find_link(logical_out, logical_in).is_some()
+            {
+                continue;
+            }
+            if rerouted && self.ports_blocked(pair.0, pair.1) {
+                continue;
+            }
+            if requested.insert(pair) {
+                commands.push(PwCommand::Connect {
+                    output_port_id: pair.0,
+                    input_port_id: pair.1,
+                });
+            }
+        }
 
         let now = Instant::now();
         self.recent_destroys.retain(|_, times| {
@@ -611,11 +793,16 @@ impl PatchbayManager {
 
         let links = self.graph.get_all_links();
         for link in &links {
-            // Blocked links go in any mode; unauthorized ones only in
-            // exclusive mode.
-            let remove = self.link_blocked(link)
-                || (self.exclusive && self.should_remove_link(link, &nodes));
-            if !remove {
+            let blocked = self.link_blocked(link);
+            let verdict = if self.exclusive {
+                self.link_verdict(link, &nodes)
+            } else {
+                Verdict::Ungoverned
+            };
+            let reroute = !blocked
+                && verdict == Verdict::Authorized
+                && self.skips_redirect(link.output_port_id, link.input_port_id);
+            if !blocked && verdict != Verdict::Unauthorized && !reroute {
                 continue;
             }
             let key = (link.output_port_id, link.input_port_id);
@@ -635,6 +822,21 @@ impl PatchbayManager {
                 continue;
             }
             times.push(now);
+            if reroute {
+                let pair = (
+                    self.physical_port(link.output_port_id),
+                    self.physical_port(link.input_port_id),
+                );
+                if self.graph.find_link(pair.0, pair.1).is_none()
+                    && !self.ports_blocked(pair.0, pair.1)
+                    && requested.insert(pair)
+                {
+                    commands.push(PwCommand::Connect {
+                        output_port_id: pair.0,
+                        input_port_id: pair.1,
+                    });
+                }
+            }
             commands.push(PwCommand::Disconnect { link_id: link.id });
         }
 
@@ -646,22 +848,14 @@ impl PatchbayManager {
         rule: &AutoConnectRule,
         target: &Node,
         source_ports: &[Port],
-    ) -> Vec<PwCommand> {
+    ) -> Vec<(ObjectId, ObjectId)> {
         let mut commands = Vec::new();
         let target_ports = self.graph.get_input_ports(target.id);
 
         if rule.port_mappings.is_empty() {
             for source_port in source_ports {
-                if let Some(target_port) = self.find_matching_port(source_port, &target_ports)
-                    && self
-                        .graph
-                        .find_link(source_port.id, target_port.id)
-                        .is_none()
-                {
-                    commands.push(PwCommand::Connect {
-                        output_port_id: source_port.id,
-                        input_port_id: target_port.id,
-                    });
+                if let Some(target_port) = self.find_matching_port(source_port, &target_ports) {
+                    commands.push((source_port.id, target_port.id));
                 }
             }
         } else {
@@ -680,12 +874,7 @@ impl PatchbayManager {
                     {
                         continue;
                     }
-                    if self.graph.find_link(out_port.id, in_port.id).is_none() {
-                        commands.push(PwCommand::Connect {
-                            output_port_id: out_port.id,
-                            input_port_id: in_port.id,
-                        });
-                    }
+                    commands.push((out_port.id, in_port.id));
                 }
             }
         }
@@ -856,41 +1045,56 @@ impl PatchbayManager {
         !matches!(node.media_type, Some(MediaType::Video))
     }
 
-    /// Whether rule enforcement should destroy `link`.
-    ///
-    /// Only links whose *source* is governed by an enabled rule are ever
-    /// removed, and only while at least one of that source's rule targets is
-    /// present (so session-manager fallback routing while the target is gone
-    /// is left alone). App streams no rule matches are governed by the
-    /// default target the same way; other unruled sources are never touched.
-    fn should_remove_link(&self, link: &Link, nodes: &[Node]) -> bool {
-        let source_node = match self.graph.get_node(link.output_node_id) {
-            Some(n) => n,
-            None => return false,
-        };
+    fn link_verdict(&self, link: &Link, nodes: &[Node]) -> Verdict {
+        if self.is_redirect_internal(link.output_port_id, link.input_port_id)
+            || self.standby_ports.contains(&link.output_port_id)
+            || self.standby_ports.contains(&link.input_port_id)
+        {
+            return Verdict::Ungoverned;
+        }
+        let physical = self.pair_verdict(link.output_port_id, link.input_port_id, nodes);
+        let logical_pair = (
+            self.logical_port(link.output_port_id),
+            self.logical_port(link.input_port_id),
+        );
+        if logical_pair == (link.output_port_id, link.input_port_id) {
+            return physical;
+        }
+        let logical = self.pair_verdict(logical_pair.0, logical_pair.1, nodes);
+        if physical == Verdict::Authorized || logical == Verdict::Authorized {
+            Verdict::Authorized
+        } else if physical == Verdict::Unauthorized || logical == Verdict::Unauthorized {
+            Verdict::Unauthorized
+        } else {
+            Verdict::Ungoverned
+        }
+    }
 
-        let target_node = match self.graph.get_node(link.input_node_id) {
-            Some(n) => n,
-            None => return false,
+    fn pair_verdict(
+        &self,
+        output_port_id: ObjectId,
+        input_port_id: ObjectId,
+        nodes: &[Node],
+    ) -> Verdict {
+        let (Some(out_p), Some(in_p)) = (
+            self.graph.get_port(output_port_id),
+            self.graph.get_port(input_port_id),
+        ) else {
+            return Verdict::Ungoverned;
+        };
+        let (Some(source_node), Some(target_node)) = (
+            self.graph.get_node(out_p.node_id),
+            self.graph.get_node(in_p.node_id),
+        ) else {
+            return Verdict::Ungoverned;
         };
 
         if !Self::is_routable_node(&source_node) || !Self::is_routable_node(&target_node) {
-            return false;
+            return Verdict::Ungoverned;
         }
         if Self::is_subgraph_internal(&source_node, &target_node) {
-            return false;
+            return Verdict::Ungoverned;
         }
-
-        // If either port has already been removed from the graph (e.g. during
-        // device disconnection), the link is stale and will be cleaned up by
-        // PipeWire.  Don't actively try to remove it — doing so can race with
-        // PipeWire's own cleanup and disrupt the audio graph.
-        let (Some(out_p), Some(in_p)) = (
-            self.graph.get_port(link.output_port_id),
-            self.graph.get_port(link.input_port_id),
-        ) else {
-            return false;
-        };
 
         let source_rules: Vec<&AutoConnectRule> = self
             .rules
@@ -901,55 +1105,39 @@ impl PatchbayManager {
                     && r.matches_source(source_node.display_name(), source_node.node_type)
             })
             .collect();
-        if source_rules.is_empty() {
-            // An app stream with no rules belongs to the default target: once
-            // that node is present, links anywhere else are unauthorized.
-            if source_node.node_type != Some(NodeType::StreamOutput) {
-                return false;
-            }
-            return self
-                .default_target_node(nodes, source_node.id)
-                .is_some_and(|d| d.id != target_node.id);
-        }
 
         let any_target_present = source_rules.iter().any(|r| {
             self.find_matching_target(r, nodes, source_node.id)
                 .is_some()
         });
         if !any_target_present {
-            return false;
+            if source_node.node_type != Some(NodeType::StreamOutput) {
+                return Verdict::Ungoverned;
+            }
+            return match self.default_target_node(nodes, source_node.id) {
+                Some(d) if d.id == target_node.id => Verdict::Authorized,
+                Some(_) => Verdict::Unauthorized,
+                None => Verdict::Ungoverned,
+            };
         }
 
         let authorized = source_rules.iter().any(|rule| {
-            if !rule.matches_target(
+            rule.matches_target(
                 target_node.display_name(),
                 target_node.node_type,
                 target_node.id,
-            ) {
-                return false;
-            }
-            rule.covers_ports(&out_p.name, &in_p.name)
+            ) && rule.covers_ports(&out_p.name, &in_p.name)
         });
 
-        !authorized
+        if authorized {
+            Verdict::Authorized
+        } else {
+            Verdict::Unauthorized
+        }
     }
 
-    /// Whether a block rule forbids `link`. Like `should_remove_link`, links
-    /// whose ports are already gone are left to PipeWire.
     fn link_blocked(&self, link: &Link) -> bool {
-        let (Some(out_p), Some(in_p)) = (
-            self.graph.get_port(link.output_port_id),
-            self.graph.get_port(link.input_port_id),
-        ) else {
-            return false;
-        };
-        let (Some(source), Some(target)) = (
-            self.graph.get_node(link.output_node_id),
-            self.graph.get_node(link.input_node_id),
-        ) else {
-            return false;
-        };
-        self.is_blocked(&source, &target, &out_p, &in_p)
+        self.ports_blocked(link.output_port_id, link.input_port_id)
     }
 }
 
@@ -1505,5 +1693,174 @@ mod tests {
         graph.insert_link(link(100, &out, &sp_in));
         let mut pb = PatchbayManager::new(graph);
         assert!(pb.scan().is_empty());
+    }
+
+    fn meter(graph: &GraphState) -> (Port, Port) {
+        graph.insert_node(node(5, "Headphones in meter", NodeType::Plugin));
+        let m_in = port(50, 5, "input_0", PortDirection::Input, MediaType::Audio);
+        let m_out = port(51, 5, "output_0", PortDirection::Output, MediaType::Audio);
+        graph.insert_port(m_in.clone());
+        graph.insert_port(m_out.clone());
+        (m_in, m_out)
+    }
+
+    #[test]
+    fn default_target_routes_through_snapped_meter() {
+        let (graph, _, hp_in, _) = setup();
+        let (m_in, m_out) = meter(&graph);
+        graph.insert_link(link(200, &m_out, &hp_in));
+        let mut pb = PatchbayManager::new(graph.clone());
+        pb.set_default_target(Some("Headphones".into()));
+        pb.set_port_redirects(HashMap::from([(hp_in.id, m_in.id)]), HashSet::new());
+        let cmds = pb.scan();
+        assert_eq!(connects(&cmds), vec![(10, m_in.id)]);
+        assert!(disconnects(&cmds).is_empty());
+    }
+
+    #[test]
+    fn link_through_snapped_meter_counts_as_link_to_its_port() {
+        let (graph, out, hp_in, _) = setup();
+        let (m_in, m_out) = meter(&graph);
+        graph.insert_link(link(200, &m_out, &hp_in));
+        graph.insert_link(link(201, &out, &m_in));
+        let mut pb = PatchbayManager::new(graph.clone());
+        pb.set_default_target(Some("Headphones".into()));
+        pb.set_port_redirects(HashMap::from([(hp_in.id, m_in.id)]), HashSet::new());
+        assert!(pb.scan().is_empty());
+        pb.set_port_redirects(HashMap::new(), HashSet::new());
+        assert_eq!(disconnects(&pb.scan()), vec![201]);
+    }
+
+    #[test]
+    fn wires_on_a_snapped_meter_waiting_for_its_port_are_kept() {
+        let (graph, out, _, _) = setup();
+        let (m_in, _) = meter(&graph);
+        graph.insert_link(link(201, &out, &m_in));
+        let mut pb = PatchbayManager::new(graph.clone());
+        pb.set_default_target(Some("Headphones".into()));
+        pb.set_port_redirects(HashMap::new(), HashSet::from([m_in.id]));
+        assert!(disconnects(&pb.scan()).is_empty());
+    }
+
+    #[test]
+    fn exclusive_moves_direct_link_onto_snapped_meter() {
+        let (graph, out, hp_in, _) = setup();
+        let (m_in, m_out) = meter(&graph);
+        graph.insert_link(link(200, &m_out, &hp_in));
+        graph.insert_link(link(202, &out, &hp_in));
+        let mut pb = PatchbayManager::new(graph.clone());
+        pb.set_default_target(Some("Headphones".into()));
+        pb.set_port_redirects(HashMap::from([(hp_in.id, m_in.id)]), HashSet::new());
+        let cmds = pb.scan();
+        assert_eq!(connects(&cmds), vec![(10, m_in.id)]);
+        assert_eq!(disconnects(&cmds), vec![202]);
+        pb.exclusive = false;
+        assert!(pb.scan().is_empty());
+    }
+
+    #[test]
+    fn meter_snapped_to_ruled_source_keeps_its_wires() {
+        let (graph, out, hp_in, _) = setup();
+        let (m_in, m_out) = meter(&graph);
+        graph.insert_link(link(200, &out, &m_in));
+        graph.insert_link(link(201, &m_out, &hp_in));
+        let mut pb = PatchbayManager::new(graph.clone());
+        pb.add_rule(AutoConnectRule::new("App", None, "Headphones", None, None));
+        pb.set_port_redirects(HashMap::from([(out.id, m_out.id)]), HashSet::new());
+        assert!(pb.scan().is_empty());
+    }
+
+    #[test]
+    fn block_applies_through_snapped_meter() {
+        let (graph, out, hp_in, _) = setup();
+        let (m_in, m_out) = meter(&graph);
+        graph.insert_link(link(200, &m_out, &hp_in));
+        graph.insert_link(link(201, &out, &m_in));
+        let mut pb = PatchbayManager::new(graph.clone());
+        pb.add_rule(
+            AutoConnectRule::new("App", None, "Headphones", None, None)
+                .with_action(RuleAction::Block),
+        );
+        pb.set_port_redirects(HashMap::from([(hp_in.id, m_in.id)]), HashSet::new());
+        assert!(pb.blocking_rule_for_ports(out.id, m_in.id).is_some());
+        assert_eq!(disconnects(&pb.scan()), vec![201]);
+    }
+
+    #[test]
+    fn rules_whose_targets_are_gone_fall_back_to_default() {
+        let (graph, out, hp_in, sp_in) = setup();
+        graph.insert_link(link(100, &out, &hp_in));
+        let mut pb = PatchbayManager::new(graph.clone());
+        pb.add_rule(AutoConnectRule::new(
+            "App",
+            None,
+            "Meter (2 ch)",
+            Some(NodeType::Plugin),
+            None,
+        ));
+        pb.set_default_target(Some("Speakers".into()));
+        let cmds = pb.scan();
+        assert_eq!(connects(&cmds), vec![(10, sp_in.id)]);
+        assert_eq!(disconnects(&cmds), vec![100]);
+    }
+
+    #[test]
+    fn rename_node_moves_rules_and_merges_twins() {
+        let (graph, _, _, _) = setup();
+        let mut pb = PatchbayManager::new(graph);
+        let mut old = AutoConnectRule::new(
+            "App",
+            Some(NodeType::StreamOutput),
+            "Meter (2 ch)",
+            Some(NodeType::Plugin),
+            Some(5),
+        );
+        old.add_port_mapping("output_FL".into(), "input_0".into());
+        let mut twin = AutoConnectRule::new(
+            "App",
+            Some(NodeType::StreamOutput),
+            "Headphones in meter",
+            Some(NodeType::Plugin),
+            None,
+        );
+        twin.add_port_mapping("output_FR".into(), "input_1".into());
+        let from_meter = AutoConnectRule::new(
+            "Meter (2 ch)",
+            Some(NodeType::Plugin),
+            "Headphones",
+            Some(NodeType::Sink),
+            Some(2),
+        );
+        let sink_named_alike = AutoConnectRule::new(
+            "App",
+            Some(NodeType::StreamOutput),
+            "Meter (2 ch)",
+            Some(NodeType::Sink),
+            None,
+        );
+        pb.set_rules(vec![old, twin, from_meter, sink_named_alike]);
+        assert!(pb.rename_node("Meter (2 ch)", "Headphones in meter"));
+        assert_eq!(pb.rules().len(), 3);
+        assert_eq!(pb.rules()[0].target_pattern, "Headphones in meter");
+        assert_eq!(pb.rules()[0].port_mappings.len(), 2);
+        assert_eq!(pb.rules()[1].source_pattern, "Headphones in meter");
+        assert_eq!(pb.rules()[2].target_pattern, "Meter (2 ch)");
+        assert!(!pb.rename_node("Nothing", "Else"));
+    }
+
+    #[test]
+    fn forgetting_a_plugin_node_drops_only_its_rules() {
+        let (graph, _, _, _) = setup();
+        let mut pb = PatchbayManager::new(graph);
+        pb.set_rules(vec![
+            AutoConnectRule::new("App", None, "Meter (2 ch)", Some(NodeType::Plugin), None),
+            AutoConnectRule::new("Meter (2 ch)", Some(NodeType::Plugin), "Headphones", None, None),
+            AutoConnectRule::new("App", None, "Headphones", None, None),
+        ]);
+        let present = HashSet::from(["Meter (4 ch)".to_string()]);
+        assert!(!pb.forget_absent_plugin_nodes(|n| n == "Meter (4 ch)", &present));
+        assert!(pb.forget_absent_plugin_nodes(|n| n == "Meter (2 ch)", &HashSet::new()));
+        assert_eq!(pb.rules().len(), 1);
+        assert_eq!(pb.rules()[0].target_pattern, "Headphones");
     }
 }

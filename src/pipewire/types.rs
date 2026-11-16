@@ -192,6 +192,10 @@ pub enum PwCommand {
         instance_id: u64,
         bypassed: bool,
     },
+    RenamePlugin {
+        instance_id: u64,
+        display_name: String,
+    },
     OpenPluginUI {
         instance_id: u64,
     },

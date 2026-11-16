@@ -17,6 +17,8 @@ pub mod qobject {
         #[qproperty(QString, cpu_usage)]
         #[qproperty(bool, plugins_scanning)]
         #[qproperty(f64, plugin_scan_progress)]
+        #[qproperty(bool, plugins_rescanning)]
+        #[qproperty(f64, plugin_rescan_progress)]
         type AppController = super::AppControllerRust;
 
         #[qinvokable]
@@ -116,6 +118,12 @@ pub mod qobject {
 
         #[qinvokable]
         fn get_available_plugins_json(self: Pin<&mut Self>) -> QString;
+
+        #[qinvokable]
+        fn rescan_plugins(self: Pin<&mut Self>);
+
+        #[qinvokable]
+        fn rescan_plugins_if_stale(self: Pin<&mut Self>);
 
         #[qinvokable]
         fn add_plugin(self: Pin<&mut Self>, uri: QString) -> QString;
@@ -588,6 +596,9 @@ pub struct AppControllerRust {
     cpu_usage: QString,
     plugins_scanning: bool,
     plugin_scan_progress: f64,
+    plugins_rescanning: bool,
+    plugin_rescan_progress: f64,
+    last_plugin_scan: Option<Instant>,
     plugin_scan_rx: Option<Receiver<crate::plugin::scan::ScanEvent>>,
     pending_plugin_adds: Vec<PwCommand>,
     /// Events received while `collect_plugin_states_blocking` was waiting
@@ -631,6 +642,8 @@ pub struct AppControllerRust {
     /// Display names of plugins removed/renamed this session; links to them
     /// are forgotten rather than remembered as pending.
     forgotten_link_nodes: std::collections::HashSet<String>,
+    docked_meters: std::collections::HashMap<String, String>,
+    reconnect_instances: std::collections::HashSet<u64>,
     links_retry_due: bool,
 
     links_dirty: bool,
@@ -714,6 +727,8 @@ impl Default for AppControllerRust {
             pending_links: Vec::new(),
             last_graph_links: Vec::new(),
             forgotten_link_nodes: std::collections::HashSet::new(),
+            docked_meters: std::collections::HashMap::new(),
+            reconnect_instances: std::collections::HashSet::new(),
             links_retry_due: false,
             links_dirty: false,
             links_dirty_since: None,
@@ -733,6 +748,9 @@ impl Default for AppControllerRust {
             cpu_usage: QString::from("0.0%"),
             plugins_scanning: false,
             plugin_scan_progress: -1.0,
+            plugins_rescanning: false,
+            plugin_rescan_progress: 0.0,
+            last_plugin_scan: None,
             plugin_scan_rx: None,
             pending_plugin_adds: Vec::new(),
             stashed_events: std::collections::VecDeque::new(),
@@ -1046,19 +1064,25 @@ impl qobject::AppController {
             };
             match rx.try_recv() {
                 Ok(ScanEvent::Progress { completed, total }) => {
-                    // Workers may send progress out of order after incrementing.
-                    let progress = (completed as f64 / total.max(1) as f64)
-                        .min(0.99)
-                        .max(self.rust().plugin_scan_progress);
-                    self.as_mut().set_plugin_scan_progress(progress);
+                    let fraction = (completed as f64 / total.max(1) as f64).min(0.99);
+                    if self.rust().plugins_rescanning {
+                        let progress = fraction.max(self.rust().plugin_rescan_progress);
+                        self.as_mut().set_plugin_rescan_progress(progress);
+                    } else {
+                        let progress = fraction.max(self.rust().plugin_scan_progress);
+                        self.as_mut().set_plugin_scan_progress(progress);
+                    }
                 }
                 Ok(ScanEvent::Complete(plugins)) => {
                     if let Some(mgr) = &mut self.as_mut().rust_mut().plugin_manager {
                         mgr.set_available_plugins(plugins);
                     }
                     self.as_mut().rust_mut().plugin_scan_rx = None;
+                    self.as_mut().rust_mut().last_plugin_scan = Some(Instant::now());
                     self.as_mut().set_plugin_scan_progress(1.0);
                     self.as_mut().set_plugins_scanning(false);
+                    self.as_mut().set_plugin_rescan_progress(1.0);
+                    self.as_mut().set_plugins_rescanning(false);
                     let pending = std::mem::take(&mut self.as_mut().rust_mut().pending_plugin_adds);
                     for mut command in pending {
                         if let PwCommand::AddPlugin {
@@ -1088,6 +1112,13 @@ impl qobject::AppController {
                 Err(TryRecvError::Empty) => return,
                 Err(TryRecvError::Disconnected) => {
                     self.as_mut().rust_mut().plugin_scan_rx = None;
+                    if self.rust().plugins_rescanning {
+                        self.as_mut().set_plugins_rescanning(false);
+                        self.as_mut().error_occurred(QString::from(
+                            "Plugin rescan stopped unexpectedly. The plugin list is unchanged.",
+                        ));
+                        return;
+                    }
                     self.as_mut().set_plugins_scanning(false);
                     // Retain the original config if discovery could not finish.
                     self.as_mut().error_occurred(QString::from("Plugin discovery stopped unexpectedly. Restart to try again; the saved setup has been preserved."));
@@ -1108,6 +1139,7 @@ impl qobject::AppController {
         if let Some(mgr) = &mut self.as_mut().rust_mut().plugin_manager {
             mgr.finish_startup();
         }
+        self.as_mut().forget_stale_meter_leftovers();
         // Includes the path/descriptor backfill for older plugins.json files.
         persist_active_plugins(self.rust().plugin_manager.as_ref());
         self.as_mut().persist_midi();
@@ -1135,6 +1167,114 @@ impl qobject::AppController {
             patchbay.rules_dirty = false;
             patchbay.set_default_target(default_node);
         }
+        self.as_mut().rust_mut().docked_meters = load_docked_meters();
+    }
+
+    fn forget_stale_meter_leftovers(mut self: Pin<&mut Self>) {
+        if self.rust().plugins_frozen || self.rust().plugins_load_failed {
+            return;
+        }
+        let present: std::collections::HashSet<String> = self
+            .rust()
+            .plugin_manager
+            .iter()
+            .flat_map(|mgr| mgr.active_instances().values())
+            .map(|info| info.display_name.clone())
+            .collect();
+        let stale = |name: &str| is_default_meter_name(name) && !present.contains(name);
+        let before = self.rust().pending_links.len();
+        self.as_mut()
+            .rust_mut()
+            .pending_links
+            .retain(|p| !stale(&p.link.output_node_name) && !stale(&p.link.input_node_name));
+        if self.rust().pending_links.len() != before {
+            log::info!(
+                "Dropped {} saved link(s) left behind by meters that no longer exist",
+                before - self.rust().pending_links.len()
+            );
+            self.as_mut().mark_links_dirty();
+        }
+        let changed = self
+            .as_mut()
+            .rust_mut()
+            .patchbay
+            .as_mut()
+            .is_some_and(|pb| pb.forget_absent_plugin_nodes(is_default_meter_name, &present));
+        if changed {
+            log::info!("Removed rules left behind by meters that no longer exist");
+            if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
+                patchbay.rules_dirty = false;
+            }
+            save_rules(self.rust().patchbay.as_ref());
+            self.as_mut().rules_changed();
+        }
+    }
+
+    fn forget_meter_rules(mut self: Pin<&mut Self>, instance_id: u64) {
+        let name = self
+            .rust()
+            .plugin_manager
+            .as_ref()
+            .and_then(|mgr| mgr.get_instance(instance_id))
+            .filter(|info| crate::ladspa::builtin::is_builtin_uri(&info.plugin_uri))
+            .map(|info| info.display_name.clone());
+        let Some(name) = name else {
+            return;
+        };
+        let changed = self
+            .as_mut()
+            .rust_mut()
+            .patchbay
+            .as_mut()
+            .is_some_and(|pb| pb.forget_plugin_node(&name));
+        if changed {
+            if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
+                patchbay.rules_dirty = false;
+            }
+            save_rules(self.rust().patchbay.as_ref());
+            self.as_mut().rules_changed();
+        }
+    }
+
+    fn refresh_meter_redirects(mut self: Pin<&mut Self>) {
+        let (redirects, standby) = match (&self.rust().graph, &self.rust().plugin_manager) {
+            (Some(graph), Some(mgr)) => {
+                docked_meter_redirects(graph, mgr, &self.rust().docked_meters)
+            }
+            _ => Default::default(),
+        };
+        if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
+            patchbay.set_port_redirects(redirects, standby);
+        }
+    }
+
+    fn begin_pipewire_reconnect(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().pw_reconnecting = true;
+        let lost: Vec<u64> = self
+            .rust()
+            .plugin_manager
+            .iter()
+            .flat_map(|mgr| mgr.active_instances().values())
+            .filter(|info| info.pw_node_id.is_some())
+            .map(|info| info.id)
+            .collect();
+        if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager {
+            for id in &lost {
+                if let Some(info) = mgr.get_instance_mut(*id) {
+                    info.pw_node_id = None;
+                }
+            }
+        }
+        let mut rust = self.as_mut().rust_mut();
+        rust.reconnect_instances.extend(lost);
+        let remembered: Vec<SavedPluginLink> = rust
+            .last_graph_links
+            .iter()
+            .filter(|l| !rust.pending_links.iter().any(|p| p.link == **l))
+            .cloned()
+            .collect();
+        rust.pending_links
+            .extend(remembered.into_iter().map(PendingLink::new));
     }
 
     pub fn poll_events(mut self: Pin<&mut Self>) {
@@ -1183,7 +1323,7 @@ impl qobject::AppController {
                         PwEvent::Error(msg) => {
                             log::error!("PipeWire error: {}", msg);
                             if msg.contains("reconnecting to PipeWire") {
-                                self.as_mut().rust_mut().pw_reconnecting = true;
+                                self.as_mut().begin_pipewire_reconnect();
                             }
                             if !errors.contains(&msg) {
                                 errors.push(msg);
@@ -1218,12 +1358,18 @@ impl qobject::AppController {
                     // A PluginAdded for an instance that already had a node is
                     // a re-add (PipeWire reconnect or in-place reload at a new
                     // sample rate), not a new plugin.
-                    let re_added = self
-                        .rust()
-                        .plugin_manager
-                        .as_ref()
-                        .and_then(|mgr| mgr.get_instance(instance_id))
-                        .is_some_and(|info| info.pw_node_id.is_some());
+                    let reconnected = self
+                        .as_mut()
+                        .rust_mut()
+                        .reconnect_instances
+                        .remove(&instance_id);
+                    let re_added = reconnected
+                        || self
+                            .rust()
+                            .plugin_manager
+                            .as_ref()
+                            .and_then(|mgr| mgr.get_instance(instance_id))
+                            .is_some_and(|info| info.pw_node_id.is_some());
                     if re_added {
                         log::info!(
                             "Plugin instance {} re-added (reconnect/reload)",
@@ -1243,6 +1389,15 @@ impl qobject::AppController {
                         && let Some(ref graph) = self.rust().graph
                     {
                         graph.set_node_type(pw_node_id, NodeType::Plugin);
+                        if let Some(name) = self
+                            .rust()
+                            .plugin_manager
+                            .as_ref()
+                            .and_then(|mgr| mgr.get_instance(instance_id))
+                            .map(|info| info.display_name.clone())
+                        {
+                            graph.set_node_description(pw_node_id, &name);
+                        }
                     }
                     self.as_mut()
                         .rust_mut()
@@ -1604,6 +1759,7 @@ impl qobject::AppController {
 
         if should_apply {
             self.as_mut().rust_mut().rules_apply_pending = false;
+            self.as_mut().refresh_meter_redirects();
             let commands = if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
                 patchbay.scan()
             } else {
@@ -1831,6 +1987,24 @@ impl qobject::AppController {
     }
 
     /// Links to a plugin that was removed or renamed must not be remembered.
+    fn rename_plugin_links(mut self: Pin<&mut Self>, old: &str, new: &str) {
+        let rename = |l: &mut SavedPluginLink| {
+            if l.output_node_name == old {
+                l.output_node_name = new.to_string();
+            }
+            if l.input_node_name == old {
+                l.input_node_name = new.to_string();
+            }
+        };
+        {
+            let mut rust = self.as_mut().rust_mut();
+            rust.pending_links.iter_mut().for_each(|p| rename(&mut p.link));
+            rust.last_graph_links.iter_mut().for_each(rename);
+            rust.forgotten_link_nodes.remove(new);
+        }
+        self.as_mut().mark_links_dirty();
+    }
+
     fn forget_plugin_links(mut self: Pin<&mut Self>, name: &str) {
         let involves =
             |l: &SavedPluginLink| l.output_node_name == name || l.input_node_name == name;
@@ -2573,28 +2747,15 @@ impl qobject::AppController {
     }
 
     pub fn blocked_reason(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         output_port_id: u32,
         input_port_id: u32,
     ) -> QString {
+        self.as_mut().refresh_meter_redirects();
         let Some(patchbay) = self.rust().patchbay.as_ref().filter(|pb| pb.enabled) else {
             return QString::default();
         };
-        let Some(graph) = self.rust().graph.as_ref() else {
-            return QString::default();
-        };
-        let (Some(out), Some(inp)) = (
-            graph.get_port(output_port_id),
-            graph.get_port(input_port_id),
-        ) else {
-            return QString::default();
-        };
-        let (Some(source), Some(target)) =
-            (graph.get_node(out.node_id), graph.get_node(inp.node_id))
-        else {
-            return QString::default();
-        };
-        match patchbay.blocking_rule(&source, &target, &out, &inp) {
+        match patchbay.blocking_rule_for_ports(output_port_id, input_port_id) {
             Some(rule) => QString::from(&format!(
                 "{} \u{2192} {}",
                 rule.source_pattern, rule.target_pattern
@@ -3397,8 +3558,11 @@ impl qobject::AppController {
         QString::from(&read_config_json_text("docked-meters.json", "{}"))
     }
 
-    pub fn save_docked_meters(self: Pin<&mut Self>, json: QString) {
-        write_config_json_text("docked-meters.json", &json.to_string());
+    pub fn save_docked_meters(mut self: Pin<&mut Self>, json: QString) {
+        let text = json.to_string();
+        write_config_json_text("docked-meters.json", &text);
+        self.as_mut().rust_mut().docked_meters = parse_docked_meters(&text);
+        self.as_mut().rust_mut().rules_apply_pending = true;
     }
 
     pub fn get_pinned_json(self: Pin<&mut Self>) -> QString {
@@ -3414,7 +3578,7 @@ impl qobject::AppController {
                 .available_plugins()
                 .iter()
                 .map(|p| {
-                    serde_json::json!({
+                    let mut entry = serde_json::json!({
                         "uri": p.uri,
                         "name": p.name,
                         "category": p.category.display_name(),
@@ -3427,13 +3591,51 @@ impl qobject::AppController {
                         "requiredFeatures": p.required_features,
                         "hasUi": p.has_ui,
                         "format": p.format.as_str(),
-                    })
+                    });
+                    if let Some(twin) = mgr.ui_twin(p) {
+                        entry["uiTwinFormat"] = serde_json::json!(twin.format.as_str());
+                        entry["uiTwinName"] = serde_json::json!(twin.name);
+                        entry["uiTwinUri"] = serde_json::json!(twin.uri);
+                    }
+                    entry
                 })
                 .collect();
             let json = serde_json::to_string(&json_plugins).unwrap_or_default();
             QString::from(&json)
         } else {
             QString::from("[]")
+        }
+    }
+
+    pub fn rescan_plugins(mut self: Pin<&mut Self>) {
+        if self.rust().plugins_scanning
+            || self.rust().plugins_rescanning
+            || self.rust().plugin_scan_rx.is_some()
+        {
+            return;
+        }
+        match crate::plugin::scan::start() {
+            Ok(rx) => {
+                log::info!("Rescanning plugins");
+                self.as_mut().rust_mut().plugin_scan_rx = Some(rx);
+                self.as_mut().set_plugin_rescan_progress(0.0);
+                self.as_mut().set_plugins_rescanning(true);
+            }
+            Err(e) => {
+                self.as_mut().error_occurred(QString::from(
+                    format!("Could not start plugin discovery: {e}").as_str(),
+                ));
+            }
+        }
+    }
+
+    pub fn rescan_plugins_if_stale(self: Pin<&mut Self>) {
+        if self
+            .rust()
+            .last_plugin_scan
+            .is_some_and(|t| t.elapsed() >= PLUGIN_RESCAN_AFTER)
+        {
+            self.rescan_plugins();
         }
     }
 
@@ -3576,6 +3778,7 @@ impl qobject::AppController {
 
         let stable_id = uuid::Uuid::new_v4().to_string();
         let stable_id_for_group = stable_id.clone();
+        self.as_mut().forget_plugin_links(&display_name);
         if let Some(ref name) = default_preset {
             self.as_mut()
                 .rust_mut()
@@ -3667,6 +3870,7 @@ impl qobject::AppController {
                 let _ = tx.send(PwCommand::RemovePlugin { instance_id });
             }
             self.as_mut().connect_bridge(&bridge);
+            self.as_mut().forget_meter_rules(instance_id);
         } else {
             log::warn!(
                 "remove_plugin: no LV2 instance found for node_id={}",
@@ -3719,12 +3923,29 @@ impl qobject::AppController {
                 graph.set_node_description(node_id, &name_str);
             }
             crate::plugin::cpu_stats::global_cpu_tracker().rename(instance_id, &name_str);
-            // Links are saved by display name: drop the old-name entries, the
-            // current links are re-saved under the new name.
+            if let Some(ref tx) = self.rust().cmd_tx {
+                let _ = tx.send(PwCommand::RenamePlugin {
+                    instance_id,
+                    display_name: name_str.clone(),
+                });
+            }
             if let Some(old_name) = old_name
                 && old_name != name_str
             {
-                self.as_mut().forget_plugin_links(&old_name);
+                self.as_mut().rename_plugin_links(&old_name, &name_str);
+                let renamed = self
+                    .as_mut()
+                    .rust_mut()
+                    .patchbay
+                    .as_mut()
+                    .is_some_and(|pb| pb.rename_node(&old_name, &name_str));
+                if renamed {
+                    if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
+                        patchbay.rules_dirty = false;
+                    }
+                    save_rules(self.rust().patchbay.as_ref());
+                    self.as_mut().rules_changed();
+                }
             }
             self.as_mut()
                 .rust_mut()
@@ -4593,6 +4814,7 @@ impl qobject::AppController {
                 let _ = tx.send(PwCommand::RemovePlugin { instance_id });
             }
             self.as_mut().connect_bridge(&bridge);
+            self.as_mut().forget_meter_rules(instance_id);
             let name = self
                 .rust()
                 .plugin_manager
@@ -4788,6 +5010,7 @@ impl qobject::AppController {
     }
 
     pub fn apply_rules(mut self: Pin<&mut Self>) {
+        self.as_mut().refresh_meter_redirects();
         let commands = if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
             patchbay.scan()
         } else {
@@ -5914,6 +6137,8 @@ impl PendingLink {
 /// How long a requested connect may take to show up before we give up on it.
 const LINK_CONNECT_GRACE: Duration = Duration::from_secs(5);
 
+const PLUGIN_RESCAN_AFTER: Duration = Duration::from_secs(10 * 60);
+
 /// After a PipeWire reconnect or in-place plugin reload, links aren't saved
 /// until the graph has had this long to come back.
 const LINK_SETTLE_AFTER_RECONNECT: Duration = Duration::from_secs(5);
@@ -5962,6 +6187,110 @@ fn persist_active_plugins(plugin_manager: Option<&PluginManager>) {
     if write_config("plugins.json", json.as_bytes(), plugins.is_empty()) {
         log::debug!("persist_active_plugins: {} plugins written", plugins.len());
     }
+}
+
+fn parse_docked_meters(json: &str) -> std::collections::HashMap<String, String> {
+    serde_json::from_str::<std::collections::HashMap<String, String>>(json).unwrap_or_default()
+}
+
+fn load_docked_meters() -> std::collections::HashMap<String, String> {
+    parse_docked_meters(&read_config_json_text("docked-meters.json", "{}"))
+}
+
+fn is_default_meter_name(name: &str) -> bool {
+    let base = match name.rsplit_once(" #") {
+        Some((head, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => head,
+        _ => name,
+    };
+    crate::ladspa::builtin::CHANNEL_COUNTS
+        .iter()
+        .any(|&channels| {
+            crate::ladspa::builtin::info(&crate::ladspa::builtin::meter_uri(channels))
+                .is_some_and(|info| info.name == base)
+        })
+}
+
+fn docked_meter_redirects(
+    graph: &GraphState,
+    plugin_manager: &PluginManager,
+    docked: &std::collections::HashMap<String, String>,
+) -> (
+    std::collections::HashMap<u32, u32>,
+    std::collections::HashSet<u32>,
+) {
+    let mut redirects = std::collections::HashMap::new();
+    let mut standby = std::collections::HashSet::new();
+    if docked.is_empty() {
+        return (redirects, standby);
+    }
+    let mut links = graph.get_all_links();
+    links.sort_by_key(|l| l.id);
+    let mut meters: Vec<(u64, u32)> = plugin_manager
+        .active_instances()
+        .values()
+        .filter(|info| crate::ladspa::builtin::meter_channels(&info.plugin_uri).is_some())
+        .filter_map(|info| Some((info.id, info.pw_node_id?)))
+        .collect();
+    meters.sort_unstable();
+    for (_, node_id) in meters {
+        let Some(node) = graph.get_node(node_id) else {
+            continue;
+        };
+        let to_source = match docked
+            .get(&layout_key(&node, Some(plugin_manager)))
+            .map(String::as_str)
+        {
+            Some("source") => true,
+            Some("dest") => false,
+            _ => continue,
+        };
+        let audio_ports = |dir: PortDirection| -> Vec<Port> {
+            let mut ports: Vec<Port> = graph
+                .get_ports_for_node(node_id)
+                .into_iter()
+                .filter(|p| {
+                    p.direction == dir
+                        && !matches!(
+                            p.media_type,
+                            Some(crate::pipewire::MediaType::Midi)
+                                | Some(crate::pipewire::MediaType::Video)
+                        )
+                })
+                .collect();
+            ports.sort_by(|a, b| crate::pipewire::state::natural_cmp(&a.name, &b.name));
+            ports
+        };
+        let inputs = audio_ports(PortDirection::Input);
+        let outputs = audio_ports(PortDirection::Output);
+        for (inp, out) in inputs.iter().zip(outputs.iter()) {
+            if to_source {
+                match links
+                    .iter()
+                    .find(|l| l.input_port_id == inp.id && l.output_node_id != node_id)
+                {
+                    Some(feed) => {
+                        redirects.entry(feed.output_port_id).or_insert(out.id);
+                    }
+                    None => {
+                        standby.insert(out.id);
+                    }
+                }
+            } else {
+                match links
+                    .iter()
+                    .find(|l| l.output_port_id == out.id && l.input_node_id != node_id)
+                {
+                    Some(fed) => {
+                        redirects.entry(fed.input_port_id).or_insert(inp.id);
+                    }
+                    None => {
+                        standby.insert(inp.id);
+                    }
+                }
+            }
+        }
+    }
+    (redirects, standby)
 }
 
 fn load_saved_links() -> Vec<SavedPluginLink> {
@@ -7040,6 +7369,7 @@ mod tests {
                 compatible: true,
                 has_ui: true,
                 library_path: library.to_str().unwrap().into(),
+                ladspa_ids: Vec::new(),
             };
             let mut manager = PluginManager::new();
             manager.register_instance(PluginInstanceInfo {

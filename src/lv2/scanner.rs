@@ -172,6 +172,11 @@ pub fn scan_plugins_with_world(world: &World) -> Vec<Lv2PluginInfo> {
         &ui_external_old,
     ];
 
+    let replaces = [
+        world.new_uri("http://purl.org/dc/terms/replaces"),
+        world.new_uri("http://purl.org/dc/elements/1.1/replaces"),
+    ];
+
     let mut plugins = Vec::new();
 
     for plugin in world.plugins().iter() {
@@ -220,6 +225,17 @@ pub fn scan_plugins_with_world(world: &World) -> Vec<Lv2PluginInfo> {
             })
             .unwrap_or(false);
 
+        let mut ladspa_ids: Vec<u64> = Vec::new();
+        for predicate in &replaces {
+            for node in plugin.value(predicate).iter() {
+                if let Some(id) = node.as_uri().and_then(parse_ladspa_urn)
+                    && !ladspa_ids.contains(&id)
+                {
+                    ladspa_ids.push(id);
+                }
+            }
+        }
+
         plugins.push(Lv2PluginInfo {
             uri,
             name,
@@ -235,6 +251,7 @@ pub fn scan_plugins_with_world(world: &World) -> Vec<Lv2PluginInfo> {
             has_ui,
             format: PluginFormat::Lv2,
             library_path: String::new(),
+            ladspa_ids,
         });
     }
 
@@ -242,9 +259,24 @@ pub fn scan_plugins_with_world(world: &World) -> Vec<Lv2PluginInfo> {
     plugins
 }
 
+fn parse_ladspa_urn(uri: &str) -> Option<u64> {
+    uri.strip_prefix("urn:ladspa:")?
+        .parse::<u64>()
+        .ok()
+        .filter(|id| *id != 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ladspa_urn_gives_the_unique_id() {
+        assert_eq!(parse_ladspa_urn("urn:ladspa:5002173"), Some(5002173));
+        assert_eq!(parse_ladspa_urn("urn:ladspa:0"), None);
+        assert_eq!(parse_ladspa_urn("urn:ladspa:abc"), None);
+        assert_eq!(parse_ladspa_urn("http://example.org/plugin"), None);
+    }
 
     #[test]
     fn default_kept_when_finite() {

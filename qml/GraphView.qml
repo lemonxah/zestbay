@@ -405,6 +405,11 @@ Item {
         pinnedLoaded = false;
         savedLayout = {};
         hiddenNodes = {};
+        snapSuspended = {};
+        snapUnanchoredSince = {};
+        snapSeenAnchored = {};
+        removedMeterKeys = {};
+        pendingMeterAttach = [];
         pinnedNodes = {};
         nodePositions = {};
         placedKeyById = {};
@@ -662,6 +667,8 @@ Item {
             } catch (e) {
                 dockedMeters = {};
             }
+            for (var dockedKey in dockedMeters)
+                hiddenNodes[dockedKey] = true;
             hiddenLoaded = true;
         }
         if (!pinnedLoaded) {
@@ -744,6 +751,7 @@ Item {
         sortedPortsByNode = newSorted;
         nodeLayouts = newLayouts;
         nodeHeights = newHeights;
+        updateSnapStates();
         uniqueKeyById = buildUniqueLayoutKeys();
         // Placement below needs the real widths, not the first paint's.
         calculateNodeWidths();
@@ -1594,6 +1602,25 @@ Item {
         }
 
         ZbMenuItem {
+            readonly property string snappedSide: contextIsMeter && contextNode.layoutKey ? (dockedMeters[contextNode.layoutKey] || "") : ""
+            text: "Unsnap meter"
+            visible: snappedSide !== ""
+            height: visible ? implicitHeight : 0
+            onTriggered: {
+                var key = contextNode.layoutKey;
+                var prev = snappedSide;
+                setMeterSnapped(key, "");
+                pushUndo({
+                    kind: "snap",
+                    label: "unsnap meter",
+                    key: key,
+                    side: "",
+                    prevSide: prev
+                });
+            }
+        }
+
+        ZbMenuItem {
             text: "Open UI\u2026"
             visible: contextIsPlugin && !contextIsMeter
             enabled: contextIsPlugin && contextNode.pluginHasUi !== false
@@ -1615,8 +1642,10 @@ Item {
             visible: contextIsPlugin
             height: visible ? implicitHeight : 0
             onTriggered: {
-                if (contextNodeId >= 0)
+                if (contextNodeId >= 0) {
+                    forgetMeterWhenGone(contextNode);
                     controller.remove_plugin(contextNodeId);
+                }
             }
         }
 
@@ -1856,6 +1885,8 @@ Item {
                 return false;
             }
             onTriggered: {
+                snapSuspended = {};
+                snapUnanchoredSince = {};
                 hiddenNodes = {};
                 persistHidden();
                 canvas.requestPaint();
@@ -2231,18 +2262,23 @@ Item {
             if (hiddenNodes[k])
                 arr.push(k);
         }
+        for (var sk in snapSuspended) {
+            if (dockedMeters[sk] && !hiddenNodes[sk])
+                arr.push(sk);
+        }
         controller.save_hidden(JSON.stringify(arr));
-        // A snapped meter is a hidden one: shown again (Unhide all, undo),
-        // it is no longer snapped.
         var pruned = false;
         for (var dk in dockedMeters) {
-            if (!hiddenNodes[dk]) {
+            if (!hiddenNodes[dk] && !snapSuspended[dk]) {
                 delete dockedMeters[dk];
+                delete snapUnanchoredSince[dk];
                 pruned = true;
             }
         }
-        if (pruned)
+        if (pruned) {
+            dockedMeters = dockedMeters;
             persistDocked();
+        }
     }
 
     function persistPinned() {
@@ -2802,32 +2838,126 @@ Item {
         return (fromPos.alias || toPos.alias) && fromPos.cx === toPos.cx && fromPos.cy === toPos.cy;
     }
 
-    // Snapped meters that had their port at some point this session, and
-    // the ones that have it now (layoutKey -> true). One that loses its port
-    // (wire removed, device gone) is unsnapped after orphanTimer's grace, so
-    // it comes back as a card instead of staying hidden with no way to it.
-    // Meters that never had their port yet (just after start, before links
-    // arrive) are left alone.
     property var snapSeenAnchored: ({})
-    property var snapAnchored: ({})
+    property var snapSuspended: ({})
+    property var snapUnanchoredSince: ({})
+    property var removedMeterKeys: ({})
+    readonly property int snapGraceMs: 10000
+    readonly property int snapFirstGraceMs: 30000
 
-    function orphanedSnaps() {
-        var keys = [];
-        for (var k in dockedMeters) {
-            if (snapSeenAnchored[k] && !snapAnchored[k])
-                keys.push(k);
+    function snapAnchorCount(meter, side) {
+        var chans = meterChannelPorts(meter);
+        var n = 0;
+        for (var k = 0; k < chans.length; k++) {
+            if ((side === "source" ? chans[k].src : (chans[k].dests.length > 0 ? chans[k].dests[0] : -1)) >= 0)
+                n++;
         }
-        return keys;
+        return n;
     }
 
-    function unsnapOrphans() {
-        var keys = orphanedSnaps();
-        for (var i = 0; i < keys.length; i++) {
-            delete snapSeenAnchored[keys[i]];
-            setMeterSnapped(keys[i], "");
+    function updateSnapStates() {
+        var now = Date.now();
+        var hiddenChanged = false;
+        var forgot = false;
+        for (var rk in removedMeterKeys) {
+            if (!findNodeByLayoutKey(rk)) {
+                delete dockedMeters[rk];
+                delete hiddenNodes[rk];
+                delete snapSuspended[rk];
+                delete snapUnanchoredSince[rk];
+                delete snapSeenAnchored[rk];
+                delete removedMeterKeys[rk];
+                forgot = true;
+            } else if (now - removedMeterKeys[rk] > 15000) {
+                delete removedMeterKeys[rk];
+            }
         }
-        if (keys.length > 0)
-            showToast(keys.length > 1 ? keys.length + " meters unsnapped: the ports they were snapped to went away" : "Meter unsnapped: the port it was snapped to went away");
+        var waiting = false;
+        for (var k in dockedMeters) {
+            var meter = findNodeByLayoutKey(k);
+            if (!meter || !isMeterNode(meter)) {
+                delete snapUnanchoredSince[k];
+                continue;
+            }
+            if (snapAnchorCount(meter, dockedMeters[k]) > 0) {
+                delete snapUnanchoredSince[k];
+                snapSeenAnchored[k] = true;
+                if (snapSuspended[k] || !hiddenNodes[k]) {
+                    delete snapSuspended[k];
+                    hiddenNodes[k] = true;
+                    delete selectedNodes[meter.id];
+                    hiddenChanged = true;
+                }
+            } else if (!snapSuspended[k]) {
+                if (snapUnanchoredSince[k] === undefined)
+                    snapUnanchoredSince[k] = now;
+                waiting = true;
+            }
+        }
+        if (forgot) {
+            dockedMeters = dockedMeters;
+            hiddenChanged = true;
+            persistDocked();
+            persistHidden();
+        }
+        if (hiddenChanged)
+            hiddenNodes = hiddenNodes;
+        if (waiting && !orphanTimer.running)
+            orphanTimer.start();
+    }
+
+    function suspendOrphanedSnaps() {
+        var now = Date.now();
+        var shown = 0;
+        var waiting = false;
+        for (var k in snapUnanchoredSince) {
+            if (!dockedMeters[k] || snapSuspended[k]) {
+                delete snapUnanchoredSince[k];
+                continue;
+            }
+            var grace = snapSeenAnchored[k] ? snapGraceMs : snapFirstGraceMs;
+            if (now - snapUnanchoredSince[k] < grace) {
+                waiting = true;
+                continue;
+            }
+            delete snapUnanchoredSince[k];
+            snapSuspended[k] = true;
+            delete hiddenNodes[k];
+            shown++;
+        }
+        if (shown > 0) {
+            hiddenNodes = hiddenNodes;
+            showToast(shown > 1 ? shown + " snapped meters shown as cards until the ports they sit on are back" : "Snapped meter shown as a card until the port it sits on is back");
+            canvas.requestPaint();
+        }
+        if (waiting)
+            orphanTimer.start();
+    }
+
+    function forgetMeterWhenGone(node) {
+        if (!isMeterNode(node) || !node.layoutKey)
+            return;
+        removedMeterKeys[node.layoutKey] = Date.now();
+    }
+
+    function forgetStaleMeterKeys(name) {
+        var changed = false;
+        for (var k in dockedMeters) {
+            if (k.substring(k.indexOf(":") + 1) === name && !findNodeByLayoutKey(k)) {
+                delete dockedMeters[k];
+                delete hiddenNodes[k];
+                delete snapSuspended[k];
+                delete snapUnanchoredSince[k];
+                delete snapSeenAnchored[k];
+                changed = true;
+            }
+        }
+        if (changed) {
+            dockedMeters = dockedMeters;
+            hiddenNodes = hiddenNodes;
+            persistDocked();
+            persistHidden();
+        }
     }
 
     // Every snapped meter (including any whose port is missing), as one
@@ -3009,7 +3139,8 @@ Item {
         var jobs = pendingMeterAttach.slice();
         for (var i = 0; i < chunks.length; i++) {
             var name = controller.add_meter(chunks[i]);
-            if (name)
+            if (name) {
+                forgetStaleMeterKeys(name);
                 jobs.push({
                     name: name,
                     hostId: node.id,
@@ -3018,6 +3149,7 @@ Item {
                     t: Date.now(),
                     hidden: false
                 });
+            }
             start += chunks[i];
         }
         pendingMeterAttach = jobs;
@@ -3056,6 +3188,8 @@ Item {
                 nodePositions[meter.id] = findFreeSpot(meter, a.x, a.y, a.dir, false);
                 markHandPlaced(meter.id);
                 delete autoPlaced[meter.id];
+                renameMeter(meter, snapMeterName(host.id, job.side, job.hostPorts));
+                job.name = meter.name;
                 changed = true;
             }
             var ins = audioPortsOf(meter.id, false);
@@ -3090,7 +3224,6 @@ Item {
             }
             for (var d = 0; d < drop.length; d++)
                 controller.disconnect_link(drop[d].id);
-            renameMeter(meter, snapMeterName(host.id, job.side, job.hostPorts));
         }
         pendingMeterAttach = keep;
         if (changed) {
@@ -3109,11 +3242,11 @@ Item {
         var keys = metersSnappedOn(nodeId);
         for (var i = 0; i < keys.length; i++) {
             var m = findNodeByLayoutKey(keys[i]);
-            if (m)
+            if (m) {
+                forgetMeterWhenGone(m);
                 controller.remove_plugin(m.id);
+            }
         }
-        // The hidden/snapped entries go once the nodes are gone (an orphaned
-        // snap is cleared by orphanTimer), so no card flashes up meanwhile.
     }
 
     // The port a new wire on `portId` should really use.
@@ -3127,7 +3260,7 @@ Item {
     }
 
     function isDockedMeter(n) {
-        return isMeterNode(n) && !!n.layoutKey && !!hiddenNodes[n.layoutKey] && !!dockedMeters[n.layoutKey];
+        return isMeterNode(n) && !!n.layoutKey && !!dockedMeters[n.layoutKey];
     }
 
     // Per channel: the meter's input and output port, the ports feeding the
@@ -3257,7 +3390,7 @@ Item {
         if (!name || !oldKey || name === meter.name)
             return;
         var newKey = oldKey.substring(0, oldKey.indexOf(":") + 1) + name;
-        var maps = [hiddenNodes, dockedMeters, pinnedNodes, snapSeenAnchored, snapAnchored];
+        var maps = [hiddenNodes, dockedMeters, pinnedNodes, snapSeenAnchored, snapSuspended, snapUnanchoredSince, removedMeterKeys];
         for (var i = 0; i < maps.length; i++) {
             if (maps[i][oldKey] !== undefined) {
                 maps[i][newKey] = maps[i][oldKey];
@@ -3278,6 +3411,8 @@ Item {
 
     function setMeterSnapped(key, side) {
         key = resolveMeterKey(key);
+        delete snapSuspended[key];
+        delete snapUnanchoredSince[key];
         if (side) {
             dockedMeters[key] = side;
             hiddenNodes[key] = true;
@@ -3348,6 +3483,7 @@ Item {
             };
         var name = controller.add_meter(channels);
         if (name) {
+            forgetStaleMeterKeys(name);
             pendingPluginName = name;
         } else {
             pendingPluginPosition = null;
@@ -4469,14 +4605,6 @@ Item {
             meterFrames = newMeterFrames;
             dockBarFrames = newDockFrames;
             snapRedirect = newRedirect;
-            var anchoredNow = {};
-            for (var dfk in newDockFrames) {
-                anchoredNow[newDockFrames[dfk].meterKey] = true;
-                snapSeenAnchored[newDockFrames[dfk].meterKey] = true;
-            }
-            snapAnchored = anchoredNow;
-            if (orphanedSnaps().length > 0 && !orphanTimer.running)
-                orphanTimer.start();
             if (newDockIds.join(",") !== dockBarIds.join(","))
                 dockBarIds = newDockIds;
             updateScrollBars();
@@ -4608,12 +4736,10 @@ Item {
         }
     }
 
-    // Grace before unsnapping meters that lost their port: rides out wires
-    // that are briefly re-made (a plugin reload, a rule reconnecting).
     Timer {
         id: orphanTimer
-        interval: 1500
-        onTriggered: graphView.unsnapOrphans()
+        interval: 1000
+        onTriggered: graphView.suspendOrphanedSnaps()
     }
 
     // ~20 updates a second while there are meters and the window is shown.
@@ -7135,8 +7261,10 @@ Item {
                 keys: keys
             });
         }
-        for (var pi = 0; pi < plan.plugins.length; pi++)
+        for (var pi = 0; pi < plan.plugins.length; pi++) {
+            forgetMeterWhenGone(findNodeData(plan.plugins[pi].id));
             controller.remove_plugin(plan.plugins[pi].id);
+        }
         for (var si = 0; si < plan.subgraphs.length; si++)
             controller.delete_subgraph(plan.subgraphs[si].subgraphId);
         for (var vi = 0; vi < plan.vdevs.length; vi++)

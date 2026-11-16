@@ -36,6 +36,10 @@ ZbWindow {
             if (!controller.plugins_scanning && pluginBrowser.visible)
                 pluginBrowser.loadPlugins()
         }
+        function onPlugins_rescanningChanged() {
+            if (!controller.plugins_rescanning && pluginBrowser.visible)
+                pluginBrowser.reloadKeepingFilters()
+        }
     }
 
     onVisibleChanged: {
@@ -75,6 +79,25 @@ ZbWindow {
 
         loadTemplates()
         filterPlugins()
+    }
+
+    function reloadKeepingFilters() {
+        var category = selectedCategory
+        var current = pluginList.currentIndex >= 0 && pluginList.currentIndex < filteredPlugins.length ? filteredPlugins[pluginList.currentIndex] : null
+        loadPlugins()
+        if (categories.indexOf(category) >= 0 && category !== selectedCategory) {
+            selectedCategory = category
+            filterPlugins()
+        }
+        if (!current || current.isTemplate)
+            return
+        for (var i = 0; i < filteredPlugins.length; i++) {
+            if (filteredPlugins[i].uri === current.uri && filteredPlugins[i].format === current.format) {
+                pluginList.currentIndex = i
+                pluginList.positionViewAtIndex(i, ListView.Contain)
+                break
+            }
+        }
     }
 
     function loadTemplates() {
@@ -172,6 +195,7 @@ ZbWindow {
         if (!allowSubgraphs && selectedFormat === "Subgraphs") selectedFormat = "All"
         searchField.text = ""
         loadPlugins()
+        controller.rescan_plugins_if_stale()
         visible = true
         raise()
         requestActivate()
@@ -246,6 +270,19 @@ ZbWindow {
             }
 
             Item { Layout.fillWidth: true }
+
+            ZbButton {
+                id: rescanButton
+                readonly property bool busy: controller.plugins_scanning || controller.plugins_rescanning
+                visible: !pluginBrowser.showingTemplates
+                enabled: !busy
+                text: controller.plugins_rescanning ? "Rescanning\u2026 " + Math.floor(controller.plugin_rescan_progress * 100) + "%" : "Rescan"
+                onClicked: controller.rescan_plugins()
+                ZbTooltip {
+                    visible: rescanButton.hovered && !rescanButton.busy
+                    text: "Look for plugins installed or removed since the last scan"
+                }
+            }
 
             ZbButton {
                 id: categoryButton
@@ -421,8 +458,18 @@ ZbWindow {
                         }
 
                         ZbBadge {
+                            id: uiBadge
+                            readonly property string twinFormat: row.plugin.uiTwinFormat || ""
                             visible: row.plugin.hasUi === false
-                            text: "no UI"
+                            text: twinFormat !== "" ? "UI in " + twinFormat + " version" : "no UI"
+                            tone: twinFormat !== "" ? uiBadge.formatTone(twinFormat) : "neutral"
+                            HoverHandler {
+                                id: uiBadgeHover
+                            }
+                            ZbTooltip {
+                                visible: uiBadgeHover.hovered && uiBadge.twinFormat !== ""
+                                text: (row.plugin.format || "This") + " plugins have no UI. \u201c" + (row.plugin.uiTwinName || "") + "\u201d is the " + uiBadge.twinFormat + " build of this plugin and has one."
+                            }
                         }
 
                         ZbButton {

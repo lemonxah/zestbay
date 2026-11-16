@@ -76,6 +76,18 @@ impl PluginManager {
             .or_else(|| crate::ladspa::builtin::info(uri))
     }
 
+    pub fn ui_twin(&self, plugin: &PluginInfo) -> Option<&PluginInfo> {
+        if plugin.has_ui || plugin.format != PluginFormat::Ladspa || plugin.ladspa_ids.is_empty() {
+            return None;
+        }
+        self.available_plugins.iter().find(|p| {
+            p.format == PluginFormat::Lv2
+                && p.has_ui
+                && p.compatible
+                && p.ladspa_ids.iter().any(|id| plugin.ladspa_ids.contains(id))
+        })
+    }
+
     pub fn find_plugin_with_format(&self, uri: &str, format: PluginFormat) -> Option<&PluginInfo> {
         self.available_plugins
             .iter()
@@ -218,6 +230,53 @@ mod tests {
             port_names: Default::default(),
         });
         manager
+    }
+
+    fn catalog_entry(
+        uri: &str,
+        format: PluginFormat,
+        has_ui: bool,
+        compatible: bool,
+        ladspa_ids: Vec<u64>,
+    ) -> PluginInfo {
+        PluginInfo {
+            uri: uri.to_string(),
+            name: uri.to_string(),
+            format,
+            category: crate::plugin::types::PluginCategory::from_class_label("Plugin"),
+            author: None,
+            ports: Vec::new(),
+            audio_inputs: 2,
+            audio_outputs: 2,
+            control_inputs: 0,
+            control_outputs: 0,
+            required_features: Vec::new(),
+            compatible,
+            has_ui,
+            library_path: String::new(),
+            ladspa_ids,
+        }
+    }
+
+    #[test]
+    fn ui_twin_is_the_lv2_plugin_replacing_a_ladspa_one() {
+        let mut manager = PluginManager::new();
+        manager.set_available_plugins(vec![
+            catalog_entry("ladspa:scope", PluginFormat::Ladspa, false, true, vec![5002173]),
+            catalog_entry("ladspa:other", PluginFormat::Ladspa, false, true, vec![77]),
+            catalog_entry("ladspa:anon", PluginFormat::Ladspa, false, true, Vec::new()),
+            catalog_entry("lv2:headless", PluginFormat::Lv2, false, true, vec![77]),
+            catalog_entry("lv2:broken", PluginFormat::Lv2, true, false, vec![77]),
+            catalog_entry("lv2:scope", PluginFormat::Lv2, true, true, vec![5002173]),
+        ]);
+        let catalog = manager.available_plugins().to_vec();
+        assert_eq!(
+            manager.ui_twin(&catalog[0]).map(|p| p.uri.as_str()),
+            Some("lv2:scope")
+        );
+        assert!(manager.ui_twin(&catalog[1]).is_none());
+        assert!(manager.ui_twin(&catalog[2]).is_none());
+        assert!(manager.ui_twin(&catalog[5]).is_none());
     }
 
     #[test]
