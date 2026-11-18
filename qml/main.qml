@@ -92,6 +92,12 @@ ZbWindow {
         Component.onCompleted: controller.init()
     }
 
+    Binding {
+        target: Theme
+        property: "desktopScheme"
+        value: controller.desktop_color_scheme
+    }
+
     // Rule counts for the toolbar Rules button.
     property int ruleCount: 0
     function refreshRuleCount() {

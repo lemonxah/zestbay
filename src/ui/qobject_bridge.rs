@@ -15,6 +15,7 @@ pub mod qobject {
         #[qproperty(i32, node_count)]
         #[qproperty(i32, link_count)]
         #[qproperty(QString, cpu_usage)]
+        #[qproperty(i32, desktop_color_scheme)]
         #[qproperty(bool, plugins_scanning)]
         #[qproperty(f64, plugin_scan_progress)]
         #[qproperty(bool, plugins_rescanning)]
@@ -594,6 +595,7 @@ pub struct AppControllerRust {
     node_count: i32,
     link_count: i32,
     cpu_usage: QString,
+    desktop_color_scheme: i32,
     plugins_scanning: bool,
     plugin_scan_progress: f64,
     plugins_rescanning: bool,
@@ -746,6 +748,7 @@ impl Default for AppControllerRust {
             prefs: load_preferences(),
             tray_state: None,
             cpu_usage: QString::from("0.0%"),
+            desktop_color_scheme: 0,
             plugins_scanning: false,
             plugin_scan_progress: -1.0,
             plugins_rescanning: false,
@@ -1278,6 +1281,10 @@ impl qobject::AppController {
     }
 
     pub fn poll_events(mut self: Pin<&mut Self>) {
+        let scheme = crate::color_scheme::current();
+        if scheme != self.rust().desktop_color_scheme {
+            self.as_mut().set_desktop_color_scheme(scheme);
+        }
         self.as_mut().poll_plugin_scan();
         self.as_mut().poll_osc();
         self.as_mut().poll_session_swap();

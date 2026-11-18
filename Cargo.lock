@@ -2160,6 +2160,7 @@ dependencies = [
  "serde_json",
  "uuid",
  "vst3",
+ "zbus",
 ]
 
 [[package]]
