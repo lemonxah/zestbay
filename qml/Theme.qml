@@ -13,8 +13,11 @@ QtObject {
     // The desktop's colour scheme (Qt 6.5+). When Qt can't tell (older Qt,
     // or Unknown: e.g. qt5ct/qt6ct on sway-style compositors, issue #15),
     // judge by the system palette, which qt6ct and similar tools do set.
-    readonly property bool systemDark: Qt.ColorScheme !== undefined
-                                       && Qt.styleHints.colorScheme !== Qt.ColorScheme.Unknown
+    property int desktopScheme: 0
+    readonly property bool systemDark: desktopScheme === 1 ? true
+        : desktopScheme === 2 ? false
+        : Qt.ColorScheme !== undefined
+          && Qt.styleHints.colorScheme !== Qt.ColorScheme.Unknown
         ? Qt.styleHints.colorScheme === Qt.ColorScheme.Dark
         : systemPalette.window.hslLightness < 0.5
     readonly property bool dark: mode === "dark" || (mode === "system" && systemDark)

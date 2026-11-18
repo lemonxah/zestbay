@@ -1,4 +1,5 @@
 mod clap;
+mod color_scheme;
 mod layout;
 mod lv2;
 mod midi;
@@ -77,6 +78,7 @@ fn main() {
     }
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    color_scheme::start();
 
     let args: Vec<String> = std::env::args().collect();
 
