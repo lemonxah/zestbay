@@ -564,6 +564,11 @@ impl Host {
                         return;
                     }
 
+                    // filter out the PulseAudio Volume Control nodes
+                    if node.name == "PulseAudio Volume Control" {
+                        return;
+                    }
+
                     self.graph.insert_node(node.clone());
                     let _ = self.event_tx.send(PwEvent::NodeChanged(node));
                     self.changes_pending.set(true);
