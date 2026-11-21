@@ -84,6 +84,7 @@ struct AddRequest {
     /// Parameter values applied after state restore (reload / reconnect).
     params: Vec<(usize, f32)>,
     bypassed: bool,
+    enabled: bool,
     /// Rate to instantiate at; None = current graph rate.
     sample_rate: Option<u32>,
     probe: ProbeStatus,
@@ -713,6 +714,24 @@ impl Host {
                     self.patch_queued_add(instance_id, |req| req.bypassed = bypassed);
                 }
             }
+            PwCommand::SetPluginEnabled {
+                instance_id,
+                enabled,
+            } => {
+                if let Some(f) = self.lv2_filters.borrow().get(&instance_id) {
+                    f.set_enabled(enabled);
+                } else if let Some(f) = self.clap_filters.borrow().get(&instance_id) {
+                    f.set_enabled(enabled);
+                } else if let Some(f) = self.vst3_filters.borrow().get(&instance_id) {
+                    f.set_enabled(enabled);
+                } else if let Some(f) = self.vst2_filters.borrow().get(&instance_id) {
+                    f.set_enabled(enabled);
+                } else if let Some(f) = self.ladspa_filters.borrow().get(&instance_id) {
+                    f.set_enabled(enabled);
+                } else {
+                    self.patch_queued_add(instance_id, |req| req.enabled = enabled);
+                }
+            }
             PwCommand::RenamePlugin {
                 instance_id,
                 display_name,
@@ -804,6 +823,7 @@ impl Host {
                 lv2_state,
                 plugin_state,
                 stable_id,
+                enabled,
             } => self.queue_op(InternalOp::AddPlugin(Box::new(AddRequest {
                 plugin_uri,
                 instance_id,
@@ -815,6 +835,7 @@ impl Host {
                 plugin_state,
                 params: Vec::new(),
                 bypassed: false,
+                enabled,
                 sample_rate: None,
                 probe: if crate::NO_PROBE.load(std::sync::atomic::Ordering::SeqCst) {
                     ProbeStatus::Done(crate::plugin::sandbox::ProbeOutcome::Ok)
@@ -1519,6 +1540,7 @@ impl Host {
             sample_rate: sr as u32,
             has_midi_in,
             midi_outputs,
+            enabled: req.enabled,
         };
         let filter = crate::lv2::filter::Lv2FilterNode::new(
             &self.core,
@@ -1569,6 +1591,7 @@ impl Host {
             audio_outputs: inst.audio_output_channels,
             has_midi_in: inst.has_midi_in,
             midi_outputs: inst.midi_output_names.clone(),
+            enabled: req.enabled,
         };
         let instance_rc = Rc::new(RefCell::new(inst));
         let filter = crate::clap::filter::ClapFilterNode::new(
@@ -1620,6 +1643,7 @@ impl Host {
             audio_outputs: inst.audio_output_channels,
             has_midi_in: inst.has_midi_in,
             midi_outputs: inst.midi_output_names.clone(),
+            enabled: req.enabled,
         };
         let instance_rc = Rc::new(RefCell::new(inst));
         let filter = crate::vst3::filter::Vst3FilterNode::new(
@@ -1671,6 +1695,7 @@ impl Host {
             audio_outputs: inst.audio_output_channels,
             has_midi_in: inst.has_midi_in,
             midi_outputs: Vec::new(),
+            enabled: req.enabled,
         };
         let instance_rc = Rc::new(RefCell::new(inst));
         let filter = crate::vst2::filter::Vst2FilterNode::new(
@@ -1723,6 +1748,7 @@ impl Host {
             midi_outputs: Vec::new(),
             // Built-in meters are audio only: no MIDI in or thru.
             midi_ports: !crate::ladspa::builtin::is_builtin_uri(&req.plugin_uri),
+            enabled: req.enabled,
         };
         let meter_levels = crate::ladspa::builtin::meter_channels(&req.plugin_uri)
             .map(|_| inst.port_updates.clone());
@@ -1922,6 +1948,7 @@ impl Host {
                 (Vec::new(), None, params, inst.is_bypassed())
             };
 
+        let enabled = self.plugin_enabled(instance_id);
         Some(AddRequest {
             plugin_uri: meta.plugin_uri,
             instance_id,
@@ -1933,10 +1960,27 @@ impl Host {
             plugin_state,
             params,
             bypassed,
+            enabled,
             sample_rate: None,
             // Already proven safe in this process.
             probe: ProbeStatus::Done(crate::plugin::sandbox::ProbeOutcome::Ok),
         })
+    }
+
+    fn plugin_enabled(&self, instance_id: u64) -> bool {
+        if let Some(f) = self.lv2_filters.borrow().get(&instance_id) {
+            f.is_enabled()
+        } else if let Some(f) = self.clap_filters.borrow().get(&instance_id) {
+            f.is_enabled()
+        } else if let Some(f) = self.vst3_filters.borrow().get(&instance_id) {
+            f.is_enabled()
+        } else if let Some(f) = self.vst2_filters.borrow().get(&instance_id) {
+            f.is_enabled()
+        } else if let Some(f) = self.ladspa_filters.borrow().get(&instance_id) {
+            f.is_enabled()
+        } else {
+            true
+        }
     }
 
     fn plugin_node_id(&self, instance_id: u64) -> Option<ObjectId> {

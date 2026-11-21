@@ -12,8 +12,8 @@
 //! /zestbay/plugins                           query: lists the plugins
 //! /zestbay/sessions                          query: lists the sessions
 //! /zestbay/session/load             "name"   switch to another session
-//! /zestbay/plugin/<plugin>/enable   1|0      on / off (off = bypassed)
-//! /zestbay/plugin/<plugin>/bypass   1|0      the reverse of enable
+//! /zestbay/plugin/<plugin>/enable   1|0      hard on / off (off = silent)
+//! /zestbay/plugin/<plugin>/bypass   1|0      bypass on / off (audio passes through)
 //! /zestbay/plugin/<plugin>/toggle            flip on/off
 //! /zestbay/plugin/<plugin>/param/<param> v   set a value in the parameter's own range
 //! /zestbay/plugin/<plugin>/param/<param>/normalized v   set it from 0.0 to 1.0
@@ -40,8 +40,8 @@ const ROOT: &str = "zestbay";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum OscAction {
-    /// `enabled` false bypasses the plugin.
     Enable { plugin: String, enabled: bool },
+    Bypass { plugin: String, bypassed: bool },
     Toggle { plugin: String },
     Param {
         plugin: String,
@@ -114,7 +114,7 @@ pub fn parse(addr: &str, args: &[OscType]) -> Result<OscAction, String> {
                 }
                 ["bypass"] => {
                     let on = args.first().and_then(number).map_or(true, |v| v > 0.5);
-                    Ok(OscAction::Enable { plugin, enabled: !on })
+                    Ok(OscAction::Bypass { plugin, bypassed: on })
                 }
                 ["toggle"] => {
                     // A button sends 1 on press and 0 on release: act on press.
@@ -291,7 +291,7 @@ mod tests {
         );
         assert_eq!(
             parse("/zestbay/plugin/reverb/bypass", &[OscType::Bool(true)]),
-            Ok(OscAction::Enable { plugin: "reverb".into(), enabled: false })
+            Ok(OscAction::Bypass { plugin: "reverb".into(), bypassed: true })
         );
         // No argument means "on" (enable) / "bypassed" (bypass).
         assert_eq!(

@@ -37,6 +37,7 @@ pub struct FilterConfig {
     pub has_midi_in: bool,
     /// Names of the plugin's MIDI outputs (empty: the MIDI out is a thru).
     pub midi_outputs: Vec<String>,
+    pub enabled: bool,
 }
 
 #[repr(C)]
@@ -167,7 +168,13 @@ impl ClapFilterNode {
 
         let cpu_slot =
             global_cpu_tracker().register(config.instance_id, config.display_name.clone());
-        let (main, rt) = new_filter_halves(ports, config.has_midi_in, config.midi_outputs.len(), cpu_slot);
+        let (main, rt) = new_filter_halves(
+            ports,
+            config.has_midi_in,
+            config.midi_outputs.len(),
+            cpu_slot,
+            config.enabled,
+        );
 
         let user_data = Box::into_raw(Box::new(FilterData {
             shared: main.shared.clone(),
@@ -260,6 +267,14 @@ impl ClapFilterNode {
 
     pub fn set_learn_mode(&self, enabled: bool) {
         self.main.set_learn_mode(enabled);
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        self.main.set_enabled(enabled);
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.main.is_enabled()
     }
 }
 

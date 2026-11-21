@@ -19,6 +19,7 @@ pub mod graph;
 mod ordering;
 mod ranking;
 mod x_coords;
+mod wrap;
 mod y_coords;
 
 use graph::{LayoutConfig, LayoutGraph, NodeId};
@@ -68,6 +69,7 @@ pub fn sugiyama_layout(
     ordering::minimize_crossings(&mut graph);
     y_coords::assign_y_coords(&mut graph);
     x_coords::assign_x_coords(&mut graph);
+    wrap::wrap_columns(&mut graph);
 
     let result = if pinned.is_empty() {
         graph

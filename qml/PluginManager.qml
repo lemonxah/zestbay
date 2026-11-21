@@ -162,7 +162,7 @@ ZbWindow {
                             }
 
                             Text {
-                                text: (pluginRow.plugin.bypassed ? "Bypassed" : "Active")
+                                text: (pluginRow.plugin.enabled === false ? "Off" : pluginRow.plugin.bypassed ? "Bypassed" : "Active")
                                       + " · " + pluginRow.paramCount + (pluginRow.paramCount === 1 ? " param" : " params")
                                 font.family: Theme.fontMono
                                 font.pixelSize: Theme.sizeMono
@@ -258,6 +258,10 @@ ZbWindow {
                                     text: pluginManager.selectedPlugin && pluginManager.selectedPlugin.format
                                           ? pluginManager.selectedPlugin.format : ""
                                     tone: detailFormatBadge.formatTone(text)
+                                }
+                                ZbBadge {
+                                    visible: !!pluginManager.selectedPlugin && pluginManager.selectedPlugin.enabled === false
+                                    text: "off"
                                 }
                                 ZbBadge {
                                     visible: !!pluginManager.selectedPlugin && !!pluginManager.selectedPlugin.bypassed

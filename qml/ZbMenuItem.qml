@@ -14,6 +14,7 @@ MenuItem {
     // Pick-one lists (e.g. a filter): marks the current choice with a check;
     // the item still triggers and closes the menu. Use instead of checkable.
     property bool selected: false
+    property color swatch: "transparent"
 
     implicitHeight: Theme.menuItemHeight
     implicitWidth: Theme.menuWidth - 12
@@ -24,9 +25,20 @@ MenuItem {
 
     contentItem: Item {
         implicitHeight: label.implicitHeight
+        Rectangle {
+            id: swatchDot
+            visible: control.swatch.a > 0
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            width: visible ? 10 : 0
+            height: 10
+            radius: 5
+            color: control.swatch
+        }
         Text {
             id: label
-            anchors.left: parent.left
+            anchors.left: swatchDot.right
+            anchors.leftMargin: swatchDot.visible ? 8 : 0
             anchors.right: selectedMark.left
             anchors.rightMargin: 8
             anchors.verticalCenter: parent.verticalCenter

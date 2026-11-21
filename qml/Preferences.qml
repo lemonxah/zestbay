@@ -24,6 +24,8 @@ ZbWindow {
     signal gridSizeChanged(int px)
     signal nodeSpacingChanged(int px)
     signal cardRowChanged(int px)
+    signal wireStyleChanged(string style)
+    signal gradientWiresChanged(bool enabled)
 
     // Two densities, each a pixel value with three presets (the sliders set
     // any value in between): graph density is the gap between nodes (node
@@ -81,6 +83,27 @@ ZbWindow {
 
 
     readonly property var themeModes: ["system", "dark", "light"]
+    readonly property var wireStyles: ["bezier", "straight", "stepped", "circuit"]
+
+    function wireStyleIndex() {
+        return Math.max(0, wireStyles.indexOf(pref("wire_style", "bezier")));
+    }
+
+    function paletteIndex() {
+        return Math.max(0, Theme.paletteIds.indexOf(Theme.palette));
+    }
+
+    function setPalette(id) {
+        Theme.palette = id;
+        setPref("palette", id);
+        paletteSegmented.currentIndex = Qt.binding(() => prefsWindow.paletteIndex());
+    }
+
+    function setWireStyle(style) {
+        setPref("wire_style", style);
+        wireStyleChanged(style);
+        wireSegmented.currentIndex = Qt.binding(() => prefsWindow.wireStyleIndex());
+    }
 
     function loadPrefs() {
         try {
@@ -134,6 +157,9 @@ ZbWindow {
         if (key === "card_row_px") {
             cardRowChanged(value);
         }
+        if (key === "gradient_wires") {
+            gradientWiresChanged(value);
+        }
     }
 
     function themeIndex() {
@@ -155,6 +181,11 @@ ZbWindow {
         gridSizeChanged(pref("grid_size_px", 24));
         nodeSpacingChanged(pref("node_spacing_px", 20));
         cardRowChanged(pref("card_row_px", 22));
+        wireStyleChanged(pref("wire_style", "bezier"));
+        gradientWiresChanged(pref("gradient_wires", false));
+        Theme.palette = "zest";
+        paletteSegmented.currentIndex = Qt.binding(() => prefsWindow.paletteIndex());
+        wireSegmented.currentIndex = Qt.binding(() => prefsWindow.wireStyleIndex());
         dragModeChanged(pref("drag_mode", "grab"));
         Theme.mode = "system";
         themeSegmented.currentIndex = Qt.binding(() => prefsWindow.themeIndex());
@@ -318,6 +349,7 @@ ZbWindow {
         property real stepSize: 1
         property real fallback: 0
         property string unit: "ms"
+        property string zeroText: ""
         Layout.fillWidth: true
         Layout.leftMargin: Theme.grid * 4
         Layout.rightMargin: Theme.grid * 4
@@ -351,12 +383,13 @@ ZbWindow {
                     anchors.centerIn: parent
                     spacing: Theme.grid
                     Text {
-                        text: Math.round(slider.value)
+                        text: sliderRow.zeroText !== "" && Math.round(slider.value) === 0 ? sliderRow.zeroText : Math.round(slider.value)
                         font.family: Theme.fontMono
                         font.pixelSize: Theme.sizeCaption
                         color: Theme.textPrimary
                     }
                     Text {
+                        visible: !(sliderRow.zeroText !== "" && Math.round(slider.value) === 0)
                         text: sliderRow.unit
                         font.family: Theme.fontMono
                         font.pixelSize: Theme.sizeCaption
@@ -659,6 +692,26 @@ ZbWindow {
                                 onActivated: index => prefsWindow.setTheme(prefsWindow.themeModes[index])
                             }
                         }
+                        ZbDivider { Layout.fillWidth: true }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            Layout.leftMargin: Theme.grid * 4
+                            Layout.rightMargin: Theme.grid * 4
+                            Layout.topMargin: Theme.grid * 3
+                            Layout.bottomMargin: Theme.grid * 3
+                            spacing: Theme.grid * 2
+                            RowText {
+                                Layout.fillWidth: true
+                                title: "Palette"
+                                description: "Colours for the whole app. Each palette has a dark and a light version, picked by Theme."
+                            }
+                            ZbSegmented {
+                                id: paletteSegmented
+                                model: Theme.paletteNames
+                                currentIndex: prefsWindow.paletteIndex()
+                                onActivated: index => prefsWindow.setPalette(Theme.paletteIds[index])
+                            }
+                        }
                     }
 
                     SettingsSection {
@@ -696,6 +749,18 @@ ZbWindow {
                             unit: "px"
                         }
                         ZbDivider { Layout.fillWidth: true }
+                        SliderRow {
+                            title: "Wrap tall columns"
+                            description: "Auto layout splits a column with more nodes than this into a grid of side-by-side columns, so long stacks of apps or devices take less height. Off keeps every column in one stack."
+                            key: "column_wrap"
+                            from: 0
+                            to: 20
+                            stepSize: 1
+                            fallback: 0
+                            unit: "nodes"
+                            zeroText: "Off"
+                        }
+                        ZbDivider { Layout.fillWidth: true }
                         RowLayout {
                             Layout.fillWidth: true
                             Layout.leftMargin: Theme.grid * 4
@@ -726,6 +791,34 @@ ZbWindow {
                             stepSize: 1
                             fallback: 22
                             unit: "px"
+                        }
+                        ZbDivider { Layout.fillWidth: true }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Layout.leftMargin: Theme.grid * 4
+                            Layout.rightMargin: Theme.grid * 4
+                            Layout.topMargin: Theme.grid * 3
+                            Layout.bottomMargin: Theme.grid * 3
+                            spacing: Theme.grid * 4
+                            RowText {
+                                Layout.fillWidth: true
+                                title: "Wire style"
+                                description: "How wires are drawn. Circuit uses right angles with rounded corners and gives side-by-side wires their own lanes, which keeps dense graphs readable."
+                            }
+                            ZbSegmented {
+                                id: wireSegmented
+                                Layout.alignment: Qt.AlignVCenter
+                                model: ["Curved", "Straight", "Stepped", "Circuit"]
+                                currentIndex: prefsWindow.wireStyleIndex()
+                                onActivated: index => prefsWindow.setWireStyle(prefsWindow.wireStyles[index])
+                            }
+                        }
+                        ZbDivider { Layout.fillWidth: true }
+                        ToggleRow {
+                            title: "Gradient wires"
+                            description: "Audio wires fade from the source node's colour to the destination's (set a node's colour from its right-click menu). MIDI and video wires keep their signal colours."
+                            key: "gradient_wires"
+                            fallback: false
                         }
                         ZbDivider { Layout.fillWidth: true }
                         ToggleRow {
