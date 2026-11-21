@@ -118,7 +118,7 @@ ZbWindow {
 
     Connections {
         target: Theme
-        function onDarkChanged() { chart.requestPaint() }
+        function onColorsChanged() { chart.requestPaint() }
     }
 
     function ensureSeries(key, name, slot) {

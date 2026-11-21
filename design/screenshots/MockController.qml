@@ -280,6 +280,9 @@ QtObject {
     function save_hidden(j) {}
     function save_pinned(j) {}
     function get_node_styles_json() { return "{}" }
+    property int custom_themes_rev: 0
+    function get_custom_themes_json() { return "[]" }
+    function themes_folder() { return "/home/user/.config/zestbay/themes" }
     function save_node_styles(j) {}
     function set_plugin_enabled(id, e) {}
     function set_preference(k, v) {}

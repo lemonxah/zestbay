@@ -10,6 +10,7 @@ mod plugin;
 mod presets;
 mod session;
 mod subgraph;
+mod theme_css;
 mod tray;
 mod ui;
 pub mod ui_bridge;

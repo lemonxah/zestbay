@@ -16,6 +16,7 @@ pub mod qobject {
         #[qproperty(i32, link_count)]
         #[qproperty(QString, cpu_usage)]
         #[qproperty(i32, desktop_color_scheme)]
+        #[qproperty(i32, custom_themes_rev)]
         #[qproperty(bool, plugins_scanning)]
         #[qproperty(f64, plugin_scan_progress)]
         #[qproperty(bool, plugins_rescanning)]
@@ -119,6 +120,12 @@ pub mod qobject {
 
         #[qinvokable]
         fn get_node_styles_json(self: Pin<&mut Self>) -> QString;
+
+        #[qinvokable]
+        fn get_custom_themes_json(self: Pin<&mut Self>) -> QString;
+
+        #[qinvokable]
+        fn themes_folder(self: Pin<&mut Self>) -> QString;
 
         #[qinvokable]
         fn save_node_styles(self: Pin<&mut Self>, json: QString);
@@ -605,6 +612,9 @@ pub struct AppControllerRust {
     link_count: i32,
     cpu_usage: QString,
     desktop_color_scheme: i32,
+    custom_themes_rev: i32,
+    themes_stamp: Vec<(String, Option<std::time::SystemTime>, u64)>,
+    themes_checked_at: Option<Instant>,
     plugins_scanning: bool,
     plugin_scan_progress: f64,
     plugins_rescanning: bool,
@@ -758,6 +768,9 @@ impl Default for AppControllerRust {
             tray_state: None,
             cpu_usage: QString::from("0.0%"),
             desktop_color_scheme: 0,
+            custom_themes_rev: 0,
+            themes_stamp: Vec::new(),
+            themes_checked_at: None,
             plugins_scanning: false,
             plugin_scan_progress: -1.0,
             plugins_rescanning: false,
@@ -1296,6 +1309,7 @@ impl qobject::AppController {
         if scheme != self.rust().desktop_color_scheme {
             self.as_mut().set_desktop_color_scheme(scheme);
         }
+        self.as_mut().poll_custom_themes();
         self.as_mut().poll_plugin_scan();
         self.as_mut().poll_osc();
         self.as_mut().poll_session_swap();
@@ -3592,6 +3606,49 @@ impl qobject::AppController {
         write_config_json_text("pinned.json", &json.to_string());
     }
 
+    fn poll_custom_themes(mut self: Pin<&mut Self>) {
+        if self
+            .rust()
+            .themes_checked_at
+            .is_some_and(|t| t.elapsed() < Duration::from_secs(1))
+        {
+            return;
+        }
+        self.as_mut().rust_mut().themes_checked_at = Some(Instant::now());
+        let stamp: Vec<(String, Option<std::time::SystemTime>, u64)> = crate::theme_css::list_files()
+            .into_iter()
+            .map(|(name, _, modified, len)| (name, modified, len))
+            .collect();
+        if stamp != self.rust().themes_stamp {
+            self.as_mut().rust_mut().themes_stamp = stamp;
+            let rev = self.rust().custom_themes_rev.wrapping_add(1);
+            self.as_mut().set_custom_themes_rev(rev);
+        }
+    }
+
+    pub fn get_custom_themes_json(self: Pin<&mut Self>) -> QString {
+        let themes: Vec<serde_json::Value> = crate::theme_css::load_all()
+            .into_iter()
+            .map(|(name, theme)| {
+                serde_json::json!({
+                    "id": format!("custom:{name}"),
+                    "name": name,
+                    "dark": theme.dark,
+                    "light": theme.light,
+                })
+            })
+            .collect();
+        QString::from(&serde_json::Value::Array(themes).to_string())
+    }
+
+    pub fn themes_folder(self: Pin<&mut Self>) -> QString {
+        let dir = crate::theme_css::themes_dir();
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            log::warn!("Could not create {}: {}", dir.display(), e);
+        }
+        QString::from(&dir.to_string_lossy().to_string())
+    }
+
     pub fn get_node_styles_json(self: Pin<&mut Self>) -> QString {
         QString::from(&read_config_json_text("node-style.json", "{}"))
     }
@@ -5357,7 +5414,11 @@ impl qobject::AppController {
                 }
             }
             "palette" => {
-                if PALETTES.contains(&val_str.as_str()) {
+                if PALETTES.contains(&val_str.as_str())
+                    || val_str
+                        .strip_prefix("custom:")
+                        .is_some_and(crate::theme_css::valid_theme_name)
+                {
                     self.as_mut().rust_mut().prefs.palette = val_str.clone();
                 } else {
                     log::warn!("Unknown palette '{}'", val_str);

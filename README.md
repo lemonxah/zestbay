@@ -111,7 +111,7 @@ Carla is a full-featured plugin host and JACK patchbay. The differences are abou
 - The node under the cursor is highlighted, and a node whose name is too long for its card shows the full name in a popup
 - **Search** nodes and ports (Ctrl+F); non-matching nodes dim
 - Status bar with node/link counts, a CPU sparkline and the rules state; dark and light themes, or follow the desktop
-- **Palettes** (Preferences › Appearance): Zest, Catppuccin, Gruvbox, Nord and Solarized, each with a dark and a light version picked by the theme
+- **Palettes** (Preferences › Appearance): Zest, Catppuccin, Gruvbox, Nord and Solarized, each with a dark and a light version picked by the theme, plus your own (see [Custom themes](#custom-themes))
 - **Hide unnamed nodes** (Preferences › Advanced, on by default) leaves out nodes with no name of their own, such as pavucontrol's level-meter streams
 
 **Moving around**
@@ -368,6 +368,46 @@ oscsend localhost 9000 /zestbay/session/load s "live"
 ```
 
 **Good to know.** Messages are applied on ZestBay's UI timer (100 ms by default; Preferences › Timing, minimum 16 ms), and a parameter sent repeatedly within one tick only counts once, so a fast fader doesn't pile up. Parameter changes are saved like changes made in the UI. While a session switch is in progress other messages are ignored.
+
+### Custom themes
+
+Put `.css` files in ZestBay's themes folder and each one appears under **Preferences › Appearance › Palette**, named after the file. ZestBay checks the folder every second, so editing or regenerating a file restyles the app straight away. **Open themes folder** in Preferences opens it.
+
+| Install | Themes folder |
+|---------|---------------|
+| Native | `~/.config/zestbay/themes/` |
+| Flatpak | `~/.var/app/io.github.lemonxah.ZestBay/config/zestbay/themes/` |
+
+Only CSS custom properties (`--name: value`) are read, and only colours: `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, `rgb()`/`rgba()` and `var(--other)`. Selectors and other properties are ignored. Anything a theme leaves out keeps the built-in colour.
+
+```css
+:root {
+  --accent: #cba6f7;
+  --bg-canvas: #11111b;
+  --sig-audio: #89b4fa;
+}
+@media (prefers-color-scheme: light) {
+  :root { --bg-canvas: #dce0e8; }
+}
+```
+
+`:root` applies to both modes. `@media (prefers-color-scheme: dark|light)`, `.dark`/`.light` and `[data-theme="dark|light"]` blocks apply to one mode, matching the **Theme** setting (System, Dark or Light).
+
+ZestBay's colour names:
+
+| Group | Variables |
+|-------|-----------|
+| Surfaces | `--bg-canvas` `--bg-panel` `--bg-surface` `--bg-menu` `--bg-raised` `--bg-inset` `--bg-hover` `--bg-subtle` |
+| Borders | `--border-strong` `--border-hairline` `--border-panel` `--grid-dot` |
+| Text | `--text-primary` `--text-strong` `--text-secondary` `--text-icon` `--text-muted` `--text-disabled` `--text-on-accent` `--text-destructive` |
+| Accent | `--accent` `--accent-hover` |
+| Wires and pins | `--sig-audio` `--sig-midi` `--sig-video` |
+| Node kinds | `--cat-hardware` `--cat-virtual` `--cat-app` `--cat-plugin` `--cat-midi` `--cat-subgraph` |
+
+**Using your rice's colours.** A file doesn't need ZestBay's names. If it defines a pywal-style set (`--background`, `--foreground`, `--color0`…`--color15`) or a base16 set (`--base00`…`--base0F`), ZestBay builds the whole palette from it: surfaces and borders are shades between background and foreground, the accent is blue (`color4` / `base0D`), audio is cyan, MIDI magenta, and so on. Any ZestBay names in the same file override those choices.
+
+- **pywal**: link the generated file, `ln -s ~/.cache/wal/colors.css ~/.config/zestbay/themes/wal.css`, then pick "wal". Every `wal` run restyles ZestBay. For the Flatpak, either let it read pywal's cache (`flatpak override --user --filesystem=~/.cache/wal:ro io.github.lemonxah.ZestBay`) and link into the Flatpak themes folder, or have pywal write a template straight into that folder.
+- **matugen, wallust, stylix and other template tools**: add a template that writes a `.css` file into the themes folder with either ZestBay's names or a base16 set.
 
 ### System Tray
 - Start minimized (background service mode) and close to tray
