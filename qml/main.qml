@@ -46,6 +46,7 @@ ZbWindow {
                 graphView.wireStyle = prefs.wire_style;
             if (prefs.gradient_wires !== undefined)
                 graphView.gradientWires = prefs.gradient_wires;
+            mainWindow.loadCustomThemes();
             if (prefs.palette)
                 Theme.palette = prefs.palette;
             // New nodes may still be repositioned until their rule has had
@@ -111,6 +112,34 @@ ZbWindow {
             ruleCount = JSON.parse(controller.get_rules_json()).length;
         } catch (e) {
             ruleCount = 0;
+        }
+    }
+
+    function loadCustomThemes() {
+        var list = [];
+        try {
+            list = JSON.parse(controller.get_custom_themes_json());
+        } catch (e) {}
+        var map = {};
+        var ids = [];
+        var names = [];
+        for (var i = 0; i < list.length; i++) {
+            map[list[i].id] = {
+                dark: list[i].dark,
+                light: list[i].light
+            };
+            ids.push(list[i].id);
+            names.push(list[i].name);
+        }
+        Theme.customPalettes = map;
+        Theme.customIds = ids;
+        Theme.customNames = names;
+    }
+
+    Connections {
+        target: controller
+        function onCustom_themes_revChanged() {
+            mainWindow.loadCustomThemes();
         }
     }
 
@@ -1099,7 +1128,7 @@ ZbWindow {
                         }
                         Connections {
                             target: Theme
-                            function onDarkChanged() {
+                            function onColorsChanged() {
                                 cpuSparkline.requestPaint();
                             }
                         }

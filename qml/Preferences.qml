@@ -93,10 +93,11 @@ ZbWindow {
         return Math.max(0, Theme.paletteIds.indexOf(Theme.palette));
     }
 
+    property string themesFolder: ""
+
     function setPalette(id) {
         Theme.palette = id;
         setPref("palette", id);
-        paletteSegmented.currentIndex = Qt.binding(() => prefsWindow.paletteIndex());
     }
 
     function setWireStyle(style) {
@@ -122,6 +123,7 @@ ZbWindow {
     }
 
     function open() {
+        themesFolder = controller.themes_folder();
         loadPrefs();
         loadSessions();
         sessionError = "";
@@ -184,7 +186,6 @@ ZbWindow {
         wireStyleChanged(pref("wire_style", "bezier"));
         gradientWiresChanged(pref("gradient_wires", false));
         Theme.palette = "zest";
-        paletteSegmented.currentIndex = Qt.binding(() => prefsWindow.paletteIndex());
         wireSegmented.currentIndex = Qt.binding(() => prefsWindow.wireStyleIndex());
         dragModeChanged(pref("drag_mode", "grab"));
         Theme.mode = "system";
@@ -700,16 +701,55 @@ ZbWindow {
                             Layout.topMargin: Theme.grid * 3
                             Layout.bottomMargin: Theme.grid * 3
                             spacing: Theme.grid * 2
-                            RowText {
+                            RowLayout {
                                 Layout.fillWidth: true
-                                title: "Palette"
-                                description: "Colours for the whole app. Each palette has a dark and a light version, picked by Theme."
+                                spacing: Theme.grid * 4
+                                RowText {
+                                    Layout.fillWidth: true
+                                    title: "Palette"
+                                    description: "Colours for the whole app. Each palette has a dark and a light version, picked by Theme. Your own themes are .css files in the themes folder; they show up here and reload as soon as the file changes."
+                                }
+                                ZbButton {
+                                    id: paletteButton
+                                    Layout.alignment: Qt.AlignVCenter
+                                    text: Theme.paletteNames[prefsWindow.paletteIndex()] || "Zest"
+                                    trailingIconName: "chevronDown"
+                                    onClicked: paletteMenu.opened ? paletteMenu.close() : paletteMenu.open()
+
+                                    ZbMenu {
+                                        id: paletteMenu
+                                        y: paletteButton.height + 4
+
+                                        Instantiator {
+                                            model: Theme.paletteIds
+                                            delegate: ZbMenuItem {
+                                                required property var modelData
+                                                required property int index
+                                                text: Theme.paletteNames[index] || modelData
+                                                selected: Theme.palette === modelData
+                                                onTriggered: prefsWindow.setPalette(modelData)
+                                            }
+                                            onObjectAdded: (index, object) => paletteMenu.insertItem(index, object)
+                                            onObjectRemoved: (index, object) => paletteMenu.removeItem(object)
+                                        }
+                                    }
+                                }
                             }
-                            ZbSegmented {
-                                id: paletteSegmented
-                                model: Theme.paletteNames
-                                currentIndex: prefsWindow.paletteIndex()
-                                onActivated: index => prefsWindow.setPalette(Theme.paletteIds[index])
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: Theme.grid * 2
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: prefsWindow.themesFolder
+                                    elide: Text.ElideMiddle
+                                    font.family: Theme.fontMono
+                                    font.pixelSize: Theme.sizeCaption
+                                    color: Theme.textMuted
+                                }
+                                ZbButton {
+                                    text: "Open themes folder"
+                                    onClicked: Qt.openUrlExternally("file://" + prefsWindow.themesFolder)
+                                }
                             }
                         }
                     }

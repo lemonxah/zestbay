@@ -25,8 +25,15 @@ QtObject {
     property SystemPalette systemPalette: SystemPalette {}
 
     property string palette: "zest"
-    readonly property var paletteIds: ["zest", "catppuccin", "gruvbox", "nord", "solarized"]
-    readonly property var paletteNames: ["Zest", "Catppuccin", "Gruvbox", "Nord", "Solarized"]
+    signal colorsChanged()
+    onDarkChanged: colorsChanged()
+    onPaletteChanged: colorsChanged()
+    onCustomPalettesChanged: colorsChanged()
+    property var customPalettes: ({})
+    property var customIds: []
+    property var customNames: []
+    readonly property var paletteIds: ["zest", "catppuccin", "gruvbox", "nord", "solarized"].concat(customIds)
+    readonly property var paletteNames: ["Zest", "Catppuccin", "Gruvbox", "Nord", "Solarized"].concat(customNames)
     readonly property var palettes: ({
         catppuccin: {
             dark: { bgCanvas: "#11111b", bgPanel: "#181825", bgSurface: "#1e1e2e", bgMenu: "#1e1e2e", bgRaised: "#232334", bgInset: "#11111b", bgHover: "#2a2b3d", bgSubtle: "#313244", borderStrong: "#45475a", borderHairline: "#313244", borderPanel: "#2a2b3d", gridDot: "#45475a", textPrimary: "#cdd6f4", textStrong: "#e2e8fb", textSecondary: "#a6adc8", textIcon: "#bac2de", textMuted: "#9399b2", textDisabled: "#6c7086", textOnAccent: "#11111b", textDestructive: "#f38ba8", accent: "#cba6f7", accentHover: "#dcc2fa", sigAudio: "#89b4fa", sigMidi: "#f5c2e7", sigVideo: "#fab387", catHardware: "#94e2d5", catVirtual: "#74c7ec", catApp: "#fab387", catPlugin: "#b4befe", catMidi: "#f5c2e7", catSubgraph: "#a6e3a1" },
@@ -47,7 +54,7 @@ QtObject {
     })
 
     function pick(name, fallback) {
-        var p = palettes[palette];
+        var p = palettes[palette] || customPalettes[palette];
         if (!p)
             return fallback;
         var v = p[dark ? "dark" : "light"][name];

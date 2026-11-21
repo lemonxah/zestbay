@@ -534,7 +534,7 @@ Item {
 
     Connections {
         target: Theme
-        function onDarkChanged() {
+        function onColorsChanged() {
             widthsDirty = true;
             canvas.requestPaint();
         }
