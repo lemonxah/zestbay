@@ -122,7 +122,7 @@ Carla is a full-featured plugin host and JACK patchbay. The differences are abou
 
 **Wiring**
 - Drag from a port to another port to connect. Wires highlight and can be clicked from a few pixels away, so you don't have to hit them exactly
-- **Wire styles** (Preferences › Graph): Curved, Straight, Stepped (right angles), or Circuit (right angles with rounded corners, where wires running side by side each get their own lane so bundles stay readable)
+- **Wire styles** (Preferences › Graph): Curved, Straight, Stepped (right angles), or Circuit (right angles with rounded corners, where wires running side by side each get their own lane so bundles stay readable). Stepped and Circuit wires steer around node cards instead of running behind them
 - **Gradient wires** (Preferences › Graph, off by default): audio wires fade from the source node's colour to the destination's; MIDI and video wires keep their signal colours
 - Right-drag from one port to another to **block** the pair; blocked pairs are drawn as red dashed lines with a ⊘. Hover one to highlight it, click it to select it (Ctrl+click to add more) and press **Delete** to remove the rule that blocks it. A rule can cover several pairs; the toast says when removing it frees others too
 - Drag a plugin onto a wire to insert it into that connection; Ctrl+Z takes it out again and puts the original wire back. A node never offers to drop onto its own wires, including those of a meter snapped onto it
