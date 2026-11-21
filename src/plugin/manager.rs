@@ -225,6 +225,7 @@ mod tests {
             parameters,
             active: true,
             bypassed: false,
+            enabled: true,
             lv2_state: Vec::new(),
             plugin_state: None,
             port_names: Default::default(),

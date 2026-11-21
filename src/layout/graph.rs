@@ -83,6 +83,7 @@ pub struct LayoutConfig {
     pub iterations: usize,
     /// Layout direction for Brandes-Köpf. "balanced" averages 4 directions.
     pub direction: LayoutDirection,
+    pub max_column_nodes: usize,
 }
 
 impl Default for LayoutConfig {
@@ -92,6 +93,7 @@ impl Default for LayoutConfig {
             margin_y: 20.0,
             iterations: 25,
             direction: LayoutDirection::Balanced,
+            max_column_nodes: 0,
         }
     }
 }

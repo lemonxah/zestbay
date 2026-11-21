@@ -179,6 +179,7 @@ pub enum PwCommand {
         plugin_state: Option<Vec<u8>>,
         /// Persistent instance identity (survives restarts, unlike instance_id).
         stable_id: String,
+        enabled: bool,
     },
     RemovePlugin {
         instance_id: u64,
@@ -191,6 +192,10 @@ pub enum PwCommand {
     SetPluginBypass {
         instance_id: u64,
         bypassed: bool,
+    },
+    SetPluginEnabled {
+        instance_id: u64,
+        enabled: bool,
     },
     RenamePlugin {
         instance_id: u64,

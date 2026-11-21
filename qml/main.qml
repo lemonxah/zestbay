@@ -42,6 +42,12 @@ ZbWindow {
                 graphView.nodeSpacing = prefs.node_spacing_px;
             if (prefs.card_row_px !== undefined)
                 graphView.cardRow = prefs.card_row_px;
+            if (prefs.wire_style)
+                graphView.wireStyle = prefs.wire_style;
+            if (prefs.gradient_wires !== undefined)
+                graphView.gradientWires = prefs.gradient_wires;
+            if (prefs.palette)
+                Theme.palette = prefs.palette;
             // New nodes may still be repositioned until their rule has had
             // time to connect them.
             if (prefs.rule_settle_ms !== undefined)
@@ -1235,6 +1241,8 @@ ZbWindow {
         onDragModeChanged: mode => graphView.dragMode = mode
         onNodeSpacingChanged: px => graphView.nodeSpacing = px
         onCardRowChanged: px => graphView.cardRow = px
+        onWireStyleChanged: style => graphView.wireStyle = style
+        onGradientWiresChanged: enabled => graphView.gradientWires = enabled
     }
 
     CpuOverlay {

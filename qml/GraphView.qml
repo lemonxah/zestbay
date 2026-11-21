@@ -209,6 +209,8 @@ Item {
 
     property var pinnedNodes: ({})
     property bool pinnedLoaded: false
+    property var nodeStyles: ({})
+    property bool nodeStylesLoaded: false
 
     property bool selectDragging: false
     property real selectStartX: 0
@@ -297,6 +299,7 @@ Item {
     // Maps nodeId -> bool (true = bypassed). An entry is dropped as soon as a
     // refresh reports the backend's bypass state, or when the node goes away.
     property var localBypassState: ({})
+    property var localEnabledState: ({})
 
     // Per-node caches, rebuilt by refreshData(): sorted port lists, node
     // heights, and the unique layout key of each node.
@@ -319,6 +322,15 @@ Item {
     // same pitch. Auto layout follows it too.
     property bool snapToGrid: true
     property real gridSize: 24
+
+    property string wireStyle: "bezier"
+    onWireStyleChanged: canvas.requestPaint()
+    property bool gradientWires: false
+    onGradientWiresChanged: canvas.requestPaint()
+    property var wireLanes: ({})
+    readonly property real wireStub: 16
+    readonly property real wireCorner: 8
+    readonly property real wireLaneGap: 10
     onSnapToGridChanged: if (snapToGrid)
         alignAllToGrid()
     onGridSizeChanged: {
@@ -403,6 +415,7 @@ Item {
         layoutLoaded = false;
         hiddenLoaded = false;
         pinnedLoaded = false;
+        nodeStylesLoaded = false;
         savedLayout = {};
         hiddenNodes = {};
         snapSuspended = {};
@@ -476,7 +489,7 @@ Item {
         for (var i = 0; i < blockGeom.length; i++) {
             var g = blockGeom[i];
             var dm = Math.sqrt((c.x - g.mx) * (c.x - g.mx) + (c.y - g.my) * (c.y - g.my));
-            var d = dm <= 10 / zoom ? 0 : distToBezier(c.x, c.y, g.x1, g.y1, g.x2, g.y2);
+            var d = dm <= 10 / zoom ? 0 : distToWire(c.x, c.y, g.x1, g.y1, g.x2, g.y2, 0);
             if (d < bestDist) {
                 bestDist = d;
                 best = g;
@@ -684,6 +697,15 @@ Item {
             }
             pinnedLoaded = true;
         }
+        if (!nodeStylesLoaded) {
+            try {
+                var st = JSON.parse(controller.get_node_styles_json());
+                nodeStyles = st && typeof st === "object" && !Array.isArray(st) ? st : {};
+            } catch (e) {
+                nodeStyles = {};
+            }
+            nodeStylesLoaded = true;
+        }
 
         try {
             var nodesJson = controller.get_nodes_json();
@@ -845,6 +867,16 @@ Item {
         }
         if (bypassPruned)
             localBypassState = localBypassState;
+        var enabledPruned = false;
+        for (var enId in localEnabledState) {
+            var enNode = liveNodeById[enId];
+            if (!enNode || enNode.pluginEnabled !== undefined) {
+                delete localEnabledState[enId];
+                enabledPruned = true;
+            }
+        }
+        if (enabledPruned)
+            localEnabledState = localEnabledState;
 
         refreshSeq++;
         var nowMs = Date.now();
@@ -1537,6 +1569,76 @@ Item {
         ZbMenuItem {
             text: contextNode && contextNode.layoutKey && pinnedNodes[contextNode.layoutKey] ? "Unpin" : "Pin"
             onTriggered: togglePinned(contextNode)
+        }
+
+        ZbMenuItem {
+            text: "Connected ports only"
+            checkable: true
+            checked: !!contextNode && !!nodeStyles && isConnectedOnly(contextNode)
+            visible: !!contextNode && !!contextNode.layoutKey && !contextIsMeter
+            height: visible ? implicitHeight : 0
+            onToggled: setNodeStyle(contextNode, "connectedOnly", !isConnectedOnly(contextNode))
+        }
+
+        ZbMenu {
+            id: nodeColorMenu
+            title: "Colour"
+            enabled: !!contextNode && !!contextNode.layoutKey
+            readonly property string current: contextNode && nodeStyles ? ((nodeStyle(contextNode) || {}).color || "") : ""
+            ZbMenuItem {
+                text: "Default"
+                selected: nodeColorMenu.current === ""
+                onTriggered: setNodeStyle(contextNode, "color", "")
+            }
+            ZbMenuSeparator {}
+            ZbMenuItem {
+                text: "Teal"
+                swatch: Theme.catHardware
+                selected: nodeColorMenu.current === "catHardware"
+                onTriggered: setNodeStyle(contextNode, "color", "catHardware")
+            }
+            ZbMenuItem {
+                text: "Blue"
+                swatch: Theme.catVirtual
+                selected: nodeColorMenu.current === "catVirtual"
+                onTriggered: setNodeStyle(contextNode, "color", "catVirtual")
+            }
+            ZbMenuItem {
+                text: "Green"
+                swatch: Theme.catSubgraph
+                selected: nodeColorMenu.current === "catSubgraph"
+                onTriggered: setNodeStyle(contextNode, "color", "catSubgraph")
+            }
+            ZbMenuItem {
+                text: "Accent"
+                swatch: Theme.accent
+                selected: nodeColorMenu.current === "accent"
+                onTriggered: setNodeStyle(contextNode, "color", "accent")
+            }
+            ZbMenuItem {
+                text: "Orange"
+                swatch: Theme.catApp
+                selected: nodeColorMenu.current === "catApp"
+                onTriggered: setNodeStyle(contextNode, "color", "catApp")
+            }
+            ZbMenuItem {
+                text: "Purple"
+                swatch: Theme.catPlugin
+                selected: nodeColorMenu.current === "catPlugin"
+                onTriggered: setNodeStyle(contextNode, "color", "catPlugin")
+            }
+            ZbMenuItem {
+                text: "Pink"
+                swatch: Theme.catMidi
+                selected: nodeColorMenu.current === "catMidi"
+                onTriggered: setNodeStyle(contextNode, "color", "catMidi")
+            }
+            ZbMenuItem {
+                text: "Red"
+                swatch: Theme.textDestructive
+                selected: nodeColorMenu.current === "textDestructive"
+                onTriggered: setNodeStyle(contextNode, "color", "textDestructive")
+            }
         }
 
         ZbMenuSeparator {
@@ -2281,6 +2383,47 @@ Item {
         }
     }
 
+    function nodeStyle(node) {
+        return node && node.layoutKey ? (nodeStyles[node.layoutKey] || null) : null;
+    }
+
+    function setNodeStyle(node, field, value) {
+        if (!node || !node.layoutKey)
+            return;
+        var key = node.layoutKey;
+        var entry = nodeStyles[key] || {};
+        if (value === undefined || value === null || value === false || value === "")
+            delete entry[field];
+        else
+            entry[field] = value;
+        if (Object.keys(entry).length > 0)
+            nodeStyles[key] = entry;
+        else
+            delete nodeStyles[key];
+        nodeStyles = nodeStyles;
+        controller.save_node_styles(JSON.stringify(nodeStyles));
+        var lay = computeNodeLayout(node, getSortedPorts(node.id));
+        nodeLayouts[node.id] = lay;
+        nodeHeights[node.id] = lay.height;
+        canvas.requestPaint();
+    }
+
+    readonly property var nodeColorTokens: ["catHardware", "catVirtual", "catSubgraph", "accent", "catApp", "catPlugin", "catMidi", "textDestructive"]
+
+    function customNodeColor(node) {
+        var st = nodeStyle(node);
+        return st && st.color && nodeColorTokens.indexOf(st.color) >= 0 ? Theme[st.color] : null;
+    }
+
+    function nodeColor(node) {
+        return customNodeColor(node) || nodeCategory(node).color;
+    }
+
+    function isConnectedOnly(node) {
+        var st = nodeStyle(node);
+        return !!(st && st.connectedOnly);
+    }
+
     function persistPinned() {
         var arr = [];
         for (var k in pinnedNodes) {
@@ -2646,6 +2789,12 @@ Item {
         if (node.id in localBypassState)
             return localBypassState[node.id];
         return node.pluginBypassed === true;
+    }
+
+    function isNodeEnabled(node) {
+        if (node.id in localEnabledState)
+            return localEnabledState[node.id];
+        return node.pluginEnabled !== false;
     }
 
     function findNodeData(nodeId) {
@@ -3497,7 +3646,14 @@ Item {
         var hiddenIn = 0;
         var hiddenOut = 0;
         var meter = isMeterNode(node);
-        if (node.type === "Plugin" && !meter) {
+        if (!meter && isConnectedOnly(node)) {
+            ins = ins.filter(function (p) {
+                return !!connectedPorts[p.id];
+            });
+            outs = outs.filter(function (p) {
+                return !!connectedPorts[p.id];
+            });
+        } else if (node.type === "Plugin" && !meter) {
             hiddenIn = ins.length - visiblePortCount(ins);
             hiddenOut = outs.length - visiblePortCount(outs);
             if (hiddenIn < collapseMinHidden)
@@ -3959,15 +4115,19 @@ Item {
         ] : [
             {
                 key: "onoff",
-                w: 48
+                w: 40
+            },
+            {
+                key: "bypass",
+                w: 50
             },
             {
                 key: "ui",
-                w: 32
+                w: 28
             },
             {
                 key: "params",
-                w: 56
+                w: 52
             }
         ];
         var margin = 10;
@@ -4001,6 +4161,34 @@ Item {
             w: s,
             h: s
         };
+    }
+
+    function portsRect(n, nx, ny) {
+        var r = pinRect(n, nx, ny);
+        return {
+            x: r.x - r.w,
+            y: r.y,
+            w: r.w,
+            h: r.h
+        };
+    }
+
+    function hasUnconnectedPorts(node) {
+        var sorted = getSortedPorts(node.id);
+        var all = sorted.inputs.concat(sorted.outputs);
+        for (var i = 0; i < all.length; i++) {
+            if (!connectedPorts[all[i].id])
+                return true;
+        }
+        return false;
+    }
+
+    function showPortsButton(node) {
+        if (!node || !node.layoutKey || isMeterNode(node))
+            return false;
+        if (isConnectedOnly(node))
+            return true;
+        return hoveredNodeId === node.id && hasUnconnectedPorts(node);
     }
 
     function togglePinned(node) {
@@ -4046,6 +4234,14 @@ Item {
                 button: "pin",
                 nodeId: n.id
             };
+        if (showPortsButton(n)) {
+            var fb = portsRect(n, pos.x, pos.y);
+            if (c.x >= fb.x && c.x <= fb.x + fb.w && c.y >= fb.y && c.y <= fb.y + fb.h)
+                return {
+                    button: "ports",
+                    nodeId: n.id
+                };
+        }
         var lay = nodeLayout(n);
         var tr = toggleRowRect(n, lay, pos.x, pos.y);
         if (tr && c.x >= tr.x && c.x <= tr.x + tr.w && c.y >= tr.y && c.y <= tr.y + tr.h)
@@ -4083,6 +4279,12 @@ Item {
                 if (b.key === "onoff")
                     return {
                         button: "onoff",
+                        nodeId: n.id,
+                        enabled: isNodeEnabled(n)
+                    };
+                if (b.key === "bypass")
+                    return {
+                        button: "bypass",
                         nodeId: n.id,
                         bypassed: isNodeBypassed(n)
                     };
@@ -4371,6 +4573,12 @@ Item {
 
             // ---- Pass 2: wires, behind the nodes --------------------------
             ctx.lineCap = "round";
+            wireLanes = computeWireLanes(newPortPositions);
+            var wireNodeColors = {};
+            if (gradientWires) {
+                for (var wn = 0; wn < nodes.length; wn++)
+                    wireNodeColors[nodes[wn].id] = nodeColor(nodes[wn]);
+            }
             for (var li = 0; li < links.length; li++) {
                 var link = links[li];
                 var fromPos = newPortPositions[link.outputPortId];
@@ -4391,7 +4599,7 @@ Item {
                     ctx.save();
                     ctx.globalAlpha = 0.3;
                     ctx.setLineDash([3, 5]);
-                    drawBezier(ctx, fromPos.cx, fromPos.cy, toPos.cx, toPos.cy, signalColor(mt), Theme.wireWidth);
+                    drawWire(ctx, fromPos.cx, fromPos.cy, toPos.cx, toPos.cy, signalColor(mt), Theme.wireWidth, wireLane(link.id));
                     ctx.restore();
                     continue;
                 }
@@ -4399,7 +4607,13 @@ Item {
                 // Skips a meter snapped to one of its ports: dashed.
                 if (bypassLinks[link.id])
                     ctx.setLineDash([5, 4]);
-                drawBezier(ctx, fromPos.cx, fromPos.cy, toPos.cx, toPos.cy, accented ? Theme.accent : signalColor(mt), accented || hovered ? Theme.wireWidthActive : Theme.wireWidth);
+                var wireCol = accented ? Theme.accent : signalColor(mt);
+                if (gradientWires && !accented && mt === "Audio" && wireNodeColors[fromPos.nodeId] && wireNodeColors[toPos.nodeId]) {
+                    wireCol = ctx.createLinearGradient(fromPos.cx, fromPos.cy, toPos.cx, toPos.cy);
+                    wireCol.addColorStop(0, "" + wireNodeColors[fromPos.nodeId]);
+                    wireCol.addColorStop(1, "" + wireNodeColors[toPos.nodeId]);
+                }
+                drawWire(ctx, fromPos.cx, fromPos.cy, toPos.cx, toPos.cy, wireCol, accented || hovered ? Theme.wireWidthActive : Theme.wireWidth, wireLane(link.id));
                 if (bypassLinks[link.id])
                     ctx.setLineDash([]);
             }
@@ -4423,8 +4637,9 @@ Item {
                 var by1 = bsPos.y + 17;
                 var bx2 = btPos.x;
                 var by2 = btPos.y + 17;
-                var bmx = (bx1 + bx2) / 2;
-                var bmy = (by1 + by2) / 2;
+                var bMid = wireMidpoint(bx1, by1, bx2, by2, 0);
+                var bmx = bMid.x;
+                var bmy = bMid.y;
                 var bKey = blockKey(bp);
                 var bSel = !!selectedBlocks[bKey];
                 var bHot = bSel || hoveredBlockKey === bKey || (contextBlock && contextBlock.ruleId === bp.ruleId && contextBlock.source === bp.source && contextBlock.target === bp.target);
@@ -4433,11 +4648,11 @@ Item {
                     // Selected: a soft halo under the line, like a selected wire.
                     ctx.globalAlpha = 1;
                     ctx.setLineDash([]);
-                    drawBezier(ctx, bx1, by1, bx2, by2, Theme.tint(Theme.textDestructive, 0.28), 8);
+                    drawWire(ctx, bx1, by1, bx2, by2, Theme.tint(Theme.textDestructive, 0.28), 8, 0);
                 }
                 ctx.globalAlpha = bHot ? 1 : 0.8;
                 ctx.setLineDash([6, 4]);
-                drawBezier(ctx, bx1, by1, bx2, by2, Theme.textDestructive, bHot ? Theme.wireWidthActive + (bSel ? 0.5 : 0) : Theme.wireWidth);
+                drawWire(ctx, bx1, by1, bx2, by2, Theme.textDestructive, bHot ? Theme.wireWidthActive + (bSel ? 0.5 : 0) : Theme.wireWidth, 0);
                 ctx.setLineDash([]);
                 ctx.globalAlpha = 1;
                 var bR = bHot ? 8.5 : 7;
@@ -4526,7 +4741,7 @@ Item {
                     if (!gmt || gmt === "Unknown")
                         gmt = portMediaTypes[gIn];
                     ctx.globalAlpha = 0.85;
-                    drawBezier(ctx, gFrom.cx, gFrom.cy, gTo.cx, gTo.cy, signalColor(gmt), Theme.wireWidthActive);
+                    drawWire(ctx, gFrom.cx, gFrom.cy, gTo.cx, gTo.cy, signalColor(gmt), Theme.wireWidthActive, 0);
                     // Pin dots where the ghost wire would connect.
                     ctx.globalAlpha = 1;
                     ctx.fillStyle = "" + signalColor(gmt);
@@ -4548,9 +4763,9 @@ Item {
                     ctx.save();
                     ctx.setLineDash([4, 4]);
                     if (connectFromDir === "Input")
-                        drawBezier(ctx, dragToC.x, dragToC.y, dragFrom.cx, dragFrom.cy, dragColor, Theme.wireWidthActive);
+                        drawWire(ctx, dragToC.x, dragToC.y, dragFrom.cx, dragFrom.cy, dragColor, Theme.wireWidthActive, 0);
                     else
-                        drawBezier(ctx, dragFrom.cx, dragFrom.cy, dragToC.x, dragToC.y, dragColor, Theme.wireWidthActive);
+                        drawWire(ctx, dragFrom.cx, dragFrom.cy, dragToC.x, dragToC.y, dragColor, Theme.wireWidthActive, 0);
                     if (connectBlocking || connectTargetBlocked) {
                         // A small ⊘ at the cursor end.
                         ctx.setLineDash([]);
@@ -4767,6 +4982,12 @@ Item {
         var selected = !!selectedNodes[node.id];
         var isDefault = defaultNodeKey !== "" && node.layoutKey === defaultNodeKey;
         var cat = nodeCategory(node);
+        var custom = customNodeColor(node);
+        if (custom)
+            cat = {
+                color: custom,
+                glyph: cat.glyph
+            };
         var hdr = Theme.nodeHeader;
         var rowH = Theme.nodePortRow;
         var portsTop = hdr + Theme.nodePortsTop;
@@ -4845,6 +5066,17 @@ Item {
             ctx.stroke();
         }
 
+        if (custom) {
+            ctx.save();
+            roundRectPath(ctx, nx, ny, nw, nh, Theme.radiusCard);
+            ctx.clip();
+            ctx.fillStyle = "" + Theme.tint(custom, Theme.chipAlpha * 0.6);
+            ctx.fillRect(nx, ny, nw, hdr);
+            ctx.fillStyle = "" + custom;
+            ctx.fillRect(nx, ny, 3, nh);
+            ctx.restore();
+        }
+
         // Header: category chip, title, tags; hairline below.
         var chip = Theme.nodeChip;
         var chipX = nx + 10;
@@ -4875,6 +5107,17 @@ Item {
         ctx.restore();
 
         var tagRight = pr.x - 4;
+        if (showPortsButton(node)) {
+            var fr = portsRect(node, nx, ny);
+            var filtering = isConnectedOnly(node);
+            var filterHover = hoveredButton === node.id + ":ports";
+            ctx.save();
+            if (!filtering && !filterHover)
+                ctx.globalAlpha = baseAlpha * 0.6;
+            drawGlyph(ctx, "portsFilter", fr.x + 3, fr.y + 3, 12, filtering ? Theme.accent : (filterHover ? Theme.textIcon : Theme.textDisabled));
+            ctx.restore();
+            tagRight = fr.x - 2;
+        }
         if (isPlugin && node.pluginFormat && !isMeter)
             tagRight = drawTag(ctx, node.pluginFormat, tagRight, ny + hdr / 2) - 6;
         if (isSubgraph) {
@@ -5027,18 +5270,20 @@ Item {
             ctx.fillStyle = "" + Theme.borderHairline;
             ctx.fillRect(nx + 1, ny + nh - Theme.nodeFooter, nw - 2, 1);
             var bypassed = isNodeBypassed(node);
+            var enabled = isNodeEnabled(node);
             var hasUi = node.pluginHasUi !== false;
             var btns = footerButtons(node, nx, ny, nh);
             for (var b = 0; b < btns.length; b++) {
                 var bt = btns[b];
                 var hoverB = hoveredButton === node.id + ":" + bt.key;
-                var on = bt.key === "onoff" && !bypassed;
+                var on = bt.key === "onoff" && enabled;
+                var byp = bt.key === "bypass" && bypassed;
                 roundRectPath(ctx, bt.x, bt.y, bt.w, bt.h, Theme.radiusSmall);
-                ctx.fillStyle = "" + (on ? Theme.accentFaint : (hoverB ? Theme.borderStrong : Theme.bgSubtle));
+                ctx.fillStyle = "" + (on ? Theme.accentFaint : byp ? Theme.bypassFaint : (hoverB ? Theme.borderStrong : Theme.bgSubtle));
                 ctx.fill();
-                var txt = bt.key === "onoff" ? (bypassed ? "Off" : "On") : bt.key === "ui" ? "UI" : "Params";
-                var col = on ? Theme.accent : bt.key === "ui" && !hasUi ? Theme.textDisabled : bt.key === "onoff" ? Theme.textMuted : Theme.textIcon;
-                ctx.font = fontSpec(on ? 600 : 500, 11, false);
+                var txt = bt.key === "onoff" ? (enabled ? "On" : "Off") : bt.key === "bypass" ? "Bypass" : bt.key === "ui" ? "UI" : "Params";
+                var col = on ? Theme.accent : byp ? Theme.bypass : bt.key === "ui" && !hasUi ? Theme.textDisabled : bt.key === "onoff" || bt.key === "bypass" ? Theme.textMuted : Theme.textIcon;
+                ctx.font = fontSpec(on || byp ? 600 : 500, 11, false);
                 ctx.fillStyle = "" + col;
                 ctx.textBaseline = "middle";
                 if (bt.key === "onoff") {
@@ -5324,11 +5569,19 @@ Item {
                             toggleExpanded(tn);
                     } else if (btnHit.button === "pin") {
                         togglePinned(findNodeData(btnHit.nodeId));
+                    } else if (btnHit.button === "ports") {
+                        var fn = findNodeData(btnHit.nodeId);
+                        setNodeStyle(fn, "connectedOnly", !isConnectedOnly(fn));
                     } else if (btnHit.button === "onoff") {
+                        var newEnabled = !btnHit.enabled;
+                        localEnabledState[btnHit.nodeId] = newEnabled;
+                        localEnabledState = localEnabledState;
+                        controller.set_plugin_enabled(btnHit.nodeId, newEnabled);
+                        canvas.requestPaint();
+                    } else if (btnHit.button === "bypass") {
                         var newBypassed = !btnHit.bypassed;
-                        // Immediate local feedback
                         localBypassState[btnHit.nodeId] = newBypassed;
-                        localBypassState = localBypassState;  // trigger change signal
+                        localBypassState = localBypassState;
                         controller.set_plugin_bypass(btnHit.nodeId, newBypassed);
                         canvas.requestPaint();
                     } else if (btnHit.button === "ui" && btnHit.hasUi) {
@@ -6294,6 +6547,17 @@ Item {
                     pinTip.y = tp.y + 4;
                     pinTip.open();
                 }
+            } else if (btn.indexOf(":ports") > 0) {
+                var fnode = findNodeData(parseInt(btn));
+                var fPos = fnode ? nodePositions[fnode.id] : null;
+                if (fPos) {
+                    var fr = portsRect(fnode, fPos.x, fPos.y);
+                    var ftp = toScreen(fr.x + fr.w, fr.y + fr.h);
+                    pinTip.text = isConnectedOnly(fnode) ? "Showing connected ports only — click to show all" : "Show connected ports only";
+                    pinTip.x = ftp.x;
+                    pinTip.y = ftp.y + 4;
+                    pinTip.open();
+                }
             } else if (blockUnder) {
                 pinTip.text = "Do not connect: " + blockUnder.label + ". Click to select; Delete removes the rule.";
                 pinTip.x = sx + 12;
@@ -6381,22 +6645,229 @@ Item {
         nameTip.y = above >= 8 ? above : s.y + Theme.nodeHeader * zoom + 4;
     }
 
-    // Wire control-point offset: clamp(0.5·|dx|, 32, 200), horizontal only,
-    // so wires leave and enter pins horizontally. Shared by drawing and
-    // every hit test.
     function bezierCtrl(x1, x2) {
         return Math.max(32, Math.min(200, Math.abs(x2 - x1) / 2));
     }
 
-    function drawBezier(ctx, x1, y1, x2, y2, color, lineWidth) {
-        var ctrlDist = bezierCtrl(x1, x2);
-        ctx.strokeStyle = "" + color;
-        ctx.lineWidth = lineWidth;
-        ctx.lineCap = "round";
+    function isOrthoWire() {
+        return wireStyle === "stepped" || wireStyle === "circuit";
+    }
+
+    function wireLane(linkId) {
+        if (wireStyle !== "circuit" || linkId === undefined)
+            return 0;
+        return wireLanes[linkId] || 0;
+    }
+
+    function orthoPoints(x1, y1, x2, y2, lane) {
+        var stub = wireStub;
+        if (x2 - x1 >= 2 * stub) {
+            if (Math.abs(y2 - y1) < 0.5)
+                return [[x1, y1], [x2, y2]];
+            var mid = Math.max(x1 + stub, Math.min(x2 - stub, (x1 + x2) / 2 + lane));
+            return [[x1, y1], [mid, y1], [mid, y2], [x2, y2]];
+        }
+        var ym = Math.abs(y2 - y1) < 4 * stub ? Math.max(y1, y2) + 3 * stub + lane : (y1 + y2) / 2 + lane;
+        var a = x1 + stub;
+        var b = x2 - stub;
+        return [[x1, y1], [a, y1], [a, ym], [b, ym], [b, y2], [x2, y2]];
+    }
+
+    function wirePolyline(x1, y1, x2, y2, lane) {
+        if (wireStyle === "straight")
+            return [[x1, y1], [x2, y2]];
+        if (isOrthoWire())
+            return orthoPoints(x1, y1, x2, y2, lane || 0);
+        var c = bezierCtrl(x1, x2);
+        var cx1 = x1 + c;
+        var cx2 = x2 - c;
+        var pts = [[x1, y1]];
+        var steps = 30;
+        for (var i = 1; i <= steps; i++) {
+            var t = i / steps;
+            var u = 1 - t;
+            pts.push([u * u * u * x1 + 3 * u * u * t * cx1 + 3 * u * t * t * cx2 + t * t * t * x2, u * u * u * y1 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y2]);
+        }
+        return pts;
+    }
+
+    function wireSamples(x1, y1, x2, y2, lane, step) {
+        var pts = wirePolyline(x1, y1, x2, y2, lane);
+        var out = [pts[0]];
+        for (var i = 1; i < pts.length; i++) {
+            var ax = pts[i - 1][0], ay = pts[i - 1][1];
+            var dx = pts[i][0] - ax, dy = pts[i][1] - ay;
+            var n = Math.max(1, Math.ceil(Math.sqrt(dx * dx + dy * dy) / step));
+            for (var k = 1; k <= n; k++)
+                out.push([ax + dx * k / n, ay + dy * k / n]);
+        }
+        return out;
+    }
+
+    function wireBounds(x1, y1, x2, y2, lane) {
+        if (!isOrthoWire() && wireStyle !== "straight") {
+            var c = bezierCtrl(x1, x2);
+            return {
+                x0: Math.min(x1, x2 - c),
+                x1: Math.max(x1 + c, x2),
+                y0: Math.min(y1, y2),
+                y1: Math.max(y1, y2)
+            };
+        }
+        var pts = wirePolyline(x1, y1, x2, y2, lane);
+        var b = {
+            x0: Infinity,
+            x1: -Infinity,
+            y0: Infinity,
+            y1: -Infinity
+        };
+        for (var i = 0; i < pts.length; i++) {
+            b.x0 = Math.min(b.x0, pts[i][0]);
+            b.x1 = Math.max(b.x1, pts[i][0]);
+            b.y0 = Math.min(b.y0, pts[i][1]);
+            b.y1 = Math.max(b.y1, pts[i][1]);
+        }
+        return b;
+    }
+
+    function wireMidpoint(x1, y1, x2, y2, lane) {
+        if (isOrthoWire()) {
+            var pts = orthoPoints(x1, y1, x2, y2, lane || 0);
+            if (pts.length === 4)
+                return {
+                    x: pts[1][0],
+                    y: (y1 + y2) / 2
+                };
+            if (pts.length === 6)
+                return {
+                    x: (pts[2][0] + pts[3][0]) / 2,
+                    y: pts[2][1]
+                };
+        }
+        return {
+            x: (x1 + x2) / 2,
+            y: (y1 + y2) / 2
+        };
+    }
+
+    function traceWire(ctx, x1, y1, x2, y2, lane) {
         ctx.beginPath();
         ctx.moveTo(x1, y1);
-        ctx.bezierCurveTo(x1 + ctrlDist, y1, x2 - ctrlDist, y2, x2, y2);
+        if (wireStyle === "straight") {
+            ctx.lineTo(x2, y2);
+            return;
+        }
+        if (isOrthoWire()) {
+            var pts = orthoPoints(x1, y1, x2, y2, lane || 0);
+            var radius = wireStyle === "circuit" ? wireCorner : 0;
+            for (var i = 1; i < pts.length - 1; i++) {
+                var p = pts[i - 1], q = pts[i], n = pts[i + 1];
+                var r = Math.min(radius, Math.hypot(q[0] - p[0], q[1] - p[1]) / 2, Math.hypot(n[0] - q[0], n[1] - q[1]) / 2);
+                if (r > 0.5)
+                    ctx.arcTo(q[0], q[1], n[0], n[1], r);
+                else
+                    ctx.lineTo(q[0], q[1]);
+            }
+            ctx.lineTo(x2, y2);
+            return;
+        }
+        var c = bezierCtrl(x1, x2);
+        ctx.bezierCurveTo(x1 + c, y1, x2 - c, y2, x2, y2);
+    }
+
+    function strokeStyleOf(color) {
+        return color && color.addColorStop !== undefined ? color : "" + color;
+    }
+
+    function drawWire(ctx, x1, y1, x2, y2, color, lineWidth, lane) {
+        ctx.strokeStyle = strokeStyleOf(color);
+        ctx.lineWidth = lineWidth;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        traceWire(ctx, x1, y1, x2, y2, lane || 0);
         ctx.stroke();
+    }
+
+    function computeWireLanes(positions) {
+        var lanes = {};
+        if (wireStyle !== "circuit")
+            return lanes;
+        var entities = {};
+        var list = [];
+        for (var li = 0; li < links.length; li++) {
+            var link = links[li];
+            var a = positions[link.outputPortId];
+            var b = positions[link.inputPortId];
+            if (!a || !b || isSnapInternal(a, b))
+                continue;
+            if (b.cx - a.cx < 2 * wireStub || Math.abs(b.cy - a.cy) < 0.5)
+                continue;
+            var mid = (a.cx + b.cx) / 2;
+            var key = link.outputPortId + "|" + Math.round(mid);
+            var e = entities[key];
+            if (!e) {
+                e = {
+                    mid: mid,
+                    y1: a.cy,
+                    lo: a.cy,
+                    hi: a.cy,
+                    sumDy: 0,
+                    room: Infinity,
+                    links: []
+                };
+                entities[key] = e;
+                list.push(e);
+            }
+            e.lo = Math.min(e.lo, b.cy);
+            e.hi = Math.max(e.hi, b.cy);
+            e.sumDy += b.cy - a.cy;
+            e.room = Math.min(e.room, b.cx - a.cx - 2 * wireStub);
+            e.links.push(link.id);
+        }
+        list.sort(function (p, q) {
+            return p.mid - q.mid || p.lo - q.lo;
+        });
+        var i = 0;
+        while (i < list.length) {
+            var j = i + 1;
+            while (j < list.length && list[j].mid - list[j - 1].mid <= wireLaneGap * 1.5)
+                j++;
+            assignLaneGroup(list.slice(i, j), lanes);
+            i = j;
+        }
+        return lanes;
+    }
+
+    function assignLaneGroup(group, lanes) {
+        group.sort(function (p, q) {
+            return p.lo - q.lo;
+        });
+        var k = 0;
+        while (k < group.length) {
+            var reach = group[k].hi;
+            var m = k + 1;
+            while (m < group.length && group[m].lo <= reach + wireLaneGap) {
+                reach = Math.max(reach, group[m].hi);
+                m++;
+            }
+            var comp = group.slice(k, m);
+            comp.sort(function (p, q) {
+                var pd = p.sumDy >= 0, qd = q.sumDy >= 0;
+                if (pd !== qd)
+                    return pd ? -1 : 1;
+                return pd ? q.y1 - p.y1 : p.y1 - q.y1;
+            });
+            var room = Infinity;
+            for (var r = 0; r < comp.length; r++)
+                room = Math.min(room, comp[r].room);
+            var gap = comp.length > 1 ? Math.min(wireLaneGap, room / (comp.length - 1)) : 0;
+            for (var c = 0; c < comp.length; c++) {
+                var offset = (c - (comp.length - 1) / 2) * gap;
+                for (var l = 0; l < comp[c].links.length; l++)
+                    lanes[comp[c].links[l]] = offset;
+            }
+            k = m;
+        }
     }
 
     // The link nearest to the cursor within linkHitPx screen pixels, so a
@@ -6415,13 +6886,11 @@ Item {
             var toPos = portPositions[link.inputPortId];
             if (!fromPos || !toPos || isSnapInternal(fromPos, toPos))
                 continue;
-            // The curve stays inside its control polygon's box.
-            var ctrl = bezierCtrl(fromPos.cx, toPos.cx);
-            if (c.x < Math.min(fromPos.cx, toPos.cx - ctrl) - threshold || c.x > Math.max(fromPos.cx + ctrl, toPos.cx) + threshold)
+            var lane = wireLane(link.id);
+            var wb = wireBounds(fromPos.cx, fromPos.cy, toPos.cx, toPos.cy, lane);
+            if (c.x < wb.x0 - threshold || c.x > wb.x1 + threshold || c.y < wb.y0 - threshold || c.y > wb.y1 + threshold)
                 continue;
-            if (c.y < Math.min(fromPos.cy, toPos.cy) - threshold || c.y > Math.max(fromPos.cy, toPos.cy) + threshold)
-                continue;
-            var dist = distToBezier(c.x, c.y, fromPos.cx, fromPos.cy, toPos.cx, toPos.cy);
+            var dist = distToWire(c.x, c.y, fromPos.cx, fromPos.cy, toPos.cx, toPos.cy, lane);
             if (dist < bestDist) {
                 bestDist = dist;
                 bestId = link.id;
@@ -6472,17 +6941,10 @@ Item {
             // in there would loop it through its own meter).
             if (fromPos.nodeId === nodeId || toPos.nodeId === nodeId)
                 continue;
-            var ctrlDist = bezierCtrl(fromPos.cx, toPos.cx);
-            var cx1 = fromPos.cx + ctrlDist;
-            var cy1 = fromPos.cy;
-            var cx2 = toPos.cx - ctrlDist;
-            var cy2 = toPos.cy;
-            var steps = 30;
-            for (var i = 0; i <= steps; i++) {
-                var t = i / steps;
-                var u = 1 - t;
-                var bx = u * u * u * fromPos.cx + 3 * u * u * t * cx1 + 3 * u * t * t * cx2 + t * t * t * toPos.cx;
-                var by = u * u * u * fromPos.cy + 3 * u * u * t * cy1 + 3 * u * t * t * cy2 + t * t * t * toPos.cy;
+            var samples = wireSamples(fromPos.cx, fromPos.cy, toPos.cx, toPos.cy, wireLane(link.id), 8);
+            for (var i = 0; i < samples.length; i++) {
+                var bx = samples[i][0];
+                var by = samples[i][1];
                 if (bx >= nx && bx <= nx + nw && by >= ny && by <= ny + nh) {
                     var cx = nx + nw / 2;
                     var cy = ny + nh / 2;
@@ -6500,52 +6962,28 @@ Item {
         return bestId;
     }
 
-    // Distance from (px, py) to the wire from (x1, y1) to (x2, y2): the
-    // curve is walked as a polyline and the distance taken to its segments,
-    // so a long wire has no dead spots between sample points.
-    function distToBezier(px, py, x1, y1, x2, y2) {
-        var ctrlDist = bezierCtrl(x1, x2);
-        var cx1 = x1 + ctrlDist;
-        var cy1 = y1;
-        var cx2 = x2 - ctrlDist;
-        var cy2 = y2;
-        var steps = 30;
+    function distToWire(px, py, x1, y1, x2, y2, lane) {
+        var pts = wirePolyline(x1, y1, x2, y2, lane || 0);
         var minSq = Infinity;
-        var ax = x1, ay = y1;
-        for (var i = 1; i <= steps; i++) {
-            var t = i / steps;
-            var u = 1 - t;
-            var bx = u * u * u * x1 + 3 * u * u * t * cx1 + 3 * u * t * t * cx2 + t * t * t * x2;
-            var by = u * u * u * y1 + 3 * u * u * t * cy1 + 3 * u * t * t * cy2 + t * t * t * y2;
-            var sx = bx - ax, sy = by - ay;
+        for (var i = 1; i < pts.length; i++) {
+            var ax = pts[i - 1][0], ay = pts[i - 1][1];
+            var sx = pts[i][0] - ax, sy = pts[i][1] - ay;
             var len = sx * sx + sy * sy;
             var k = len > 0 ? Math.max(0, Math.min(1, ((px - ax) * sx + (py - ay) * sy) / len)) : 0;
             var dx = px - (ax + k * sx);
             var dy = py - (ay + k * sy);
-            var d = dx * dx + dy * dy;
-            if (d < minSq)
-                minSq = d;
-            ax = bx;
-            ay = by;
+            minSq = Math.min(minSq, dx * dx + dy * dy);
         }
         return Math.sqrt(minSq);
     }
 
-    function bezierIntersectsRect(x1, y1, x2, y2, rx, ry, rw, rh) {
-        var ctrlDist = bezierCtrl(x1, x2);
-        var cx1 = x1 + ctrlDist;
-        var cy1 = y1;
-        var cx2 = x2 - ctrlDist;
-        var cy2 = y2;
-        var steps = 20;
-        for (var i = 0; i <= steps; i++) {
-            var t = i / steps;
-            var u = 1 - t;
-            var px = u * u * u * x1 + 3 * u * u * t * cx1 + 3 * u * t * t * cx2 + t * t * t * x2;
-            var py = u * u * u * y1 + 3 * u * u * t * cy1 + 3 * u * t * t * cy2 + t * t * t * y2;
-            if (px >= rx && px <= rx + rw && py >= ry && py <= ry + rh) {
+    function wireIntersectsRect(x1, y1, x2, y2, lane, rx, ry, rw, rh) {
+        var samples = wireSamples(x1, y1, x2, y2, lane, 6);
+        for (var i = 0; i < samples.length; i++) {
+            var px = samples[i][0];
+            var py = samples[i][1];
+            if (px >= rx && px <= rx + rw && py >= ry && py <= ry + rh)
                 return true;
-            }
         }
         return false;
     }
@@ -6568,7 +7006,7 @@ Item {
             var fromPos = portPositions[link.outputPortId];
             var toPos = portPositions[link.inputPortId];
             if (fromPos && toPos && !isSnapInternal(fromPos, toPos)) {
-                if (bezierIntersectsRect(fromPos.cx, fromPos.cy, toPos.cx, toPos.cy, rx, ry, rw, rh)) {
+                if (wireIntersectsRect(fromPos.cx, fromPos.cy, toPos.cx, toPos.cy, wireLane(link.id), rx, ry, rw, rh)) {
                     result[link.id] = linkSig(link);
                 }
             }

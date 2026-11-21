@@ -24,6 +24,7 @@ QtObject {
         // Pin toggle in node headers; "pinFill" is the head filled in when pinned.
         "pin":        { vb: 12, sw: 1.5, d: "M4 1.5h4M5 1.5v3L3 7h6L7 4.5v-3M6 7v3.5" },
         "pinFill":    { vb: 12, sw: 1.5, d: "M5 1.5h2v3L9 7H3l2-2.5z" },
+        "portsFilter": { vb: 12, sw: 1.5, d: "M1.5 2h9L7 6.2v3.8L5 9V6.2z" },
         // Toolbar / dialog glyphs
         "search":     { vb: 14, sw: 1.5, d: _circle(6, 6, 4.2) + "M9.2 9.2L12.5 12.5" },
         "plus":       { vb: 14, sw: 1.75, d: "M7 2.5v9M2.5 7h9" },

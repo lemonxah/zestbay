@@ -279,6 +279,9 @@ QtObject {
     function save_viewport(j) {}
     function save_hidden(j) {}
     function save_pinned(j) {}
+    function get_node_styles_json() { return "{}" }
+    function save_node_styles(j) {}
+    function set_plugin_enabled(id, e) {}
     function set_preference(k, v) {}
     function reset_preferences() {}
     function toggle_patchbay(e) { patchbay_enabled = e }

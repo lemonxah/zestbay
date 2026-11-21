@@ -118,6 +118,12 @@ pub mod qobject {
         fn save_pinned(self: Pin<&mut Self>, json: QString);
 
         #[qinvokable]
+        fn get_node_styles_json(self: Pin<&mut Self>) -> QString;
+
+        #[qinvokable]
+        fn save_node_styles(self: Pin<&mut Self>, json: QString);
+
+        #[qinvokable]
         fn get_available_plugins_json(self: Pin<&mut Self>) -> QString;
 
         #[qinvokable]
@@ -170,6 +176,9 @@ pub mod qobject {
 
         #[qinvokable]
         fn set_plugin_bypass(self: Pin<&mut Self>, node_id: u32, bypassed: bool);
+
+        #[qinvokable]
+        fn set_plugin_enabled(self: Pin<&mut Self>, node_id: u32, enabled: bool);
 
         /// Preset summary for every plugin node: {nodeId: {name, isDefault,
         /// modified, count}}. `name` is the selected preset ("" for none).
@@ -1022,6 +1031,7 @@ impl qobject::AppController {
                 parameters: restored_params,
                 active: true,
                 bypassed: sp.bypassed,
+                enabled: sp.enabled,
                 lv2_state: sp.lv2_state.clone(),
                 plugin_state: plugin_state.clone(),
                 port_names: sp.port_names.clone(),
@@ -1044,6 +1054,7 @@ impl qobject::AppController {
             lv2_state: sp.lv2_state,
             plugin_state,
             stable_id: sid.clone(),
+            enabled: sp.enabled,
         });
         (instance_id, sid)
     }
@@ -3491,6 +3502,7 @@ impl qobject::AppController {
         let config = layout::graph::LayoutConfig {
             margin_x: spacing * 2.5,
             margin_y: spacing,
+            max_column_nodes: self.rust().prefs.column_wrap as usize,
             ..Default::default()
         };
         let mut pinned_by_id: HashMap<u32, (f64, f64)> = HashMap::new();
@@ -3578,6 +3590,14 @@ impl qobject::AppController {
 
     pub fn save_pinned(self: Pin<&mut Self>, json: QString) {
         write_config_json_text("pinned.json", &json.to_string());
+    }
+
+    pub fn get_node_styles_json(self: Pin<&mut Self>) -> QString {
+        QString::from(&read_config_json_text("node-style.json", "{}"))
+    }
+
+    pub fn save_node_styles(self: Pin<&mut Self>, json: QString) {
+        write_config_json_text("node-style.json", &json.to_string());
     }
     pub fn get_available_plugins_json(self: Pin<&mut Self>) -> QString {
         if let Some(ref mgr) = self.rust().plugin_manager {
@@ -3808,6 +3828,7 @@ impl qobject::AppController {
                 parameters: initial_params,
                 active: true,
                 bypassed: false,
+                enabled: true,
                 lv2_state: default_state.clone(),
                 plugin_state: None,
                 port_names: Default::default(),
@@ -3832,6 +3853,7 @@ impl qobject::AppController {
                 lv2_state: default_state,
                 plugin_state: None,
                 stable_id,
+                enabled: true,
             });
             // The add is queued on the PipeWire thread; parameter commands
             // sent now are folded into it and applied when it runs.
@@ -4021,6 +4043,7 @@ impl qobject::AppController {
                 "pluginUri": info.plugin_uri,
                 "displayName": info.display_name,
                 "bypassed": info.bypassed,
+                "enabled": info.enabled,
                 "parameters": params,
             });
             let json = serde_json::to_string(&result).unwrap_or_default();
@@ -4059,6 +4082,13 @@ impl qobject::AppController {
         }
     }
 
+    pub fn set_plugin_enabled(mut self: Pin<&mut Self>, node_id: u32, enabled: bool) {
+        if let Some(instance_id) = self.find_instance_id_for_node(node_id) {
+            self.as_mut().set_instance_enabled(instance_id, enabled);
+            self.as_mut().graph_changed();
+        }
+    }
+
     fn set_instance_parameter(mut self: Pin<&mut Self>, instance_id: u64, port_index: usize, value: f32) {
         if let Some(ref tx) = self.rust().cmd_tx {
             let _ = tx.send(PwCommand::SetPluginParameter {
@@ -4087,6 +4117,24 @@ impl qobject::AppController {
             && let Some(info) = mgr.get_instance_mut(instance_id)
         {
             info.bypassed = bypassed;
+        }
+        self.as_mut().rust_mut().params_dirty = true;
+        if self.rust().params_dirty_since.is_none() {
+            self.as_mut().rust_mut().params_dirty_since = Some(Instant::now());
+        }
+    }
+
+    fn set_instance_enabled(mut self: Pin<&mut Self>, instance_id: u64, enabled: bool) {
+        if let Some(ref tx) = self.rust().cmd_tx {
+            let _ = tx.send(PwCommand::SetPluginEnabled {
+                instance_id,
+                enabled,
+            });
+        }
+        if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager
+            && let Some(info) = mgr.get_instance_mut(instance_id)
+        {
+            info.enabled = enabled;
         }
         self.as_mut().rust_mut().params_dirty = true;
         if self.rust().params_dirty_since.is_none() {
@@ -4184,15 +4232,15 @@ impl qobject::AppController {
                 false
             }
             OscAction::ListPlugins => {
-                let mut rows: Vec<(u64, String, String, bool)> = self
+                let mut rows: Vec<(u64, String, String, bool, bool)> = self
                     .rust()
                     .plugin_manager
                     .iter()
                     .flat_map(|m| m.active_instances().iter())
-                    .map(|(id, i)| (*id, slug(&i.display_name), i.display_name.clone(), !i.bypassed))
+                    .map(|(id, i)| (*id, slug(&i.display_name), i.display_name.clone(), i.enabled, i.bypassed))
                     .collect();
                 rows.sort();
-                for (_, key, name, enabled) in rows {
+                for (_, key, name, enabled, bypassed) in rows {
                     reply(
                         &self,
                         "/zestbay/plugin",
@@ -4200,6 +4248,7 @@ impl qobject::AppController {
                             OscType::String(key),
                             OscType::String(name),
                             OscType::Int(enabled as i32),
+                            OscType::Int(bypassed as i32),
                         ],
                     );
                 }
@@ -4239,7 +4288,15 @@ impl qobject::AppController {
                     log::debug!("OSC: no plugin \"{plugin}\"");
                     return false;
                 };
-                self.as_mut().set_instance_bypass(id, !enabled);
+                self.as_mut().set_instance_enabled(id, enabled);
+                true
+            }
+            OscAction::Bypass { plugin, bypassed } => {
+                let Some(id) = self.find_osc_plugin(&plugin) else {
+                    log::debug!("OSC: no plugin \"{plugin}\"");
+                    return false;
+                };
+                self.as_mut().set_instance_bypass(id, bypassed);
                 true
             }
             OscAction::Toggle { plugin } => {
@@ -4247,13 +4304,13 @@ impl qobject::AppController {
                     log::debug!("OSC: no plugin \"{plugin}\"");
                     return false;
                 };
-                let bypassed = self
+                let enabled = self
                     .rust()
                     .plugin_manager
                     .as_ref()
                     .and_then(|m| m.get_instance(id))
-                    .is_some_and(|i| i.bypassed);
-                self.as_mut().set_instance_bypass(id, !bypassed);
+                    .is_none_or(|i| i.enabled);
+                self.as_mut().set_instance_enabled(id, !enabled);
                 true
             }
             OscAction::Param {
@@ -4781,6 +4838,7 @@ impl qobject::AppController {
                         "pluginUri": info.plugin_uri,
                         "displayName": info.display_name,
                         "bypassed": info.bypassed,
+                        "enabled": info.enabled,
                         "active": info.pw_node_id.is_some(),
                         "parameters": params,
                     })
@@ -5278,6 +5336,32 @@ impl qobject::AppController {
             "card_row_px" => {
                 if let Ok(v) = val_str.parse::<u32>() {
                     self.as_mut().rust_mut().prefs.card_row_px = v.clamp(16, 32);
+                }
+            }
+            "wire_style" => {
+                if matches!(val_str.as_str(), "bezier" | "straight" | "stepped" | "circuit") {
+                    self.as_mut().rust_mut().prefs.wire_style = val_str.clone();
+                } else {
+                    log::warn!("Unknown wire style '{}'", val_str);
+                    return;
+                }
+            }
+            "gradient_wires" => {
+                if let Ok(v) = val_str.parse::<bool>() {
+                    self.as_mut().rust_mut().prefs.gradient_wires = v;
+                }
+            }
+            "column_wrap" => {
+                if let Ok(v) = val_str.parse::<u32>() {
+                    self.as_mut().rust_mut().prefs.column_wrap = v.min(40);
+                }
+            }
+            "palette" => {
+                if PALETTES.contains(&val_str.as_str()) {
+                    self.as_mut().rust_mut().prefs.palette = val_str.clone();
+                } else {
+                    log::warn!("Unknown palette '{}'", val_str);
+                    return;
                 }
             }
             "drag_mode" => {
@@ -6025,6 +6109,8 @@ struct SavedPlugin {
     display_name: String,
     #[serde(default)]
     bypassed: bool,
+    #[serde(default = "default_true")]
+    enabled: bool,
     #[serde(default)]
     parameters: Vec<SavedPluginParam>,
     /// "LV2", "CLAP", or "VST3".  Defaults to "LV2" for backwards compat.
@@ -6052,6 +6138,7 @@ impl From<&crate::plugin::PluginInstanceInfo> for SavedPlugin {
             uri: info.plugin_uri.clone(),
             display_name: info.display_name.clone(),
             bypassed: info.bypassed,
+            enabled: info.enabled,
             parameters: info
                 .parameters
                 .iter()
@@ -6149,6 +6236,10 @@ const PLUGIN_RESCAN_AFTER: Duration = Duration::from_secs(10 * 60);
 /// After a PipeWire reconnect or in-place plugin reload, links aren't saved
 /// until the graph has had this long to come back.
 const LINK_SETTLE_AFTER_RECONNECT: Duration = Duration::from_secs(5);
+
+fn default_true() -> bool {
+    true
+}
 
 fn default_lv2_format_str() -> String {
     "LV2".to_string()
@@ -6768,6 +6859,7 @@ fn node_to_json(
                 val["meterChannels"] = serde_json::json!(channels);
             }
             val["pluginBypassed"] = serde_json::json!(instance.bypassed);
+            val["pluginEnabled"] = serde_json::json!(instance.enabled);
         }
     }
 
@@ -6834,6 +6926,8 @@ fn add_ports_to_layout(
         layout_ports.push((p.id, node_id, port_index, is_output));
     }
 }
+
+const PALETTES: &[&str] = &["zest", "catppuccin", "gruvbox", "nord", "solarized"];
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct Preferences {
@@ -6902,6 +6996,18 @@ struct Preferences {
     /// middle-drag), "select" draws a selection box.
     #[serde(default = "Preferences::default_drag_mode")]
     pub drag_mode: String,
+
+    #[serde(default = "Preferences::default_wire_style")]
+    pub wire_style: String,
+
+    #[serde(default)]
+    pub gradient_wires: bool,
+
+    #[serde(default)]
+    pub column_wrap: u32,
+
+    #[serde(default = "Preferences::default_palette")]
+    pub palette: String,
 
     /// Effect plugins as passive PipeWire nodes, letting linked devices
     /// suspend when nothing else uses them (see plugin::PASSIVE_EFFECTS).
@@ -6977,6 +7083,12 @@ impl Preferences {
     fn default_drag_mode() -> String {
         "grab".to_string()
     }
+    fn default_wire_style() -> String {
+        "bezier".to_string()
+    }
+    fn default_palette() -> String {
+        "zest".to_string()
+    }
     fn default_hide_unnamed_nodes() -> bool {
         true
     }
@@ -7005,6 +7117,10 @@ impl Default for Preferences {
             node_spacing_px: Self::default_node_spacing_px(),
             card_row_px: Self::default_card_row_px(),
             drag_mode: Self::default_drag_mode(),
+            wire_style: Self::default_wire_style(),
+            gradient_wires: false,
+            column_wrap: 0,
+            palette: Self::default_palette(),
             passive_plugins: false,
             hide_unnamed_nodes: Self::default_hide_unnamed_nodes(),
             osc_enabled: false,
@@ -7327,6 +7443,7 @@ mod tests {
             uri: "u".into(),
             display_name: "d".into(),
             bypassed: false,
+            enabled: true,
             parameters: Vec::new(),
             format: "CLAP".into(),
             lv2_state: Vec::new(),
@@ -7399,6 +7516,7 @@ mod tests {
                 }],
                 active: true,
                 bypassed: old.bypassed,
+                enabled: old.enabled,
                 lv2_state: Vec::new(),
                 plugin_state: old.decode_plugin_state(),
                 port_names: Default::default(),
@@ -7419,6 +7537,7 @@ mod tests {
             assert_eq!(next_start.stable_id, old.stable_id);
             assert_eq!(next_start.decode_plugin_state(), old.decode_plugin_state());
             assert!(next_start.bypassed);
+            assert!(next_start.enabled);
             assert_eq!(next_start.parameters[0].value, 0.7);
 
             let mut mismatched = next_start.clone();

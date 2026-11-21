@@ -175,6 +175,7 @@ pub struct FilterShared {
     /// Set by `state_changed` once the filter reached PAUSED/STREAMING.
     pub ready: AtomicBool,
     pub graph_rate: AtomicU32,
+    pub enabled: AtomicBool,
     pub learn: LearnFlags,
     pub mappings: MappingSwap,
 }
@@ -222,11 +223,13 @@ pub fn new_filter_halves(
     has_midi_in: bool,
     plugin_midi_outs: usize,
     cpu_slot: Arc<PluginTimingSlot>,
+    enabled: bool,
 ) -> (FilterMain, FilterRt) {
     let shared = Arc::new(FilterShared {
         shutting_down: AtomicBool::new(false),
         ready: AtomicBool::new(false),
         graph_rate: AtomicU32::new(0),
+        enabled: AtomicBool::new(enabled),
         learn: LearnFlags::new(),
         mappings: MappingSwap::new(Arc::new(ResolvedMappings::empty())),
     });
@@ -278,6 +281,14 @@ impl FilterMain {
 
     pub fn set_learn_mode(&self, enabled: bool) {
         self.shared.learn.set(enabled);
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        self.shared.enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.shared.enabled.load(Ordering::Relaxed)
     }
 
     pub fn set_shutting_down(&self) {
@@ -445,6 +456,20 @@ impl FilterRt {
                     );
                 }
                 self.shared.mappings.rt_exit(epoch);
+            }
+
+            if !self.shared.enabled.load(Ordering::Relaxed) {
+                for &out in &self.ports.midi_outs {
+                    write_midi_sequence(out, &[]);
+                }
+                for port in &self.ports.outputs {
+                    let (p, cap) = dsp_buffer(*port, n_samples, true);
+                    if !p.is_null() {
+                        std::ptr::write_bytes(p, 0, n_samples.min(cap));
+                    }
+                }
+                self.cpu_slot.record(0, 0, n_samples as u32, rate);
+                return;
             }
 
             // Without plugin MIDI outputs the MIDI out port is a thru.

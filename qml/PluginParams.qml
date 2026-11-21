@@ -20,6 +20,7 @@ ZbWindow {
     property string pluginName: ""
     property string pluginUri: ""
     property bool pluginBypassed: false
+    property bool pluginEnabled: true
     property int instanceId: -1
     // Port indices currently in paramModel (to detect a changed parameter set).
     property var paramPorts: []
@@ -131,6 +132,7 @@ ZbWindow {
             pluginName = data.displayName || ""
             pluginUri = data.pluginUri || ""
             pluginBypassed = data.bypassed || false
+            pluginEnabled = data.enabled !== false
             instanceId = data.instanceId || -1
             var params = data.parameters || []
             var ports = params.map(function(p) { return p.portIndex })
@@ -388,6 +390,20 @@ ZbWindow {
                             visible: uriMouse.containsMouse
                             text: pluginParams.pluginUri
                         }
+                    }
+                }
+            }
+
+            ZbSwitch {
+                id: enabledSwitch
+                Layout.alignment: Qt.AlignTop
+                Layout.topMargin: 5
+                text: "On"
+                checked: pluginParams.pluginEnabled
+                onToggled: {
+                    if (pluginParams.pluginNodeId >= 0) {
+                        pluginParams.controller.set_plugin_enabled(pluginParams.pluginNodeId, checked)
+                        pluginParams.pluginEnabled = checked
                     }
                 }
             }

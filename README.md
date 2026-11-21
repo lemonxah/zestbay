@@ -76,7 +76,7 @@ qpwgraph is a straightforward PipeWire graph editor. ZestBay goes further:
 - **Quick wiring** -- Drag a plugin onto a wire to insert it into that connection (Ctrl+Z takes it out again), remove a plugin and the wires on either side are joined back up, and set a default node so app streams without a rule are routed there.
 - **Auto-connect rules with learning and blocking** -- Manually connect two ports and ZestBay creates a patchbay rule; disconnect them and the rule updates. Block rules keep a source from ever reaching a target.
 - **Subgraphs and virtual devices** -- Group a plugin chain into one block, reuse it as a template, offer it to apps as a microphone or speaker, and create virtual sinks and sources without editing PipeWire config.
-- **Full session persistence** -- Plugin instances, their parameters and state, bypass, wiring, MIDI mappings, subgraphs, virtual devices, layout, pins, viewport, window geometry, hidden nodes and rules all survive restarts.
+- **Full session persistence** -- Plugin instances, their parameters and state, on/off, bypass, wiring, MIDI mappings, subgraphs, virtual devices, layout, pins, viewport, window geometry, hidden nodes and rules all survive restarts.
 - **System tray with start-minimized** -- Run ZestBay as a background service. It starts hidden, keeps your routing rules active, and shows the window when you click the tray icon.
 
 ### vs. Carla
@@ -106,9 +106,12 @@ Carla is a full-featured plugin host and JACK patchbay. The differences are abou
 - Real-time PipeWire graph: devices, app streams, virtual sinks, plugins and subgraphs as node cards, colour-coded by kind; wires coloured by signal (audio, MIDI, video)
 - MIDI bridge devices split into one node per device
 - Plugins with many unused ports fold them into a "n more" row
+- **Connected ports only**: the funnel icon in a node's header (shown when you hover a node with unused ports, or from its right-click menu) hides every unconnected port on that node; it lights up while active
+- **Node colours**: right-click a node → Colour to give it one of the palette's colours (a thin strip on the card's left edge and a faint header tint)
 - The node under the cursor is highlighted, and a node whose name is too long for its card shows the full name in a popup
 - **Search** nodes and ports (Ctrl+F); non-matching nodes dim
 - Status bar with node/link counts, a CPU sparkline and the rules state; dark and light themes, or follow the desktop
+- **Palettes** (Preferences › Appearance): Zest, Catppuccin, Gruvbox, Nord and Solarized, each with a dark and a light version picked by the theme
 - **Hide unnamed nodes** (Preferences › Advanced, on by default) leaves out nodes with no name of their own, such as pavucontrol's level-meter streams
 
 **Moving around**
@@ -119,6 +122,8 @@ Carla is a full-featured plugin host and JACK patchbay. The differences are abou
 
 **Wiring**
 - Drag from a port to another port to connect. Wires highlight and can be clicked from a few pixels away, so you don't have to hit them exactly
+- **Wire styles** (Preferences › Graph): Curved, Straight, Stepped (right angles), or Circuit (right angles with rounded corners, where wires running side by side each get their own lane so bundles stay readable)
+- **Gradient wires** (Preferences › Graph, off by default): audio wires fade from the source node's colour to the destination's; MIDI and video wires keep their signal colours
 - Right-drag from one port to another to **block** the pair; blocked pairs are drawn as red dashed lines with a ⊘. Hover one to highlight it, click it to select it (Ctrl+click to add more) and press **Delete** to remove the rule that blocks it. A rule can cover several pairs; the toast says when removing it frees others too
 - Drag a plugin onto a wire to insert it into that connection; Ctrl+Z takes it out again and puts the original wire back. A node never offers to drop onto its own wires, including those of a meter snapped onto it
 - **Removing a plugin keeps the audio flowing**: when a plugin with as many audio inputs as outputs is removed, whatever fed its n-th input is wired to whatever its n-th output fed
@@ -142,6 +147,7 @@ Carla is a full-featured plugin host and JACK patchbay. The differences are abou
   - **Card density** (card row height, 16–32 px): how big the node cards are. Compact packs more nodes on screen, Spacious makes ports easier to hit; text sizes stay. Cards that end up overlapping are pushed apart (Ctrl+Z undoes it).
 
   The toolbar menus can re-space the whole graph with Auto layout.
+- **Wrap tall columns** (Preferences › Graph, off by default): Auto layout splits a column with more nodes than the limit into a grid of side-by-side columns, so a long stack of apps or devices takes less height
 
 ### Level Meters
 
@@ -194,15 +200,15 @@ Right-click any node → **Meter inputs (n)** or **Meter outputs (n)**. ZestBay 
 - One-click instantiation as real PipeWire filter nodes with RT-safe audio processing
 - 25 recognized plugin categories (Compressor, EQ, Reverb, Delay, etc.)
 - Parameters window: sliders and toggles, per-parameter reset, MIDI learn
-- **Manage plugins** window: every active plugin with its parameters, bypass state and Reset params
+- **Manage plugins** window: every active plugin with its parameters, on/off and bypass state and Reset params
 - Native plugin UI support:
   - **LV2**: GTK3, X11, Qt5, GTK2, GTK4 via suil, and KXStudio external UIs (x42 meters, Carla, Yoshimi, ...), which are loaded directly and open their own window. When a plugin has several UIs, ZestBay picks GTK3, then X11, then an external UI, then Qt5, GTK2 and GTK4. X11 and external UIs that don't need direct access to the plugin instance run in the separate `zestbay-ui-bridge` process, so a crashing UI can't take ZestBay down; whether a UI needs that access is read from that UI's own description. Qt5 UIs need suil's `qt5_in_gtk3` module installed, and GTK2 and GTK4 UIs only work where suil can show them inside GTK3
   - **VST2**: Embedded X11 editors with idle callbacks and resize support
   - **VST3**: Embedded X11 windows with IPlugFrame resize support
   - **CLAP**: Embedded X11 windows with GUI resize and timer support
 - Multiple simultaneous native plugin UIs
-- Bypass toggle per plugin instance; rename plugins and their ports (see [Renaming nodes and ports](#renaming-nodes-and-ports))
-- Plugin state (parameters, bypass, LV2 state, VST2/VST3/CLAP state, connections) persisted across sessions
+- Separate On and Bypass buttons per plugin instance: On is a hard on/off (off = silent), Bypass lets audio pass through unprocessed; rename plugins and their ports (see [Renaming nodes and ports](#renaming-nodes-and-ports))
+- Plugin state (parameters, on/off, bypass, LV2 state, VST2/VST3/CLAP state, connections) persisted across sessions
 - **Persistent LSP input names**: rename channels in an LSP Mixer LV2 editor and the names appear on the corresponding node input ports within about a second. Names are saved with the plugin state and restored after restarting ZestBay. Stereo channels show L/R suffixes; routing keeps its stable port identifiers.
 - **Crash protection**: each plugin is test-loaded in a separate process before it runs in ZestBay, so a crashing plugin is skipped instead of taking the app down. If a restore still crashes, the next start enters safe mode and offers the last known-good plugin set
 - **Presets** per plugin: save a plugin's settings once and reuse them on any other instance (see [Plugin Presets](#plugin-presets))
@@ -332,8 +338,8 @@ Turn it on in **Preferences › Remote control (OSC)**:
 
 | Address | Arguments | Effect |
 |---------|-----------|--------|
-| `/zestbay/plugin/<plugin>/enable` | `1` / `0` (none = on) | Turn the plugin on or off (off = bypassed) |
-| `/zestbay/plugin/<plugin>/bypass` | `1` / `0` (none = bypassed) | The reverse of `enable` |
+| `/zestbay/plugin/<plugin>/enable` | `1` / `0` (none = on) | Turn the plugin hard on or off (off = silent: no audio or MIDI passes) |
+| `/zestbay/plugin/<plugin>/bypass` | `1` / `0` (none = bypassed) | Bypass the plugin or not (bypassed = audio and MIDI pass through unprocessed) |
 | `/zestbay/plugin/<plugin>/toggle` | none, or `1` | Flip on/off. A `0` is ignored, so a button that sends 1 on press and 0 on release toggles once |
 | `/zestbay/plugin/<plugin>/param/<param>` | number | Set the parameter in its own range; clamped to its minimum and maximum |
 | `/zestbay/plugin/<plugin>/param/<param>/normalized` | number 0.0-1.0 | Set the parameter as a fraction of its range |
@@ -346,7 +352,7 @@ Turn it on in **Preferences › Remote control (OSC)**:
 Numbers can be sent as float, int, double or boolean. Bundles are accepted.
 
 **Replies.** Queries are answered to the address and port the request came from:
-- `/zestbay/plugin <plugin> <name> <enabled 0|1>`, one message per plugin
+- `/zestbay/plugin <plugin> <name> <enabled 0|1> <bypassed 0|1>`, one message per plugin
 - `/zestbay/param <plugin> <symbol> <name> <value> <min> <max>`, one per parameter
 - `/zestbay/session <name> <open 0|1>`, one per session
 - `/zestbay/error <message>` when `/zestbay/session/load` fails (unknown session, already open, still starting up)

@@ -29,6 +29,7 @@ const SESSION_ENTRIES: &[&str] = &[
     "hidden.json",
     "docked-meters.json",
     "pinned.json",
+    "node-style.json",
     "viewport.json",
     "plugin-state",
     ".zestbay-restoring",
