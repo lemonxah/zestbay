@@ -96,6 +96,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.2.11" date="2026-11-21">
+      <description>
+        <p>Cosmetic changes to the graph: Theming, built in and custom themes. New routing pathing styles</p>
+      </description>
+    </release>
     <release version="1.2.10" date="2026-11-18">
       <description>
         <p>stopped PulseAudio Volume Control nodes from showing up</p>

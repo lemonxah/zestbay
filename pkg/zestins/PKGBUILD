@@ -1,6 +1,6 @@
 # Maintainer: lemonxah <lemonxah@gmail.com>
 pkgname=zestins
-pkgver=1.2.10
+pkgver=1.2.11
 pkgrel=1
 pkgdesc="LV2 plugins from ZestBay: utility, meter, EQ, gate, compressor, delay, reverb, tone generator, synth and MIDI tools"
 arch=('x86_64')
