@@ -1,7 +1,3 @@
-//! Nodes ZestBay creates in PipeWire itself (not plugins): subgraph boundary
-//! pass-through filters and loopback pairs (subgraphs shown as devices, and
-//! user virtual devices). Lives on the PipeWire thread.
-
 use std::ffi::CString;
 
 use pipewire::context::ContextRc;
@@ -9,8 +5,7 @@ use pipewire::core::CoreRc;
 
 use super::types::{LoopbackSpec, OwnedNodeSpec, PassSpec};
 
-/// A live owned node; dropping it removes the node from PipeWire.
-#[allow(dead_code)] // held for its Drop
+#[allow(dead_code)]
 pub enum OwnedNode {
     Pass(PassNode),
     Loopback(LoopbackModule),
@@ -29,12 +24,6 @@ impl OwnedNode {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Pass-through filter
-// ---------------------------------------------------------------------------
-
-/// User data of the pass-through filter: port pointers, written only before
-/// the filter connects and then read by the RT `process` callback.
 struct PassData {
     inputs: Vec<*mut std::ffi::c_void>,
     outputs: Vec<*mut std::ffi::c_void>,
@@ -159,8 +148,6 @@ impl Drop for PassNode {
     }
 }
 
-/// # Safety
-/// `filter` must be a valid, not yet connected pw_filter.
 unsafe fn add_port(
     filter: *mut pipewire::sys::pw_filter,
     direction: libspa::sys::spa_direction,
@@ -236,10 +223,6 @@ unsafe extern "C" fn on_pass_process(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Loopback
-// ---------------------------------------------------------------------------
-
 pub struct LoopbackModule {
     module: *mut pipewire::sys::pw_impl_module,
 }
@@ -276,7 +259,6 @@ impl Drop for LoopbackModule {
     }
 }
 
-/// SPA-JSON arguments for `libpipewire-module-loopback`.
 pub fn loopback_args(spec: &LoopbackSpec) -> String {
     let props = |list: &[(String, String)]| -> String {
         list.iter()
@@ -295,7 +277,6 @@ pub fn loopback_args(spec: &LoopbackSpec) -> String {
     )
 }
 
-/// A quoted SPA-JSON string.
 fn spa_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -311,7 +292,6 @@ fn spa_string(s: &str) -> String {
     out
 }
 
-/// Property keys are plain identifiers; drop anything else.
 fn spa_key(k: &str) -> String {
     k.chars()
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))

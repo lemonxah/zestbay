@@ -1,11 +1,3 @@
-//! LADSPA instance lifecycle and audio processing.
-//!
-//! The main thread owns the instance and only touches atomics (parameter
-//! slots, bypass). The audio thread is the only one that calls into the
-//! plugin after construction, so no gate is needed: `activate` runs before
-//! the PipeWire filter is connected and `deactivate`/`cleanup` after it has
-//! been destroyed.
-
 use std::cell::UnsafeCell;
 use std::ffi::c_ulong;
 use std::path::Path;
@@ -20,13 +12,11 @@ use crate::plugin::types::*;
 
 #[derive(Clone)]
 pub struct LadspaParam {
-    /// LADSPA port index; also the index used in `PortUpdates` and MIDI maps.
     pub port_index: usize,
     pub name: String,
     pub meta: ControlMeta,
 }
 
-/// Where one LADSPA port gets its data.
 #[derive(Clone, Copy)]
 enum PortRole {
     AudioIn(usize),
@@ -36,15 +26,10 @@ enum PortRole {
     Unused,
 }
 
-/// State touched only by the audio thread (and the constructor).
 struct AudioState {
-    /// Control input values, one per control input; ports point into this.
     ctrl_in: Box<[f32]>,
-    /// Control output values; ports point into this.
     ctrl_out: Box<[f32]>,
-    /// Zeros for audio inputs the graph did not provide.
     silence: Box<[f32]>,
-    /// Sink for audio outputs the graph did not provide and unused ports.
     sink: Box<[f32]>,
 }
 
@@ -52,7 +37,7 @@ pub struct LadspaPluginInstance {
     _library: Library,
     desc: *const Descriptor,
     handle: Handle,
-    #[allow(dead_code)] // kept for diagnostics; not read yet
+    #[allow(dead_code)]
     pub display_name: String,
     pub audio_input_channels: usize,
     pub audio_output_channels: usize,
@@ -60,17 +45,12 @@ pub struct LadspaPluginInstance {
     pub params: Vec<LadspaParam>,
     pub port_updates: SharedPortUpdates,
     pub sample_rate: f64,
-    /// Port index -> role, for connecting audio buffers every cycle.
     roles: Vec<PortRole>,
     bypassed: AtomicBool,
     audio: UnsafeCell<AudioState>,
 }
 
 impl LadspaPluginInstance {
-    /// Calls untrusted plugin code. Must run on the plugin main thread.
-    ///
-    /// `_state` is unused: LADSPA has no state API, parameters are restored
-    /// by the caller through [`set_parameter`](Self::set_parameter).
     pub unsafe fn new(
         library_path: &str,
         plugin_id: &str,
@@ -112,7 +92,6 @@ impl LadspaPluginInstance {
             let (instantiate, connect_port) = (d.instantiate?, d.connect_port?);
             d.run?;
 
-            // Classify ports in index order.
             let mut roles = Vec::with_capacity(port_count);
             let mut params = Vec::new();
             let (mut ai, mut ao, mut ci, mut co) = (0usize, 0usize, 0usize, 0usize);
@@ -165,8 +144,6 @@ impl LadspaPluginInstance {
                 silence: vec![0.0; MAX_BLOCK].into_boxed_slice(),
                 sink: vec![0.0; MAX_BLOCK].into_boxed_slice(),
             };
-            // Every port must be connected before activate/run: audio ports
-            // start on scratch memory and are re-pointed each cycle.
             for (i, role) in roles.iter().enumerate() {
                 let ptr: *mut f32 = match *role {
                     PortRole::ControlIn(k) => &mut audio.ctrl_in[k],
@@ -257,8 +234,6 @@ impl LadspaPluginInstance {
             .collect()
     }
 
-    /// Audio thread only. Input/output slices are valid for `n` frames.
-    /// Nothing is allocated here.
     pub unsafe fn process(
         &self,
         inputs: &[&[f32]],
@@ -274,7 +249,6 @@ impl LadspaPluginInstance {
             threading::passthrough(inputs, outputs, n);
             return;
         }
-        // SAFETY: only the audio thread reaches this after construction.
         let audio = unsafe { &mut *self.audio.get() };
         let d = unsafe { &*self.desc };
         let (Some(connect_port), Some(run)) = (d.connect_port, d.run) else {
@@ -287,15 +261,12 @@ impl LadspaPluginInstance {
             audio.ctrl_in[k] = if v.is_finite() { v.clamp(p.meta.min, p.meta.max) } else { p.meta.default };
         }
 
-        // Chunked so scratch buffers (MAX_BLOCK frames) always suffice; the
-        // plugin keeps its state across consecutive run() calls.
         let mut start = 0;
         while start < n {
             let len = (n - start).min(MAX_BLOCK);
             for (i, role) in self.roles.iter().enumerate() {
                 let ptr: *mut f32 = match *role {
                     PortRole::AudioIn(ch) => match inputs.get(ch) {
-                        // Plugins must not write to inputs.
                         Some(buf) if buf.len() >= start + len => {
                             buf[start..].as_ptr() as *mut f32
                         }
@@ -313,7 +284,6 @@ impl LadspaPluginInstance {
             start += len;
         }
 
-        // Outputs the plugin has no audio output for stay silent.
         for out in outputs.iter_mut().skip(self.audio_output_channels) {
             let m = out.len().min(n);
             out[..m].fill(0.0);
@@ -329,10 +299,6 @@ impl LadspaPluginInstance {
 
 impl Drop for LadspaPluginInstance {
     fn drop(&mut self) {
-        // The filter is destroyed before its instance, so the audio thread
-        // no longer runs. Ports may point into freed PipeWire buffers; the
-        // plugin must not touch them in deactivate/cleanup, so park them on
-        // scratch memory first.
         unsafe {
             let d = &*self.desc;
             let audio = &mut *self.audio.get();

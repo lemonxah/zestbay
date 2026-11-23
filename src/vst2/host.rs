@@ -1,7 +1,3 @@
-//! VST2 lifecycle and audio processing. The main thread owns the instance;
-//! audio processing uses shared references and an UnsafeCell protected by
-//! RtGate. Host callbacks only access immutable data and atomics.
-
 use std::cell::{Cell, UnsafeCell};
 use std::ffi::{CStr, CString, c_void};
 use std::path::Path;
@@ -16,14 +12,10 @@ use crate::midi::rt::MAX_BLOCK;
 use crate::plugin::types::*;
 
 const MAX_STATE: usize = 64 * 1024 * 1024;
-/// How long the audio thread must have been quiet before the main thread
-/// suspends it to apply parameters itself (same as the CLAP host).
 const RT_IDLE_BEFORE_FLUSH: Duration = Duration::from_millis(500);
 
 thread_local! {
-    // During VSTPluginMain the plugin can call the host with a null effect.
     static CONSTRUCTING: Cell<*const HostData> = const { Cell::new(std::ptr::null()) };
-    // Each caller gets its own time record; editor queries cannot race audio.
     static TIME: UnsafeCell<TimeInfo> = UnsafeCell::new(TimeInfo::default());
 }
 
@@ -47,7 +39,6 @@ unsafe extern "C" fn host_callback(
     ptr: *mut c_void,
     opt: f32,
 ) -> isize {
-    // These queries are valid even before the plugin has returned AEffect.
     match opcode {
         1 => return 2400,
         32 | 33 => {
@@ -69,7 +60,7 @@ unsafe extern "C" fn host_callback(
                 _ => 0,
             };
         }
-        38 => return 1, // English
+        38 => return 1,
         _ => {}
     }
     let data = CONSTRUCTING.with(|slot| slot.get());
@@ -85,7 +76,6 @@ unsafe extern "C" fn host_callback(
     };
     match opcode {
         0 => {
-            // audioMasterAutomate, including edits from the native GUI
             if opt.is_finite()
                 && index >= 0
                 && let Some(slot) = data
@@ -102,13 +92,12 @@ unsafe extern "C" fn host_callback(
             0
         }
         2 => data.current_id as isize,
-        6 => 1, // legacy wantMidi
+        6 => 1,
         7 => TIME.with(|time| unsafe {
             let info = &mut *time.get();
             *info = TimeInfo {
                 sample_pos: data.position.load(Ordering::Relaxed) as f64,
                 sample_rate: data.sample_rate,
-                // ZestBay has no DAW transport; no tempo/PPQ validity flags.
                 ..TimeInfo::default()
             };
             time.get() as isize
@@ -124,7 +113,7 @@ unsafe extern "C" fn host_callback(
         }
         16 => data.sample_rate as isize,
         17 => MAX_BLOCK as isize,
-        22 => 1, // replacing mode
+        22 => 1,
         23 => {
             if threading::is_audio_thread() {
                 2
@@ -132,14 +121,13 @@ unsafe extern "C" fn host_callback(
                 1
             }
         }
-        24 => 1, // automation off
+        24 => 1,
         41 => data.directory.as_ptr() as isize,
         42 => {
             data.refresh.store(true, Ordering::Release);
             1
         }
-        43 | 44 => 1, // begin/end parameter edit
-        // MIDI output, file selectors and offline processing are unsupported.
+        43 | 44 => 1,
         _ => 0,
     }
 }
@@ -161,8 +149,6 @@ pub(super) struct LoadedEffect {
 }
 
 impl LoadedEffect {
-    /// Main thread, or an isolated scanner process. The module must match
-    /// this process's architecture. `id` selects a child of a shell plugin.
     pub unsafe fn open(path: &Path, id: i32, sample_rate: f64) -> Option<Self> {
         use std::os::unix::ffi::OsStrExt;
         let path_c = CString::new(path.as_os_str().as_bytes()).ok()?;
@@ -321,7 +307,6 @@ impl LoadedEffect {
 
 impl Drop for LoadedEffect {
     fn drop(&mut self) {
-        // CLOSE may delete AEffect itself. Never dereference it afterwards.
         unsafe {
             command(self.raw, eff::CLOSE, 0);
         }
@@ -385,16 +370,12 @@ pub struct Vst2PluginInstance {
     bypassed: AtomicBool,
     params_dirty: AtomicBool,
     parked: Cell<bool>,
-    // Main thread: the last sample position seen and when it last moved,
-    // to tell whether the audio thread is processing this plugin.
     seen_position: Cell<u64>,
     position_moved: Cell<Instant>,
-    // Accessed only by the audio callback, or main while the gate is suspended.
     audio: UnsafeCell<AudioState>,
 }
 
 impl Vst2PluginInstance {
-    /// Calls untrusted plugin code. Must run on the plugin main thread.
     pub unsafe fn new(
         library_path: &str,
         plugin_id: &str,
@@ -412,9 +393,6 @@ impl Vst2PluginInstance {
             return None;
         }
         let defaults = loaded.parameters();
-        // Deliberately fatal: a plugin that loaded with defaults would have
-        // its saved state overwritten by the next autosave.  Skipped, the
-        // saved state stays on disk until it can be restored.
         if let Some(blob) = state
             && !restore_state(&loaded, blob)
         {
@@ -474,7 +452,6 @@ impl Vst2PluginInstance {
             params_dirty: AtomicBool::new(false),
             parked: Cell::new(false),
             seen_position: Cell::new(0),
-            // Starts "quiet" so changes made before the first block are applied.
             position_moved: Cell::new(
                 Instant::now()
                     .checked_sub(RT_IDLE_BEFORE_FLUSH)
@@ -521,8 +498,6 @@ impl Vst2PluginInstance {
             .collect()
     }
 
-    /// Audio thread only. Input/output slices are valid for `n` frames.
-    /// All scratch and event storage is allocated during construction.
     pub unsafe fn process(
         &self,
         inputs: &[&[f32]],
@@ -548,8 +523,6 @@ impl Vst2PluginInstance {
         self.params_dirty.store(false, Ordering::Release);
         self.apply_parameters();
         let raw = self.loaded.raw;
-        // IOChanged can arrive during parameter changes. Avoid calling into
-        // an incompatible layout until the manager has reloaded the instance.
         if self.needs_restart() {
             threading::passthrough(inputs, outputs, n);
             self.gate.leave();
@@ -566,7 +539,7 @@ impl Vst2PluginInstance {
         }
         for i in 0..self.audio_output_channels {
             let buf = &mut audio.outputs[i * MAX_BLOCK..i * MAX_BLOCK + n];
-            buf.fill(0.0); // also supports pre-2.4 accumulating process()
+            buf.fill(0.0);
             audio.output_ptrs[i] = buf.as_mut_ptr();
         }
         if self.has_midi_in {
@@ -643,8 +616,6 @@ impl Vst2PluginInstance {
         for (i, slot) in self.port_updates.control_inputs.iter().enumerate() {
             let value = slot.value.load();
             if value.is_finite() && value != applied[i].load() {
-                // Publish before calling the plugin: a synchronous automate
-                // callback can report a quantized value and must win.
                 applied[i].store(value);
                 unsafe {
                     if let Some(set) = (*self.loaded.raw).set_parameter {
@@ -655,7 +626,6 @@ impl Vst2PluginInstance {
         }
     }
 
-    /// Whether the audio thread has processed this plugin recently.
     fn audio_running(&self) -> bool {
         let position = self.loaded.host.position.load(Ordering::Relaxed);
         if position != self.seen_position.get() {
@@ -665,11 +635,6 @@ impl Vst2PluginInstance {
         self.position_moved.get().elapsed() < RT_IDLE_BEFORE_FLUSH
     }
 
-    /// Copy the plugin's own parameter values (after `updateDisplay`) into
-    /// the shared slots without excluding the audio thread.  A slot with a
-    /// host change still pending is left alone, and a concurrent write wins.
-    /// The audio thread then re-applies each published value, which is a
-    /// no-op for the plugin.
     fn publish_plugin_values(&self) {
         let Some(applied) = self.loaded.host.applied.get() else {
             return;
@@ -686,7 +651,6 @@ impl Vst2PluginInstance {
         }
     }
 
-    /// Main-thread flushing also handles knobs when PipeWire is idle.
     pub fn idle(&self) {
         if self.parked.get() || self.needs_restart() {
             return;
@@ -698,8 +662,6 @@ impl Vst2PluginInstance {
             return;
         }
         if audio_running {
-            // The audio thread applies host changes at the start of every
-            // block; suspending it here would drop that block.
             if self.loaded.host.refresh.swap(false, Ordering::AcqRel) {
                 self.publish_plugin_values();
             }
@@ -754,8 +716,6 @@ impl Vst2PluginInstance {
         true
     }
 
-    /// State calls are serialized with audio; no plugin state methods run
-    /// concurrently with processReplacing or setParameter.
     pub fn get_state(&self) -> Option<Vec<u8>> {
         let already_suspended = self.parked.get();
         if !already_suspended && !self.gate.suspend(Duration::from_secs(1)) {
@@ -765,8 +725,6 @@ impl Vst2PluginInstance {
         if !already_suspended {
             self.gate.resume();
         }
-        // Encoding a large chunk takes far longer than fetching it; it runs
-        // after audio has resumed.
         serde_json::to_vec(&captured?).ok()
     }
 
@@ -818,8 +776,6 @@ impl Vst2PluginInstance {
 
 impl Drop for Vst2PluginInstance {
     fn drop(&mut self) {
-        // The filter is destroyed before its instance. All GUI work is on
-        // this same thread, and must finish before CLOSE unloads its code.
         super::ui::force_close_for_plugin(self.loaded.raw);
         unsafe {
             command(self.loaded.raw, eff::STOP, 0);
@@ -844,7 +800,6 @@ fn restore_state(loaded: &LoadedEffect, blob: &[u8]) -> bool {
             if (*raw).flags & PROGRAM_CHUNKS == 0 || chunk.is_empty() || chunk.len() > MAX_STATE {
                 return false;
             }
-            // Many plugins return 0 even after successfully restoring a chunk.
             dispatch(
                 raw,
                 eff::SET_CHUNK,

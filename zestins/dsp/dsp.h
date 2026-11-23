@@ -1,5 +1,3 @@
-// Small DSP helpers shared by the Zestins plugins.
-
 #ifndef ZESTINS_DSP_H
 #define ZESTINS_DSP_H
 
@@ -27,15 +25,12 @@ static inline float gain_to_db(float g) { return g > 1e-6f ? 20.0f * log10f(g) :
 
 static inline float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
 
-// Read a control port, falling back to `def` while it is unconnected.
 static inline float ctl(const float *port, float def) { return port ? *port : def; }
 
-// Coefficient of a one-pole smoother/envelope that covers ~63% in `ms`.
 static inline float time_coef(float ms, double rate) {
     return ms <= 0.0f ? 0.0f : expf(-1.0f / (ms * 0.001f * (float)rate));
 }
 
-// One-pole parameter smoothing (~20 ms) against zipper noise.
 typedef struct {
     float value, coef;
 } Smooth;
@@ -50,7 +45,6 @@ static inline float smooth_next(Smooth *s, float target) {
     return s->value;
 }
 
-// RBJ biquad (Audio EQ Cookbook), transposed direct form II.
 typedef struct {
     float b0, b1, b2, a1, a2;
     float z1, z2;
@@ -106,8 +100,6 @@ static inline void biquad_design(Biquad *f, BiquadType type, double rate, double
     }
 }
 
-// PolyBLEP correction for a step discontinuity at phase 0 of a naive
-// oscillator (p = phase in [0, 1), dt = phase step per sample).
 static inline float poly_blep(double p, double dt) {
     if (p < dt) {
         p /= dt;
@@ -120,7 +112,6 @@ static inline float poly_blep(double p, double dt) {
     return 0.0f;
 }
 
-// One-pole lowpass (used for damping in feedback paths).
 typedef struct {
     float z, a;
 } OnePole;
@@ -134,7 +125,6 @@ static inline float onepole_run(OnePole *f, float x) {
     return f->z;
 }
 
-// Find the urid:map feature (NULL when the host does not provide it).
 static inline LV2_URID_Map *find_map(const LV2_Feature *const *features) {
     for (int i = 0; features && features[i]; i++) {
         if (!strcmp(features[i]->URI, LV2_URID__map))
@@ -143,8 +133,6 @@ static inline LV2_URID_Map *find_map(const LV2_Feature *const *features) {
     return NULL;
 }
 
-// Prepare an output atom port for writing: returns its capacity and turns
-// it into an empty sequence.
 static inline uint32_t midi_out_begin(LV2_Atom_Sequence *out, LV2_URID sequence_type) {
     if (!out)
         return 0;
@@ -154,7 +142,6 @@ static inline uint32_t midi_out_begin(LV2_Atom_Sequence *out, LV2_URID sequence_
     return capacity;
 }
 
-// Append a MIDI message of up to 3 bytes to an output sequence.
 static inline void midi_out_write(LV2_Atom_Sequence *out, uint32_t capacity, LV2_URID midi_type,
                                   int64_t frames, const uint8_t *msg, uint32_t size) {
     struct {
@@ -170,7 +157,6 @@ static inline void midi_out_write(LV2_Atom_Sequence *out, uint32_t capacity, LV2
     lv2_atom_sequence_append_event(out, capacity, &ev.event);
 }
 
-// Every plugin exports one descriptor (see zestins.c).
 #define ZESTINS_DESCRIPTOR(var, name, inst, conn, act, run_fn, clean)                   \
     const LV2_Descriptor var = { ZESTINS_URI(name), inst, conn, act, run_fn, NULL, clean, \
                                  NULL }

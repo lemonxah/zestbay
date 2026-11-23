@@ -1,6 +1,5 @@
 import QtQuick
 
-// Small mono count pill (e.g. the rule count on the Rules button).
 Rectangle {
     property alias text: label.text
     implicitWidth: Math.max(20, label.implicitWidth + 10)

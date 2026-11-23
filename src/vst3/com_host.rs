@@ -1,18 +1,3 @@
-//! VST3 COM host objects — IHostApplication, IComponentHandler, IRunLoop.
-//!
-//! These are hand-rolled COM objects (same pattern as HostPlugFrame in ui.rs)
-//! that VST3 plugins need for correct operation:
-//!
-//! - **IHostApplication** — passed to `IComponent::initialize()` and
-//!   `IEditController::initialize()`. Plugins use it for `getName()` and
-//!   sometimes `queryInterface` for `IRunLoop`.
-//!
-//! - **IComponentHandler** — set on the controller via `setComponentHandler()`.
-//!   Plugins call `performEdit()` when the user tweaks a knob in the GUI.
-//!
-//! - **IRunLoop** — Linux-specific. Plugins (esp. JUCE-based) register timers
-//!   and file-descriptor event handlers that must be serviced on the GUI thread.
-
 use std::os::raw::c_void;
 use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,20 +9,10 @@ use vst3::Steinberg::*;
 
 use crate::plugin::types::*;
 
-// =========================================================================
-// IHostApplication
-// =========================================================================
-
-/// Our host-side IHostApplication.
-///
-/// Layout: first field is a pointer to the vtable so that a
-/// `*mut HostApplication` can be cast to `*mut IHostApplication` / `*mut FUnknown`.
 #[repr(C)]
 pub struct HostApplication {
     pub(crate) vtbl: *const IHostApplicationVtbl,
     ref_count: AtomicU32,
-    /// Pointer to the shared HostRunLoop (if any). The HostApplication's
-    /// queryInterface returns this for IRunLoop_iid requests.
     pub run_loop: *mut HostRunLoop,
 }
 
@@ -65,14 +40,12 @@ unsafe extern "system" fn host_app_query_interface(
         }
         let iid_ref = &*iid;
 
-        // Accept FUnknown or IHostApplication
         if *iid_ref == FUnknown_iid || *iid_ref == IHostApplication_iid {
             host_app_add_ref(this);
             *obj = this as *mut c_void;
             return kResultOk;
         }
 
-        // Forward IRunLoop queries to our run loop
         if *iid_ref == IRunLoop_iid {
             let app = this as *mut HostApplication;
             if !(*app).run_loop.is_null() {
@@ -115,7 +88,6 @@ unsafe extern "system" fn host_app_get_name(
         if name.is_null() {
             return kInvalidArgument;
         }
-        // Write "ZestBay" as UTF-16 into String128 ([TChar; 128] = [i16; 128])
         let host_name = "ZestBay";
         let buf = &mut *name;
         for (i, ch) in host_name.encode_utf16().enumerate() {
@@ -139,8 +111,6 @@ unsafe extern "system" fn host_app_create_instance(
         if obj.is_null() {
             return kInvalidArgument;
         }
-        // Plugins ask for IMessage / IAttributeList to talk to their own
-        // controller or component over IConnectionPoint.
         match super::message::create_instance(cid, iid) {
             Some(instance) => {
                 *obj = instance;
@@ -154,7 +124,6 @@ unsafe extern "system" fn host_app_create_instance(
     }
 }
 
-/// Allocate a new HostApplication (ref_count starts at 1).
 pub fn new_host_application(run_loop: *mut HostRunLoop) -> *mut HostApplication {
     let app = Box::new(HostApplication {
         vtbl: &HOST_APP_VTBL,
@@ -164,10 +133,6 @@ pub fn new_host_application(run_loop: *mut HostRunLoop) -> *mut HostApplication 
     Box::into_raw(app)
 }
 
-/// Release (decrement refcount of) a HostApplication.
-///
-/// # Safety
-/// `app` must be a valid pointer from `new_host_application`.
 pub unsafe fn release_host_application(app: *mut HostApplication) {
     if !app.is_null() {
         unsafe {
@@ -176,10 +141,6 @@ pub unsafe fn release_host_application(app: *mut HostApplication) {
     }
 }
 
-/// Release (decrement refcount of) a HostComponentHandler.
-///
-/// # Safety
-/// `ch` must be a valid pointer from `new_host_component_handler`.
 pub unsafe fn release_host_component_handler(ch: *mut HostComponentHandler) {
     if !ch.is_null() {
         unsafe {
@@ -188,23 +149,11 @@ pub unsafe fn release_host_component_handler(ch: *mut HostComponentHandler) {
     }
 }
 
-// =========================================================================
-// IComponentHandler
-// =========================================================================
-
-/// State shared between a VST3 instance, its component handler and the
-/// audio thread.  Indexed by parameter index (== port_index).
 pub struct Vst3SharedParams {
-    /// Shared port updates: normalized values, host ⇄ processor.
     pub port_updates: SharedPortUpdates,
-    /// VST3 ParamID per parameter index.
     pub ids: Vec<ParamID>,
-    /// (ParamID, index), sorted by id for RT-safe lookup.
     pub id_index: Vec<(ParamID, usize)>,
-    /// f32 bits of the value the edit controller is known to hold.  The
-    /// main thread pushes slot values that differ to `setParamNormalized`.
     pub controller_bits: Vec<AtomicU32>,
-    /// Accumulated `restartComponent` flags, consumed on the main thread.
     pub restart_flags: AtomicI32,
 }
 
@@ -227,7 +176,6 @@ impl Vst3SharedParams {
         }
     }
 
-    /// Parameter index for a ParamID (no allocation; RT-safe).
     pub fn index_of(&self, id: ParamID) -> Option<usize> {
         self.id_index
             .binary_search_by_key(&id, |&(pid, _)| pid)
@@ -236,11 +184,6 @@ impl Vst3SharedParams {
     }
 }
 
-/// Our host-side IComponentHandler.
-///
-/// When the plugin's GUI changes a parameter, it calls `performEdit()`.
-/// We write the new value into the shared slot; the next `process()` sends
-/// it to the processor via inputParameterChanges.
 #[repr(C)]
 pub struct HostComponentHandler {
     vtbl: *const IComponentHandlerVtbl,
@@ -308,7 +251,6 @@ unsafe extern "system" fn host_ch_begin_edit(
     _this: *mut IComponentHandler,
     _id: ParamID,
 ) -> tresult {
-    // We don't need to do anything special at the start of an edit gesture.
     kResultOk
 }
 
@@ -323,7 +265,6 @@ unsafe extern "system" fn host_ch_perform_edit(
             && let Some(slot) = shared.port_updates.control_inputs.get(idx)
         {
             let v = value_normalized.clamp(0.0, 1.0) as f32;
-            // The controller already holds this value; don't echo it back.
             shared.controller_bits[idx].store(v.to_bits(), Ordering::Relaxed);
             slot.value.store(v);
         }
@@ -343,7 +284,6 @@ unsafe extern "system" fn host_ch_restart_component(
         "VST3 IComponentHandler::restartComponent(flags=0x{:x})",
         flags
     );
-    // Acted on by Vst3PluginInstance::idle() on the main thread.
     unsafe {
         let shared = &(*(this as *mut HostComponentHandler)).shared;
         shared.restart_flags.fetch_or(flags, Ordering::AcqRel);
@@ -351,7 +291,6 @@ unsafe extern "system" fn host_ch_restart_component(
     kResultOk
 }
 
-/// Allocate a new HostComponentHandler (ref_count starts at 1).
 pub fn new_host_component_handler(
     instance_id: PluginInstanceId,
     shared: Arc<Vst3SharedParams>,
@@ -365,28 +304,17 @@ pub fn new_host_component_handler(
     Box::into_raw(ch)
 }
 
-// =========================================================================
-// IRunLoop (Linux-specific)
-// =========================================================================
-
-/// A registered timer entry.
 struct TimerEntry {
     handler: *mut ITimerHandler,
     interval_ms: u64,
     last_fired: std::time::Instant,
 }
 
-/// A registered fd event handler entry.
 struct FdEntry {
     handler: *mut IEventHandler,
     fd: std::os::raw::c_int,
 }
 
-/// Our host-side IRunLoop for Linux.
-///
-/// VST3 plugins (especially JUCE-based) register timers and file descriptor
-/// event handlers via this interface. We service them from the plugin main
-/// thread (see `run_loop_tick`).
 #[repr(C)]
 pub struct HostRunLoop {
     vtbl: *const IRunLoopVtbl,
@@ -518,7 +446,6 @@ unsafe extern "system" fn host_run_loop_unregister_timer(
     }
 }
 
-/// Allocate a new HostRunLoop (ref_count starts at 1).
 pub fn new_host_run_loop() -> *mut HostRunLoop {
     let rl = Box::new(HostRunLoop {
         vtbl: &HOST_RUN_LOOP_VTBL,
@@ -529,17 +456,6 @@ pub fn new_host_run_loop() -> *mut HostRunLoop {
     Box::into_raw(rl)
 }
 
-/// Fire any due timers and poll any registered file descriptors.
-///
-/// Must be called on the plugin main thread (the PipeWire thread), which is
-/// also where the view is created, attached and removed — so a handler can
-/// never be called concurrently with (or after) the view's teardown.
-/// Handlers are called without holding the run loop locks (plugins may
-/// (un)register from inside callbacks), are re-checked right before each
-/// call, and are kept alive with addRef/release around the call.
-///
-/// # Safety
-/// The `run_loop` must be a valid `*mut HostRunLoop`.
 pub unsafe fn run_loop_tick(run_loop: *mut HostRunLoop) {
     unsafe {
         if run_loop.is_null() {
@@ -603,8 +519,6 @@ pub unsafe fn run_loop_tick(run_loop: *mut HostRunLoop) {
     }
 }
 
-/// Drop all registered handlers (without calling them).  Used when a view
-/// is torn down and the plugin did not unregister everything itself.
 pub fn run_loop_clear(run_loop: *mut HostRunLoop) {
     if run_loop.is_null() {
         return;
@@ -628,21 +542,11 @@ unsafe fn funknown_release(obj: *mut FUnknown) {
     }
 }
 
-// =========================================================================
-// IBStream — memory-backed byte stream for state save/load
-// =========================================================================
-
-/// A memory-backed `IBStream` for VST3 state serialization.
-///
-/// Used for `IComponent::getState()` / `setState()` and
-/// `IEditController::getState()` / `setState()`.
 #[repr(C)]
 pub struct MemoryStream {
     vtbl: *const IBStreamVtbl,
     ref_count: AtomicU32,
-    /// The backing buffer.
     pub data: Vec<u8>,
-    /// Current read/write position.
     pub pos: usize,
 }
 
@@ -792,7 +696,6 @@ unsafe extern "system" fn ms_tell(this: *mut IBStream, pos: *mut int64) -> tresu
     }
 }
 
-/// Create a new empty MemoryStream (for getState — plugin writes into it).
 pub fn new_memory_stream() -> *mut MemoryStream {
     let ms = Box::new(MemoryStream {
         vtbl: &MEMORY_STREAM_VTBL,
@@ -803,7 +706,6 @@ pub fn new_memory_stream() -> *mut MemoryStream {
     Box::into_raw(ms)
 }
 
-/// Create a MemoryStream pre-filled with data (for setState — plugin reads from it).
 pub fn new_memory_stream_from_data(data: Vec<u8>) -> *mut MemoryStream {
     let ms = Box::new(MemoryStream {
         vtbl: &MEMORY_STREAM_VTBL,
@@ -814,10 +716,6 @@ pub fn new_memory_stream_from_data(data: Vec<u8>) -> *mut MemoryStream {
     Box::into_raw(ms)
 }
 
-/// Release a MemoryStream.
-///
-/// # Safety
-/// `ms` must be a valid pointer from `new_memory_stream*`.
 pub unsafe fn release_memory_stream(ms: *mut MemoryStream) {
     if !ms.is_null() {
         unsafe {
@@ -829,8 +727,6 @@ pub unsafe fn release_memory_stream(ms: *mut MemoryStream) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ---- MemoryStream: write then read ----
 
     #[test]
     fn memory_stream_write_then_read() {
@@ -849,7 +745,6 @@ mod tests {
             assert_eq!((*ms).data, data);
             assert_eq!((*ms).pos, data.len());
 
-            // Seek back to start
             let mut new_pos: int64 = 0;
             let result = ms_seek(
                 ms as *mut IBStream,
@@ -860,7 +755,6 @@ mod tests {
             assert_eq!(result, kResultOk);
             assert_eq!(new_pos, 0);
 
-            // Read it back
             let mut buf = [0u8; 32];
             let mut bytes_read: int32 = 0;
             let result = ms_read(
@@ -885,7 +779,6 @@ mod tests {
             assert_eq!((*ms).pos, 0);
             assert_eq!((*ms).data, data);
 
-            // Read all
             let mut buf = [0u8; 8];
             let mut bytes_read: int32 = 0;
             let result = ms_read(
@@ -907,7 +800,6 @@ mod tests {
     fn memory_stream_read_past_end() {
         unsafe {
             let ms = new_memory_stream_from_data(vec![10, 20]);
-            // Skip past the data
             (*ms).pos = 2;
 
             let mut buf = [0u8; 4];
@@ -919,7 +811,7 @@ mod tests {
                 &mut bytes_read,
             );
             assert_eq!(result, kResultOk);
-            assert_eq!(bytes_read, 0); // nothing left to read
+            assert_eq!(bytes_read, 0);
 
             release_memory_stream(ms);
         }
@@ -929,7 +821,6 @@ mod tests {
     fn memory_stream_partial_read() {
         unsafe {
             let ms = new_memory_stream_from_data(vec![1, 2, 3, 4, 5]);
-            // Read only 3 bytes
             let mut buf = [0u8; 3];
             let mut bytes_read: int32 = 0;
             ms_read(
@@ -942,21 +833,18 @@ mod tests {
             assert_eq!(&buf, &[1, 2, 3]);
             assert_eq!((*ms).pos, 3);
 
-            // Read remaining
             ms_read(
                 ms as *mut IBStream,
                 buf.as_mut_ptr() as *mut c_void,
                 3,
                 &mut bytes_read,
             );
-            assert_eq!(bytes_read, 2); // only 2 left
+            assert_eq!(bytes_read, 2);
             assert_eq!(&buf[..2], &[4, 5]);
 
             release_memory_stream(ms);
         }
     }
-
-    // ---- MemoryStream: seek modes ----
 
     #[test]
     fn memory_stream_seek_set() {
@@ -985,7 +873,6 @@ mod tests {
             assert_eq!(result_pos, 50);
             assert_eq!((*ms).pos, 50);
 
-            // Seek backwards
             let r = ms_seek(ms as *mut IBStream, -10, kIBSeekCur as int32, &mut result_pos);
             assert_eq!(r, kResultOk);
             assert_eq!(result_pos, 40);
@@ -1000,12 +887,10 @@ mod tests {
             let ms = new_memory_stream_from_data(vec![0; 100]);
             let mut result_pos: int64 = 0;
 
-            // Seek to end
             let r = ms_seek(ms as *mut IBStream, 0, kIBSeekEnd as int32, &mut result_pos);
             assert_eq!(r, kResultOk);
             assert_eq!(result_pos, 100);
 
-            // Seek 10 before end
             let r = ms_seek(ms as *mut IBStream, -10, kIBSeekEnd as int32, &mut result_pos);
             assert_eq!(r, kResultOk);
             assert_eq!(result_pos, 90);
@@ -1020,7 +905,6 @@ mod tests {
             let ms = new_memory_stream_from_data(vec![0; 10]);
             let mut result_pos: int64 = 0;
 
-            // Seeking before beginning should fail
             let r = ms_seek(ms as *mut IBStream, -1, kIBSeekSet as int32, &mut result_pos);
             assert_eq!(r, kInvalidArgument);
 
@@ -1041,8 +925,6 @@ mod tests {
         }
     }
 
-    // ---- MemoryStream: tell ----
-
     #[test]
     fn memory_stream_tell() {
         unsafe {
@@ -1058,13 +940,10 @@ mod tests {
         }
     }
 
-    // ---- MemoryStream: write extends buffer ----
-
     #[test]
     fn memory_stream_write_extends_buffer() {
         unsafe {
             let ms = new_memory_stream();
-            // Write at position 0
             let data1 = b"ABC";
             let mut written: int32 = 0;
             ms_write(
@@ -1076,7 +955,6 @@ mod tests {
             assert_eq!((*ms).data.len(), 3);
             assert_eq!((*ms).pos, 3);
 
-            // Seek past end and write more
             (*ms).pos = 10;
             let data2 = b"XY";
             ms_write(
@@ -1088,15 +966,12 @@ mod tests {
             assert_eq!((*ms).data.len(), 12);
             assert_eq!((&(*ms).data)[10], b'X');
             assert_eq!((&(*ms).data)[11], b'Y');
-            // Gap should be zeroed
             assert_eq!((&(*ms).data)[3], 0);
             assert_eq!((&(*ms).data)[9], 0);
 
             release_memory_stream(ms);
         }
     }
-
-    // ---- MemoryStream: invalid args ----
 
     #[test]
     fn memory_stream_read_null_buffer() {
@@ -1134,8 +1009,6 @@ mod tests {
         }
     }
 
-    // ---- HostApplication: getName ----
-
     #[test]
     fn host_app_get_name_returns_zestbay() {
         unsafe {
@@ -1145,7 +1018,6 @@ mod tests {
             let r = host_app_get_name(app as *mut IHostApplication, &mut name);
             assert_eq!(r, kResultOk);
 
-            // Decode UTF-16
             let len = name.iter().position(|&c| c == 0).unwrap_or(128);
             let s = String::from_utf16(&name[..len]).unwrap();
             assert_eq!(s, "ZestBay");
@@ -1153,8 +1025,6 @@ mod tests {
             release_host_application(app);
         }
     }
-
-    // ---- HostApplication: createInstance ----
 
     #[test]
     fn host_app_create_instance_returns_not_implemented() {
@@ -1172,8 +1042,6 @@ mod tests {
         }
     }
 
-    // ---- HostComponentHandler: performEdit ----
-
     #[test]
     fn component_handler_perform_edit() {
         unsafe {
@@ -1187,34 +1055,27 @@ mod tests {
                 atom_inputs: Vec::new(),
             });
 
-            // ParamID 200 → index 0, ParamID 100 → index 1 (unsorted on purpose)
             let shared = Arc::new(Vst3SharedParams::new(port_updates.clone(), vec![200, 100]));
             let ch = new_host_component_handler(42, shared.clone());
 
-            // Perform edit on param 100
             let r = host_ch_perform_edit(ch as *mut IComponentHandler, 100, 0.75);
             assert_eq!(r, kResultOk);
             assert!((port_updates.control_inputs[1].value.load() - 0.75).abs() < 1e-5);
-            // The controller already has the edited value.
             assert_eq!(
                 shared.controller_bits[1].load(Ordering::Relaxed),
                 0.75f32.to_bits()
             );
 
-            // Perform edit on param 200
             let r = host_ch_perform_edit(ch as *mut IComponentHandler, 200, 0.25);
             assert_eq!(r, kResultOk);
             assert!((port_updates.control_inputs[0].value.load() - 0.25).abs() < 1e-5);
 
-            // Unknown param ID — should not crash, still returns Ok
             let r = host_ch_perform_edit(ch as *mut IComponentHandler, 999, 0.5);
             assert_eq!(r, kResultOk);
 
             release_host_component_handler(ch);
         }
     }
-
-    // ---- HostComponentHandler: begin/end edit are no-ops ----
 
     #[test]
     fn component_handler_begin_end_edit_are_noop() {
@@ -1257,15 +1118,11 @@ mod tests {
         }
     }
 
-    // ---- HostRunLoop: timer registration ----
-
     #[test]
     fn run_loop_register_unregister_timer() {
         unsafe {
             let rl = new_host_run_loop();
 
-            // We can't create real ITimerHandler objects, but we can use
-            // a fake pointer to test registration/unregistration logic.
             let fake_handler1 = 0x1000usize as *mut ITimerHandler;
             let fake_handler2 = 0x2000usize as *mut ITimerHandler;
 
@@ -1277,12 +1134,10 @@ mod tests {
 
             assert_eq!((*rl).timers.lock().unwrap().len(), 2);
 
-            // Unregister one
             let r = host_run_loop_unregister_timer(rl as *mut IRunLoop, fake_handler1);
             assert_eq!(r, kResultOk);
             assert_eq!((*rl).timers.lock().unwrap().len(), 1);
 
-            // Unregister the other
             let r = host_run_loop_unregister_timer(rl as *mut IRunLoop, fake_handler2);
             assert_eq!(r, kResultOk);
             assert_eq!((*rl).timers.lock().unwrap().len(), 0);
@@ -1290,8 +1145,6 @@ mod tests {
             host_run_loop_release(rl as *mut FUnknown);
         }
     }
-
-    // ---- HostRunLoop: fd handler registration ----
 
     #[test]
     fn run_loop_register_unregister_event_handler() {
@@ -1311,8 +1164,6 @@ mod tests {
             host_run_loop_release(rl as *mut FUnknown);
         }
     }
-
-    // ---- HostRunLoop: null handler rejected ----
 
     #[test]
     fn run_loop_null_timer_handler_rejected() {
@@ -1336,13 +1187,10 @@ mod tests {
         }
     }
 
-    // ---- Ref counting ----
-
     #[test]
     fn host_application_ref_counting() {
         unsafe {
             let app = new_host_application(std::ptr::null_mut());
-            // Initial ref_count = 1
             let count = host_app_add_ref(app as *mut FUnknown);
             assert_eq!(count, 2);
 
@@ -1355,7 +1203,6 @@ mod tests {
             let count = host_app_release(app as *mut FUnknown);
             assert_eq!(count, 1);
 
-            // Final release deallocates
             let count = host_app_release(app as *mut FUnknown);
             assert_eq!(count, 0);
         }
@@ -1371,7 +1218,6 @@ mod tests {
             let count = ms_release(ms as *mut FUnknown);
             assert_eq!(count, 1);
 
-            // Final release
             let count = ms_release(ms as *mut FUnknown);
             assert_eq!(count, 0);
         }

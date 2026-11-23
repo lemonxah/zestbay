@@ -1,19 +1,3 @@
-//! LV2 Log extension implementation.
-//!
-//! Provides the `LV2_Log_Log` feature so plugins can emit log messages
-//! that are routed to Rust's `log` crate (env_logger).  The host maps
-//! LV2 log‐type URIDs to the appropriate `log` level:
-//!
-//! - `log#Error`   → `log::error!`
-//! - `log#Warning` → `log::warn!`
-//! - `log#Note`    → `log::info!`
-//! - `log#Trace`   → `log::trace!`
-//!
-//! Messages logged while the calling thread is inside the plugin's `run()`
-//! (see [`RtScope`]) are formatted into a stack buffer and pushed into a
-//! lock-free ring; a background thread drains the ring and does the actual
-//! logging, so the RT thread never allocates, locks or does I/O.
-
 use std::cell::Cell;
 use std::ffi::{CStr, c_char, c_void};
 use std::sync::{Arc, OnceLock};
@@ -21,12 +5,6 @@ use std::sync::{Arc, OnceLock};
 use super::urid::UridMapper;
 use crate::plugin::types::{MsgConsumer, MsgPop, MsgProducer, msg_ring};
 
-// `va_list` ABI: on x86_64 SysV it is an array type, so a `va_list` parameter
-// is passed as a pointer; on aarch64 Linux (AAPCS64) it is a 32-byte struct,
-// which is passed by reference to a caller-made copy.  In both cases the
-// callee receives a single pointer, and forwarding that pointer to
-// `vsnprintf` is ABI-correct.  On other architectures we do not interpret
-// the argument list and log the raw format string instead.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 unsafe extern "C" {
     fn vsnprintf(s: *mut c_char, n: usize, format: *const c_char, ap: *mut c_void) -> i32;
@@ -64,9 +42,6 @@ thread_local! {
     static IN_RT: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Marks the current thread as running plugin RT code (`run()`, worker
-/// responses) for as long as the guard lives.  Log calls made inside the
-/// scope are deferred to the background log thread.
 pub struct RtScope {
     prev: bool,
 }
@@ -120,7 +95,6 @@ fn emit(level: Level, msg: &str) {
     }
 }
 
-/// Process-wide ring for messages logged from RT context.
 struct RtLogRing {
     producer: parking_lot::Mutex<MsgProducer>,
 }
@@ -162,8 +136,6 @@ fn rt_log_drain_thread(mut consumer: MsgConsumer) {
     }
 }
 
-/// RT-safe: copies the message into the ring, dropping it if the ring is
-/// full or momentarily contended.
 fn push_rt(level: Level, msg: &[u8]) {
     let Some(ring) = RT_LOG_RING.get() else {
         return;
@@ -221,14 +193,10 @@ pub struct Lv2LogSetup {
     log_ctx_ptr: *mut LogContext,
 }
 
-// SAFETY: log_ctx_ptr is heap-allocated in new(), only dereferenced in the
-// log callbacks, and reclaimed in Drop.
 unsafe impl Send for Lv2LogSetup {}
 
 impl Lv2LogSetup {
     pub fn new(mapper: &Arc<UridMapper>) -> Self {
-        // Make sure the RT drain thread exists before any plugin can log
-        // from run().
         rt_log_ring();
 
         let ctx = Box::new(LogContext {
@@ -240,14 +208,6 @@ impl Lv2LogSetup {
         });
         let ctx_ptr = Box::into_raw(ctx);
 
-        // Stable Rust cannot define C-variadic functions.  `printf` points at
-        // a function taking only the fixed (handle, type, fmt) prefix.  On the
-        // supported SysV/AAPCS64 targets the fixed arguments of a variadic
-        // call are passed exactly like a non-variadic call, and the callee
-        // never touches the variadic part, so this is sound in practice.  The
-        // format string is logged without argument substitution; plugins using
-        // the standard lv2_log_* helpers go through `vprintf` and get full
-        // formatting.
         let printf: PrintfFn = unsafe {
             std::mem::transmute::<PrintfPrefixFn, PrintfFn>(log_printf_callback)
         };
@@ -283,8 +243,6 @@ impl Drop for Lv2LogSetup {
     }
 }
 
-/// `printf` entry point: logs the raw format string (arguments are not
-/// substituted, see `Lv2LogSetup::new`).
 unsafe extern "C" fn log_printf_callback(
     handle: *mut c_void,
     type_: u32,
@@ -300,8 +258,6 @@ unsafe extern "C" fn log_printf_callback(
     bytes.len() as i32
 }
 
-/// # Safety
-/// `ap` must be the `va_list` argument as received from the calling plugin.
 unsafe extern "C" fn log_vprintf_callback(
     handle: *mut c_void,
     type_: u32,
@@ -314,7 +270,6 @@ unsafe extern "C" fn log_vprintf_callback(
 
     let ctx = unsafe { &*(handle as *const LogContext) };
 
-    // Single pass into a fixed stack buffer: no allocation, RT-safe.
     let mut buf = [0u8; MSG_BUF_SIZE];
     let written = unsafe { format_va(&mut buf, fmt, ap) };
 

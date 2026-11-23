@@ -32,20 +32,15 @@ pub mod qobject {
         #[qinvokable]
         fn request_quit(self: Pin<&mut Self>);
 
-        /// {"current": name or "", "path": folder, "sessions": [names]}
         #[qinvokable]
         fn get_sessions_json(self: Pin<&mut Self>) -> QString;
 
-        /// Empty string on success, otherwise what went wrong.
         #[qinvokable]
         fn create_session(self: Pin<&mut Self>, name: QString) -> QString;
 
-        /// Delete a session's folder. Empty string on success, otherwise why not.
         #[qinvokable]
         fn delete_session(self: Pin<&mut Self>, name: QString) -> QString;
 
-        /// Save this session and load another one, live. Empty string when
-        /// it started, otherwise why it can't.
         #[qinvokable]
         fn switch_session(self: Pin<&mut Self>, name: QString) -> QString;
 
@@ -67,23 +62,16 @@ pub mod qobject {
         #[qinvokable]
         fn disconnect_link(self: Pin<&mut Self>, link_id: u32);
 
-        /// Disconnect `link_id` and add a block rule for its node pair.
         #[qinvokable]
         fn block_link(self: Pin<&mut Self>, link_id: u32);
 
-        /// Add a block rule for the node pair of two ports (right-drag) and
-        /// disconnect any links between those nodes.
         #[qinvokable]
         fn block_ports(self: Pin<&mut Self>, output_port_id: u32, input_port_id: u32);
 
-        /// "Source → Target" when an enabled block rule forbids connecting
-        /// these ports (rules on), otherwise "".
         #[qinvokable]
         fn blocked_reason(self: Pin<&mut Self>, output_port_id: u32, input_port_id: u32)
         -> QString;
 
-        /// Node pairs under an enabled block rule, for the red lines:
-        /// `[{source, target, ruleId, label}]` (empty while rules are off).
         #[qinvokable]
         fn get_blocked_pairs_json(self: Pin<&mut Self>) -> QString;
 
@@ -105,7 +93,6 @@ pub mod qobject {
         #[qinvokable]
         fn save_hidden(self: Pin<&mut Self>, json: QString);
 
-        /// Meters snapped onto a port: {layoutKey: "source" | "dest"}.
         #[qinvokable]
         fn get_docked_meters_json(self: Pin<&mut Self>) -> QString;
 
@@ -142,19 +129,12 @@ pub mod qobject {
         #[qinvokable]
         fn add_plugin(self: Pin<&mut Self>, uri: QString) -> QString;
 
-        /// Add a built-in meter with 1..6 or 8 channels; returns its display name
-        /// ("" on failure), like `add_plugin`.
         #[qinvokable]
         fn add_meter(self: Pin<&mut Self>, channels: i32) -> QString;
 
-        /// Rename a built-in meter to `base_name` made unique (" #2"...), or
-        /// back to its default name when `base_name` is empty. Returns the
-        /// name it now has ("" if the node is not a meter).
         #[qinvokable]
         fn rename_meter(self: Pin<&mut Self>, node_id: u32, base_name: QString) -> QString;
 
-        /// Levels of every running meter, by PipeWire node id:
-        /// {"<nodeId>": [linear level per channel]}.
         #[qinvokable]
         fn meter_levels_json(self: Pin<&mut Self>) -> QString;
 
@@ -173,8 +153,6 @@ pub mod qobject {
         #[qinvokable]
         fn get_plugin_params_json(self: Pin<&mut Self>, node_id: u32) -> QString;
 
-        /// The plugin instance's current PipeWire node id, or -1. A reload
-        /// (preset with state, sample-rate change) gives it a new node.
         #[qinvokable]
         fn plugin_node_for_instance(self: Pin<&mut Self>, instance_id: u64) -> i32;
 
@@ -187,21 +165,15 @@ pub mod qobject {
         #[qinvokable]
         fn set_plugin_enabled(self: Pin<&mut Self>, node_id: u32, enabled: bool);
 
-        /// Preset summary for every plugin node: {nodeId: {name, isDefault,
-        /// modified, count}}. `name` is the selected preset ("" for none).
         #[qinvokable]
         fn get_plugin_presets_all_json(self: Pin<&mut Self>) -> QString;
 
-        /// {presets: [names], selected, default} for one plugin node.
         #[qinvokable]
         fn get_plugin_presets_json(self: Pin<&mut Self>, node_id: u32) -> QString;
 
-        /// Apply the named preset's parameter values and select it.
         #[qinvokable]
         fn apply_plugin_preset(self: Pin<&mut Self>, node_id: u32, name: QString) -> bool;
 
-        /// Save the node's current parameters as a preset: a new one, or an
-        /// update if the name exists. The preset becomes the selected one.
         #[qinvokable]
         fn save_plugin_preset(self: Pin<&mut Self>, node_id: u32, name: QString) -> bool;
 
@@ -211,13 +183,9 @@ pub mod qobject {
         #[qinvokable]
         fn delete_plugin_preset(self: Pin<&mut Self>, node_id: u32, name: QString);
 
-        /// Reset the plugin to its defaults (parameters and, for LV2, saved
-        /// state) and deselect its preset, ready to save as a new one.
         #[qinvokable]
         fn start_new_plugin_preset(self: Pin<&mut Self>, node_id: u32);
 
-        /// Make the named preset the plugin's default for new instances;
-        /// an empty name clears the default.
         #[qinvokable]
         fn set_default_plugin_preset(self: Pin<&mut Self>, node_id: u32, name: QString);
 
@@ -275,36 +243,28 @@ pub mod qobject {
             action: QString,
         );
 
-        // ---- Subgraphs (issue #17) and virtual devices ----
         #[qinvokable]
         fn get_subgraphs_json(self: Pin<&mut Self>) -> QString;
-        /// Id of the subgraph the graph view is inside, or "" (main graph).
         #[qinvokable]
         fn get_subgraph_view(self: Pin<&mut Self>) -> QString;
         #[qinvokable]
         fn set_subgraph_view(self: Pin<&mut Self>, subgraph_id: QString);
-        /// Suggested name and I/O for grouping these node ids (JSON array).
         #[qinvokable]
         fn infer_subgraph_io(self: Pin<&mut Self>, node_ids_json: QString) -> QString;
-        /// Group plugin nodes into a new subgraph; returns its id ("" on failure).
         #[qinvokable]
         fn create_subgraph(
             self: Pin<&mut Self>,
             node_ids_json: QString,
             config_json: QString,
         ) -> QString;
-        /// Change name, I/O, MIDI or device options.
         #[qinvokable]
         fn update_subgraph(self: Pin<&mut Self>, subgraph_id: QString, config_json: QString);
         #[qinvokable]
         fn ungroup_subgraph(self: Pin<&mut Self>, subgraph_id: QString);
-        /// Remove a subgraph and its plugins.
         #[qinvokable]
         fn delete_subgraph(self: Pin<&mut Self>, subgraph_id: QString);
         #[qinvokable]
         fn save_subgraph_view_state(self: Pin<&mut Self>, subgraph_id: QString, json: QString);
-        /// Copy a subgraph (plugins, settings, wiring) next to it. Returns
-        /// `{subgraphId, layout}` like `insert_subgraph_template`.
         #[qinvokable]
         fn duplicate_subgraph(
             self: Pin<&mut Self>,
@@ -320,8 +280,6 @@ pub mod qobject {
         ) -> QString;
         #[qinvokable]
         fn list_subgraph_templates_json(self: Pin<&mut Self>) -> QString;
-        /// Insert a saved template at (x, y); returns `{subgraphId, layout}`
-        /// where `layout` maps layout keys to positions.
         #[qinvokable]
         fn insert_subgraph_template(self: Pin<&mut Self>, file: QString, x: f64, y: f64)
         -> QString;
@@ -329,7 +287,6 @@ pub mod qobject {
         fn delete_subgraph_template(self: Pin<&mut Self>, file: QString);
         #[qinvokable]
         fn get_virtual_devices_json(self: Pin<&mut Self>) -> QString;
-        /// kind: "sink" | "source". Returns the new id.
         #[qinvokable]
         fn add_virtual_device(
             self: Pin<&mut Self>,
@@ -341,15 +298,6 @@ pub mod qobject {
         fn update_virtual_device(self: Pin<&mut Self>, id: QString, name: QString, channels: u32);
         #[qinvokable]
         fn remove_virtual_device(self: Pin<&mut Self>, id: QString);
-
-        /// Inside a Flatpak, the folder (holding lv2/, vst3/, clap/) where
-        /// users put their own plugins; "" otherwise.
-        #[qinvokable]
-        fn get_app_plugin_folder(self: Pin<&mut Self>) -> QString;
-
-        /// "Flatpak" (with the app id) or "Native".
-        #[qinvokable]
-        fn get_install_kind(self: Pin<&mut Self>) -> QString;
 
         #[qinvokable]
         fn get_window_geometry_json(self: Pin<&mut Self>) -> QString;
@@ -458,30 +406,24 @@ pub mod qobject {
         #[qsignal]
         fn error_occurred(self: Pin<&mut AppController>, message: QString);
 
-        /// The rule set changed (added, removed, toggled, learned, blocked).
         #[qsignal]
         fn rules_changed(self: Pin<&mut AppController>);
 
         #[qsignal]
         fn show_window_requested(self: Pin<&mut AppController>);
 
-        /// A tray menu action for the UI: "add_plugin", "rules" or
-        /// "preferences" (the window has already been asked to show).
         #[qsignal]
         fn tray_action_requested(self: Pin<&mut AppController>, action: QString);
 
         #[qsignal]
         fn hide_window_requested(self: Pin<&mut AppController>);
 
-        /// Subgraphs or virtual devices changed (created, edited, removed).
         #[qsignal]
         fn subgraphs_changed(self: Pin<&mut AppController>);
 
-        /// A session switch is starting: the view saves what it holds.
         #[qsignal]
         fn session_changing(self: Pin<&mut AppController>);
 
-        /// Another session is now open: the view reloads layout, pins etc.
         #[qsignal]
         fn session_changed(self: Pin<&mut AppController>);
 
@@ -538,24 +480,15 @@ use crate::subgraph::{
 use crate::tray::TrayState;
 use crate::ui::subgraphs::{self as sgui, Subgraphs, ViewNodeKind};
 
-/// Tracks the mapping between virtual sub-node IDs (used in the UI for split
-/// bridge nodes) and the real PipeWire node ID + port group.
 #[derive(Debug, Default)]
 struct BridgeSplitState {
-    /// virtual_node_id -> (real_node_id, port_group)
     virtual_to_real: HashMap<u32, (u32, String)>,
-    /// (real_node_id, port_group) -> virtual_node_id
     real_to_virtual: HashMap<(u32, String), u32>,
-    /// port_id -> virtual_node_id (for link rewriting)
     port_to_virtual: HashMap<u32, u32>,
-    /// Next virtual node ID to allocate (starts high to avoid collisions with PipeWire IDs)
     next_virtual_id: u32,
 }
 
 impl BridgeSplitState {
-    /// Virtual IDs start at 1,000,000 — well above any real PipeWire object ID
-    /// (which are typically < 1000) but safely within QML's signed 32-bit int
-    /// range (max 2,147,483,647).
     const VIRTUAL_ID_BASE: u32 = 1_000_000;
 
     fn new() -> Self {
@@ -565,10 +498,6 @@ impl BridgeSplitState {
         }
     }
 
-    /// Rebuild only the port mappings. Node id mappings survive for the whole
-    /// session: a device must keep its virtual id across refreshes, otherwise a
-    /// reconnecting device inherits another node's id — and with it, that
-    /// node's on-screen position — instead of its own saved one.
     fn clear_ports(&mut self) {
         self.port_to_virtual.clear();
     }
@@ -622,8 +551,6 @@ pub struct AppControllerRust {
     last_plugin_scan: Option<Instant>,
     plugin_scan_rx: Option<Receiver<crate::plugin::scan::ScanEvent>>,
     pending_plugin_adds: Vec<PwCommand>,
-    /// Events received while `collect_plugin_states_blocking` was waiting
-    /// for state replies; handled by the next `poll_events`.
     stashed_events: std::collections::VecDeque<PwEvent>,
 
     graph: Option<Arc<GraphState>>,
@@ -644,24 +571,14 @@ pub struct AppControllerRust {
     params_dirty: bool,
     params_dirty_since: Option<std::time::Instant>,
 
-    /// Per-plugin parameter presets (presets.json).
     presets: crate::presets::PresetStore,
-    /// A preset just saved from an LV2 instance: (plugin URI, preset name)
-    /// to refresh with the fresh state snapshot that is on its way.
     preset_state_refresh: std::collections::HashMap<u64, (String, String)>,
 
-    /// Instance ids of the plugins restored from plugins.json at startup that
-    /// have not reported back yet (added or failed).
     restore_instance_ids: std::collections::HashSet<u64>,
     restore_started_at: Option<std::time::Instant>,
     restore_batch_size: usize,
-    /// Saved links not (yet) present in the graph. Kept across persists so a
-    /// device or plugin that is absent right now doesn't lose its links.
     pending_links: Vec<PendingLink>,
-    /// Persistable links seen in the graph at the last persist.
     last_graph_links: Vec<SavedPluginLink>,
-    /// Display names of plugins removed/renamed this session; links to them
-    /// are forgotten rather than remembered as pending.
     forgotten_link_nodes: std::collections::HashSet<String>,
     docked_meters: std::collections::HashMap<String, String>,
     reconnect_instances: std::collections::HashSet<u64>,
@@ -670,22 +587,15 @@ pub struct AppControllerRust {
     links_dirty: bool,
     links_dirty_since: Option<std::time::Instant>,
 
-    /// The mapping a MIDI-learn just tried to add (kept for conflict resolution).
     last_learned_mapping: Option<crate::midi::MidiCcMapping>,
     pending_conflict_mapping: Option<crate::midi::MidiCcMapping>,
 
     state_request_sent_at: Option<Instant>,
     last_state_autosave: Instant,
-    /// plugins.json could not be parsed at startup — never snapshot it as known-good.
     plugins_load_failed: bool,
 
-    /// PipeWire connection dropped; the graph is being torn down/rebuilt.
     pw_reconnecting: bool,
-    /// Links are not persisted until this time (graph still settling after a
-    /// reconnect or an in-place plugin reload).
     links_suppressed_until: Option<Instant>,
-    /// MIDI mappings whose device is unplugged: kept on disk and re-added
-    /// when the device comes back.
     dormant_midi_mappings: Vec<crate::midi::MidiCcMapping>,
 
     prefs: Preferences,
@@ -704,15 +614,11 @@ pub struct AppControllerRust {
     midi_learn_target: Option<(u64, usize, String, crate::midi::MappingMode)>,
     plugins_frozen: bool,
 
-    /// OSC remote control, while enabled in the preferences.
     osc: Option<crate::osc::OscServer>,
 
-    /// Set while one session is being taken down for another.
     session_swap: Option<SessionSwap>,
 }
 
-/// A live session switch in progress: the plugins of the old session are
-/// being removed; the new one loads once they are gone.
 struct SessionSwap {
     target: String,
     started: Instant,
@@ -761,9 +667,6 @@ impl Default for AppControllerRust {
             pw_reconnecting: false,
             links_suppressed_until: None,
             dormant_midi_mappings: Vec::new(),
-            // Loaded here, not in init(): QML reads preferences (theme,
-            // grid, start minimized) in its Component.onCompleted, which can
-            // run before init().
             prefs: load_preferences(),
             tray_state: None,
             cpu_usage: QString::from("0.0%"),
@@ -798,9 +701,7 @@ impl qobject::AppController {
     pub fn init(mut self: Pin<&mut Self>) {
         log::info!("AppController::init — starting PipeWire");
 
-        // Already loaded when the controller was created (see Default).
         let prefs = self.rust().prefs.clone();
-        // Before PipeWire starts and saved plugins are restored.
         crate::plugin::PASSIVE_EFFECTS
             .store(prefs.passive_plugins, std::sync::atomic::Ordering::Relaxed);
         crate::pipewire::HIDE_UNNAMED_NODES
@@ -868,9 +769,6 @@ impl qobject::AppController {
         log::info!("AppController initialized successfully");
     }
 
-    /// Load the open session's links, plugins, MIDI mappings and subgraphs
-    /// and start restoring them. Returns the plugins named by a crash marker
-    /// (a previous restore crashed), in which case nothing is restored.
     fn begin_session_restore(mut self: Pin<&mut Self>) -> Option<String> {
         let saved_links = load_saved_links();
         if !saved_links.is_empty() {
@@ -907,9 +805,6 @@ impl qobject::AppController {
 
         let skip_restore = safe_mode || auto_safe;
 
-        // stable_id -> instance id of every plugin restored below, plus the
-        // restore order (legacy MIDI mappings stored the old per-session ids,
-        // which were assigned 1..N in this order).
         let mut stable_to_instance: HashMap<String, u64> = HashMap::new();
         let mut restore_order: Vec<u64> = Vec::new();
 
@@ -939,8 +834,6 @@ impl qobject::AppController {
             }
         }
 
-        // MIDI mappings target plugins, so they are only restored when the
-        // plugins are; in safe mode midi_mappings.json is left untouched.
         if !skip_restore {
             let saved_midi = load_midi_mappings();
             if !saved_midi.is_empty() {
@@ -959,8 +852,6 @@ impl qobject::AppController {
         crashed_uris_str
     }
 
-    /// Register and start a plugin from its saved form (plugins.json entry
-    /// or subgraph template). Returns (instance id, stable id).
     fn spawn_saved_plugin(mut self: Pin<&mut Self>, sp: SavedPlugin) -> (u64, String) {
         let instance_id = self.rust().next_instance_id;
         self.as_mut().rust_mut().next_instance_id += 1;
@@ -1127,7 +1018,6 @@ impl qobject::AppController {
                         }
                         self.as_mut().send_or_defer_plugin(command);
                     }
-                    // Discovery time must not consume the restore timeout.
                     if !self.rust().restore_instance_ids.is_empty() {
                         self.as_mut().rust_mut().restore_started_at = Some(Instant::now());
                     }
@@ -1147,7 +1037,6 @@ impl qobject::AppController {
                         return;
                     }
                     self.as_mut().set_plugins_scanning(false);
-                    // Retain the original config if discovery could not finish.
                     self.as_mut().error_occurred(QString::from("Plugin discovery stopped unexpectedly. Restart to try again; the saved setup has been preserved."));
                     return;
                 }
@@ -1167,12 +1056,10 @@ impl qobject::AppController {
             mgr.finish_startup();
         }
         self.as_mut().forget_stale_meter_leftovers();
-        // Includes the path/descriptor backfill for older plugins.json files.
         persist_active_plugins(self.rust().plugin_manager.as_ref());
         self.as_mut().persist_midi();
     }
 
-    /// Load the open session's patchbay rules and default node.
     fn load_rules_and_default_node(mut self: Pin<&mut Self>) {
         let rules = load_rules();
         if !rules.is_empty() {
@@ -1327,16 +1214,12 @@ impl qobject::AppController {
         if has_events {
             let rx = self.as_mut().rust_mut().event_rx.take();
             if let Some(rx) = rx {
-                // Events set aside by a blocking state collection come first,
-                // in the order they arrived.
                 let mut stashed = std::mem::take(&mut self.as_mut().rust_mut().stashed_events);
                 while let Some(event) = stashed.pop_front().or_else(|| rx.try_recv().ok()) {
                     match event {
                         PwEvent::NodeChanged(_) => {
                             changed = true;
                             if self.rust().pw_reconnecting {
-                                // Nodes are coming back; give the graph a few
-                                // seconds to fill in before links are saved.
                                 self.as_mut().rust_mut().pw_reconnecting = false;
                                 self.as_mut()
                                     .suppress_link_persist(LINK_SETTLE_AFTER_RECONNECT);
@@ -1370,7 +1253,6 @@ impl qobject::AppController {
             }
         }
 
-        // Latest value per (instance, port); emitted once per poll.
         let mut param_updates: Vec<(u64, u32, f32)> = Vec::new();
 
         for event in plugin_events {
@@ -1387,9 +1269,6 @@ impl qobject::AppController {
                         pw_node_id,
                         display_name
                     );
-                    // A PluginAdded for an instance that already had a node is
-                    // a re-add (PipeWire reconnect or in-place reload at a new
-                    // sample rate), not a new plugin.
                     let reconnected = self
                         .as_mut()
                         .rust_mut()
@@ -1436,9 +1315,6 @@ impl qobject::AppController {
                         .forgotten_link_nodes
                         .remove(&display_name);
 
-                    // A reload/reconnect restores params and bypass on the
-                    // PipeWire side (on top of the plugin's restored state);
-                    // only a first add gets the saved values from here.
                     if !re_added
                         && let Some(ref mgr) = self.rust().plugin_manager
                         && let Some(info) = mgr.get_instance(instance_id)
@@ -1528,8 +1404,6 @@ impl qobject::AppController {
                     }
                 }
                 PluginEvent::PluginSkipped { instance_id } => {
-                    // Not running this session, but its entry (state, params,
-                    // links, MIDI mappings) stays in the config.
                     changed = true;
                     log::warn!("Plugin instance {} skipped for this session", instance_id);
                     if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager
@@ -1622,7 +1496,6 @@ impl qobject::AppController {
                         mapping.source,
                         mapping.target
                     );
-                    // One mapping per source and per target: a re-learn replaces.
                     let replaced: Vec<crate::midi::MidiCcTarget> = self
                         .rust()
                         .midi_mappings
@@ -1660,8 +1533,6 @@ impl qobject::AppController {
                         .filter(|m| m.source == *source)
                         .map(|m| (m.target.instance_id, m.target.port_index as u32))
                         .collect();
-                    // Removed because its device was unplugged: keep it (on
-                    // disk too) and re-add it when the device returns.
                     let device_gone = self.rust().graph.as_ref().is_some_and(|g| {
                         !node_name_present(g, &g.get_all_nodes(), &source.device_name)
                     });
@@ -1766,8 +1637,6 @@ impl qobject::AppController {
             self.as_mut().revive_dormant_midi_mappings();
         }
 
-        // Pending (remembered) links are merged into every persist, so link
-        // changes can be persisted as soon as the plugin restore is done.
         if link_changed && self.rust().restore_instance_ids.is_empty() {
             self.as_mut().mark_links_dirty();
         }
@@ -1938,9 +1807,6 @@ impl qobject::AppController {
             self.as_mut().error_occurred(qmsg);
         }
 
-        // The restore completes when every plugin of the batch reported back
-        // (PluginAdded, PluginSkipped or a fatal PluginError); this is a safety
-        // cap, scaled with the batch since probes and adds run in sequence.
         if !self.rust().plugins_scanning
             && !self.rust().restore_instance_ids.is_empty()
             && let Some(started) = self.rust().restore_started_at
@@ -1992,7 +1858,6 @@ impl qobject::AppController {
         self.as_mut().set_cpu_usage(QString::from(&cpu_str));
     }
 
-    /// A plugin from the startup restore batch reported back (added or failed).
     fn finish_restore_of(mut self: Pin<&mut Self>, instance_id: u64) {
         if !self
             .as_mut()
@@ -2018,7 +1883,6 @@ impl qobject::AppController {
         }
     }
 
-    /// Links to a plugin that was removed or renamed must not be remembered.
     fn rename_plugin_links(mut self: Pin<&mut Self>, old: &str, new: &str) {
         let rename = |l: &mut SavedPluginLink| {
             if l.output_node_name == old {
@@ -2065,7 +1929,6 @@ impl qobject::AppController {
         write_saved_links(&merged);
     }
 
-    /// Try to (re)connect remembered links whose endpoints are now present.
     fn retry_pending_links(mut self: Pin<&mut Self>) {
         let Some(graph) = self.rust().graph.clone() else {
             return;
@@ -2139,7 +2002,6 @@ impl qobject::AppController {
         persist_midi_mappings(&all, self.rust().plugin_manager.as_ref());
     }
 
-    /// Re-add mappings whose MIDI device has reappeared.
     fn revive_dormant_midi_mappings(mut self: Pin<&mut Self>) {
         if self.rust().dormant_midi_mappings.is_empty() {
             return;
@@ -2185,8 +2047,6 @@ impl qobject::AppController {
                 .is_some_and(|t| Instant::now() < t)
     }
 
-    /// Remove every MIDI mapping that targets `instance_id` (plugin removed).
-    /// Take a removed plugin (by stable id) out of the subgraph it belonged to.
     fn drop_subgraph_member(mut self: Pin<&mut Self>, stable_id: &str) {
         if self.rust().subgraphs.owner_of(stable_id).is_none() {
             return;
@@ -2240,7 +2100,6 @@ impl qobject::AppController {
         lv2_state: Vec<crate::lv2::state::StateEntry>,
         blob: Option<Vec<u8>>,
     ) {
-        // A preset was just saved from this plugin: keep the fresh snapshot.
         if let Some((uri, name)) = self
             .as_mut()
             .rust_mut()
@@ -2253,7 +2112,6 @@ impl qobject::AppController {
                 .presets
                 .set_lv2_state(&uri, &name, lv2_state.clone());
             persist_presets(&self.rust().presets);
-            // Saving the state may have written files; keep them with it.
             if let Some(scope) = self
                 .rust()
                 .plugin_manager
@@ -2289,7 +2147,6 @@ impl qobject::AppController {
                     info.lv2_state = lv2_state;
                 }
                 _ => {
-                    // Keep the previous blob if the plugin couldn't produce one.
                     if blob.is_some() {
                         info.plugin_state = blob;
                     }
@@ -2313,7 +2170,6 @@ impl qobject::AppController {
                 .is_some_and(|mgr| mgr.startup_complete() && !mgr.active_instances().is_empty())
     }
 
-    /// Periodically snapshot plugin state so a crash doesn't lose it.
     fn maybe_autosave_plugin_states(mut self: Pin<&mut Self>) {
         const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(60);
         const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -2338,9 +2194,6 @@ impl qobject::AppController {
         }
     }
 
-    /// Ask the PipeWire thread for every plugin's state and wait (bounded) for
-    /// the replies. Other events received meanwhile are kept for the next
-    /// `poll_events`.
     fn collect_plugin_states_blocking(mut self: Pin<&mut Self>, timeout: Duration) {
         let Some(rx) = self.as_mut().rust_mut().event_rx.take() else {
             return;
@@ -2351,7 +2204,6 @@ impl qobject::AppController {
             .as_ref()
             .is_some_and(|tx| tx.send(PwCommand::RequestPluginStates).is_ok());
         if sent {
-            // An autosave request may still be in flight; its Done comes first.
             let mut dones_needed = if self.rust().state_request_sent_at.is_some() {
                 2
             } else {
@@ -2407,10 +2259,8 @@ impl qobject::AppController {
                 nodes.iter().filter(|n| n.ready).count()
             );
 
-            // Rebuild port mappings each refresh; virtual node ids stay stable
             self.as_mut().rust_mut().bridge_split.clear_ports();
 
-            // What the current view (main graph or one subgraph) shows.
             let members = self.member_nodes();
             self.as_mut()
                 .rust_mut()
@@ -2430,11 +2280,9 @@ impl qobject::AppController {
                     None => "Unknown",
                 };
 
-                // Split bridge nodes into per-device sub-nodes
                 if n.is_bridge {
                     let groups = graph.get_bridge_port_groups(n.id);
                     if groups.is_empty() {
-                        // No ports with groups yet — show the bridge as-is
                         let mgr = self.rust().plugin_manager.as_ref();
                         json_nodes.push(node_to_json(n, mgr));
                     } else {
@@ -2445,7 +2293,6 @@ impl qobject::AppController {
                                 .bridge_split
                                 .get_or_create_virtual_id(n.id, group);
 
-                            // Register all ports in this group for link rewriting
                             let group_ports = graph.get_ports_for_bridge_group(n.id, group);
                             for port in &group_ports {
                                 self.as_mut()
@@ -2454,7 +2301,6 @@ impl qobject::AppController {
                                     .register_port(port.id, vid);
                             }
 
-                            // Determine sub-node type based on port directions
                             let has_inputs = group_ports
                                 .iter()
                                 .any(|p| p.direction == PortDirection::Input);
@@ -2503,8 +2349,6 @@ impl qobject::AppController {
             let json_links: Vec<serde_json::Value> = links
                 .iter()
                 .filter_map(|l| {
-                    // Rewrite node IDs for ports shown on subgraph view nodes
-                    // or bridge sub-nodes; drop links the view doesn't show.
                     let out_node = self.view_node_for(l.output_port_id, l.output_node_id)?;
                     let in_node = self.view_node_for(l.input_port_id, l.input_node_id)?;
                     Some(serde_json::json!({
@@ -2527,7 +2371,6 @@ impl qobject::AppController {
     pub fn get_ports_json(self: Pin<&mut Self>, node_id: u32) -> QString {
         log::debug!("get_ports_json: node_id={}", node_id);
         if let Some(ref graph) = self.rust().graph {
-            // Subgraph view nodes, then virtual bridge sub-node IDs
             let ports = if let Some(vn) = self.rust().subgraphs.vm.nodes.get(&node_id) {
                 vn.ports.clone()
             } else if let Some((real_node_id, group)) = self
@@ -2550,9 +2393,6 @@ impl qobject::AppController {
                         Some(crate::pipewire::MediaType::Midi) => "Midi",
                         None => "Unknown",
                     };
-                    // For bridge sub-node ports, use a cleaner display name
-                    // from port.alias (the part after the colon) or fall back to default
-                    // Subgraph edges show their channel (FL, MONO…) or midi_in/out.
                     let display_name = if self.rust().subgraphs.vm.nodes.contains_key(&node_id) {
                         p.display_name().to_string()
                     } else {
@@ -2571,7 +2411,6 @@ impl qobject::AppController {
                             crate::lv2::atom_state::port_label(&i.plugin_uri, &i.lv2_state, &p.name)
                         })
                         .unwrap_or(display_name);
-                    // Ports keep their place when the user renames them.
                     let sort_name = display_name.clone();
                     let display_name = self
                         .rust()
@@ -2602,18 +2441,15 @@ impl qobject::AppController {
     }
 
     pub fn connect_ports(mut self: Pin<&mut Self>, output_port_id: u32, input_port_id: u32) {
-        // Reject self-loops: don't connect a node's output to its own input
-        // For bridge nodes, allow cross-device connections (different port groups)
         if let Some(ref graph) = self.rust().graph {
             let out_port = graph.get_port(output_port_id);
             let in_port = graph.get_port(input_port_id);
             if let (Some(op), Some(ip)) = (&out_port, &in_port)
                 && op.node_id == ip.node_id
             {
-                // Same PipeWire node — only reject if same port group (or no groups)
                 let same_group = match (&op.port_group, &ip.port_group) {
                     (Some(og), Some(ig)) => og == ig,
-                    _ => true, // If either has no group, treat as same device
+                    _ => true,
                 };
                 if same_group {
                     log::warn!(
@@ -2626,7 +2462,6 @@ impl qobject::AppController {
             }
         }
 
-        // A block rule forbids this pair: refuse (the UI says why).
         let reason = self.as_mut().blocked_reason(output_port_id, input_port_id);
         if !reason.is_empty() {
             log::info!("Connect refused, blocked by rule: {}", reason);
@@ -2810,7 +2645,6 @@ impl qobject::AppController {
                     .find(|r| r.id == rule_id)
                     .map(|r| format!("{} \u{2192} {}", r.source_pattern, r.target_pattern))
                     .unwrap_or_default();
-                // Subgraph edges are drawn as their card in the main graph.
                 let owner = &self.rust().subgraphs.vm.real_owner;
                 serde_json::json!({
                     "source": owner.get(&source).copied().unwrap_or(source),
@@ -2823,8 +2657,6 @@ impl qobject::AppController {
         QString::from(&serde_json::to_string(&pairs).unwrap_or_else(|_| "[]".into()))
     }
 
-    /// Add a block rule for `source_id` → `target_id` and remove the links
-    /// between them now (the patchbay keeps them removed once rules are on).
     fn block_nodes(mut self: Pin<&mut Self>, source_id: u32, target_id: u32) {
         let Some(graph) = self.rust().graph.clone() else {
             return;
@@ -2869,9 +2701,6 @@ impl qobject::AppController {
         }
     }
 
-    /// What dropping plugin `node_id` on `link_id` would do, for the drag
-    /// preview: `{"remove": [link ids], "add": [[out port, in port], ...]}`,
-    /// or `""` when it can't be inserted there.
     pub fn insert_on_link_preview_json(self: Pin<&mut Self>, link_id: u32, node_id: u32) -> QString {
         let Some(ref graph) = self.rust().graph else {
             return QString::from("");
@@ -3025,14 +2854,7 @@ impl qobject::AppController {
 
     pub fn restart_pipewire(self: Pin<&mut Self>) {
         std::thread::spawn(|| {
-            let mut cmd = if crate::plugin::paths::in_flatpak() {
-                // The sandbox can't reach the host's systemd directly.
-                let mut c = std::process::Command::new("flatpak-spawn");
-                c.args(["--host", "systemctl"]);
-                c
-            } else {
-                std::process::Command::new("systemctl")
-            };
+            let mut cmd = std::process::Command::new("systemctl");
             cmd.args([
                 "--user",
                 "restart",
@@ -3088,8 +2910,6 @@ impl qobject::AppController {
         }
     }
 
-    /// Start switching to another session: save this one, take its plugins
-    /// and subgraphs down, and (in `poll_session_swap`) load the other.
     fn begin_session_swap(mut self: Pin<&mut Self>, name: &str) -> Result<(), String> {
         if self.rust().session_swap.is_some() {
             return Err("A session switch is already in progress.".into());
@@ -3116,7 +2936,6 @@ impl qobject::AppController {
         self.as_mut().session_changing();
         self.as_mut().save_session_now();
 
-        // From here on nothing is written until the new session is open.
         crate::session::suspend_writes(true);
 
         let (owned_keys, running, idle): (Vec<String>, Vec<u64>, Vec<u64>) = {
@@ -3149,7 +2968,6 @@ impl qobject::AppController {
                 });
             }
         }
-        // Plugins that never started have nothing to wait for.
         for instance_id in idle {
             if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager {
                 mgr.remove_instance(instance_id);
@@ -3163,8 +2981,6 @@ impl qobject::AppController {
         Ok(())
     }
 
-    /// Finish a session switch once the old plugins are gone (or have taken
-    /// too long to go).
     fn poll_session_swap(mut self: Pin<&mut Self>) {
         const GIVE_UP_AFTER: Duration = Duration::from_secs(8);
         let Some(swap) = self.rust().session_swap.as_ref() else {
@@ -3193,7 +3009,6 @@ impl qobject::AppController {
             return;
         }
 
-        // Nothing of the old session may linger.
         crate::PLUGINS_FROZEN.store(false, std::sync::atomic::Ordering::SeqCst);
         list_clear(&LOAD_FAILED);
         list_clear(&SAVE_BLOCKED);
@@ -3231,7 +3046,6 @@ impl qobject::AppController {
         }
         crate::session::suspend_writes(false);
 
-        // Load the new one, the way startup does.
         self.as_mut().load_rules_and_default_node();
         self.as_mut().rust_mut().rules_loaded = true;
         let crashed = self.as_mut().begin_session_restore();
@@ -3246,7 +3060,6 @@ impl qobject::AppController {
         log::info!("Session \"{target}\" is open");
     }
 
-    /// Tell the user a previous restore crashed (a crash marker was found).
     fn notify_crash_recovery(mut self: Pin<&mut Self>, crashed: Option<String>) {
         let Some(uris) = crashed else { return };
         if has_known_good_plugins() {
@@ -3263,9 +3076,6 @@ impl qobject::AppController {
         }
     }
 
-    /// Write the open session's state to disk: plugin states, links,
-    /// plugins, subgraphs and MIDI mappings. Used on quit and before
-    /// switching to another session.
     fn save_session_now(mut self: Pin<&mut Self>) {
         let frozen = crate::PLUGINS_FROZEN.load(std::sync::atomic::Ordering::SeqCst);
         if self.plugins_persistable() {
@@ -3279,16 +3089,12 @@ impl qobject::AppController {
                 .as_ref()
                 .is_some_and(|mgr| mgr.startup_complete());
         remove_crash_marker();
-        // While PipeWire is reconnecting the graph is empty/partial; links.json
-        // already holds the last good state.
         if !self.links_persist_suppressed() {
             self.as_mut().persist_links_now();
         }
         persist_active_plugins(self.rust().plugin_manager.as_ref());
         self.as_mut().persist_midi();
         self.persist_subgraphs();
-        // Only a session that really loaded plugins.json (no safe mode, no
-        // parse failure, restore finished) may become the known-good snapshot.
         if !frozen && !self.rust().plugins_load_failed && restore_complete {
             save_known_good_plugins();
         }
@@ -3302,9 +3108,6 @@ impl qobject::AppController {
     }
 
     pub fn restore_known_good(self: Pin<&mut Self>) -> bool {
-        // plugins.json is replaced on disk and loaded on the next normal start.
-        // Plugins stay frozen for the rest of this session so nothing written
-        // here (an empty plugin list, the known-good copy) can clobber it.
         if restore_known_good_plugins() {
             log::info!("Known-good plugins restored. Restart to load them.");
             true
@@ -3345,11 +3148,6 @@ impl qobject::AppController {
         write_config_json_text("layout.json", &json.to_string());
     }
 
-    /// `node_sizes_json`: nodeId → [width, height] for every node shown in the
-    /// UI (hidden nodes are omitted and therefore not laid out).
-    /// `pinned_positions_json`: nodeId → [x, y]. Returns nodeId → [x, y].
-    /// Pinned nodes keep their positions; free nodes are laid out.
-    /// `grid_size` > 0 puts the result on that grid (snap to grid is on).
     pub fn auto_layout(
         mut self: Pin<&mut Self>,
         node_sizes_json: QString,
@@ -3377,8 +3175,6 @@ impl qobject::AppController {
             None => return QString::from("{}"),
         };
 
-        // Sort everything by id: HashMap iteration order would otherwise make
-        // the layout differ from run to run.
         let mut all_nodes = graph.get_all_nodes();
         all_nodes.sort_by_key(|n| n.id);
         let mut all_links = graph.get_all_links();
@@ -3389,7 +3185,6 @@ impl qobject::AppController {
         let mut layout_links: Vec<(u32, u32, u32, u32, u32)> = Vec::new();
         let mut included: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
-        // Phase 1: resolve bridge virtual IDs (needs mutable self for bridge_split)
         let mut bridge_vids: Vec<(u32, u32, String, String)> = Vec::new();
         for n in all_nodes.iter().filter(|n| n.ready && n.is_bridge) {
             let groups = graph.get_bridge_port_groups(n.id);
@@ -3403,7 +3198,6 @@ impl qobject::AppController {
             }
         }
 
-        // Phase 2: build layout data
         for n in all_nodes.iter().filter(|n| n.ready) {
             let has_groups = n.is_bridge && bridge_vids.iter().any(|(rid, ..)| *rid == n.id);
             if has_groups {
@@ -3451,7 +3245,6 @@ impl qobject::AppController {
             }
         }
 
-        // Subgraph cards and Input/Output nodes of the current view.
         let mut view_nodes: Vec<(u32, sgui::ViewNode)> = self
             .rust()
             .subgraphs
@@ -3510,8 +3303,6 @@ impl qobject::AppController {
             }
         }
 
-        // Graph density (preference node_spacing_px): the gap between
-        // stacked nodes, and 2.5x that between columns (50 / 20 by default).
         let spacing = f64::from(self.rust().prefs.node_spacing_px);
         let config = layout::graph::LayoutConfig {
             margin_x: spacing * 2.5,
@@ -3822,7 +3613,6 @@ impl qobject::AppController {
                 return QString::from("");
             };
 
-        // A new instance starts from the plugin's default preset, if it has one.
         let mut initial_params = initial_params;
         let default_preset = self
             .rust()
@@ -3912,8 +3702,6 @@ impl qobject::AppController {
                 stable_id,
                 enabled: true,
             });
-            // The add is queued on the PipeWire thread; parameter commands
-            // sent now are folded into it and applied when it runs.
             for (port_index, value) in default_values {
                 let _ = tx.send(PwCommand::SetPluginParameter {
                     instance_id,
@@ -3925,7 +3713,6 @@ impl qobject::AppController {
 
         persist_active_plugins(self.rust().plugin_manager.as_ref());
 
-        // Added while inside a subgraph: it belongs to that subgraph.
         if let Some(view) = self.rust().subgraphs.view.clone() {
             if let Some(def) = self.as_mut().rust_mut().subgraphs.find_mut(&view) {
                 def.members.push(stable_id_for_group.clone());
@@ -3940,7 +3727,6 @@ impl qobject::AppController {
     pub fn remove_plugin(mut self: Pin<&mut Self>, node_id: u32) {
         let instance_id = self.find_instance_id_for_node(node_id);
         if let Some(instance_id) = instance_id {
-            // Taken while the plugin's wires still exist.
             let bridge = self
                 .rust()
                 .graph
@@ -4049,8 +3835,6 @@ impl qobject::AppController {
         }
     }
 
-    /// Give a plugin port a name of the user's choosing; an empty name goes
-    /// back to the port's own.
     pub fn rename_port(mut self: Pin<&mut Self>, port_id: u32, new_name: QString) {
         let new_name = new_name.to_string().trim().to_string();
         let Some(port) = self.rust().graph.as_ref().and_then(|g| g.get_port(port_id)) else {
@@ -4134,7 +3918,6 @@ impl qobject::AppController {
     pub fn set_plugin_bypass(mut self: Pin<&mut Self>, node_id: u32, bypassed: bool) {
         if let Some(instance_id) = self.find_instance_id_for_node(node_id) {
             self.as_mut().set_instance_bypass(instance_id, bypassed);
-            // Let the graph view pick up the new bypass state.
             self.as_mut().graph_changed();
         }
     }
@@ -4199,9 +3982,7 @@ impl qobject::AppController {
         }
     }
 
-    /// (Re)start the OSC server to match the preferences.
     fn restart_osc(mut self: Pin<&mut Self>) {
-        // Free the port before binding it again.
         self.as_mut().rust_mut().osc = None;
         let (enabled, port, all) = {
             let p = &self.rust().prefs;
@@ -4221,8 +4002,6 @@ impl qobject::AppController {
         }
     }
 
-    /// The plugin an OSC address names: its stable id, or its name in the
-    /// lowercase `_` form. The lowest instance id wins if two names collide.
     fn find_osc_plugin(&self, key: &str) -> Option<u64> {
         let want = crate::osc::slug(key);
         self.rust()
@@ -4252,7 +4031,6 @@ impl qobject::AppController {
         }
     }
 
-    /// Apply one OSC request. Returns whether the graph view needs a refresh.
     fn handle_osc(mut self: Pin<&mut Self>, req: crate::osc::OscRequest) -> bool {
         use crate::osc::{OscAction, slug};
         use rosc::OscType;
@@ -4262,8 +4040,6 @@ impl qobject::AppController {
                 server.reply(req.from, addr, args);
             }
         };
-        // While a session is being swapped the plugins are going away; only
-        // the session list can be asked for.
         if self.rust().session_swap.is_some() && !matches!(req.action, OscAction::ListSessions) {
             log::debug!("OSC: ignored while the session is switching");
             return false;
@@ -4536,7 +4312,6 @@ impl qobject::AppController {
         }
     }
 
-    /// (instance id, stable id, plugin URI) of the plugin behind a graph node.
     fn preset_target(&self, node_id: u32) -> Option<(u64, String, String)> {
         let mgr = self.rust().plugin_manager.as_ref()?;
         mgr.active_instances()
@@ -4581,7 +4356,6 @@ impl qobject::AppController {
         };
         let store = &self.rust().presets;
         let selected = store.selected_name(&stable_id, &uri).unwrap_or("");
-        // What changed since the preset was applied or saved (the "*" marker).
         let changes: Vec<String> = self
             .rust()
             .plugin_manager
@@ -4641,8 +4415,6 @@ impl qobject::AppController {
                 preset.port_names.clone(),
             )
         };
-        // A preset saved with port names sets them; one saved without leaves
-        // the instance's own names alone.
         if !port_names.is_empty() {
             if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager
                 && let Some(info) = mgr.get_instance_mut(instance_id)
@@ -4653,10 +4425,6 @@ impl qobject::AppController {
             self.as_mut().graph_changed();
         }
         if let Some(state) = reload_state {
-            // The plugin's state (e.g. channel names) can only be restored
-            // before it starts, so it is re-created in place with the state
-            // and the preset's parameter values. Files the state refers to
-            // are copied into this instance's directory first.
             crate::presets::restore_preset_files(&uri, &stable_id, &name);
             if let Some(ref tx) = self.rust().cmd_tx {
                 let _ = tx.send(PwCommand::ReloadPluginWithState {
@@ -4738,8 +4506,6 @@ impl qobject::AppController {
         if is_lv2 {
             crate::presets::store_preset_files(&uri, &stable_id, &name);
         }
-        // The state kept here can be up to a minute old; ask for a fresh
-        // snapshot and store it in the preset when it arrives.
         if is_lv2
             && let Some(ref tx) = self.rust().cmd_tx
             && tx.send(PwCommand::RequestPluginStates).is_ok()
@@ -4760,8 +4526,6 @@ impl qobject::AppController {
         true
     }
 
-    /// Ctrl+S: write every plugin's current settings back into the preset it
-    /// has selected, for the ones that differ from it. Returns how many.
     pub fn save_modified_presets(mut self: Pin<&mut Self>) -> i32 {
         let targets: Vec<(u32, String)> = {
             let Some(mgr) = self.rust().plugin_manager.as_ref() else {
@@ -4809,8 +4573,6 @@ impl qobject::AppController {
             None => return,
         };
         if has_lv2_state {
-            // Saved state (e.g. channel names) can only be dropped by
-            // re-creating the plugin without it.
             if let Some(ref tx) = self.rust().cmd_tx {
                 let _ = tx.send(PwCommand::ReloadPluginWithState {
                     instance_id,
@@ -4946,8 +4708,6 @@ impl qobject::AppController {
             if let Some(name) = name {
                 self.as_mut().forget_plugin_links(&name);
             }
-            // The instance is gone from the manager before `PluginRemoved`
-            // arrives, so that handler can no longer find its stable id.
             self.as_mut().drop_subgraph_member(&sid);
             if let Some(ref mut mgr) = self.as_mut().rust_mut().plugin_manager {
                 mgr.remove_instance(instance_id);
@@ -5038,26 +4798,6 @@ impl qobject::AppController {
                 self.as_mut().rust_mut().params_dirty_since = Some(Instant::now());
             }
         }
-    }
-
-    pub fn get_app_plugin_folder(self: Pin<&mut Self>) -> QString {
-        crate::plugin::paths::app_plugin_dir("lv2")
-            .and_then(|d| d.parent().map(|p| p.to_string_lossy().into_owned()))
-            .map(|s| QString::from(&s))
-            .unwrap_or_default()
-    }
-
-    pub fn get_install_kind(self: Pin<&mut Self>) -> QString {
-        use crate::plugin::paths::{flatpak_app_id, in_flatpak};
-        let kind = if in_flatpak() {
-            match flatpak_app_id() {
-                Some(id) => format!("Flatpak ({id})"),
-                None => "Flatpak".to_string(),
-            }
-        } else {
-            "Native".to_string()
-        };
-        QString::from(&kind)
     }
 
     pub fn get_window_geometry_json(self: Pin<&mut Self>) -> QString {
@@ -5172,7 +4912,6 @@ impl qobject::AppController {
         self.as_mut().set_patchbay_exclusive(exclusive);
         self.as_mut().sync_tray_flags();
         log::info!("Patchbay exclusive mode: {}", exclusive);
-        // Turning it on should enforce the rules now, not on the next change.
         if exclusive && self.rust().patchbay_enabled {
             self.as_mut().apply_rules();
         }
@@ -5198,7 +4937,6 @@ impl qobject::AppController {
             let nodes = graph.get_all_nodes();
             let mut entries: Vec<serde_json::Value> = Vec::new();
 
-            // The inside half of a subgraph device edge is never a rule end.
             let internal = |n: &&Node| {
                 n.subgraph
                     .as_ref()
@@ -5213,7 +4951,6 @@ impl qobject::AppController {
                 };
 
                 if n.is_bridge {
-                    // For bridge nodes, list each device sub-node separately
                     let groups = graph.get_bridge_port_groups(n.id);
                     for device_name in groups.values() {
                         entries.push(serde_json::json!({
@@ -5494,8 +5231,6 @@ impl qobject::AppController {
                 .and_then(|mgr| mgr.get_instance(id))
                 .is_some_and(|info| crate::ladspa::builtin::is_builtin_uri(&info.plugin_uri))
         };
-        // Built-in meters are flagged: the CPU window bundles them into one
-        // collapsible "Meters" row.
         let items: Vec<serde_json::Value> = snapshots
             .into_iter()
             .map(|(id, name, snap)| {
@@ -5534,12 +5269,10 @@ impl qobject::AppController {
             log::info!("Set default node: {}", key);
         }
 
-        // Update patchbay manager with the new default
         if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
             if key.is_empty() {
                 patchbay.set_default_target(None);
             } else {
-                // Extract the display name from the layout key (format is "Type:DisplayName")
                 let display_name = if let Some(pos) = key.find(':') {
                     key[pos + 1..].to_string()
                 } else {
@@ -5570,14 +5303,12 @@ impl qobject::AppController {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        // Format as YYYYMMDD_HHMMSS using simple arithmetic (UTC)
         let secs = now as i64;
         let days = secs / 86400;
         let time_of_day = (secs % 86400) as u32;
         let hours = time_of_day / 3600;
         let minutes = (time_of_day % 3600) / 60;
         let seconds = time_of_day % 60;
-        // Compute date from days since epoch (1970-01-01)
         let (year, month, day) = days_to_ymd(days);
         let timestamp = format!(
             "{:04}{:02}{:02}_{:02}{:02}{:02}",
@@ -5632,21 +5363,18 @@ impl qobject::AppController {
                         .unwrap_or("")
                         .to_string();
 
-                    // Parse rule count from the file
                     let rule_count = std::fs::read_to_string(&path)
                         .ok()
                         .and_then(|s| serde_json::from_str::<Vec<serde_json::Value>>(&s).ok())
                         .map(|v| v.len())
                         .unwrap_or(0);
 
-                    // Format: YYYYMMDD_HHMMSS[_OptionalName].json
                     let stem = filename.trim_end_matches(".json");
                     let (parsed_date, display_name) = parse_backup_stem(stem);
 
                     let date_str = if let Some(d) = parsed_date {
                         d
                     } else {
-                        // Fallback to file modification time
                         entry
                             .metadata()
                             .ok()
@@ -5679,7 +5407,6 @@ impl qobject::AppController {
             }
         }
 
-        // Sort newest first
         backups.sort_by(|a, b| {
             let fa = a["filename"].as_str().unwrap_or("");
             let fb = b["filename"].as_str().unwrap_or("");
@@ -5703,16 +5430,13 @@ impl qobject::AppController {
 
         match std::fs::read_to_string(&backup_path) {
             Ok(content) => {
-                // Validate it parses as rules
                 match serde_json::from_str::<Vec<crate::patchbay::rules::AutoConnectRule>>(&content)
                 {
                     Ok(rules) => {
-                        // Write to rules.json
                         let rules_path = config_path("rules.json");
                         if write_atomic(&rules_path, content.as_bytes()).is_err() {
                             return;
                         }
-                        // Load into patchbay manager
                         if let Some(ref mut patchbay) = self.as_mut().rust_mut().patchbay {
                             patchbay.set_rules(rules.clone());
                         }
@@ -5761,7 +5485,6 @@ impl qobject::AppController {
         }
     }
 
-    /// Mirror the patchbay switches into the tray menu's check marks.
     fn sync_tray_flags(self: Pin<&mut Self>) {
         if let Some(ref tray) = self.rust().tray_state {
             use std::sync::atomic::Ordering;
@@ -5814,8 +5537,6 @@ impl qobject::AppController {
         }
     }
 
-    /// Make the wires `plan_bridge_on_remove` planned, as if by hand (so
-    /// block rules and auto-learn apply as usual).
     fn connect_bridge(mut self: Pin<&mut Self>, pairs: &[(u32, u32)]) {
         for &(out_port, in_port) in pairs {
             log::info!("Bridging removed plugin: {} -> {}", out_port, in_port);
@@ -5858,18 +5579,16 @@ impl qobject::AppController {
     }
 }
 
-/// Convert days since Unix epoch to (year, month, day).
 fn days_to_ymd(days: i64) -> (i64, u32, u32) {
-    // Algorithm from http://howardhinnant.github.io/date_algorithms.html
     let z = days + 719468;
     let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
-    let doe = (z - era * 146097) as u32; // day of era [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // year of era [0, 399]
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
     let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
 }
@@ -5878,19 +5597,10 @@ fn config_path(filename: &str) -> PathBuf {
     crate::session::config_path(filename)
 }
 
-// ---------------------------------------------------------------------------
-// Config file robustness: atomic writes, corrupt-file backups, error surfacing
-// ---------------------------------------------------------------------------
-
-/// Errors from loading/saving config files, surfaced to the user by poll_events.
 static CONFIG_ERRORS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
-/// Config files that failed to parse this session. An empty list/object is
-/// never written over them (the user's data would otherwise silently vanish);
-/// real content may be written once a backup exists.
 static LOAD_FAILED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
-/// Config files that failed to parse AND could not be backed up: never written.
 static SAVE_BLOCKED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 fn push_config_error(msg: String) {
@@ -5928,7 +5638,6 @@ fn list_set(list: &std::sync::Mutex<Vec<String>>, name: &str, present: bool) {
     }
 }
 
-/// UTC timestamp `YYYYMMDD_HHMMSS`.
 fn timestamp_string() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -5947,8 +5656,6 @@ fn timestamp_string() -> String {
     )
 }
 
-/// Write `data` to `path` atomically: temp file in the same directory, fsync,
-/// rename over the target, fsync the directory.
 fn write_atomic(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     if crate::session::writes_suspended() {
@@ -5987,8 +5694,6 @@ fn write_atomic(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     result
 }
 
-/// Write a config file (by name). `is_empty` marks content that holds no user
-/// data — it is not written over a file that failed to load this session.
 fn write_config(filename: &str, data: &[u8], is_empty: bool) -> bool {
     if list_contains(&SAVE_BLOCKED, filename) {
         log::warn!(
@@ -6010,7 +5715,6 @@ fn write_config(filename: &str, data: &[u8], is_empty: bool) -> bool {
     write_atomic(&config_path(filename), data).is_ok()
 }
 
-/// Copy a config file that failed to parse to `<name>.corrupt-<timestamp>`.
 fn backup_corrupt_file(filename: &str, err: &dyn std::fmt::Display) {
     let path = config_path(filename);
     let backup = config_path(&format!("{}.corrupt-{}", filename, timestamp_string()));
@@ -6035,9 +5739,6 @@ fn backup_corrupt_file(filename: &str, err: &dyn std::fmt::Display) {
     }
 }
 
-/// Load a JSON config file. `Ok(None)`: the file doesn't exist. `Err(())`: it
-/// exists but couldn't be read/parsed — it has been backed up and the error
-/// queued for the user.
 fn load_config<T: serde::de::DeserializeOwned>(filename: &str) -> Result<Option<T>, ()> {
     let path = config_path(filename);
     let text = match std::fs::read_to_string(&path) {
@@ -6058,8 +5759,6 @@ fn load_config<T: serde::de::DeserializeOwned>(filename: &str) -> Result<Option<
     }
 }
 
-/// Raw JSON text of a config file owned by QML (layout, hidden, ...), or
-/// `default` when missing/invalid (invalid files are backed up first).
 fn read_config_json_text(filename: &str, default: &str) -> String {
     match load_config::<serde_json::Value>(filename) {
         Ok(Some(v)) => serde_json::to_string(&v).unwrap_or_else(|_| default.to_string()),
@@ -6117,7 +5816,6 @@ fn known_good_plugins_path() -> PathBuf {
     config_path("plugins.known_good.json")
 }
 
-/// Copy `src` over `dst` atomically, but only if `src` holds a valid plugin list.
 fn copy_plugins_file(src: &std::path::Path, dst: &std::path::Path) -> bool {
     let content = match std::fs::read(src) {
         Ok(c) => c,
@@ -6174,19 +5872,14 @@ struct SavedPlugin {
     enabled: bool,
     #[serde(default)]
     parameters: Vec<SavedPluginParam>,
-    /// "LV2", "CLAP", or "VST3".  Defaults to "LV2" for backwards compat.
     #[serde(default = "default_lv2_format_str")]
     format: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     lv2_state: Vec<crate::lv2::state::StateEntry>,
-    /// CLAP/VST3 state blob, base64.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     plugin_state: Option<String>,
-    /// Optional discovery metadata, including CLAP/VST3 library location.
-    /// Older configs omit this and use background discovery on the first run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     scan_info: Option<crate::plugin::PluginInfo>,
-    /// User-chosen port names, by port name.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     port_names: std::collections::BTreeMap<String, String>,
 }
@@ -6272,8 +5965,6 @@ struct SavedPluginLink {
     input_port_name: String,
 }
 
-/// A saved link that isn't in the graph right now (endpoint absent, or a
-/// connect was just requested).
 #[derive(Clone, Debug)]
 struct PendingLink {
     link: SavedPluginLink,
@@ -6289,13 +5980,10 @@ impl PendingLink {
     }
 }
 
-/// How long a requested connect may take to show up before we give up on it.
 const LINK_CONNECT_GRACE: Duration = Duration::from_secs(5);
 
 const PLUGIN_RESCAN_AFTER: Duration = Duration::from_secs(10 * 60);
 
-/// After a PipeWire reconnect or in-place plugin reload, links aren't saved
-/// until the graph has had this long to come back.
 const LINK_SETTLE_AFTER_RECONNECT: Duration = Duration::from_secs(5);
 
 fn default_true() -> bool {
@@ -6322,8 +6010,6 @@ fn load_saved_plugins() -> Result<Vec<SavedPlugin>, ()> {
     load_config::<Vec<SavedPlugin>>("plugins.json").map(Option::unwrap_or_default)
 }
 
-/// Upper bound on how long the startup restore may take before it is
-/// considered finished anyway: 30 s plus 15 s per plugin in the batch.
 fn restore_safety_cap(batch_size: usize) -> Duration {
     Duration::from_secs(30 + 15 * batch_size as u64)
 }
@@ -6466,8 +6152,6 @@ fn write_saved_links(links: &[SavedPluginLink]) {
     }
 }
 
-/// On-disk form of a MIDI mapping: the per-session instance id is useless
-/// after a restart, so the plugin's stable id is stored alongside it.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 struct SavedMidiMapping {
     #[serde(flatten)]
@@ -6483,10 +6167,6 @@ fn load_midi_mappings() -> Vec<SavedMidiMapping> {
         .unwrap_or_default()
 }
 
-/// Map saved MIDI mappings onto this session's instance ids. Mappings whose
-/// plugin no longer exists are dropped. Legacy entries (no stable id) carry
-/// the previous session's instance id, which was assigned 1..N in plugins.json
-/// order — `restore_order[k-1]` is this session's id for old id k.
 fn resolve_saved_midi_mappings(
     saved: Vec<SavedMidiMapping>,
     stable_to_instance: &HashMap<String, u64>,
@@ -6533,7 +6213,6 @@ fn resolve_saved_midi_mappings(
             }
         };
         mapping.target.instance_id = instance_id;
-        // One mapping per source and per target; later entries win.
         out.retain(|m| m.source != mapping.source && m.target != mapping.target);
         out.push(mapping);
     }
@@ -6596,8 +6275,6 @@ fn build_persistable_links(graph: &GraphState) -> Vec<SavedPluginLink> {
         let out_port = graph.get_port(link.output_port_id);
         let in_port = graph.get_port(link.input_port_id);
 
-        // Links of nodes ZestBay owns (plugins, subgraph edges, virtual
-        // devices) are remembered here; everything else is left to rules.
         let owned = |n: &Option<Node>| {
             n.as_ref().is_some_and(|n| {
                 n.node_type == Some(NodeType::Plugin) || n.subgraph.is_some() || n.vdev_id.is_some()
@@ -6621,8 +6298,6 @@ fn build_persistable_links(graph: &GraphState) -> Vec<SavedPluginLink> {
         if let (Some(out_node), Some(in_node), Some(out_port), Some(in_port)) =
             (out_node, in_node, out_port, in_port)
         {
-            // For bridge nodes, use the device name from port.alias instead
-            // of the bridge node name for more stable link restoration
             let out_name = if out_node.is_bridge {
                 bridge_device_name_for_port(&out_port)
                     .unwrap_or_else(|| out_node.display_name().to_string())
@@ -6664,7 +6339,6 @@ fn build_persistable_links(graph: &GraphState) -> Vec<SavedPluginLink> {
     saved_links
 }
 
-/// Is a node (or bridge sub-device) with this saved name in the graph?
 fn node_name_present(graph: &GraphState, all_nodes: &[Node], name: &str) -> bool {
     all_nodes.iter().any(|n| {
         n.display_name() == name
@@ -6683,7 +6357,6 @@ fn find_saved_link_port(
     port_name: &str,
     direction: PortDirection,
 ) -> Option<u32> {
-    // First try matching by node display name
     for n in all_nodes.iter().filter(|n| n.display_name() == node_name) {
         let ports = graph.get_ports_for_node(n.id);
         if let Some(p) = ports
@@ -6693,7 +6366,6 @@ fn find_saved_link_port(
             return Some(p.id);
         }
     }
-    // Then bridge sub-nodes by device name (from port.alias)
     for n in all_nodes.iter().filter(|n| n.is_bridge) {
         for (group, device_name) in &graph.get_bridge_port_groups(n.id) {
             if device_name != node_name {
@@ -6734,11 +6406,6 @@ fn find_saved_link_ports(
     )
 }
 
-/// Compute the link list to persist: the links in the graph now, plus every
-/// remembered link that can't be in the graph because an endpoint is absent.
-/// Links that were in the graph last time and vanished because an endpoint
-/// went away are remembered (moved to `pending`); links that vanished while
-/// both endpoints are still present were removed on purpose and are dropped.
 fn merge_links_for_persist(
     current: &[SavedPluginLink],
     last_current: &[SavedPluginLink],
@@ -6786,7 +6453,6 @@ fn save_rules(patchbay: Option<&PatchbayManager>) {
     }
 }
 
-/// A backup name from QML must be a bare file name inside rule_backups.
 fn is_plain_file_name(name: &str) -> bool {
     !name.is_empty()
         && name != "."
@@ -6796,14 +6462,11 @@ fn is_plain_file_name(name: &str) -> bool {
         && !name.contains('\0')
 }
 
-/// Parse a rule backup stem `YYYYMMDD_HHMMSS[_Name]` into a display date and
-/// name. Never panics on arbitrary (non-ASCII) file names.
 fn parse_backup_stem(stem: &str) -> (Option<String>, String) {
     let b = stem.as_bytes();
     let digits =
         |r: std::ops::Range<usize>| b.get(r).is_some_and(|s| s.iter().all(u8::is_ascii_digit));
     if b.len() >= 15 && digits(0..8) && b[8] == b'_' && digits(9..15) {
-        // Bytes 0..15 are ASCII, so these are char boundaries.
         let date = format!(
             "{}-{}-{} {}:{}:{}",
             &stem[0..4],
@@ -6824,7 +6487,6 @@ fn parse_backup_stem(stem: &str) -> (Option<String>, String) {
     }
 }
 
-/// Order ports like the graph view draws them: MIDI first, then natural name.
 fn sort_ports_for_layout(ports: &mut [Port], bridge_sub_node: bool) {
     ports.sort_by(|a, b| {
         let am = a.media_type != Some(crate::pipewire::MediaType::Midi);
@@ -6840,7 +6502,6 @@ fn sort_ports_for_layout(ports: &mut [Port], bridge_sub_node: bool) {
     });
 }
 
-/// Port name as shown in the UI (bridge sub-node ports use their alias).
 fn port_ui_name(p: &Port, bridge_sub_node: bool) -> String {
     if bridge_sub_node
         && let Some(ref alias) = p.port_alias
@@ -6897,31 +6558,27 @@ fn node_to_json(
         val["vdevId"] = serde_json::json!(vdev);
     }
 
-    // Enrich plugin nodes with format and hasUi info
     if n.node_type == Some(NodeType::Plugin)
         && let Some(mgr) = plugin_manager
-    {
-        // Find the active instance whose pw_node_id matches this node
-        if let Some(instance) = mgr
+        && let Some(instance) = mgr
             .active_instances()
             .values()
             .find(|inst| inst.pw_node_id == Some(n.id))
-        {
-            let format_str = instance.format.as_str();
-            let has_ui = mgr
-                .find_plugin_with_format(&instance.plugin_uri, instance.format)
-                .or(instance.scan_info.as_ref())
-                .map(|p| p.has_ui)
-                .unwrap_or(false);
+    {
+        let format_str = instance.format.as_str();
+        let has_ui = mgr
+            .find_plugin_with_format(&instance.plugin_uri, instance.format)
+            .or(instance.scan_info.as_ref())
+            .map(|p| p.has_ui)
+            .unwrap_or(false);
 
-            val["pluginFormat"] = serde_json::json!(format_str);
-            val["pluginHasUi"] = serde_json::json!(has_ui);
-            if let Some(channels) = crate::ladspa::builtin::meter_channels(&instance.plugin_uri) {
-                val["meterChannels"] = serde_json::json!(channels);
-            }
-            val["pluginBypassed"] = serde_json::json!(instance.bypassed);
-            val["pluginEnabled"] = serde_json::json!(instance.enabled);
+        val["pluginFormat"] = serde_json::json!(format_str);
+        val["pluginHasUi"] = serde_json::json!(has_ui);
+        if let Some(channels) = crate::ladspa::builtin::meter_channels(&instance.plugin_uri) {
+            val["meterChannels"] = serde_json::json!(channels);
         }
+        val["pluginBypassed"] = serde_json::json!(instance.bypassed);
+        val["pluginEnabled"] = serde_json::json!(instance.enabled);
     }
 
     val
@@ -6938,7 +6595,6 @@ fn layout_key(
         Some(NodeType::StreamInput) => "StreamIn".to_string(),
         Some(NodeType::Duplex) => "Duplex".to_string(),
         Some(NodeType::Plugin) => {
-            // Use the actual format if available
             if let Some(mgr) = plugin_manager {
                 mgr.active_instances()
                     .values()
@@ -7019,42 +6675,27 @@ struct Preferences {
     #[serde(default = "Preferences::default_pw_operation_cooldown_ms")]
     pub pw_operation_cooldown_ms: u64,
 
-    /// Disconnect links that no rule allows (see `PatchbayManager::exclusive`).
     #[serde(default = "Preferences::default_patchbay_exclusive")]
     pub patchbay_exclusive: bool,
 
-    /// UI colour scheme: "system" (follow the desktop), "dark" or "light".
     #[serde(default = "Preferences::default_theme")]
     pub theme: String,
 
-    /// Gap left between nodes when Shift-drag snaps one next to another,
-    /// in graph units (pixels at 100 % zoom).
     #[serde(default = "Preferences::default_snap_gap_px")]
     pub snap_gap_px: u32,
 
-    /// Snap node positions (drags, placement, auto layout) to a grid.
     #[serde(default = "Preferences::default_snap_to_grid")]
     pub snap_to_grid: bool,
 
-    /// Grid pitch in graph units (pixels at 100 % zoom); also the dot grid.
     #[serde(default = "Preferences::default_grid_size_px")]
     pub grid_size_px: u32,
 
-    /// Graph density: the room Auto layout and the placement of new nodes
-    /// leave between stacked nodes, in graph units (pixels at 100 % zoom);
-    /// columns are 2.5x as far apart. Presets: 8 compact, 20 normal, 40 spacious.
     #[serde(default = "Preferences::default_node_spacing_px")]
     pub node_spacing_px: u32,
 
-    /// Node card density: the height of one port row on a node card, in
-    /// pixels at 100 % zoom; the rest of the card (header, footer,
-    /// paddings, pins, width) scales with it. Presets: 18 compact, 22 normal,
-    /// 26 spacious.
     #[serde(default = "Preferences::default_card_row_px")]
     pub card_row_px: u32,
 
-    /// What a left-drag on empty canvas does: "grab" pans the view (like a
-    /// middle-drag), "select" draws a selection box.
     #[serde(default = "Preferences::default_drag_mode")]
     pub drag_mode: String,
 
@@ -7070,24 +6711,18 @@ struct Preferences {
     #[serde(default = "Preferences::default_palette")]
     pub palette: String,
 
-    /// Effect plugins as passive PipeWire nodes, letting linked devices
-    /// suspend when nothing else uses them (see plugin::PASSIVE_EFFECTS).
     #[serde(default)]
     pub passive_plugins: bool,
 
-    /// Hide nodes that have no name of their own (e.g. pavucontrol's
-    /// level-meter streams).
     #[serde(default = "Preferences::default_hide_unnamed_nodes")]
     pub hide_unnamed_nodes: bool,
 
-    /// Accept OSC messages that enable, disable and tune plugins.
     #[serde(default)]
     pub osc_enabled: bool,
 
     #[serde(default = "Preferences::default_osc_port")]
     pub osc_port: u16,
 
-    /// Listen on every network interface instead of only this machine.
     #[serde(default)]
     pub osc_listen_all: bool,
 }
@@ -7268,10 +6903,6 @@ fn save_preferences(prefs: &Preferences) {
 }
 
 
-/// The wires that keep audio flowing when plugin `node_id` is removed: for
-/// a plugin with as many audio inputs as outputs, whatever fed its n-th
-/// input is wired to whatever its n-th output fed. Pairs already wired,
-/// and pairs within one node, are left out.
 fn plan_bridge_on_remove(graph: &GraphState, node_id: u32) -> Vec<(u32, u32)> {
     use crate::pipewire::MediaType;
     let audio_ports = |dir: PortDirection| -> Vec<Port> {
@@ -7315,7 +6946,6 @@ fn plan_bridge_on_remove(graph: &GraphState, node_id: u32) -> Vec<(u32, u32)> {
     pairs
 }
 
-/// One audio wire rerouted through an inserted plugin.
 struct InsertRewire {
     upstream_out: u32,
     plugin_in: u32,
@@ -7323,7 +6953,6 @@ struct InsertRewire {
     downstream_in: u32,
 }
 
-/// The links removed and created when plugin `node_id` is dropped on `link_id`.
 struct InsertPlan {
     upstream_node_id: u32,
     downstream_node_id: u32,
@@ -7331,10 +6960,6 @@ struct InsertPlan {
     rewires: Vec<InsertRewire>,
 }
 
-/// Plan inserting plugin `node_id` on audio link `link_id`: every audio link
-/// between the same two nodes is split, the n-th upstream / downstream
-/// channel going through the plugin's n-th input / output (clamped to the
-/// ones it has).
 fn plan_insert_on_link(graph: &GraphState, link_id: u32, node_id: u32) -> Result<InsertPlan, String> {
     use crate::pipewire::MediaType;
     let link = graph
@@ -7370,8 +6995,6 @@ fn plan_insert_on_link(graph: &GraphState, link_id: u32, node_id: u32) -> Result
     let upstream_ports = audio_ports(upstream_node_id, PortDirection::Output);
     let downstream_ports = audio_ports(downstream_node_id, PortDirection::Input);
 
-    // Only audio links can take an audio plugin; a MIDI link would be
-    // disconnected and replaced by links that cannot work.
     let upstream_idx = upstream_ports.iter().position(|p| p.id == link.output_port_id);
     let downstream_idx = downstream_ports.iter().position(|p| p.id == link.input_port_id);
     let (Some(upstream_idx), Some(downstream_idx)) = (upstream_idx, downstream_idx) else {
@@ -7584,7 +7207,6 @@ mod tests {
             });
             assert!(!manager.startup_complete());
             manager.set_available_plugins(vec![discovered.clone()]);
-            // Discovery alone must not allow an unfinished restore to be persisted.
             assert!(!manager.startup_complete());
             manager.finish_startup();
             let saved = SavedPlugin::from(manager.get_instance(1).unwrap());
@@ -7629,7 +7251,6 @@ mod tests {
     #[test]
     fn merge_links_remembers_links_of_absent_nodes() {
         let forgotten = std::collections::HashSet::new();
-        // Device "B" vanished: its link is remembered; A->C was deleted on purpose.
         let mut pending = Vec::new();
         let last = vec![link("A", "B"), link("A", "C")];
         let current = vec![];
@@ -7638,7 +7259,6 @@ mod tests {
         assert_eq!(merged, vec![link("A", "B")]);
         assert_eq!(pending.len(), 1);
 
-        // Back in the graph: no longer pending, persisted once.
         let current = vec![link("A", "B")];
         let merged = merge_links_for_persist(&current, &[], &mut pending, &forgotten, |_| true);
         assert_eq!(merged, vec![link("A", "B")]);
@@ -7670,7 +7290,6 @@ mod tests {
             parse_backup_stem("20240102_030405"),
             (Some("2024-01-02 03:04:05".to_string()), String::new())
         );
-        // Multi-byte chars around the indices that used to be sliced.
         assert_eq!(
             parse_backup_stem("ééééééééééééééééé"),
             (None, String::new())
@@ -7708,6 +7327,5 @@ mod tests {
     }
 }
 
-// Subgraph and virtual device invokables (src/ui/subgraphs_bridge.rs).
 #[path = "subgraphs_bridge.rs"]
 mod subgraphs_bridge;

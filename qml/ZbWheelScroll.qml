@@ -1,11 +1,5 @@
 import QtQuick
 
-// Mouse-wheel scrolling for a Flickable / ListView: a fixed, immediate step
-// per notch (the desktop's "lines per wheel step" x Theme.wheelLineHeight)
-// instead of Flickable's slow velocity-based wheel; touchpads scroll by their
-// own pixel deltas. Declare it inside the view:
-//
-//   ListView { id: list; ...; ZbWheelScroll { flickable: list } }
 WheelHandler {
     id: handler
     property Flickable flickable

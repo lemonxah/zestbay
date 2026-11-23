@@ -1,12 +1,3 @@
-//! CLAP plugin host — instantiation and real-time processing.
-//!
-//! Threading model (see `threading.rs`): everything except `process()` runs
-//! on the PipeWire main-loop thread, which is the CLAP main thread.
-//! `process()` runs on the PipeWire data thread and never allocates or locks.
-//! Host → plugin parameter changes travel through the atomic slots in
-//! `port_updates`; `process()` diffs them against an RT-private copy of the
-//! last applied values and emits `CLAP_EVENT_PARAM_VALUE` events.
-
 use std::ffi::{CStr, CString, c_void};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -32,32 +23,19 @@ use clap_sys::stream::{clap_istream, clap_ostream};
 use super::threading::{self, RtGate};
 use crate::plugin::types::*;
 
-/// Largest block `process()` is ever called with (K4).
 pub const MAX_BLOCK: usize = 8192;
-/// Max MIDI events forwarded per block.
 const MAX_MIDI_EVENTS: usize = 512;
-/// How long the RT thread must have been quiet before the main thread
-/// flushes parameters itself.
 const RT_IDLE_BEFORE_FLUSH: Duration = Duration::from_millis(500);
 
-/// A loaded CLAP plugin library (keeps the dlopen handle alive).
 struct ClapLibrary {
-    /// dlopen handle — must NOT be closed while any plugin from this lib exists.
     _handle: *mut c_void,
-    /// The entry point (lives inside the .so).
     entry: *const clap_sys::entry::clap_plugin_entry,
-    /// Path passed to `entry.init`; keys the init/deinit refcount.
     path: String,
 }
 
-/// Live `ClapLibrary` count per path. The CLAP spec pairs `init` and `deinit`
-/// once per loaded library, but every instance dlopens the same shared
-/// object, so `init` runs on the first instance and `deinit` on the last.
 static LIBRARY_USERS: std::sync::Mutex<Option<std::collections::HashMap<String, usize>>> =
     std::sync::Mutex::new(None);
 
-/// Count a new user of `path`; returns true if this is the first one (the
-/// caller must then run `entry.init`).
 fn library_acquire(path: &str) -> bool {
     let mut guard = LIBRARY_USERS.lock().unwrap_or_else(|e| e.into_inner());
     let count = guard.get_or_insert_with(Default::default).entry(path.to_string()).or_insert(0);
@@ -65,7 +43,6 @@ fn library_acquire(path: &str) -> bool {
     *count == 1
 }
 
-/// Drop a user of `path`; returns true if it was the last one.
 fn library_release(path: &str) -> bool {
     let mut guard = LIBRARY_USERS.lock().unwrap_or_else(|e| e.into_inner());
     let map = guard.get_or_insert_with(Default::default);
@@ -93,14 +70,10 @@ impl Drop for ClapLibrary {
                 deinit();
             }
         }
-        // We intentionally do NOT dlclose.  See scanner.rs comment.
     }
 }
 
-/// Host-side state reachable from plugin callbacks via `clap_host.host_data`.
-/// Boxed so its address is stable; callbacks may arrive on any thread.
 pub(crate) struct HostData {
-    /// The plugin pointer — set right after create_plugin(), before init().
     pub plugin: *const clap_plugin,
     callback_requested: AtomicBool,
     restart_requested: AtomicBool,
@@ -108,7 +81,6 @@ pub(crate) struct HostData {
     rescan_flags: AtomicU32,
 }
 
-/// A running CLAP plugin instance.
 pub struct ClapPluginInstance {
     plugin: *const clap_plugin,
     _host_box: Box<clap_host>,
@@ -116,55 +88,39 @@ pub struct ClapPluginInstance {
 
     pub display_name: String,
 
-    /// Audio port layout (flattened to mono channels, matching the LV2 approach)
     pub audio_input_channels: usize,
     pub audio_output_channels: usize,
 
-    /// Whether this plugin accepts MIDI input (has note input ports)
     pub has_midi_in: bool,
-    /// Names of the plugin's note output ports (one MIDI output each).
     pub midi_output_names: Vec<String>,
 
-    /// Channel count of each CLAP audio port.
     input_port_channels: Vec<usize>,
     output_port_channels: Vec<usize>,
 
-    /// Parameters (static info; values live in `port_updates`).
     pub params: Vec<ClapParam>,
-    /// (param id, index into `params`), sorted by id.
     id_index: Vec<(clap_id, usize)>,
     params_ext: *const clap_plugin_params,
     state_ext: *const clap_plugin_state,
 
-    /// Shared port updates (same pattern as LV2)
     pub port_updates: SharedPortUpdates,
 
     bypassed: AtomicBool,
-    /// Fixed at instantiation; a graph rate change requires a reload (K3).
     pub sample_rate: f64,
     activated: bool,
-    /// A restart left the plugin deactivated or with a different port
-    /// layout: the RT gate stays suspended until the instance is dropped.
     parked: bool,
 
     gate: RtGate,
     process_count: AtomicU64,
-    /// Set by `set_parameter`; lets `idle` flush when audio is stopped.
     host_param_dirty: AtomicBool,
-    /// Main-thread bookkeeping for RT idleness.
     last_seen_process_count: u64,
     last_process_change: Instant,
 
-    /// Touched only by `process()` (or by the main thread while suspended).
     rt: RtState,
 
-    /// Dropped last: deinit must run after the plugin is destroyed.
     _library: ClapLibrary,
 }
 
-/// Preallocated buffers used by `process()`.
 struct RtState {
-    /// start_processing() succeeded and stop_processing() is still due.
     started: bool,
     last_applied: Vec<f64>,
     param_events: Vec<clap_event_param_value>,
@@ -193,8 +149,6 @@ impl RtState {
             silence: vec![0.0; MAX_BLOCK],
             scratch: vec![0.0; MAX_BLOCK],
         };
-        // The pointer arrays never reallocate, so the per-port views into
-        // them stay valid for the life of the instance.
         let mut off = 0;
         for &ch in input_ports {
             rt.in_bufs.push(audio_buffer(unsafe { rt.in_ptrs.as_mut_ptr().add(off) }, ch));
@@ -228,27 +182,16 @@ pub struct ClapParam {
     pub max: f64,
     pub default: f64,
     pub is_toggle: bool,
-    /// Discrete steps between min and max for stepped params (0 = continuous).
     pub step_count: u32,
 }
 
 unsafe impl Send for ClapPluginInstance {}
 
 impl ClapPluginInstance {
-    /// Return the raw CLAP plugin pointer (for GUI extension access).
     pub fn plugin_ptr(&self) -> *const clap_plugin {
         self.plugin
     }
 
-    /// Load a CLAP plugin from a `.clap` file and instantiate it.
-    ///
-    /// `state` (from `get_state`) is loaded after `init` and before the
-    /// ports are queried and the plugin is activated, so state-dependent
-    /// port layouts come up right the first time.
-    ///
-    /// # Safety
-    /// Calls into C plugin code via dlopen/function pointers.  Must be called
-    /// on the PipeWire thread, which becomes the CLAP main thread.
     pub unsafe fn new(
         clap_path: &str,
         plugin_id: &str,
@@ -362,7 +305,6 @@ impl ClapPluginInstance {
             let audio_input_channels: usize = input_port_channels.iter().sum();
             let audio_output_channels: usize = output_port_channels.iter().sum();
 
-            // Query note ports (MIDI capability)
             let mut has_midi_in = false;
             let mut midi_output_names = Vec::new();
             if let Some(get_ext) = plugin_ref.get_extension {
@@ -391,8 +333,6 @@ impl ClapPluginInstance {
                 }
             }
 
-            // If the plugin is categorised as an instrument, assume it accepts MIDI
-            // even if it doesn't expose note ports (some plugins omit the extension).
             if !has_midi_in && plugin_info.category == PluginCategory::Instrument {
                 has_midi_in = true;
             }
@@ -406,7 +346,6 @@ impl ClapPluginInstance {
                 midi_output_names.len(),
             );
 
-            // Query params
             let mut params = Vec::new();
             let mut initial_values = Vec::new();
             let params_ext = get_plugin_ext::<clap_plugin_params>(
@@ -474,10 +413,8 @@ impl ClapPluginInstance {
                 atom_outputs: Vec::new(),
                 atom_inputs: Vec::new(),
             });
-            // Compare against exactly what the slots hold.
             let last_applied: Vec<f64> = initial_values.iter().map(|&v| v as f32 as f64).collect();
 
-            // Activate (K4: any block size from 1 to MAX_BLOCK).
             let activated = match plugin_ref.activate {
                 Some(activate) => activate(plugin_ptr, sample_rate, 1, MAX_BLOCK as u32),
                 None => true,
@@ -488,7 +425,6 @@ impl ClapPluginInstance {
                 return None;
             }
 
-            // start_processing is an audio-thread call: process() does it lazily.
             let rt = RtState::new(&input_port_channels, &output_port_channels, last_applied);
 
             Some(Self {
@@ -522,11 +458,6 @@ impl ClapPluginInstance {
         }
     }
 
-    /// Process a block of audio.
-    ///
-    /// # Safety
-    /// Called from the PipeWire RT thread.  The `inputs` and `outputs` slices
-    /// must be valid for `sample_count` frames.  Never allocates or locks.
     pub unsafe fn process(
         &mut self,
         inputs: &[&[f32]],
@@ -548,8 +479,6 @@ impl ClapPluginInstance {
         self.process_count.fetch_add(1, Ordering::Relaxed);
         self.host_data.flush_requested.store(false, Ordering::Relaxed);
 
-        // While bypassed the plugin still runs, but its MIDI output is
-        // replaced by the input (like its audio).
         let bypassed = self.bypassed.load(Ordering::Relaxed);
         let sink: *mut crate::midi::processing::MidiSink = if bypassed {
             std::ptr::null_mut()
@@ -664,8 +593,6 @@ impl ClapPluginInstance {
         }
     }
 
-    /// Set a parameter (plain value).  Only stores into the atomic slot;
-    /// `process()` forwards it to the plugin.
     pub fn set_parameter(&self, port_index: usize, value: f32) {
         if let Some(p) = self.params.iter().find(|p| p.port_index == port_index) {
             let clamped = (value as f64).clamp(p.min, p.max);
@@ -689,7 +616,6 @@ impl ClapPluginInstance {
         self.bypassed.load(Ordering::Relaxed)
     }
 
-    /// Serialize plugin state via the CLAP state extension (main thread).
     pub fn get_state(&self) -> Option<Vec<u8>> {
         if self.state_ext.is_null() {
             return None;
@@ -710,10 +636,6 @@ impl ClapPluginInstance {
         }
     }
 
-    /// Restore plugin state via the CLAP state extension (main thread).
-    ///
-    /// # Safety
-    /// Calls into plugin code.
     #[allow(dead_code)]
     pub unsafe fn set_state(&mut self, blob: &[u8]) -> bool {
         if self.state_ext.is_null() {
@@ -727,7 +649,6 @@ impl ClapPluginInstance {
         ok
     }
 
-    /// Re-read parameter values from the plugin into the slots (main thread).
     fn refresh_param_values(&self) {
         if self.params_ext.is_null() {
             return;
@@ -762,11 +683,6 @@ impl ClapPluginInstance {
             .collect()
     }
 
-    /// Main-thread housekeeping; call on every manager tick.
-    ///
-    /// Runs `on_main_thread` when the plugin asked for it, applies
-    /// `params.rescan` requests, and flushes parameters through
-    /// `params.flush` while the audio thread is not processing the plugin.
     pub fn idle(&mut self) {
         unsafe {
             let plugin_ref = &*self.plugin;
@@ -804,8 +720,6 @@ impl ClapPluginInstance {
         }
     }
 
-    /// Deliver pending host parameter changes (and collect plugin output
-    /// events) via `params.flush` while the audio thread is excluded.
     fn flush_params(&mut self) {
         if !self.activated || self.params_ext.is_null() {
             return;
@@ -836,29 +750,17 @@ impl ClapPluginInstance {
             id_index,
             slots: &port_updates.control_inputs,
             last_applied: rt.last_applied.as_mut_ptr(),
-            // flush() runs outside a process cycle: no MIDI output to collect
             midi: std::ptr::null_mut(),
         };
         let out_events = out_ctx.as_clap();
-        // While active, flush is an audio-thread call; the gate guarantees
-        // the real audio thread is not inside the plugin.
         threading::with_audio_thread(|| unsafe { flush(*plugin, &in_events, &out_events) });
         self.gate.resume();
     }
 
-    /// True after the plugin called `host.request_restart`.
     pub fn needs_restart(&self) -> bool {
         self.host_data.restart_requested.load(Ordering::Acquire)
     }
 
-    /// Deactivate and reactivate the plugin in place (main thread).
-    ///
-    /// Returns false if the plugin could not be brought back with the same
-    /// audio port layout.  The instance is then parked: the audio thread
-    /// stays excluded (process() passes audio through without touching the
-    /// plugin) until it is dropped, and the caller must reload it (K3
-    /// path).  If the audio thread could not be excluded in time nothing is
-    /// changed, the request stays pending and true is returned.
     pub fn restart(&mut self) -> bool {
         if self.parked {
             return false;
@@ -894,14 +796,10 @@ impl ClapPluginInstance {
         }
     }
 
-    /// True once a failed restart excluded the audio thread for good; the
-    /// instance must be reloaded.
     pub fn is_parked(&self) -> bool {
         self.parked
     }
 
-    /// stop_processing (as the audio thread) + deactivate.  The gate must be
-    /// suspended or the filter already destroyed.
     unsafe fn stop_and_deactivate(&mut self) {
         unsafe {
             let plugin_ref = &*self.plugin;
@@ -923,8 +821,6 @@ impl ClapPluginInstance {
 
 impl Drop for ClapPluginInstance {
     fn drop(&mut self) {
-        // The filter is destroyed before the instance, so the audio thread
-        // can no longer enter process(); the gate just makes sure of it.
         super::ui::force_close_for_plugin(self.plugin);
         super::ui::remove_plugin_callbacks(self.plugin);
         self.gate.suspend(Duration::from_secs(2));
@@ -939,7 +835,6 @@ impl Drop for ClapPluginInstance {
     }
 }
 
-/// `clap_plugin_state.load` from an in-memory blob (main thread).
 unsafe fn load_state(
     plugin: *const clap_plugin,
     state_ext: *const clap_plugin_state,
@@ -970,7 +865,6 @@ unsafe fn get_plugin_ext<T>(plugin: *const clap_plugin, id: &CStr) -> *const T {
     }
 }
 
-/// Channel counts of the plugin's input and output audio ports.
 unsafe fn query_audio_ports(plugin: *const clap_plugin) -> (Vec<usize>, Vec<usize>) {
     unsafe {
         let mut ins = Vec::new();
@@ -998,8 +892,6 @@ unsafe fn query_audio_ports(plugin: *const clap_plugin) -> (Vec<usize>, Vec<usiz
     }
 }
 
-/// Diff slots against `rt.last_applied` and fill `rt.param_events`.
-/// Preallocated: never pushes beyond capacity.
 fn collect_param_events(params: &[ClapParam], slots: &[PortSlot], rt: &mut RtState) {
     rt.param_events.clear();
     for ((p, slot), last) in params.iter().zip(slots).zip(rt.last_applied.iter_mut()) {
@@ -1032,8 +924,6 @@ fn event_header<T>(type_: u16, time: u32) -> clap_event_header {
         flags: 0,
     }
 }
-
-// ---- Input events (params first at time 0, then MIDI in time order) ----
 
 struct InputEvents<'a> {
     params: &'a [clap_event_param_value],
@@ -1074,19 +964,13 @@ unsafe extern "C" fn input_events_get(
     }
 }
 
-// ---- Output events: plugin-originated parameter changes → slots,
-// ---- notes / MIDI → the filter's MIDI outputs ----
-
 struct OutputEvents<'a> {
     id_index: &'a [(clap_id, usize)],
     slots: &'a [PortSlot],
-    /// RT-private last-applied values (so the change isn't echoed back).
     last_applied: *mut f64,
-    /// MIDI output of the current block, or null when not collected.
     midi: *mut crate::midi::processing::MidiSink,
 }
 
-/// MIDI bytes for a CLAP note on/off event (None for wildcard keys).
 fn note_event_to_midi(on: bool, ev: &clap_event_note) -> Option<[u8; 3]> {
     if !(0..128).contains(&ev.key) {
         return None;
@@ -1094,14 +978,12 @@ fn note_event_to_midi(on: bool, ev: &clap_event_note) -> Option<[u8; 3]> {
     let channel = ev.channel.clamp(0, 15) as u8;
     let velocity = (ev.velocity.clamp(0.0, 1.0) * 127.0).round() as u8;
     Some(if on {
-        // Velocity 0 would read as a note off
         [0x90 | channel, ev.key as u8, velocity.max(1)]
     } else {
         [0x80 | channel, ev.key as u8, velocity]
     })
 }
 
-/// Size of a short MIDI message from its status byte.
 fn midi_message_len(status: u8) -> usize {
     match status & 0xF0 {
         0xC0 | 0xD0 => 2,
@@ -1114,10 +996,6 @@ fn midi_message_len(status: u8) -> usize {
     }
 }
 
-/// Forward a plugin output event that carries MIDI to `sink`.
-///
-/// # Safety
-/// `event` must point to a complete event of the type its header names.
 unsafe fn push_midi_output(sink: &mut crate::midi::processing::MidiSink, event: *const clap_event_header) {
     unsafe {
         let hdr = &*event;
@@ -1187,8 +1065,6 @@ unsafe extern "C" fn output_events_try_push(
     }
 }
 
-// ---- State streams ----
-
 unsafe extern "C" fn ostream_write(
     stream: *const clap_ostream,
     buffer: *const c_void,
@@ -1213,7 +1089,6 @@ struct StreamReader<'a> {
 }
 
 impl StreamReader<'_> {
-    /// Copy up to `out.len()` bytes; returns the count (0 at end of stream).
     fn read_into(&mut self, out: &mut [u8]) -> usize {
         let n = out.len().min(self.data.len() - self.pos);
         out[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
@@ -1240,8 +1115,6 @@ unsafe extern "C" fn istream_read(
         reader.read_into(out) as i64
     }
 }
-
-// ---- Host callbacks ----
 
 unsafe fn host_data<'a>(host: *const clap_host) -> Option<&'a HostData> {
     unsafe {
@@ -1308,9 +1181,7 @@ unsafe extern "C" fn host_request_restart(host: *const clap_host) {
     }
 }
 
-unsafe extern "C" fn host_request_process(_host: *const clap_host) {
-    // The PipeWire graph drives processing continuously.
-}
+unsafe extern "C" fn host_request_process(_host: *const clap_host) {}
 
 unsafe extern "C" fn host_request_callback(host: *const clap_host) {
     if let Some(hd) = unsafe { host_data(host) } {
@@ -1328,9 +1199,7 @@ unsafe extern "C" fn host_params_clear(
     _host: *const clap_host,
     _param_id: clap_id,
     _flags: clap_param_clear_flags,
-) {
-    // No automation or modulation is stored by the host.
-}
+) {}
 
 unsafe extern "C" fn host_params_request_flush(host: *const clap_host) {
     if let Some(hd) = unsafe { host_data(host) } {
@@ -1338,9 +1207,7 @@ unsafe extern "C" fn host_params_request_flush(host: *const clap_host) {
     }
 }
 
-unsafe extern "C" fn host_state_mark_dirty(_host: *const clap_host) {
-    // State is snapshotted on demand (K2); nothing to track.
-}
+unsafe extern "C" fn host_state_mark_dirty(_host: *const clap_host) {}
 
 unsafe extern "C" fn host_log(
     _host: *const clap_host,
@@ -1348,7 +1215,6 @@ unsafe extern "C" fn host_log(
     msg: *const std::ffi::c_char,
 ) {
     use clap_sys::ext::log::*;
-    // Logging may allocate; don't do it from the audio thread.
     if msg.is_null() || (threading::is_audio_thread() && !threading::is_main_thread()) {
         return;
     }
@@ -1408,7 +1274,6 @@ mod tests {
         assert_eq!(rt.param_events[0].param_id, 20);
         assert_eq!(rt.param_events[0].value, 0.75);
 
-        // Applied once; no repeat on the next block.
         collect_param_events(&params, &s, &mut rt);
         assert!(rt.param_events.is_empty());
     }
@@ -1492,7 +1357,6 @@ mod tests {
             assert!(output_events_try_push(&out, &midi.header));
             assert!(output_events_try_push(&out, &sysex.header));
         }
-        // header(16) + control(16 + data, padded to 8)
         assert_eq!(&sink.output(2)[32..35], &[0x93, 60, 127]);
         assert_eq!(&sink.output(1)[32..34], &[0xC5, 7]);
         assert_eq!(&sink.output(0)[32..36], &sysex_bytes);

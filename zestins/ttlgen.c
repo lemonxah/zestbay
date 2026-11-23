@@ -1,6 +1,3 @@
-// Writes the LV2 data (manifest.ttl and one .ttl per plugin) of the Zestins
-// bundle from the specs in spec.c.  Usage: ttlgen <bundle directory>
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,7 +19,6 @@
 
 static const char *bundle_dir;
 
-// "urn:zestins:midi-switch" -> "midi-switch"
 static const char *short_name(const ZPlugin *p) {
     const char *colon = strrchr(p->uri, ':');
     return colon ? colon + 1 : p->uri;
@@ -128,8 +124,6 @@ static void write_plugin(const ZPlugin *p) {
     }
     fprintf(f, " .\n\n");
 
-    // UI: an X11 UI driven by the host's idle calls; outputs are reported
-    // to it through port notifications.
     fprintf(f, "<%s>\n    a ui:X11UI ;\n", p->ui_uri);
     fprintf(f, "    lv2:requiredFeature ui:parent ;\n");
     fprintf(f, "    lv2:optionalFeature ui:resize ;\n");

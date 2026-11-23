@@ -5,9 +5,6 @@ use std::time::{Duration, Instant};
 use super::rules::{AutoConnectRule, PortMapping, RuleAction, pattern_matches};
 use crate::pipewire::{GraphState, Link, MediaType, Node, NodeType, ObjectId, Port, PwCommand};
 
-/// How many times the same (output port, input port) pair may be destroyed by
-/// rule enforcement within `DESTROY_WINDOW` before we stop fighting whoever
-/// keeps re-creating it (usually the session manager).
 const MAX_DESTROYS_PER_WINDOW: usize = 3;
 const DESTROY_WINDOW: Duration = Duration::from_secs(30);
 
@@ -15,16 +12,10 @@ pub struct PatchbayManager {
     graph: Arc<GraphState>,
     rules: Vec<AutoConnectRule>,
     pub enabled: bool,
-    /// Exclusive mode: links from a ruled source that no rule allows are
-    /// disconnected. Off, rules only ever add links and nothing is removed.
     pub exclusive: bool,
     pub hide_unnamed: bool,
     pub rules_dirty: bool,
-    /// Display name of the default target node. When a source node has no
-    /// matching rules, its output ports will be connected to this node instead.
     default_target: Option<String>,
-    /// Recent rule-enforced disconnects per (output port, input port), used to
-    /// break destroy/relink loops.
     recent_destroys: HashMap<(ObjectId, ObjectId), Vec<Instant>>,
     redirects: HashMap<ObjectId, ObjectId>,
     redirect_origins: HashMap<ObjectId, ObjectId>,
@@ -294,8 +285,6 @@ impl PatchbayManager {
 
         let source_name = source_node.display_name();
         let mut changed = false;
-        // Rules whose explicit mappings were all removed by this unlearn.
-        // Rules that never had mappings (auto-match rules) are left alone.
         let mut emptied: Vec<String> = Vec::new();
 
         for rule in &mut self.rules {
@@ -332,10 +321,6 @@ impl PatchbayManager {
         changed
     }
 
-    /// Add a block rule for `source` → `target` (the whole node pair), or
-    /// re-enable an existing one. Connect rules for exactly this pair are
-    /// removed, since the block would override them anyway. Returns whether
-    /// the rules changed.
     pub fn block_pair(&mut self, source: &Node, target: &Node) -> bool {
         if source.id == target.id {
             return false;
@@ -383,7 +368,6 @@ impl PatchbayManager {
         changed
     }
 
-    /// The enabled block rule that forbids `out` → `inp`, if any.
     pub fn blocking_rule(
         &self,
         source: &Node,
@@ -404,9 +388,6 @@ impl PatchbayManager {
         self.blocking_rule(source, target, out, inp).is_some()
     }
 
-    /// Node pairs (source id, target id, rule id) currently covered by an
-    /// enabled block rule, for drawing. Only ready nodes that have outputs
-    /// (source) and inputs (target) are listed.
     pub fn blocked_pairs(&self) -> Vec<(ObjectId, ObjectId, String)> {
         let blocks: Vec<&AutoConnectRule> = self
             .rules
@@ -446,7 +427,6 @@ impl PatchbayManager {
         pairs
     }
 
-    /// `is_blocked` for a port pair given by id.
     fn ports_blocked(&self, output_port_id: ObjectId, input_port_id: ObjectId) -> bool {
         self.blocking_rule_for_ports(output_port_id, input_port_id)
             .is_some()
@@ -524,7 +504,6 @@ impl PatchbayManager {
             }
         }
 
-        // Block rules aren't connections; keep them.
         let mut rules: Vec<AutoConnectRule> = self
             .rules
             .iter()
@@ -536,12 +515,6 @@ impl PatchbayManager {
         self.rules_dirty = true;
     }
 
-    /// Point rules at new endpoints after plugins were grouped into (or
-    /// ungrouped from) a subgraph. Rules whose target (`targets == true`) or
-    /// source is a node in `map.nodes` are rewritten: explicit port mappings
-    /// through `map.ports`, heuristic rules to each node in `map.nodes`.
-    /// Rules whose other end is in `skip` (both ends inside the subgraph)
-    /// are left alone. Returns whether anything changed.
     pub fn remap_rules(
         &mut self,
         map: &EndpointMap,
@@ -816,7 +789,6 @@ impl PatchbayManager {
                         link.input_port_id,
                         DESTROY_WINDOW.as_secs(),
                     );
-                    // One extra entry so the warning is logged once per window.
                     times.push(now);
                 }
                 continue;
@@ -868,7 +840,6 @@ impl PatchbayManager {
                     .find(|p| p.name == mapping.input_port_name);
 
                 if let (Some(out_port), Some(in_port)) = (out_port, in_port) {
-                    // Skip media type mismatches (e.g. Midi → Audio)
                     if let (Some(out_mt), Some(in_mt)) = (out_port.media_type, in_port.media_type)
                         && out_mt != in_mt
                     {
@@ -883,12 +854,11 @@ impl PatchbayManager {
     }
 
     fn find_matching_port<'a>(&self, source: &Port, targets: &'a [Port]) -> Option<&'a Port> {
-        // Filter targets to compatible media types (don't connect Midi→Audio or Audio→Midi)
         let compatible: Vec<&Port> = targets
             .iter()
             .filter(|p| match (source.media_type, p.media_type) {
                 (Some(a), Some(b)) => a == b,
-                _ => true, // If either is unknown, allow
+                _ => true,
             })
             .collect();
 
@@ -916,7 +886,6 @@ impl PatchbayManager {
             .or_else(|| compatible.first().copied())
     }
 
-    /// The default target node, if one is set and present (and isn't `exclude`).
     fn default_target_node<'a>(&self, nodes: &'a [Node], exclude: ObjectId) -> Option<&'a Node> {
         let name = self.default_target.as_deref()?;
         nodes.iter().find(|n| {
@@ -949,8 +918,6 @@ impl PatchbayManager {
         })
     }
 
-    /// Remove port mappings where media types are incompatible (e.g. a rule
-    /// learned before MIDI port detection that maps Midi → Audio).
     fn clean_incompatible_mappings(&mut self) {
         let nodes = self.graph.get_all_nodes();
         let mut dirty = false;
@@ -961,13 +928,11 @@ impl PatchbayManager {
                 continue;
             }
 
-            // Find a target node for this rule
             let target = nodes
                 .iter()
                 .find(|n| n.ready && rule.matches_target(n.display_name(), n.node_type, n.id));
             let Some(target) = target else { continue };
 
-            // Find a source node
             let source = nodes
                 .iter()
                 .find(|n| n.ready && rule.matches_source(n.display_name(), n.node_type));
@@ -995,7 +960,7 @@ impl PatchbayManager {
                         _ => true,
                     }
                 } else {
-                    true // ports not found yet — keep mapping
+                    true
                 }
             });
             if rule.port_mappings.len() != before {
@@ -1006,9 +971,6 @@ impl PatchbayManager {
             }
         }
 
-        // Rules with empty port_mappings use auto-matching, so a learned rule
-        // whose mappings were all cleaned away must be removed rather than
-        // turning into a "connect everything" rule.
         if !emptied.is_empty() {
             self.rules.retain(|r| !emptied.contains(&r.id));
         }
@@ -1017,9 +979,6 @@ impl PatchbayManager {
         }
     }
 
-    /// Wiring inside a subgraph: out of its In edge or into its Out edge.
-    /// ZestBay keeps those links itself (links.json); rules neither learn
-    /// them nor remove them.
     fn is_subgraph_internal(source: &Node, target: &Node) -> bool {
         use crate::pipewire::SubgraphRole;
         source
@@ -1033,8 +992,6 @@ impl PatchbayManager {
     }
 
     fn is_routable_node(node: &Node) -> bool {
-        // The inside half of a subgraph shown as a device is wired by
-        // ZestBay as part of the subgraph, never by rules.
         if node
             .subgraph
             .as_ref()
@@ -1141,12 +1098,9 @@ impl PatchbayManager {
     }
 }
 
-/// Old endpoint → new endpoints, for `PatchbayManager::remap_rules`.
 #[derive(Debug, Default, Clone)]
 pub struct EndpointMap {
-    /// (node, port) → [(node, port)]
     pub ports: HashMap<(String, String), Vec<(String, String)>>,
-    /// node → nodes that stand for it (for heuristic rules)
     pub nodes: HashMap<String, Vec<String>>,
 }
 
@@ -1226,7 +1180,6 @@ mod tests {
         }
     }
 
-    /// App (1) with one output, Headphones (2) and Speakers (3) sinks.
     fn setup() -> (Arc<GraphState>, Port, Port, Port) {
         let graph = GraphState::new();
         graph.insert_node(node(1, "App", NodeType::StreamOutput));
@@ -1266,7 +1219,6 @@ mod tests {
     fn unlearn_keeps_user_auto_match_rules() {
         let (graph, out, hp_in, _) = setup();
         let mut pb = PatchbayManager::new(graph.clone());
-        // User rules (no mappings = auto-match ports).
         pb.add_rule(AutoConnectRule::new("Other", None, "Speakers", None, None));
         pb.add_rule(AutoConnectRule::new("App", None, "Headphones", None, None));
         let app = graph.get_node(1).unwrap();
@@ -1307,8 +1259,6 @@ mod tests {
         let midi_in = port(21, 2, "midi_in", PortDirection::Input, MediaType::Midi);
         graph.insert_port(midi_in);
         let mut pb = PatchbayManager::new(graph.clone());
-        // A learned rule containing only an incompatible mapping (e.g. learned
-        // before MIDI port detection).
         let mut rule = AutoConnectRule::new(
             "App",
             Some(NodeType::StreamOutput),
@@ -1317,13 +1267,11 @@ mod tests {
             Some(2),
         );
         rule.add_port_mapping(out.name.clone(), "midi_in".into());
-        // And a user auto-match rule that must survive.
         let user = AutoConnectRule::new("App", None, "Speakers", None, None);
         pb.set_rules(vec![rule, user]);
         let cmds = pb.scan();
         assert_eq!(pb.rules().len(), 1);
         assert_eq!(pb.rules()[0].target_pattern, "Speakers");
-        // The removed rule must not have turned into a connect-everything rule.
         assert!(!connects(&cmds).contains(&(10, 20)));
     }
 
@@ -1333,7 +1281,6 @@ mod tests {
         graph.insert_node(node(4, "Other", NodeType::StreamOutput));
         let other_out = port(40, 4, "output_FL", PortDirection::Output, MediaType::Audio);
         graph.insert_port(other_out.clone());
-        // Rule: App -> Headphones. "Other" has no rule but links into Headphones.
         graph.insert_link(link(100, &other_out, &hp_in));
         graph.insert_link(link(101, &out, &hp_in));
         let mut pb = PatchbayManager::new(graph.clone());
@@ -1351,7 +1298,6 @@ mod tests {
     #[test]
     fn ruled_source_links_kept_while_target_absent() {
         let (graph, out, _, sp_in) = setup();
-        // Session manager routed App to Speakers because Headphones vanished.
         graph.remove_node(2);
         graph.remove_port(20);
         graph.insert_link(link(100, &out, &sp_in));
@@ -1369,7 +1315,6 @@ mod tests {
         for _ in 0..MAX_DESTROYS_PER_WINDOW {
             assert_eq!(disconnects(&pb.scan()), vec![100]);
         }
-        // The link keeps coming back: stop fighting it.
         assert!(disconnects(&pb.scan()).is_empty());
         assert!(disconnects(&pb.scan()).is_empty());
     }
@@ -1432,8 +1377,6 @@ mod tests {
 
     #[test]
     fn block_rule_alone_does_not_govern_other_links() {
-        // A block rule is not a connect rule: in exclusive mode, App's link to
-        // Headphones must stay (no connect rule makes App "ruled").
         let (graph, out, hp_in, _) = setup();
         graph.insert_link(link(100, &out, &hp_in));
         let mut pb = PatchbayManager::new(graph.clone());
@@ -1475,9 +1418,7 @@ mod tests {
         assert!(pb.block_pair(&app, &sp));
         assert_eq!(pb.rules().len(), 1);
         assert!(pb.rules()[0].is_block());
-        // Blocking twice changes nothing.
         assert!(!pb.block_pair(&app, &sp));
-        // A blocked pair is never learned, so the block stays the only rule.
         assert!(!pb.learn_from_link(&app, &sp, &out, &sp_in));
         assert_eq!(pb.rules().len(), 1);
         assert!(pb.is_blocked(&app, &sp, &out, &sp_in));
@@ -1505,7 +1446,6 @@ mod tests {
         pb.add_rule(rule);
         pb.add_rule(block("Missing", "Speakers"));
         assert_eq!(pb.blocked_pairs(), vec![(1, 3, id.clone())]);
-        // Disabled blocks aren't drawn.
         pb.toggle_rule(&id);
         assert!(pb.blocked_pairs().is_empty());
     }
@@ -1558,8 +1498,8 @@ mod tests {
         learned.add_port_mapping("output_FL".into(), "in_l".into());
         learned.add_port_mapping("output_FR".into(), "in_r".into());
         pb.add_rule(learned);
-        pb.add_rule(AutoConnectRule::new("Gate", None, "EQ", None, None)); // inside the subgraph
-        pb.add_rule(AutoConnectRule::new("Spotify", None, "EQ", None, None)); // heuristic
+        pb.add_rule(AutoConnectRule::new("Gate", None, "EQ", None, None));
+        pb.add_rule(AutoConnectRule::new("Spotify", None, "EQ", None, None));
         let map = endpoint_map(&[
             ("EQ", "in_l", "Chain In", "in_FL"),
             ("EQ", "in_r", "Chain In", "in_FR"),
@@ -1633,7 +1573,6 @@ mod tests {
         graph.insert_port(gate_in.clone());
         graph.insert_link(link(100, &in_out, &gate_in));
         let mut pb = PatchbayManager::new(graph.clone());
-        // A rule on the edge node that doesn't mention Gate.
         pb.add_rule(AutoConnectRule::new(
             "Chain In", None, "Speakers", None, None,
         ));
@@ -1668,7 +1607,6 @@ mod tests {
     #[test]
     fn exclusive_default_target_removes_other_links() {
         let (graph, out, hp_in, sp_in) = setup();
-        // The session manager also routed the unruled App to its own default.
         graph.insert_link(link(100, &out, &hp_in));
         graph.insert_link(link(101, &out, &sp_in));
         let mut pb = PatchbayManager::new(graph.clone());

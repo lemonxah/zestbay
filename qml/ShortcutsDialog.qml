@@ -2,10 +2,6 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// Keyboard and mouse shortcuts, grouped. Opened with ? or F1, from the app
-// menu and from the help button on the canvas. Each row is a list of
-// alternatives (key combinations, each a list of caps) and what they do.
-// Keep in step with GraphView's key handling and the README's shortcut table.
 ZbDialog {
     id: dialog
     title: "Keyboard and mouse shortcuts"
@@ -13,7 +9,6 @@ ZbDialog {
     secondaryText: ""
     width: 700
 
-    // [{ title, rows: [{ keys: [[cap, ...], ...], text }] }]
     readonly property var sections: [
         {
             title: "Move around",
@@ -74,7 +69,6 @@ ZbDialog {
         }
     ]
 
-    // One key cap: mono 10, outline tag (same look as the canvas hint).
     component Cap: Rectangle {
         id: cap
         property string label
@@ -94,7 +88,6 @@ ZbDialog {
         }
     }
 
-    // One row: the alternatives (separated by "or") and the description.
     component ShortcutRow: RowLayout {
         id: row
         property var keys: []
@@ -160,8 +153,6 @@ ZbDialog {
 
     Item {
         id: viewport
-        // A Dialog sizes itself from its content's implicit size; keep the
-        // list within the window and let it scroll.
         readonly property real maxHeight: Math.max(240, (Overlay.overlay ? Overlay.overlay.height : 760) - 230)
         implicitWidth: 640
         implicitHeight: Math.min(content.implicitHeight, maxHeight)

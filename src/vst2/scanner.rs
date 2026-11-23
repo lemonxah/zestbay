@@ -1,6 +1,3 @@
-//! VST2 discovery. Library inspection and shell enumeration run only in
-//! isolated scan processes, since metadata queries execute plugin code.
-
 use super::abi::{self, eff, *};
 use super::host::LoadedEffect;
 use crate::clap::scanner::ScanCache;
@@ -34,15 +31,13 @@ pub fn find_plugin(uri: &str) -> Option<PluginInfo> {
 }
 
 pub(crate) fn discover_plugins() -> Vec<PathBuf> {
-    let dirs = crate::plugin::paths::search_dirs("VST_PATH", SEARCH_DIRS, "vst", "VST2");
+    let dirs = crate::plugin::paths::search_dirs("VST_PATH", SEARCH_DIRS, "VST2");
     crate::plugin::scan::discover(&dirs, "so", true)
 }
 
 pub(crate) fn scan_discovered(paths: &[PathBuf], progress: &(impl Fn() + Sync)) -> Vec<PluginInfo> {
     let mut plugins = crate::plugin::scan::scan_libraries("vst2", paths, progress);
     plugins.sort_by_cached_key(|p| p.name.to_lowercase());
-    // A library can appear in both a system and a user directory. Prefer
-    // the first search root, consistently with the other format scanners.
     let mut seen = HashSet::new();
     plugins.retain(|p| seen.insert(p.uri.clone()));
     CACHE.store(&plugins);
@@ -50,8 +45,6 @@ pub(crate) fn scan_discovered(paths: &[PathBuf], progress: &(impl Fn() + Sync)) 
     plugins
 }
 
-/// The filename disambiguates plugins that reuse the 32-bit VST2 ID while
-/// keeping sessions portable when a library is moved to a different folder.
 fn plugin_uri(path: &Path, id: i32) -> String {
     format!(
         "vst2:{:08x}:{}",

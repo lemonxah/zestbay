@@ -1,18 +1,10 @@
 import QtQuick
 import QtQuick.Controls
 
-// Menu item: 32 tall, radius 6, 10 px side padding, 13/400.
-// destructive = text.destructive; shortcutHint = right-aligned mono 10 muted.
-// checkable items show a compact switch (same look as ZbSwitch compact) on
-// the right; clicking the row emits toggled() and keeps the menu open (a
-// normal trigger would close it). Handle toggles with onToggled; keep
-// `checked` bound to the real state.
 MenuItem {
     id: control
     property bool destructive: false
     property string shortcutHint: ""
-    // Pick-one lists (e.g. a filter): marks the current choice with a check;
-    // the item still triggers and closes the menu. Use instead of checkable.
     property bool selected: false
     property color swatch: "transparent"
 
@@ -70,7 +62,6 @@ MenuItem {
             font.pixelSize: Theme.sizeBadge
             color: Theme.textMuted
         }
-        // Compact switch: 32x18 track, 14 px knob (bible §4 "Switch").
         Rectangle {
             id: check
             visible: control.checkable
@@ -95,7 +86,6 @@ MenuItem {
         }
     }
 
-    // Toggles stay open: flip without triggered(), which closes the menu.
     MouseArea {
         anchors.fill: parent
         enabled: control.checkable && control.enabled
@@ -105,7 +95,6 @@ MenuItem {
     }
 
     indicator: Item {}
-    // Submenu entries (a ZbMenu inside a ZbMenu) get a right chevron.
     arrow: ZbIcon {
         x: control.width - width - control.rightPadding
         y: (control.height - height) / 2

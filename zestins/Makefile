@@ -1,20 +1,8 @@
-# Zestins: ZestBay's own LV2 plugins, built into one bundle, zestins.lv2:
-#
-#   zestins.so      every plugin's DSP (dsp/*.c, descriptors in zestins.c)
-#   zestins_ui.so   one X11 UI for all of them (ui/ui.c)
-#   *.ttl           generated from spec.c by ttlgen
-#
-#   make                      build into build/zestins.lv2
-#   make install              copy the bundle to ~/.lv2
-#   make install DESTDIR=$pkgdir LV2_DIR=/usr/lib/lv2   (packaging)
-#   make uninstall / make clean
-
 BUILD    ?= build
 LV2_DIR  ?= $(HOME)/.lv2
 DESTDIR  ?=
 CC       ?= cc
 CFLAGS   ?= -O2 -g
-# Always applied, also when a packager passes CFLAGS on the command line.
 ZFLAGS   := -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -fPIC -fvisibility=hidden
 LV2_CFLAGS := $(shell pkg-config --cflags lv2 2>/dev/null)
 X11_CFLAGS := $(shell pkg-config --cflags x11 2>/dev/null)

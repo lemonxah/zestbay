@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick.Controls
 
-// Tooltip: bg.hover (dark) / white (light), strong border, radius 8, 11 px.
 ToolTip {
     id: control
     delay: 400

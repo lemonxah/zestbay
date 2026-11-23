@@ -1,8 +1,3 @@
-//! PipeWire filter node that wraps a CLAP plugin instance.
-//!
-//! This is structurally identical to `lv2::filter::Lv2FilterNode`, but uses
-//! `ClapPluginInstance` for the process callback.
-
 use std::cell::{RefCell, UnsafeCell};
 use std::ffi::CString;
 use std::rc::Rc;
@@ -35,7 +30,6 @@ pub struct FilterConfig {
     pub audio_inputs: usize,
     pub audio_outputs: usize,
     pub has_midi_in: bool,
-    /// Names of the plugin's MIDI outputs (empty: the MIDI out is a thru).
     pub midi_outputs: Vec<String>,
     pub enabled: bool,
 }
@@ -45,16 +39,9 @@ struct PortData {
     index: u32,
 }
 
-/// User data of the pw_filter callbacks.
-///
-/// `shared` (atomics only) may be read from any thread.  `rt` is touched
-/// exclusively by the RT `process` callback once the filter is connected
-/// (before that only by `new`), hence the `UnsafeCell`.
 struct FilterData {
     shared: Arc<FilterShared>,
     rt: UnsafeCell<FilterRt>,
-    /// Plugin instance owned by an `Rc<RefCell<..>>` on the main thread.
-    /// See `on_process` for the aliasing rules.
     instance_ptr: *mut ClapPluginInstance,
 }
 
@@ -69,13 +56,6 @@ impl ClapFilterNode {
             .unwrap_or_else(|_| CString::new("CLAP Plugin").unwrap());
         let instance_id_str = config.instance_id.to_string();
 
-        // Effects are passive only when the user opted in (PASSIVE_EFFECTS):
-        // a passive node never wakes the devices it is linked to, so
-        // mic -> effect -> headset would stay silent until something else
-        // woke the mic. Instruments (audio_inputs == 0) are never passive:
-        // their only input is MIDI, and when the MIDI device disconnects
-        // PipeWire would stop scheduling a passive node with no connected
-        // inputs, killing the audio output chain.
         let is_passive = config.audio_inputs > 0
             && crate::plugin::PASSIVE_EFFECTS.load(std::sync::atomic::Ordering::Relaxed);
 
@@ -113,9 +93,6 @@ impl ClapFilterNode {
             return Err("Failed to create pw_filter".into());
         }
 
-        // Ports are created before the filter is connected, so the RT
-        // callback cannot run yet.  A port that fails to be created keeps a
-        // null entry and is fed from scratch memory.
         let mut ports = FilterPorts {
             inputs: Vec::with_capacity(config.audio_inputs),
             outputs: Vec::with_capacity(config.audio_outputs),
@@ -244,16 +221,10 @@ impl ClapFilterNode {
         unsafe { pipewire::sys::pw_filter_get_node_id(self.filter) }
     }
 
-    /// Sample rate the graph is currently driving this filter at
-    /// (from the process clock); 0 until the first process cycle.
     pub fn graph_rate(&self) -> u32 {
         self.main.graph_rate()
     }
 
-    /// Forward events queued by the RT callback (parameter changes from MIDI
-    /// mappings, MIDI learn captures, PluginAdded once the node id is known)
-    /// and release mapping tables the RT callback no longer uses.
-    /// Must be called from the PipeWire main loop on every tick.
     pub fn drain_events(&self, event_tx: &std::sync::mpsc::Sender<crate::pipewire::PwEvent>) {
         self.main
             .drain_events(event_tx, self.instance_id, &self.display_name, || {
@@ -305,8 +276,6 @@ fn c_str(bytes: &[u8]) -> *const std::os::raw::c_char {
     bytes.as_ptr() as *const std::os::raw::c_char
 }
 
-/// # Safety
-/// `filter` must be a valid, not yet connected pw_filter; `format` must be NUL-terminated.
 unsafe fn add_port(
     filter: *mut pipewire::sys::pw_filter,
     direction: libspa::sys::spa_direction,
@@ -357,8 +326,6 @@ unsafe extern "C" fn on_state_changed(
     if state == pipewire::sys::pw_filter_state_PW_FILTER_STATE_PAUSED
         || state == pipewire::sys::pw_filter_state_PW_FILTER_STATE_STREAMING
     {
-        // Only the shared atomics are touched here; PluginAdded is emitted
-        // by `drain_events` on the next tick.
         let fd = data as *const FilterData;
         let shared = unsafe { &(*fd).shared };
         shared
@@ -373,17 +340,10 @@ unsafe extern "C" fn on_process(
 ) {
     unsafe {
         let fd = &*(data as *const FilterData);
-        // SAFETY: only this callback accesses `rt` while the filter is connected.
         let rt = &mut *fd.rt.get();
         let instance_ptr = fd.instance_ptr;
 
         rt.run_cycle(position, |inputs, outputs, n_samples, midi_events, midi_out| {
-            // Aliasing invariant: the main thread owns the instance through an
-            // Rc<RefCell<..>> and may borrow it while we run, so it must only
-            // call methods that touch atomics (set_parameter / set_bypassed /
-            // get_parameters, contract K1) or anything else only while this
-            // filter is disconnected.  The `&mut` here is created per block
-            // and never outlives the `process` call.
             let inst = &mut *instance_ptr;
             inst.process(inputs, outputs, n_samples, midi_events, midi_out);
             0

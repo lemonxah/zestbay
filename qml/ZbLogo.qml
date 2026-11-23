@@ -1,10 +1,6 @@
 import QtQuick
 import QtQuick.Shapes
 
-// The ZestBay logo (traced from images/logo/zestbay-master.png by
-// images/trace-logo.py): a lime zest arc and an orange cable that loops into
-// a zest slice and ends in an audio jack. `size` is the height; withName
-// adds the "ZestBay" wordmark (About screen only).
 Item {
     id: root
     property real size: 22
@@ -14,8 +10,6 @@ Item {
     implicitHeight: size
     implicitWidth: size * box[2] / box[3]
 
-    // Antialiasing: Qt 6.6+ curve renderer (crisp at any scale, no layer);
-    // older Qt falls back to a multisampled layer.
     property bool _curve: false
 
     Item {

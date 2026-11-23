@@ -1,27 +1,8 @@
-//! LV2 Worker extension implementation.
-//!
-//! Provides `LV2_Worker_Schedule` feature so plugins can offload
-//! non-realtime work to a background thread.  The RT thread calls
-//! `schedule_work` which copies the request into a preallocated lock-free
-//! ring and wakes the worker thread; the worker calls the plugin's `work()`,
-//! and responses travel back through a second ring for delivery after the
-//! next `run()` via `work_response()`.  Nothing on the RT side allocates,
-//! frees or blocks.
-//!
-//! Two-phase construction:
-//!   1. `Lv2WorkerSetup::new()` — creates rings + schedule feature (pre-instantiation)
-//!   2. `Lv2WorkerSetup::activate(handle, iface)` → `Lv2Worker` (post-instantiation)
-//!
-//! The owner must call `Lv2Worker::stop()` (joins the thread) before the
-//! plugin instance is freed; dropping the worker also stops it.
-
 use std::ffi::{CStr, c_void};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::plugin::types::{MsgConsumer, MsgPop, MsgProducer, msg_ring};
-
-// ── C-compatible struct definitions matching lv2/worker/worker.h ──
 
 pub const LV2_WORKER_SCHEDULE_URI: &CStr = c"http://lv2plug.in/ns/ext/worker#schedule";
 pub const LV2_WORKER_INTERFACE_URI: &str = "http://lv2plug.in/ns/ext/worker#interface";
@@ -32,9 +13,7 @@ pub const LV2_WORKER_SUCCESS: LV2_Worker_Status = 0;
 pub const LV2_WORKER_ERR_UNKNOWN: LV2_Worker_Status = 1;
 pub const LV2_WORKER_ERR_NO_SPACE: LV2_Worker_Status = 2;
 
-/// Capacity of the request and response rings, in bytes.
 const RING_CAPACITY: usize = 256 * 1024;
-/// Largest single response delivered to the plugin.
 const MAX_RESPONSE_SIZE: usize = 64 * 1024;
 
 #[allow(non_camel_case_types)]
@@ -49,7 +28,6 @@ pub type LV2_Worker_Respond_Function = unsafe extern "C" fn(
 #[allow(non_camel_case_types)]
 pub type LV2_Worker_Schedule_Handle = *mut c_void;
 
-/// The host-provided feature struct passed to the plugin.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct LV2_Worker_Schedule {
@@ -61,66 +39,44 @@ pub struct LV2_Worker_Schedule {
     ) -> LV2_Worker_Status,
 }
 
-/// Plugin-provided interface retrieved via extension_data.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct LV2_Worker_Interface {
     pub work: unsafe extern "C" fn(
-        instance: *mut c_void, // LV2_Handle
+        instance: *mut c_void,
         respond: LV2_Worker_Respond_Function,
         handle: LV2_Worker_Respond_Handle,
         size: u32,
         data: *const c_void,
     ) -> LV2_Worker_Status,
     pub work_response: unsafe extern "C" fn(
-        instance: *mut c_void, // LV2_Handle
+        instance: *mut c_void,
         size: u32,
         body: *const c_void,
     ) -> LV2_Worker_Status,
     pub end_run: Option<unsafe extern "C" fn(instance: *mut c_void) -> LV2_Worker_Status>,
 }
 
-// ── Context structs ──
-
-/// Context passed as the `handle` in the `LV2_Worker_Schedule` C struct.
-/// Lives on the heap (stable pointer) until the `Lv2Worker` is dropped,
-/// which happens after the plugin instance has been freed.
 struct ScheduleContext {
-    /// The plugin normally schedules from `run()`, but some also schedule
-    /// from `restore()`/`instantiate()` on another thread.  `try_lock` keeps
-    /// the RT path non-blocking; contention reports `NO_SPACE`.
     request_tx: parking_lot::Mutex<MsgProducer>,
-    /// Worker thread to wake (set on activation).
     worker_thread: parking_lot::Mutex<Option<std::thread::Thread>>,
 }
 
-/// Context passed as the `LV2_Worker_Respond_Handle` to the `work()` callback.
-/// Lives on the worker thread's stack; only the worker thread produces responses.
 struct RespondContext {
     response_tx: MsgProducer,
 }
 
-// ── Phase 1: Pre-instantiation setup ──
-
-/// Holds the rings and schedule feature needed BEFORE plugin instantiation.
-/// Call `make_feature()` to get the `LV2Feature` to pass to `plugin.instantiate()`,
-/// then call `activate()` after instantiation to start the worker thread.
 pub struct Lv2WorkerSetup {
     request_rx: MsgConsumer,
     response_tx: MsgProducer,
     response_rx: MsgConsumer,
-    /// Heap-allocated schedule struct (stable pointer for the plugin)
     schedule: Box<LV2_Worker_Schedule>,
     sched_ctx: Box<ScheduleContext>,
 }
 
-// SAFETY: the raw pointer inside `schedule` points into `sched_ctx`, which
-// moves with the setup.
 unsafe impl Send for Lv2WorkerSetup {}
 
 impl Lv2WorkerSetup {
-    /// Create a new worker setup. This allocates the rings and schedule
-    /// feature struct, ready to be passed to `plugin.instantiate()`.
     pub fn new() -> Self {
         let (request_tx, request_rx) = msg_ring(RING_CAPACITY);
         let (response_tx, response_rx) = msg_ring(RING_CAPACITY);
@@ -144,8 +100,6 @@ impl Lv2WorkerSetup {
         }
     }
 
-    /// Build an `LV2Feature` for the worker schedule.
-    /// Pass this (via transmute) to `plugin.instantiate()`.
     pub fn make_feature(&self) -> lv2_raw::core::LV2Feature {
         lv2_raw::core::LV2Feature {
             uri: LV2_WORKER_SCHEDULE_URI.as_ptr(),
@@ -153,12 +107,6 @@ impl Lv2WorkerSetup {
         }
     }
 
-    /// Activate the worker: spawn the background thread and return the
-    /// active `Lv2Worker`.
-    ///
-    /// # Safety
-    /// `lv2_handle` and `worker_iface` must stay valid until `Lv2Worker::stop()`
-    /// has returned (or the worker is dropped).
     pub unsafe fn activate(
         self,
         lv2_handle: *mut c_void,
@@ -210,47 +158,25 @@ impl Lv2WorkerSetup {
     }
 }
 
-// ── Phase 2: Active worker ──
-
-/// Per-instance worker handle.
-/// Constructed via `Lv2WorkerSetup::activate()`.
 pub struct Lv2Worker {
-    /// Ring for worker thread → RT (responses)
     response_rx: MsgConsumer,
-    /// Preallocated buffer a response is copied into before `work_response()`
     response_buf: Box<[u8]>,
-    /// The C struct whose pointer is given to the plugin as the feature
     _schedule: Box<LV2_Worker_Schedule>,
-    /// Pointed to by `_schedule.handle`
     sched_ctx: Box<ScheduleContext>,
-    /// Worker interface retrieved from the plugin
     worker_iface: *const LV2_Worker_Interface,
-    /// LV2_Handle (the raw instance pointer for calling work/work_response)
     lv2_handle: *mut c_void,
     thread: Option<std::thread::JoinHandle<()>>,
     stop: Arc<AtomicBool>,
-    /// Accumulated worker thread CPU time in nanoseconds (written by worker thread, drained by RT thread)
     worker_ns: Arc<AtomicU64>,
 }
 
-// SAFETY: The raw pointers (lv2_handle, worker_iface) are only used from the
-// PipeWire filter thread (same thread that calls process) and from the worker
-// thread, which is joined before the instance is freed.
 unsafe impl Send for Lv2Worker {}
 
 impl Lv2Worker {
-    /// Drain and return accumulated worker thread CPU time in nanoseconds.
-    /// Called from the process (RT) thread to include worker time in DSP stats.
     pub fn drain_worker_ns(&self) -> u64 {
         self.worker_ns.swap(0, Ordering::Relaxed)
     }
 
-    /// Deliver pending worker responses to the plugin.
-    /// Must be called from the process (RT) thread, after `run()`.
-    /// Never allocates or blocks.
-    ///
-    /// # Safety
-    /// Must only be called from the same thread that calls `run()`.
     pub unsafe fn deliver_responses(&mut self) {
         unsafe {
             let iface = &*self.worker_iface;
@@ -264,7 +190,6 @@ impl Lv2Worker {
                         );
                     }
                     MsgPop::TooLarge(_) => {
-                        // respond() rejects these; never expected here.
                         self.response_rx.discard();
                     }
                     MsgPop::Empty => break,
@@ -276,9 +201,6 @@ impl Lv2Worker {
         }
     }
 
-    /// Stop the worker thread and wait for it to exit.  After this returns
-    /// the plugin's `work()` is no longer called and the instance may be
-    /// freed.  Idempotent.
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(thread) = self.thread.take() {
@@ -297,10 +219,6 @@ impl Drop for Lv2Worker {
     }
 }
 
-// ── Callbacks ──
-
-/// Called by the plugin from `run()` (RT thread) to schedule work.
-/// Copies the request into the preallocated ring; never allocates or blocks.
 unsafe extern "C" fn schedule_work_callback(
     handle: LV2_Worker_Schedule_Handle,
     size: u32,
@@ -330,8 +248,6 @@ unsafe extern "C" fn schedule_work_callback(
     LV2_WORKER_SUCCESS
 }
 
-/// Called by the plugin's `work()` (worker thread) to send a response back
-/// to the RT thread.
 unsafe extern "C" fn respond_callback(
     handle: LV2_Worker_Respond_Handle,
     size: u32,
@@ -356,8 +272,6 @@ unsafe extern "C" fn respond_callback(
         LV2_WORKER_ERR_NO_SPACE
     }
 }
-
-// ── Worker thread ──
 
 fn worker_thread_main(
     lv2_handle: *mut c_void,

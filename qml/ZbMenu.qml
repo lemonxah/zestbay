@@ -1,22 +1,17 @@
 import QtQuick
 import QtQuick.Controls
 
-// Context menu: 220 wide, bg.menu, strong border, radius 10, 6 px padding,
-// menu shadow. Use ZbMenuItem and ZbMenuSeparator inside.
 Menu {
     id: control
     implicitWidth: Theme.menuWidth
     padding: 6
     font.family: Theme.fontSans
     font.pixelSize: Theme.sizeBody
-    // Entries Qt makes itself (a nested ZbMenu's entry) look like ours.
     delegate: ZbMenuItem {}
-    // Submenus open beside their entry, slightly overlapping it.
     overlap: 6
 
     background: Item {
         implicitWidth: Theme.menuWidth
-        // Soft shadow approximation (no effects module needed).
         Repeater {
             model: 4
             Rectangle {

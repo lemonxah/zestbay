@@ -1,8 +1,6 @@
 import QtQuick
 import QtQuick.Shapes
 
-// A glyph drawn at `size` px in `color`: a stroke glyph from Glyphs.icons,
-// or a filled one from Glyphs.traced (fill: true).
 Item {
     id: root
     property string name
@@ -15,8 +13,6 @@ Item {
     implicitWidth: size
     implicitHeight: size
 
-    // Antialiasing: Qt 6.6+ curve renderer (crisp at any scale, no layer);
-    // older Qt falls back to a multisampled layer.
     property bool _curve: false
 
     Shape {

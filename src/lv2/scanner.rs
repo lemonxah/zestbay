@@ -22,8 +22,6 @@ const PROVIDED_FEATURES: &[&str] = &[
     "http://lv2plug.in/ns/lv2core#inPlaceBroken",
 ];
 
-/// Default value for a control port: the declared `lv2:default` if it is a
-/// finite number, otherwise 0 clamped into whatever finite bounds exist.
 pub fn resolve_control_default(default: f32, min: f32, max: f32) -> f32 {
     if default.is_finite() {
         return default;
@@ -106,8 +104,6 @@ pub fn classify_lv2_ports(
         } else if is_atom && is_output {
             Lv2PortType::AtomOutput
         } else {
-            // Unknown port class (e.g. an old event port).  The host still
-            // connects it to a dummy buffer at instantiation time.
             log::debug!("LV2 port {} ('{}') has an unsupported class", i, port_symbol);
             continue;
         };

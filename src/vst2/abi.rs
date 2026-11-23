@@ -1,11 +1,3 @@
-//! Minimal C ABI declarations for VST 2.4 interoperability.
-//!
-//! No Steinberg SDK headers are included. The public RustAudio bindings are
-//! a reference for the binary layout and opcode numbers:
-//! https://github.com/RustAudio/vst2-sys/blob/master/src/lib.rs
-//! Nullable callbacks are represented with Option, including older plugins
-//! which leave the VST 2.4 processing callbacks unset.
-
 use std::ffi::c_void;
 
 pub const MAGIC: i32 = 0x5673_7450;
@@ -88,7 +80,6 @@ pub struct MidiEvent {
     pub reserved: [u8; 2],
 }
 
-/// VstEvents ends in a variable-length array of event pointers.
 #[repr(C)]
 pub struct Events<const N: usize> {
     pub count: i32,
@@ -144,7 +135,6 @@ pub struct ParameterProperties {
     pub future: [u8; 16],
 }
 
-/// The instance must remain live and this call must obey its thread rules.
 pub unsafe fn dispatch(
     effect: *mut Effect,
     opcode: i32,

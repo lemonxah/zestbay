@@ -45,18 +45,12 @@ pub enum PortDirection {
     Output,
 }
 
-/// Which edge of a subgraph a ZestBay boundary node belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SubgraphRole {
-    /// Feeds the subgraph: external inputs, internal outputs.
     In,
-    /// Leaves the subgraph: internal inputs, external outputs.
     Out,
 }
 
-/// Which side of the boundary a node carries. A plain pass-through node has
-/// both; a subgraph shown as a device splits into a device node (external)
-/// and a loopback stream (internal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SubgraphSide {
     Both,
@@ -64,8 +58,6 @@ pub enum SubgraphSide {
     Internal,
 }
 
-/// Marks a node ZestBay created for a subgraph boundary
-/// (`zestbay.subgraph.*` properties).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubgraphTag {
     pub id: String,
@@ -84,10 +76,7 @@ pub struct Node {
     pub is_jack: bool,
     pub is_bridge: bool,
     pub ready: bool,
-    /// Set on subgraph boundary nodes.
     pub subgraph: Option<SubgraphTag>,
-    /// Set on both halves of a virtual device ZestBay created
-    /// (`zestbay.vdev.id`).
     pub vdev_id: Option<String>,
 }
 
@@ -156,7 +145,7 @@ pub enum PwEvent {
 }
 
 #[allow(dead_code)]
-#[allow(clippy::large_enum_variant)] // AddPlugin carries the full PluginInfo; commands are short-lived and boxing would touch every construction site
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum PwCommand {
     Connect {
@@ -170,14 +159,10 @@ pub enum PwCommand {
         plugin_uri: String,
         instance_id: u64,
         display_name: String,
-        /// "LV2", "CLAP", or "VST3"
         format: String,
-        /// Saved/discovered descriptor, including the CLAP/VST3 library path.
         scan_info: Option<crate::plugin::PluginInfo>,
         lv2_state: Vec<crate::lv2::state::StateEntry>,
-        /// Opaque CLAP/VST3 state blob to restore after instantiation.
         plugin_state: Option<Vec<u8>>,
-        /// Persistent instance identity (survives restarts, unlike instance_id).
         stable_id: String,
         enabled: bool,
     },
@@ -219,40 +204,24 @@ pub enum PwCommand {
     RemoveMidiMappingsForPlugin {
         instance_id: u64,
     },
-    /// Not sent by anything at present (unplugged devices keep their
-    /// mappings dormant in the UI instead); kept for API completeness.
     RemoveMidiMappingsForDevice {
         device_name: String,
     },
-    /// Re-create a live plugin in place (same instance id, name and links)
-    /// with `lv2_state` restored before it starts and `params` applied on
-    /// top. Used to apply a preset that carries LV2 state.
     ReloadPluginWithState {
         instance_id: u64,
         lv2_state: Vec<crate::lv2::state::StateEntry>,
         params: Vec<(usize, f32)>,
     },
-    /// Ask the PipeWire thread to snapshot the state of every live plugin.
-    /// Replies with one `PluginStateSaved` per plugin, then `PluginStatesDone`.
     RequestPluginStates,
-    /// Create (or re-create, when the spec changed) a node ZestBay owns —
-    /// a subgraph boundary or a virtual device — under `key`; `None`
-    /// removes it.
     SetOwnedNode {
         key: String,
         spec: Option<OwnedNodeSpec>,
     },
 }
 
-/// A node ZestBay creates in PipeWire itself (not a plugin).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnedNodeSpec {
-    /// A `pw_filter` that copies each input channel (and MIDI) to the
-    /// matching output: a subgraph boundary that isn't a device.
     Pass(PassSpec),
-    /// An in-process `libpipewire-module-loopback`: a capture stream and a
-    /// playback stream joined inside PipeWire. One side is a device
-    /// (`media.class` Audio/Sink or Audio/Source) when its props say so.
     Loopback(LoopbackSpec),
 }
 
@@ -260,11 +229,8 @@ pub enum OwnedNodeSpec {
 pub struct PassSpec {
     pub node_name: String,
     pub description: String,
-    /// Channel positions (FL, FR, MONO, AUX0…); one input and one output
-    /// port per channel.
     pub channels: Vec<String>,
     pub midi: bool,
-    /// Extra node properties (tags).
     pub props: Vec<(String, String)>,
 }
 
@@ -291,9 +257,6 @@ pub enum PluginEvent {
         port_index: usize,
         value: f32,
     },
-    /// The running instance's parameter list (names, ranges, defaults and
-    /// current values).  Sent after every successful instantiation, before
-    /// `PluginAdded`.
     ParametersDescribed {
         instance_id: u64,
         params: Vec<crate::plugin::types::ParameterValue>,
@@ -309,10 +272,6 @@ pub enum PluginEvent {
         message: String,
         fatal: bool,
     },
-    /// The plugin could not be loaded (probe timeout/failure, failed
-    /// instantiation or reload) and is skipped for this session.  It is not
-    /// running, but its saved configuration, state and mappings are kept.
-    /// Followed by a non-fatal `PluginError` explaining why.
     PluginSkipped {
         instance_id: u64,
     },
@@ -335,11 +294,8 @@ pub enum PluginEvent {
     },
     PluginStateSaved {
         instance_id: u64,
-        /// LV2 state entries (empty for CLAP/VST3).
         lv2_state: Vec<crate::lv2::state::StateEntry>,
-        /// CLAP/VST3 opaque state blob (None for LV2).
         blob: Option<Vec<u8>>,
     },
-    /// Sent after all `PluginStateSaved` replies to a `RequestPluginStates`.
     PluginStatesDone,
 }

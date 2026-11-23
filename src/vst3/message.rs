@@ -1,7 +1,3 @@
-//! Host-side `IMessage` and `IAttributeList`, handed out through
-//! `IHostApplication::createInstance`. Components and controllers of one
-//! plugin use them to talk to each other over `IConnectionPoint`.
-
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_void};
 use std::sync::Mutex;
@@ -14,14 +10,9 @@ use vst3::Steinberg::*;
 enum Attr {
     Int(i64),
     Float(f64),
-    /// UTF-16, without terminator.
     Str(Vec<u16>),
     Bin(Vec<u8>),
 }
-
-// ---------------------------------------------------------------------------
-// IAttributeList
-// ---------------------------------------------------------------------------
 
 #[repr(C)]
 pub struct HostAttributeList {
@@ -46,7 +37,6 @@ static ATTR_LIST_VTBL: IAttributeListVtbl = IAttributeListVtbl {
     getBinary: list_get_binary,
 };
 
-/// New attribute list with one reference.
 pub fn new_attribute_list() -> *mut HostAttributeList {
     Box::into_raw(Box::new(HostAttributeList {
         vtbl: &ATTR_LIST_VTBL,
@@ -152,7 +142,6 @@ unsafe extern "system" fn list_get_float(this: *mut IAttributeList, id: AttrID, 
     }
 }
 
-/// Longest string accepted, in UTF-16 units (against an unterminated input).
 const MAX_STRING: usize = 1 << 20;
 
 unsafe extern "system" fn list_set_string(this: *mut IAttributeList, id: AttrID, string: *const TChar) -> tresult {
@@ -184,7 +173,6 @@ unsafe extern "system" fn list_get_string(
         let capacity = size_in_bytes as usize / std::mem::size_of::<TChar>();
         with_attrs(this, |a| match a.get(&k) {
             Some(Attr::Str(units)) if capacity > 0 => {
-                // Copy what fits and always terminate.
                 let n = units.len().min(capacity - 1);
                 for (i, u) in units[..n].iter().enumerate() {
                     *string.add(i) = *u;
@@ -229,8 +217,6 @@ unsafe extern "system" fn list_get_binary(
         if data.is_null() || size_in_bytes.is_null() {
             return kInvalidArgument;
         }
-        // The pointer stays valid until this attribute is set again or the
-        // list is freed, as the VST3 interface specifies.
         with_attrs(this, |a| match a.get(&k) {
             Some(Attr::Bin(bytes)) => {
                 *data = bytes.as_ptr() as *const c_void;
@@ -242,16 +228,11 @@ unsafe extern "system" fn list_get_binary(
     }
 }
 
-// ---------------------------------------------------------------------------
-// IMessage
-// ---------------------------------------------------------------------------
-
 #[repr(C)]
 pub struct HostMessage {
     vtbl: *const IMessageVtbl,
     ref_count: AtomicU32,
     id: Mutex<CString>,
-    /// Owned reference, released with the message.
     attributes: *mut HostAttributeList,
 }
 
@@ -266,7 +247,6 @@ static MESSAGE_VTBL: IMessageVtbl = IMessageVtbl {
     getAttributes: msg_get_attributes,
 };
 
-/// New message with one reference and its own attribute list.
 pub fn new_message() -> *mut HostMessage {
     Box::into_raw(Box::new(HostMessage {
         vtbl: &MESSAGE_VTBL,
@@ -314,7 +294,6 @@ unsafe extern "system" fn msg_release(this: *mut FUnknown) -> uint32 {
 }
 
 unsafe extern "system" fn msg_get_id(this: *mut IMessage) -> FIDString {
-    // Valid until the id is set again, as the interface specifies.
     unsafe { (*(this as *mut HostMessage)).id.lock().unwrap_or_else(|e| e.into_inner()).as_ptr() }
 }
 
@@ -326,16 +305,9 @@ unsafe extern "system" fn msg_set_id(this: *mut IMessage, id: FIDString) {
 }
 
 unsafe extern "system" fn msg_get_attributes(this: *mut IMessage) -> *mut IAttributeList {
-    // Owned by the message; no extra reference is given out.
     unsafe { (*(this as *mut HostMessage)).attributes as *mut IAttributeList }
 }
 
-/// `IHostApplication::createInstance` for the interfaces the host provides.
-/// Returns `None` for anything else. The object has one reference, owned by
-/// the caller.
-///
-/// # Safety
-/// `cid` and `iid` must be null or point to valid TUIDs.
 pub unsafe fn create_instance(cid: *const TUID, iid: *const TUID) -> Option<*mut c_void> {
     if cid.is_null() || iid.is_null() {
         return None;
@@ -374,14 +346,12 @@ mod tests {
             assert_eq!((v.getInt)(list, c"i".as_ptr(), &mut i), kResultOk);
             assert_eq!((v.getFloat)(list, c"f".as_ptr(), &mut f), kResultOk);
             assert_eq!((i, f), (-5, 1.5));
-            // Wrong type / missing key report failure.
             assert_eq!((v.getFloat)(list, c"i".as_ptr(), &mut f), kResultFalse);
             assert_eq!((v.getInt)(list, c"missing".as_ptr(), &mut i), kResultFalse);
 
             let mut out = [0 as TChar; 16];
             assert_eq!((v.getString)(list, c"s".as_ptr(), out.as_mut_ptr(), 32), kResultOk);
             assert_eq!(&out[..6], &text[..]);
-            // A short buffer is truncated and terminated.
             let mut small = [7 as TChar; 3];
             assert_eq!((v.getString)(list, c"s".as_ptr(), small.as_mut_ptr(), 6), kResultOk);
             assert_eq!(small[2], 0);

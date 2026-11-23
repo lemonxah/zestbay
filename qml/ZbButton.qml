@@ -1,21 +1,13 @@
 import QtQuick
 import QtQuick.Controls
 
-// Button kinds (bible: Buttons):
-//   "primary" accent fill, one per dialog / toolbar
-//   "ghost"   raised fill + strong border (default)
-//   "subtle"  inside cards and node footers, no border
-// Set iconName for a leading glyph; with no text it becomes a square icon button.
-// trailingIconName adds a glyph after the label (e.g. "chevronDown" for a
-// dropdown). destructive = text.destructive label (ghost / icon buttons only;
-// pair it with a confirmation step).
 Button {
     id: control
     property string kind: "ghost"
     property string iconName: ""
     property real iconSize: kind === "subtle" ? 12 : 14
     property string trailingIconName: ""
-    property bool compact: false          // 26 px tall (dense rows)
+    property bool compact: false
     property bool destructive: false
     property color textColor: kind === "primary" ? Theme.textOnAccent
                             : destructive ? Theme.textDestructive
@@ -80,7 +72,6 @@ Button {
         border.width: control.kind === "ghost" ? 1 : 0
         border.color: Theme.borderStrong
 
-        // Focus ring: 2 px accent.ring outside the control.
         Rectangle {
             visible: control.visualFocus
             anchors.fill: parent

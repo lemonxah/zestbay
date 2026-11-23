@@ -1,9 +1,5 @@
 name: RPM packages
 
-# Builds the .rpms (zestbay, and zestins: its LV2 plugins, a package of
-# their own). On a published release the files are attached to it; a
-# manual run attaches them to the release named in "tag", or with no tag
-# just keeps them as run artifacts.
 on:
   release:
     types: [published]
@@ -18,7 +14,6 @@ permissions:
   contents: read
 
 env:
-  # The tag being built: the published release, or the one given on a manual run
   TAG: ${{ github.event.release.tag_name || inputs.tag }}
 
 jobs:
@@ -28,15 +23,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # An .rpm only works on the Fedora release it was built for
         image: ["fedora:latest"]
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG || github.ref }}
 
-      # Packaging (pkg/) comes from the branch running the workflow, so an
-      # existing tag is built from its own source with the current packaging
       - name: Use this branch's packaging
         if: env.TAG != ''
         run: |
@@ -52,8 +44,6 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: rpm-${{ strategy.job-index }}
-          # Just the packages, not the debuginfo/debugsource ones rpmbuild also makes
-          # No wildcard in the directory part, or the artifact keeps an x86_64/ folder
           path: |
             pkg/rpm/rpmbuild/RPMS/x86_64/zestbay-[0-9]*.rpm
             pkg/rpm/rpmbuild/RPMS/x86_64/zestins-[0-9]*.rpm
@@ -77,7 +67,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Flatten, in case an artifact kept a sub-folder
           find . -mindepth 2 -type f -exec mv -t . {} +
           find . -mindepth 1 -type d -empty -delete
           sha256sum -- * > SHA256SUMS.rpm

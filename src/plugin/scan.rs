@@ -1,5 +1,3 @@
-//! Background catalog discovery and bounded, isolated plugin scanning.
-
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -22,7 +20,6 @@ pub fn start() -> std::io::Result<Receiver<ScanEvent>> {
             let vst2 = crate::vst2::scanner::discover_plugins();
             let vst3 = crate::vst3::scanner::discover_plugins();
             let ladspa = crate::ladspa::scanner::discover_plugins();
-            // One step for LV2's metadata catalog, then one per native library.
             let total = 1 + clap.len() + vst3.len() + vst2.len() + ladspa.len();
             let completed = AtomicUsize::new(0);
             let _ = tx.send(ScanEvent::Progress {
@@ -50,8 +47,6 @@ pub fn start() -> std::io::Result<Receiver<ScanEvent>> {
     Ok(rx)
 }
 
-/// Follow symlinks, but visit each directory and bundle only once. Search
-/// roots may overlap or link back into each other.
 pub fn discover(dirs: &[PathBuf], extension: &str, files_allowed: bool) -> Vec<PathBuf> {
     fn visit(
         path: &Path,

@@ -107,7 +107,6 @@ fn scan_process_parameters_midi_bypass_and_chunk_restore() {
         restored.process(&[&input], &mut [&mut output], 16, &[]);
     }
     assert_eq!(output, [0.25; 16]);
-    // Deserialization must not route a VST2 saved descriptor through LV2.
     let json = serde_json::to_vec(info).unwrap();
     let saved: PluginInfo = serde_json::from_slice(&json).unwrap();
     assert_eq!(saved.format, PluginFormat::Vst2);
@@ -120,7 +119,6 @@ fn legacy_main_accumulating_process_and_parameter_state() {
     let info = fixture.scan().remove(0);
     let inst = fixture.load(&info, None);
     inst.set_parameter(0, 0.75);
-    // Saving before any audio must flush pending parameter changes.
     let state = inst.get_state().unwrap();
     drop(inst);
     let inst = fixture.load(&info, Some(&state));
@@ -195,16 +193,12 @@ fn idle_leaves_running_audio_alone() {
         output
     };
     run(&inst);
-    // The plugin changes a value itself and asks for a display update while
-    // audio is running: the value is published without suspending audio.
     unsafe {
         abi::dispatch(inst.effect_ptr(), 1002, 0, 0, std::ptr::null_mut(), 0.4);
     }
     inst.idle();
     assert_eq!(inst.get_parameters()[0].value, 0.4);
     assert_eq!(run(&inst), [0.4; 8]);
-    // A host edit that has not reached the plugin yet wins over the
-    // plugin's own value, as it does when audio is idle.
     inst.set_parameter(0, 0.2);
     unsafe {
         abi::dispatch(inst.effect_ptr(), 1002, 0, 0, std::ptr::null_mut(), 0.9);
@@ -274,7 +268,7 @@ fn native_editor_reopens_and_closes_before_unload() {
     unsafe {
         super::ui::open_vst2_gui(inst.effect_ptr(), 42, "VST2 test", &events, &commands);
     }
-    drop(inst); // fixture asserts that EDIT_CLOSE precedes CLOSE
+    drop(inst);
 }
 
 #[test]

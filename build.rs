@@ -2,7 +2,6 @@ use cxx_qt_build::{CxxQtBuilder, QmlFile, QmlModule};
 use std::process::Command;
 
 fn main() {
-    // Detect Qt version at compile time via pkg-config or qmake6
     let qt_version = Command::new("pkg-config")
         .args(["--modversion", "Qt6Core"])
         .output()
@@ -64,9 +63,7 @@ fn main() {
             .qml_file(QmlFile::from("qml/Theme.qml").singleton(true))
             .qml_file(QmlFile::from("qml/Glyphs.qml").singleton(true)),
     )
-    // Declares the singletons for the qml/ directory import (Qt < 6.5).
     .qrc_resources(["qml/qmldir"])
-    // Bundled IBM Plex (OFL, fonts/OFL.txt), loaded by Theme.qml.
     .qrc_resources([
         "fonts/IBMPlexMono-Medium.ttf",
         "fonts/IBMPlexMono-Regular.ttf",

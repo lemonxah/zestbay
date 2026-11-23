@@ -1,10 +1,6 @@
 import QtQuick
 import ZestBay
 
-// Screenshot harness (see render.sh). Arguments, last four:
-//   <dark|light> <main|DialogFile> <out prefix> <qml dir URL>
-// The main window is saved as <out>.0/1/2.png (toolbar, canvas, status
-// bar) for render.sh to stack; a dialog as <out>.0.png.
 Item {
     id: root
     readonly property var args: Qt.application.arguments
@@ -15,11 +11,9 @@ Item {
 
     AppController { id: controller }
 
-    // Never hang: give up if the grab hasn't finished in time.
     Timer { interval: 20000; running: true; onTriggered: Qt.quit() }
 
     Component.onCompleted: {
-        // Theme lives in the qml/ directory, not visible from here.
         Qt.createQmlObject('import QtQuick; import "' + qmlDir + '"; QtObject { Component.onCompleted: Theme.mode = "'
                            + mode + '" }', root)
         var isMain = target === "main" || target.indexOf("main-") === 0
@@ -33,21 +27,18 @@ Item {
         var w = isMain ? c.createObject(null) : c.createObject(null, { controller: controller })
         if (target === "PluginParams") w.openForNode(30)
         else if (!isMain && w.open) w.open()
-        // The CPU window with its meters row expanded.
         if (target === "CpuOverlay") {
             w.metersExpanded = true
-            w.height += 180   // room for the meters listed under their row
+            w.height += 180
         }
         w.visible = true
         if (target === "main-sessions" || target === "main-portmenu" || target === "main-metermenu" || target === "main-nodemeters") {
-            // The whole window with the session dropdown / a port's menu open.
             menuShot.win = w
             menuShot.kind = target
             menuShot.start()
             return
         }
         if (target === "main-presets") {
-            // The whole window with a plugin node's preset dropdown open.
             presetShot.win = w
             presetShot.start()
             return
@@ -66,7 +57,6 @@ Item {
         return null
     }
 
-    // Walk Items and their non-visual children (menus are only in `data`).
     function findMenu(item, wanted) {
         var d = item.data
         for (var i = 0; i < d.length; i++) {
@@ -101,7 +91,6 @@ Item {
                 menu.popup(btn, 0, btn.height + 6)
                 menuMirror.hostOffset = btn.mapToItem(graph, 0, btn.height + 6)
             } else if (kind === "main-metermenu") {
-                // The canvas menu, with its Add meter submenu opened next.
                 menu = root.findMenu(graph, "Add plugin\u2026")
                 if (!menu) { console.warn("no canvas menu"); Qt.quit(); return }
                 menu.popup(graph, 700, 110)
@@ -112,7 +101,6 @@ Item {
                 subShot.start()
                 return
             } else if (kind === "main-nodemeters") {
-                // Daw Sink's node menu: its snapped meter and Meter inputs/outputs.
                 graph.contextNodeId = 20
                 graph.contextNode = graph.findNodeData(20)
                 menu = root.findMenu(graph, "Hide")
@@ -137,7 +125,6 @@ Item {
         }
     }
 
-    // Move an open menu's own items into the graph view at (x, y).
     function mirrorMenu(menu, graph, x, y, z) {
         var bg = menu.background, ct = menu.contentItem
         var bw = menu.width, bh = menu.height
@@ -157,7 +144,6 @@ Item {
         property var graph
         property var win
         property point hostOffset
-        // A submenu shown beside `menu`, and where.
         property var sub: null
         property point subOffset
         interval: 600
@@ -171,7 +157,6 @@ Item {
         }
     }
 
-    // Open the submenu of the entry that has one, beside the open menu.
     Timer {
         id: subShot
         property var menu
@@ -213,9 +198,6 @@ Item {
         }
     }
 
-    // Qt can't grab a popup (it lives in the window's popup layer), so move
-    // the open menu's own items into the graph view; the normal grab then
-    // includes them.
     Timer {
         id: presetMirror
         property var graph
@@ -228,8 +210,6 @@ Item {
                 if (o && typeof o.insertItem === "function" && o.opened) { menu = o; break }
             }
             if (!menu) { console.warn("no open menu found"); Qt.quit(); return }
-            // Move the menu's own items into the graph view (offscreen
-            // rendering has no shader effects to mirror them with).
             var mx = menu.x, my = menu.y
             var bg = menu.background, ct = menu.contentItem
             var bw = menu.width, bh = menu.height
@@ -250,7 +230,7 @@ Item {
     Timer {
         id: grab
         property var win
-        interval: 2500   // let the CPU chart collect a few samples
+        interval: 2500
         onTriggered: {
             var parts = []
             if (win.header) parts.push(win.header)

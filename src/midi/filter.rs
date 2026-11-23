@@ -1,5 +1,3 @@
-//! Resolved MIDI mapping tables used by the plugin filters' RT callbacks.
-
 use super::types::{MappingMode, MidiCcSource, MidiMessageType};
 use crate::plugin::types::SharedPortUpdates;
 
@@ -13,15 +11,9 @@ pub struct ResolvedMappingEntry {
     pub source: MidiCcSource,
     pub is_logarithmic: bool,
     pub is_toggle: bool,
-    /// Discrete steps between min and max (0 = continuous).
     pub step_count: u32,
 }
 
-/// Immutable snapshot of all resolved mappings for one plugin.
-/// The manager builds a new `Arc<ResolvedMappings>` and hands it to the
-/// filter's `update_mappings`, which swaps it in lock-free and releases the
-/// previous table on the main thread once the RT callback is done with it
-/// (see `midi::rt::MappingSwap`).
 pub struct ResolvedMappings {
     entries: Vec<ResolvedMappingEntry>,
 }
@@ -37,8 +29,6 @@ impl ResolvedMappings {
         }
     }
 
-    /// Match by channel + cc only (ignoring device_name).
-    /// Used for per-plugin MIDI ports where routing determines the device.
     pub fn find_any_device(
         &self,
         channel: u8,
@@ -114,7 +104,7 @@ mod resolved_mappings_tests {
         let found = mappings
             .find_any_device(5, 10, MidiMessageType::Cc)
             .unwrap();
-        assert_eq!(found.instance_id, 100); // exact wins
+        assert_eq!(found.instance_id, 100);
         let found = mappings
             .find_any_device(6, 10, MidiMessageType::Cc)
             .unwrap();
@@ -136,7 +126,6 @@ mod resolved_mappings_tests {
     fn find_any_device_exact_channel() {
         let mappings =
             ResolvedMappings::new(vec![make_entry("dev1", Some(5), 10, MidiMessageType::Cc)]);
-        // find_any_device ignores device_name
         assert!(
             mappings
                 .find_any_device(5, 10, MidiMessageType::Cc)

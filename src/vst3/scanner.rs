@@ -1,8 +1,3 @@
-//! VST3 plugin scanner.
-//!
-//! Scans standard directories for `.vst3` bundles, dlopen's the shared
-//! library inside each bundle, and enumerates plugins via `IPluginFactory`.
-
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
 
@@ -10,8 +5,6 @@ use vst3::Steinberg::*;
 
 use crate::plugin::types::*;
 
-/// Standard Linux directories where VST3 plugins are installed
-/// (`VST3_PATH` and Flatpak locations are added by `plugin::paths`).
 const VST3_SEARCH_DIRS: &[&str] = &[
     "~/.vst3",
     "/usr/lib/vst3",
@@ -22,20 +15,16 @@ const VST3_SEARCH_DIRS: &[&str] = &[
 
 static CACHE: crate::clap::scanner::ScanCache = crate::clap::scanner::ScanCache::new();
 
-/// Lookup without starting discovery on the PipeWire thread.
 pub fn cached_plugin(uri: &str) -> Option<PluginInfo> {
     CACHE.get(uri)
 }
 
-/// Look up a single plugin by URI.  Served from the cache of the last
-/// `scan_plugins()`; a miss rescans at most once per cooldown period.
 pub fn find_plugin(uri: &str) -> Option<PluginInfo> {
     CACHE.find(uri, || {
         scan_plugins();
     })
 }
 
-/// Scan all standard directories and return a list of VST3 plugin infos.
 pub fn scan_plugins() -> Vec<PluginInfo> {
     scan_discovered(&discover_plugins(), &|| {})
 }
@@ -53,13 +42,11 @@ pub(crate) fn scan_discovered(paths: &[PathBuf], progress: &(impl Fn() + Sync)) 
 }
 
 fn expand_search_dirs() -> Vec<PathBuf> {
-    crate::plugin::paths::search_dirs("VST3_PATH", VST3_SEARCH_DIRS, "vst3", "VST3")
+    crate::plugin::paths::search_dirs("VST3_PATH", VST3_SEARCH_DIRS, "VST3")
 }
 
-/// Known `Contents/<arch>-linux` directory names.
 const ARCH_DIRS: &[&str] = &["x86_64-linux", "aarch64-linux", "i386-linux", "armv7l-linux"];
 
-/// VST3 bundle directory for an architecture as named by `std::env::consts::ARCH`.
 fn arch_dir_for(arch: &str) -> String {
     match arch {
         "x86" => "i386-linux".to_string(),
@@ -68,8 +55,6 @@ fn arch_dir_for(arch: &str) -> String {
     }
 }
 
-/// Bundle architecture directories to try: the host CPU's first, then the
-/// other known ones.
 fn arch_dir_candidates() -> Vec<String> {
     let native = arch_dir_for(std::env::consts::ARCH);
     let mut dirs = vec![native.clone()];
@@ -77,8 +62,6 @@ fn arch_dir_candidates() -> Vec<String> {
     dirs
 }
 
-/// Resolve the shared library path inside a .vst3 bundle.
-/// VST3 bundle structure: `<name>.vst3/Contents/<arch>/<name>.so`
 pub fn find_bundle_binary(bundle_path: &Path) -> Option<PathBuf> {
     for arch in arch_dir_candidates() {
         let contents_dir = bundle_path.join("Contents").join(arch);
@@ -94,7 +77,6 @@ pub fn find_bundle_binary(bundle_path: &Path) -> Option<PathBuf> {
         }
     }
 
-    // Fallback: some bundles put the .so directly in the bundle root
     if let Ok(entries) = std::fs::read_dir(bundle_path) {
         for entry in entries.flatten() {
             let p = entry.path();
@@ -133,7 +115,6 @@ pub(crate) fn scan_vst3_bundle(bundle_path: &Path, plugins: &mut Vec<PluginInfo>
         Err(_) => return,
     };
 
-    // Safety: All VST3 interactions use raw C FFI via dlopen.
     unsafe {
         let lib = libc::dlopen(c_path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
         if lib.is_null() {
@@ -142,7 +123,6 @@ pub(crate) fn scan_vst3_bundle(bundle_path: &Path, plugins: &mut Vec<PluginInfo>
             return;
         }
 
-        // Call ModuleEntry (Linux VST3 requirement)
         let module_entry_sym = libc::dlsym(lib, c"ModuleEntry".as_ptr());
         if !module_entry_sym.is_null() {
             let module_entry: unsafe extern "system" fn(*mut std::ffi::c_void) -> bool =
@@ -154,7 +134,6 @@ pub(crate) fn scan_vst3_bundle(bundle_path: &Path, plugins: &mut Vec<PluginInfo>
             }
         }
 
-        // Get the factory
         let get_factory_sym = libc::dlsym(lib, c"GetPluginFactory".as_ptr());
         if get_factory_sym.is_null() {
             log::debug!("VST3: no GetPluginFactory in {}", so_str);
@@ -182,7 +161,6 @@ pub(crate) fn scan_vst3_bundle(bundle_path: &Path, plugins: &mut Vec<PluginInfo>
             }
         };
 
-        // Try to get IPluginFactory2 for richer info
         let factory2: Option<vst3::ComPtr<IPluginFactory2>> = factory.cast();
 
         let count = factory.countClasses();
@@ -193,7 +171,6 @@ pub(crate) fn scan_vst3_bundle(bundle_path: &Path, plugins: &mut Vec<PluginInfo>
                 continue;
             }
 
-            // Only interested in Audio Module Class (processor components)
             let category_str = read_cstr(&info.category);
             if category_str != "Audio Module Class" {
                 continue;
@@ -202,7 +179,6 @@ pub(crate) fn scan_vst3_bundle(bundle_path: &Path, plugins: &mut Vec<PluginInfo>
             let name = read_cstr(&info.name);
             let uri = tuid_to_hex(&info.cid);
 
-            // Try to get extended info (vendor, subcategories) from IPluginFactory2
             let mut vendor: Option<String> = None;
             let mut sub_categories = String::new();
 
@@ -219,17 +195,12 @@ pub(crate) fn scan_vst3_bundle(bundle_path: &Path, plugins: &mut Vec<PluginInfo>
 
             let plugin_category = category_from_subcategories(&sub_categories);
 
-            // Infer audio bus layout from subcategories.
-            // We do NOT instantiate the component during scanning because
-            // many plugins (synths, amp sims) load heavy resources during
-            // IComponent::initialize() which can OOM-kill the process.
-            // Accurate bus info is discovered at instantiation time in host.rs.
             let is_instrument = sub_categories.contains("Instrument")
                 || plugin_category == PluginCategory::Instrument;
             let (audio_inputs, audio_outputs) = if is_instrument {
-                (0, 2) // Instruments: no audio input, stereo output
+                (0, 2)
             } else {
-                (2, 2) // Effects: stereo in/out (default assumption)
+                (2, 2)
             };
 
             plugins.push(PluginInfo {
@@ -238,34 +209,26 @@ pub(crate) fn scan_vst3_bundle(bundle_path: &Path, plugins: &mut Vec<PluginInfo>
                 format: PluginFormat::Vst3,
                 category: plugin_category,
                 author: vendor,
-                ports: Vec::new(), // Populated at instantiation time
+                ports: Vec::new(),
                 audio_inputs,
                 audio_outputs,
                 control_inputs: 0,
                 control_outputs: 0,
                 required_features: Vec::new(),
                 compatible: true,
-                // VST3 has no metadata-level flag for GUI support, and
-                // createView() requires instantiation (which we avoid during
-                // scanning to prevent OOM).  Nearly all VST3 plugins ship
-                // with a GUI, so default to true.  The host can refine this
-                // at instantiation time via IEditController::createView().
                 has_ui: true,
                 library_path: bundle_str.to_string(),
                 ladspa_ids: Vec::new(),
             });
         }
 
-        // Release the factory before module exit
         drop(factory2);
         drop(factory);
 
         call_module_exit(lib);
-        // Do NOT dlclose — plugin descriptor strings may live inside the .so
     }
 }
 
-/// Call ModuleExit if available.
 unsafe fn call_module_exit(lib: *mut std::ffi::c_void) {
     unsafe {
         let sym = libc::dlsym(lib, c"ModuleExit".as_ptr());
@@ -276,19 +239,16 @@ unsafe fn call_module_exit(lib: *mut std::ffi::c_void) {
     }
 }
 
-/// Convert a TUID ([c_char; 16]) to a hex string for use as the plugin URI.
 fn tuid_to_hex(tuid: &[std::ffi::c_char; 16]) -> String {
     tuid.iter()
         .map(|&b| format!("{:02X}", b as u8))
         .collect()
 }
 
-/// Parse a TUID from a hex string.
 pub fn hex_to_tuid(hex: &str) -> Option<[std::ffi::c_char; 16]> {
     if hex.len() != 32 {
         return None;
     }
-    // c_char is i8 on x86_64 but u8 on aarch64: build it as c_char.
     let mut tuid = [0 as std::ffi::c_char; 16];
     for i in 0..16 {
         let byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
@@ -297,7 +257,6 @@ pub fn hex_to_tuid(hex: &str) -> Option<[std::ffi::c_char; 16]> {
     Some(tuid)
 }
 
-/// Read a null-terminated C string from a fixed-size char array.
 fn read_cstr(buf: &[std::ffi::c_char]) -> String {
     let bytes: Vec<u8> = buf
         .iter()
@@ -307,7 +266,6 @@ fn read_cstr(buf: &[std::ffi::c_char]) -> String {
     String::from_utf8(bytes).unwrap_or_else(|_| "?".to_string())
 }
 
-/// Map VST3 pipe-delimited subcategory string to our PluginCategory.
 fn category_from_subcategories(sub: &str) -> PluginCategory {
     let parts: Vec<&str> = sub.split('|').map(|s| s.trim()).collect();
 
@@ -334,7 +292,6 @@ fn category_from_subcategories(sub: &str) -> PluginCategory {
         }
     }
 
-    // Broad categories
     if parts.contains(&"Fx") {
         return PluginCategory::Filter;
     }
@@ -348,8 +305,6 @@ fn category_from_subcategories(sub: &str) -> PluginCategory {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ---- hex_to_tuid / tuid_to_hex round-trip ----
 
     #[test]
     fn hex_to_tuid_valid() {
@@ -374,15 +329,14 @@ mod tests {
         let hex = "deadbeef01234567cafebabe89abcdef";
         let tuid = hex_to_tuid(hex).unwrap();
         let back = tuid_to_hex(&tuid);
-        // tuid_to_hex produces uppercase
         assert_eq!(back, hex.to_uppercase());
     }
 
     #[test]
     fn hex_to_tuid_wrong_length() {
         assert!(hex_to_tuid("").is_none());
-        assert!(hex_to_tuid("0123456789ABCDEF").is_none()); // 16 chars (too short)
-        assert!(hex_to_tuid("0123456789ABCDEF0123456789ABCDEF00").is_none()); // 34 chars (too long)
+        assert!(hex_to_tuid("0123456789ABCDEF").is_none());
+        assert!(hex_to_tuid("0123456789ABCDEF0123456789ABCDEF00").is_none());
     }
 
     #[test]
@@ -402,8 +356,6 @@ mod tests {
         let tuid = [0xFF_u8 as std::ffi::c_char; 16];
         assert_eq!(tuid_to_hex(&tuid), "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF");
     }
-
-    // ---- read_cstr ----
 
     #[test]
     fn read_cstr_basic() {
@@ -428,8 +380,6 @@ mod tests {
             .collect();
         assert_eq!(read_cstr(&buf), "NoNull");
     }
-
-    // ---- category_from_subcategories ----
 
     #[test]
     fn category_reverb() {
@@ -522,7 +472,6 @@ mod tests {
 
     #[test]
     fn category_fx_fallback() {
-        // "Fx" with no recognized subcategory → Filter
         assert_eq!(category_from_subcategories("Fx"), PluginCategory::Filter);
     }
 
@@ -544,9 +493,7 @@ mod tests {
 
     #[test]
     fn category_first_match_wins() {
-        // "Reverb" appears first → Reverb, not Delay
         assert_eq!(category_from_subcategories("Reverb|Delay"), PluginCategory::Reverb);
-        // "Delay" appears first → Delay
         assert_eq!(category_from_subcategories("Delay|Reverb"), PluginCategory::Delay);
     }
 
@@ -563,8 +510,6 @@ mod tests {
         assert_eq!(category_from_subcategories(" Delay | Fx "), PluginCategory::Delay);
     }
 
-    // ---- find_bundle_binary ----
-
     #[test]
     fn find_bundle_binary_nonexistent_path() {
         let result = find_bundle_binary(std::path::Path::new("/nonexistent/plugin.vst3"));
@@ -573,7 +518,6 @@ mod tests {
 
     #[test]
     fn find_bundle_binary_standard_layout() {
-        // Create a temp directory mimicking a .vst3 bundle
         let tmp = std::env::temp_dir().join("test_plugin.vst3");
         let arch_dir = tmp.join("Contents").join(arch_dir_for(std::env::consts::ARCH));
         std::fs::create_dir_all(&arch_dir).unwrap();
@@ -595,7 +539,6 @@ mod tests {
         assert_eq!(arch_dir_for("arm"), "armv7l-linux");
         let c = arch_dir_candidates();
         assert_eq!(c[0], arch_dir_for(std::env::consts::ARCH));
-        // No duplicates, all known dirs present.
         for d in ARCH_DIRS {
             assert_eq!(c.iter().filter(|x| x == d).count(), 1);
         }
@@ -622,7 +565,6 @@ mod tests {
 
     #[test]
     fn find_bundle_binary_fallback_root() {
-        // .so directly in bundle root (no Contents/<arch>/)
         let tmp = std::env::temp_dir().join("test_fallback.vst3");
         std::fs::create_dir_all(&tmp).unwrap();
         let so_path = tmp.join("fallback.so");
@@ -640,7 +582,6 @@ mod tests {
         let tmp = std::env::temp_dir().join("test_no_so.vst3");
         let arch_dir = tmp.join("Contents").join(arch_dir_for(std::env::consts::ARCH));
         std::fs::create_dir_all(&arch_dir).unwrap();
-        // Write a non-.so file
         std::fs::write(arch_dir.join("readme.txt"), b"not a plugin").unwrap();
 
         let result = find_bundle_binary(&tmp);

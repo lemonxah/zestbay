@@ -1,25 +1,15 @@
-//! Subgraph and virtual device state for the UI bridge: the saved
-//! definitions, which subgraph the graph view shows, and the view model
-//! that turns subgraph edges into one card (main view) or into Input/Output
-//! nodes (inside a subgraph).
-
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use crate::pipewire::{GraphState, MediaType, Node, Port, PortDirection, SubgraphRole, SubgraphSide};
 use crate::subgraph::{NamedLink, PlanEnd, PlanLink, PlanMedia, SubgraphDef, VirtualDevice};
 
-/// View node ids (subgraph cards, Input/Output nodes) start here: above
-/// PipeWire ids and the bridge split ids (1,000,000+).
 const VIEW_ID_BASE: u32 = 2_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewNodeKind {
-    /// A subgraph on the main graph.
     Card,
-    /// Inside a subgraph: where the subgraph's inputs come in.
     Input,
-    /// Inside a subgraph: where its outputs leave.
     Output,
 }
 
@@ -30,20 +20,14 @@ pub struct ViewNode {
     pub ports: Vec<Port>,
 }
 
-/// What the current view shows. Rebuilt with the node list.
 #[derive(Debug, Default)]
 pub struct ViewModel {
     pub nodes: HashMap<u32, ViewNode>,
-    /// Port → the view node that shows it (edge ports only).
     pub port_owner: HashMap<u32, u32>,
-    /// Real node → the view node standing for it (edge nodes only).
     pub real_owner: HashMap<u32, u32>,
-    /// Real nodes shown as themselves.
     pub visible_real: HashSet<u32>,
 }
 
-/// The PipeWire nodes of one subgraph's edges (same node for both sides of
-/// a plain pass-through edge).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Edges {
     pub in_ext: Option<u32>,
@@ -64,15 +48,9 @@ impl Edges {
     }
 }
 
-/// Link work that waits for nodes to appear: `connects` (by name) go into
-/// the pending links; once they are all up (or after a timeout) the links
-/// still joining the `disconnects` port pairs are removed and the
-/// `remove_keys` owned nodes too. Port pairs, not link ids: PipeWire reuses
-/// a freed link id, so an id could point at one of the new links by then.
 #[derive(Debug)]
 pub struct Job {
     pub connects: Vec<NamedLink>,
-    /// (output port, input port)
     pub disconnects: Vec<(u32, u32)>,
     pub remove_keys: Vec<String>,
     pub started: Instant,
@@ -81,16 +59,12 @@ pub struct Job {
 pub struct Subgraphs {
     pub defs: Vec<SubgraphDef>,
     pub vdevs: Vec<VirtualDevice>,
-    /// The subgraph the graph view is inside (`None` = main graph).
     pub view: Option<String>,
     ids: HashMap<String, u32>,
     next_id: u32,
     pub vm: ViewModel,
     pub jobs: Vec<Job>,
-    /// When to create the saved virtual devices: once the graph is known,
-    /// so a name already used by another device can be detected.
     pub vdev_start_at: Option<Instant>,
-    /// Virtual devices upgraded from an older file this session.
     pub legacy_vdevs: Vec<String>,
 }
 
@@ -111,7 +85,6 @@ impl Default for Subgraphs {
 }
 
 impl Subgraphs {
-    /// Stable view id for `key` ("card:<id>", "in:<id>", "out:<id>").
     fn view_id(&mut self, key: String) -> u32 {
         if let Some(&id) = self.ids.get(&key) {
             return id;
@@ -130,7 +103,6 @@ impl Subgraphs {
         self.defs.iter_mut().find(|d| d.id == id)
     }
 
-    /// The subgraph a plugin (by stable id) belongs to.
     pub fn owner_of(&self, stable_id: &str) -> Option<&SubgraphDef> {
         self.defs.iter().find(|d| d.members.iter().any(|m| m == stable_id))
     }
@@ -159,8 +131,6 @@ impl Subgraphs {
         e
     }
 
-    /// Rebuild the view model. `member_node(stable_id)` gives a member
-    /// plugin's live node id.
     pub fn build_view(
         &mut self,
         graph: &GraphState,
@@ -186,7 +156,6 @@ impl Subgraphs {
                 .into_iter()
                 .filter(|p| p.direction == dir)
                 .collect();
-            // Audio channels in order, MIDI last.
             ports.sort_by_key(|p| (p.media_type == Some(MediaType::Midi), p.id));
             ports
         };
@@ -252,7 +221,6 @@ impl Subgraphs {
     }
 }
 
-/// Planner input: every live link touching `members`, with names.
 pub fn plan_links(graph: &GraphState, members: &HashSet<u32>) -> Vec<PlanLink> {
     let mut out = Vec::new();
     for l in graph.get_all_links() {
@@ -282,7 +250,6 @@ pub fn plan_links(graph: &GraphState, members: &HashSet<u32>) -> Vec<PlanLink> {
     out
 }
 
-/// Every live link touching any of `nodes`, by name.
 pub fn named_links_touching(graph: &GraphState, nodes: &[u32]) -> Vec<(u32, NamedLink)> {
     let set: HashSet<u32> = nodes.iter().copied().collect();
     graph
@@ -305,7 +272,6 @@ pub fn named_links_touching(graph: &GraphState, nodes: &[u32]) -> Vec<(u32, Name
         .collect()
 }
 
-/// Whether a named link is live in the graph.
 pub fn named_link_live(graph: &GraphState, nodes: &[Node], l: &NamedLink) -> bool {
     let find = |end: &PlanEnd, dir: PortDirection| -> Vec<u32> {
         nodes

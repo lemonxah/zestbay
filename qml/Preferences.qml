@@ -2,8 +2,6 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// Preferences (spec §6.4): General toggles, Appearance (theme), Timing and
-// Advanced slider rows. Every change is saved immediately.
 ZbWindow {
     id: prefsWindow
     title: "Preferences"
@@ -18,8 +16,6 @@ ZbWindow {
     signal pollIntervalChanged(int intervalMs)
     signal snapGapChanged(int px)
     signal snapToGridChanged(bool enabled)
-    // The canvas drag mode has no row here (it is switched on the canvas);
-    // this only reports its value after a reset to defaults.
     signal dragModeChanged(string mode)
     signal gridSizeChanged(int px)
     signal nodeSpacingChanged(int px)
@@ -27,9 +23,6 @@ ZbWindow {
     signal wireStyleChanged(string style)
     signal gradientWiresChanged(bool enabled)
 
-    // Two densities, each a pixel value with three presets (the sliders set
-    // any value in between): graph density is the gap between nodes (node
-    // spacing), card density is how big the node cards are (port row height).
     readonly property var densityPresets: [8, 20, 40]
     readonly property var cardPresets: [18, 22, 26]
     function densityIndex() {
@@ -132,7 +125,6 @@ ZbWindow {
         prefsWindow.requestActivate();
     }
 
-    // Current value of a preference, or `fallback` when it isn't set.
     function pref(key, fallback) {
         const v = prefs[key];
         return v !== undefined ? v : fallback;
@@ -192,7 +184,6 @@ ZbWindow {
         themeSegmented.currentIndex = Qt.binding(() => prefsWindow.themeIndex());
     }
 
-    // "10 000" style grouping for five-digit-plus range labels.
     function formatNumber(n) {
         const s = String(n);
         return s.length > 4 ? s.replace(/\B(?=(\d{3})+(?!\d))/g, " ") : s;
@@ -204,9 +195,6 @@ ZbWindow {
         onActivated: prefsWindow.visible = false
     }
 
-    // ─── Building blocks ────────────────────────────────────────────────
-
-    // Row title 13/500 + description 12 muted.
     component RowText: ColumnLayout {
         id: rowText
         property string title
@@ -232,8 +220,6 @@ ZbWindow {
         }
     }
 
-    // Uppercase label (+ optional inline hint) above a card of rows.
-    // Separate rows with ZbDivider { Layout.fillWidth: true }.
     component SettingsSection: ColumnLayout {
         id: section
         property string label
@@ -274,7 +260,6 @@ ZbWindow {
         }
     }
 
-    // Toggle row: text left, standard switch right.
     component ToggleRow: RowLayout {
         id: toggleRow
         property string title
@@ -304,9 +289,6 @@ ZbWindow {
         }
     }
 
-    // Slider row: text left, value read-out right, slider and range labels
-    // beneath. Saved on release (or on each keyboard step).
-    // A number typed into a field, committed on Enter or when focus leaves.
     component NumberRow: RowLayout {
         id: numberRow
         property string title
@@ -439,8 +421,6 @@ ZbWindow {
         }
     }
 
-    // ─── Layout ─────────────────────────────────────────────────────────
-
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
@@ -453,8 +433,6 @@ ZbWindow {
             title: "Preferences"
         }
 
-        // Scroll area: the bar sits in the right padding gutter, beside the
-        // content (bible §5.3).
         Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -514,7 +492,6 @@ ZbWindow {
                                         font.pixelSize: Theme.sizeBody
                                         color: Theme.textPrimary
                                     }
-                                    // The open session is marked; the others get icon buttons.
                                     ZbIcon {
                                         visible: modelData === prefsWindow.sessionInfo.current
                                         name: "check"
@@ -982,7 +959,6 @@ ZbWindow {
                 anchors.top: parent.top
                 anchors.bottom: parent.bottom
                 anchors.right: parent.right
-                // Keeps the content's right edge at dialogPadding either way.
                 anchors.rightMargin: Theme.dialogPadding - Theme.scrollBarWidth - Theme.scrollGap
             }
         }

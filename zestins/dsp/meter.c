@@ -1,13 +1,10 @@
-// Zestins Meter: peak (with a 20 dB/s fall) and RMS (300 ms) per channel,
-// reported in dBFS on control outputs.  Audio passes through.
-
 #include "dsp.h"
 
 typedef struct {
     void *port[METER_N];
     double rate;
     float peak[2];
-    float ms[2]; // running mean square
+    float ms[2];
     float ms_coef;
 } Meter;
 
@@ -42,7 +39,6 @@ static void run(LV2_Handle h, uint32_t n) {
     Meter *m = h;
     const float *in[2] = { m->port[METER_IN_L], m->port[METER_IN_R] };
     float *out[2] = { m->port[METER_OUT_L], m->port[METER_OUT_R] };
-    // Peak falls by 20 dB per second.
     float fall = powf(10.0f, -1.0f / (float)m->rate);
 
     for (int c = 0; c < 2; c++) {

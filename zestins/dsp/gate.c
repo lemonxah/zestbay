@@ -1,14 +1,11 @@
-// Zestins Gate: opens when the louder channel crosses the threshold, stays
-// open for the hold time, then closes down to `range` with the release time.
-
 #include "dsp.h"
 
 typedef struct {
     void *port[GATE_N];
     double rate;
-    float env;      // fast peak envelope of the input
-    float gain;     // current gain (range..1)
-    uint32_t hold;  // samples left before the gate may close
+    float env;
+    float gain;
+    uint32_t hold;
 } Gate;
 
 static LV2_Handle instantiate(const LV2_Descriptor *d, double rate, const char *path,

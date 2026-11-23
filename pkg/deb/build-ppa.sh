@@ -1,21 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-# Build signed Debian *source* packages for a Launchpad PPA, one per Ubuntu series.
-# Launchpad then compiles each against that release's own libraries, so unlike
-# the single prebuilt .deb the dependencies always resolve (24.04, 26.04, ...).
-#
-# Usage:
-#   pkg/deb/build-ppa.sh [--upload ppa:USER/NAME] [--key KEYID] [--rev N] [--no-sign] [SERIES...]
-#
-# SERIES defaults to: noble resolute   (24.04 and 26.04)
-# Without --upload the .changes files are only built (in pkg/deb/ppa/).
-#
-# Prerequisites: dpkg-buildpackage (package dpkg-dev on Debian/Ubuntu, dpkg on
-# Arch), cargo (for `cargo vendor`), python3, xz, and a GPG key registered on
-# your Launchpad account. --upload also needs dput (or run it from a container).
-# debhelper/devscripts are NOT needed here: Launchpad runs the actual build.
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_DIR"
@@ -40,7 +25,6 @@ ORIG="$WORK/zestbay_$VERSION.orig.tar.xz"
 
 mkdir -p "$WORK"
 
-# The orig tarball must be byte-identical for every series, so build it once.
 if [ ! -f "$ORIG" ]; then
     echo "Creating $ORIG (with vendored crates)..."
     rm -rf "$SRC"
@@ -53,8 +37,6 @@ if [ ! -f "$ORIG" ]; then
         --exclude=./zestins/build \
         . | tar -x -C "$SRC"
     (cd "$SRC" && cargo vendor --locked vendor >/dev/null)
-    # dpkg-source drops *.orig files when unpacking, which would break cargo's
-    # checksum check, so remove them (and their checksum entries) up front.
     python3 - "$SRC/vendor" <<'PY'
 import json, pathlib, sys
 for ck in pathlib.Path(sys.argv[1]).glob("*/.cargo-checksum.json"):
@@ -83,7 +65,6 @@ zestbay ($VERSION-0ppa$REV~$series) $series; urgency=medium
  -- Ryno Kotze <lemon.xah@gmail.com>  $(date -R)
 EOL
     SIGN=(); [ -n "$KEY" ] && SIGN=(-k"$KEY"); [ -n "$NOSIGN" ] && SIGN=(-us -uc)
-    # -d -nc: build-deps and the clean step are Launchpad's job, not this machine's
     (cd "$SRC" && dpkg-buildpackage -S -sa -d -nc "${SIGN[@]}")
     rm -rf "$SRC"
     if [ -n "$PPA" ]; then

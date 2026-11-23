@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick.Controls
 
-// Menu separator: 1 px, 6 px vertical / 4 px horizontal margin.
 MenuSeparator {
     topPadding: 6
     bottomPadding: 6

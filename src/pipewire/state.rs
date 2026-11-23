@@ -77,8 +77,6 @@ impl GraphState {
         *self.change_counter.read()
     }
 
-    /// Forget every node, port and link (e.g. after the PipeWire connection
-    /// was lost; the registry repopulates the graph on reconnect).
     pub fn clear(&self) {
         self.links.write().clear();
         self.ports.write().clear();
@@ -115,7 +113,6 @@ impl GraphState {
         self.nodes.read().get(&id).cloned()
     }
 
-    /// Id of a node with this name, without cloning the node list.
     pub fn find_node_id_by_name(&self, name: &str) -> Option<ObjectId> {
         self.nodes
             .read()
@@ -159,9 +156,6 @@ impl GraphState {
         port
     }
 
-    /// Remove all links that reference the given port and return their IDs.
-    /// Call this after `remove_port` so that stale links don't linger in the
-    /// graph when PipeWire removes ports before their parent node.
     pub fn cleanup_port(&self, port_id: ObjectId) -> Vec<ObjectId> {
         let mut links = self.links.write();
         let mut removed = Vec::new();
@@ -194,7 +188,6 @@ impl GraphState {
             .collect();
         ports.sort_by(|a, b| {
             a.direction.cmp(&b.direction).then_with(|| {
-                // MIDI ports first within each direction group
                 let a_midi = a.media_type == Some(MediaType::Midi);
                 let b_midi = b.media_type == Some(MediaType::Midi);
                 b_midi.cmp(&a_midi).then_with(|| natural_cmp(&a.name, &b.name))
@@ -212,7 +205,6 @@ impl GraphState {
             .cloned()
             .collect();
         ports.sort_by(|a, b| {
-            // MIDI ports first
             let a_midi = a.media_type == Some(MediaType::Midi);
             let b_midi = b.media_type == Some(MediaType::Midi);
             b_midi.cmp(&a_midi).then_with(|| natural_cmp(&a.name, &b.name))
@@ -229,7 +221,6 @@ impl GraphState {
             .cloned()
             .collect();
         ports.sort_by(|a, b| {
-            // MIDI ports first
             let a_midi = a.media_type == Some(MediaType::Midi);
             let b_midi = b.media_type == Some(MediaType::Midi);
             b_midi.cmp(&a_midi).then_with(|| natural_cmp(&a.name, &b.name))
@@ -266,9 +257,6 @@ impl GraphState {
             .cloned()
     }
 
-    /// For a bridge node, returns the distinct port groups and a display name
-    /// derived from the port.alias of the first port in each group.
-    /// Returns a map from port_group -> device display name.
     pub fn get_bridge_port_groups(&self, node_id: ObjectId) -> BTreeMap<String, String> {
         let ports = self.ports.read();
         let mut groups: BTreeMap<String, String> = BTreeMap::new();
@@ -280,7 +268,6 @@ impl GraphState {
                 if groups.contains_key(group) {
                     continue;
                 }
-                // Derive device name from port.alias: "DeviceName:PortName" -> "DeviceName"
                 let device_name = if let Some(ref alias) = port.port_alias {
                     if let Some(colon_pos) = alias.find(':') {
                         alias[..colon_pos].to_string()
@@ -296,7 +283,6 @@ impl GraphState {
         groups
     }
 
-    /// Get ports for a bridge node filtered to a specific port group.
     pub fn get_ports_for_bridge_group(&self, node_id: ObjectId, group: &str) -> Vec<Port> {
         let mut ports: Vec<Port> = self
             .ports
@@ -316,8 +302,6 @@ impl GraphState {
         ports
     }
 
-    /// Remove all ports and links belonging to a node.  Returns the IDs of
-    /// links that were removed so the caller can emit proper events.
     pub fn cleanup_node(&self, node_id: ObjectId) -> Vec<ObjectId> {
         let port_ids: Vec<ObjectId> = self
             .ports
@@ -399,8 +383,6 @@ mod tests {
         }
     }
 
-    // ---- natural_cmp ----
-
     #[test]
     fn natural_cmp_equal() {
         assert_eq!(natural_cmp("abc", "abc"), Ordering::Equal);
@@ -439,8 +421,6 @@ mod tests {
         assert_eq!(natural_cmp("100", "20"), Ordering::Greater);
     }
 
-    // ---- GraphState: nodes ----
-
     #[test]
     fn graph_state_insert_and_get_node() {
         let gs = GraphState::new();
@@ -477,8 +457,6 @@ mod tests {
         assert_eq!(all.len(), 2);
     }
 
-    // ---- GraphState: ports ----
-
     #[test]
     fn graph_state_insert_and_get_port() {
         let gs = GraphState::new();
@@ -504,7 +482,7 @@ mod tests {
         let gs = GraphState::new();
         gs.insert_port(make_port(10, 1, "output_0", PortDirection::Output));
         gs.insert_port(make_port(11, 1, "input_0", PortDirection::Input));
-        gs.insert_port(make_port(12, 2, "output_0", PortDirection::Output)); // different node
+        gs.insert_port(make_port(12, 2, "output_0", PortDirection::Output));
 
         let ports = gs.get_ports_for_node(1);
         assert_eq!(ports.len(), 2);
@@ -520,8 +498,6 @@ mod tests {
         assert_eq!(gs.get_input_ports(1).len(), 1);
         assert_eq!(gs.get_output_ports(1).len(), 2);
     }
-
-    // ---- GraphState: links ----
 
     #[test]
     fn graph_state_insert_and_get_link() {
@@ -561,20 +537,18 @@ mod tests {
         assert_eq!(gs.get_all_links().len(), 2);
     }
 
-    // ---- GraphState: cleanup ----
-
     #[test]
     fn graph_state_cleanup_port_removes_associated_links() {
         let gs = GraphState::new();
         gs.insert_link(make_link(100, 1, 10, 2, 20));
         gs.insert_link(make_link(101, 3, 30, 4, 40));
-        gs.insert_link(make_link(102, 1, 10, 5, 50)); // also uses port 10
+        gs.insert_link(make_link(102, 1, 10, 5, 50));
 
         let removed = gs.cleanup_port(10);
-        assert_eq!(removed.len(), 2); // links 100 and 102
+        assert_eq!(removed.len(), 2);
         assert!(gs.get_link(100).is_none());
         assert!(gs.get_link(102).is_none());
-        assert!(gs.get_link(101).is_some()); // unaffected
+        assert!(gs.get_link(101).is_some());
     }
 
     #[test]
@@ -589,10 +563,8 @@ mod tests {
         assert_eq!(removed_links.len(), 1);
         assert!(gs.get_port(10).is_none());
         assert!(gs.get_port(11).is_none());
-        assert!(gs.get_port(20).is_some()); // different node
+        assert!(gs.get_port(20).is_some());
     }
-
-    // ---- GraphState: change counter ----
 
     #[test]
     fn graph_state_change_counter_increments() {
@@ -607,24 +579,18 @@ mod tests {
         assert!(gs.change_counter() > after_node);
     }
 
-    // ---- GraphState: node media type propagates to ports ----
-
     #[test]
     fn graph_state_insert_node_propagates_media_type() {
         let gs = GraphState::new();
-        // Insert port first (no media type yet)
         let mut port = make_port(10, 1, "p", PortDirection::Output);
         port.media_type = None;
         gs.insert_port(port);
 
-        // Now insert node with Audio media type
         gs.insert_node(make_node(1, "A"));
 
         let port = gs.get_port(10).unwrap();
         assert_eq!(port.media_type, Some(MediaType::Audio));
     }
-
-    // ---- GraphState: set_node_type / set_node_description ----
 
     #[test]
     fn graph_state_set_node_type() {
@@ -645,8 +611,6 @@ mod tests {
         let node = gs.get_node(1).unwrap();
         assert_eq!(node.description, "My Plugin");
     }
-
-    // ---- Node/Port display_name ----
 
     #[test]
     fn node_display_name_prefers_description() {
@@ -681,8 +645,6 @@ mod tests {
         assert_eq!(port.display_name(), "output_0");
     }
 
-    // ---- NodeType predicates ----
-
     #[test]
     fn node_type_has_outputs() {
         assert!(NodeType::Source.has_outputs());
@@ -702,8 +664,6 @@ mod tests {
         assert!(!NodeType::Source.has_inputs());
         assert!(!NodeType::StreamOutput.has_inputs());
     }
-
-    // ---- Bridge port groups ----
 
     #[test]
     fn graph_state_bridge_port_groups() {

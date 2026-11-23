@@ -1,9 +1,8 @@
 import QtQuick
 
-// Segmented control: inset track 30 px, segments 24 px, active = bg.subtle.
 Rectangle {
     id: root
-    property var model: []           // list of labels
+    property var model: []
     property int currentIndex: 0
     signal activated(int index)
 

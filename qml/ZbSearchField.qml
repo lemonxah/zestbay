@@ -1,8 +1,6 @@
 import QtQuick
 import QtQuick.Controls
 
-// Search / filter field: magnifier, inset fill, accent border + ring on focus.
-// `large` = 40 px tall with 14 px text (Add Plugin).
 TextField {
     id: control
     property bool large: false

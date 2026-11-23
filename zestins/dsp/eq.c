@@ -1,6 +1,3 @@
-// Zestins EQ: low cut (12 dB/oct), low shelf, mid peak and high shelf.
-// Filters are redesigned only when a control changes.
-
 #include "dsp.h"
 
 enum { BAND_HP, BAND_LOW, BAND_MID, BAND_HIGH, BANDS };
@@ -29,7 +26,7 @@ static void connect(LV2_Handle h, uint32_t port, void *data) {
 static void activate(LV2_Handle h) {
     Eq *e = h;
     for (int i = 0; i < EQ_N; i++)
-        e->last[i] = NAN; // force a redesign on the first run
+        e->last[i] = NAN;
     memset(e->f, 0, sizeof(e->f));
 }
 
@@ -47,7 +44,7 @@ static void design(Eq *e, int band, BiquadType type, double freq, double q, doub
         Biquad *f = &e->f[c][band];
         float z1 = f->z1, z2 = f->z2;
         biquad_design(f, type, e->rate, freq, q, gain);
-        f->z1 = z1, f->z2 = z2; // keep the filter state: no click on changes
+        f->z1 = z1, f->z2 = z2;
     }
 }
 

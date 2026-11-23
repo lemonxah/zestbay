@@ -1,9 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
 
-// Dialog header: title 18/600, optional subtitle 12 muted, right-side
-// controls (e.g. a labelled master switch) via the default property.
-// Dialogs keep the window manager's frame, so there is no in-dialog close.
 Item {
     id: root
     property string title

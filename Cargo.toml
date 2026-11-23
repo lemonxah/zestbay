@@ -8,40 +8,30 @@ authors = ["Ryno Kotze <lemon.xah@gmail.com>"]
 license = "MIT"
 
 [dependencies]
-# Qt6 via CXX-Qt
 cxx = "1.0"
 cxx-qt = "0.8"
 cxx-qt-lib = { version = "0.8", features = ["qt_full"] }
 
-# PipeWire
 pipewire = "0.9"
 libspa = "0.9"
 
-# LV2 Plugin Hosting
 lilv = "0.2"
 lv2_raw = "0.3"
 
-# CLAP Plugin Hosting
 clap-sys = "0.5"
 
-# VST3 Plugin Hosting
 vst3 = "0.3"
 
-# Threading & Sync
 parking_lot = "0.12"
 
-# Serialization (for config)
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# System tray (D-Bus StatusNotifier)
 ksni = { version = "0.3", features = ["blocking"] }
 zbus = { version = "5", default-features = false, features = ["blocking-api", "tokio"] }
 
-# System
 libc = "0.2"
 
-# Utilities
 log = "0.4"
 env_logger = "0.11"
 dirs = "6"
@@ -49,7 +39,6 @@ uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
 rtrb = "0.3"
 
-# OSC remote control
 rosc = "0.10"
 
 [workspace]

@@ -1,29 +1,15 @@
-//! Shared RT-safe MIDI processing functions.
-//!
-//! These functions are called from each plugin filter's `on_process` callback
-//! to parse incoming MIDI messages from PipeWire DSP buffers and apply
-//! CC/Note mappings to plugin parameters via `SharedPortUpdates`.
-//!
-//! Nothing here allocates, locks or sends on a channel: notifications for the
-//! main thread are pushed into the filter's SPSC queue (`RtEvent`) and dropped
-//! when the queue is full.
-
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::filter::{ResolvedMappingEntry, ResolvedMappings};
 use super::types::{MappingMode, MidiMessageType};
 
-/// Event pushed from the RT callback to the main loop (see `FilterMain::drain_events`).
-/// Must stay `Copy` and allocation-free.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RtEvent {
-    /// A MIDI mapping changed a parameter.
     ParameterChanged {
         instance_id: u64,
         port_index: usize,
         value: f32,
     },
-    /// MIDI learn captured a CC / note.
     LearnCaptured {
         channel: u8,
         number: u8,
@@ -31,7 +17,6 @@ pub enum RtEvent {
     },
 }
 
-/// MIDI learn flags shared between the main thread (sets) and RT (captures).
 pub struct LearnFlags {
     pub mode: AtomicBool,
     pub captured: AtomicBool,
@@ -62,7 +47,6 @@ fn toggle_index(message_type: MidiMessageType, channel: u8, number: u8) -> usize
     (t * 16 + (channel & 0x0F) as usize) * 128 + (number & 0x7F) as usize
 }
 
-/// RT-private state for MIDI mapping processing (toggle edge detection).
 pub struct MidiProcessingState {
     toggle_prev: [bool; TOGGLE_SLOTS],
 }
@@ -80,13 +64,6 @@ fn push_event(events: &mut rtrb::Producer<RtEvent>, event: RtEvent) -> bool {
     events.push(event).is_ok()
 }
 
-/// Walk a "8 bit raw midi" DSP buffer and apply learn / mappings to every
-/// CC and note message.
-///
-/// # Safety
-/// - `dsp_buf` must be null or a valid pointer returned by `pw_filter_get_dsp_buffer`
-///   for a "8 bit raw midi" port
-/// - Must be called from the PipeWire RT process callback
 pub unsafe fn process_midi_buffer(
     dsp_buf: *mut std::ffi::c_void,
     state: &mut MidiProcessingState,
@@ -120,8 +97,6 @@ pub unsafe fn process_midi_buffer(
     }
 }
 
-/// Apply one 3-byte MIDI message (CC / note on / note off) to learn mode or
-/// the resolved mappings.  Other message types are ignored.
 pub fn handle_midi_message(
     state: &mut MidiProcessingState,
     learn: &LearnFlags,
@@ -139,7 +114,6 @@ pub fn handle_midi_message(
     };
 
     if learn.mode.load(Ordering::Acquire) {
-        // Notes are learned on note-on only
         if message_type == MidiMessageType::Note && value == 0 {
             return;
         }
@@ -153,15 +127,12 @@ pub fn handle_midi_message(
                 },
             );
             if !ok {
-                // Queue full: let the next message try again
                 learn.captured.store(false, Ordering::SeqCst);
             }
         }
         return;
     }
 
-    // For per-plugin MIDI, we match on channel + number only (no device_name
-    // filtering, since the MIDI is already routed to this plugin's port).
     let Some(entry) = mappings.find_any_device(channel, number, message_type) else {
         return;
     };
@@ -190,9 +161,6 @@ pub fn handle_midi_message(
     );
 }
 
-/// Whether a message counts as "pressed" for toggle/momentary/switch handling.
-/// Notes: note-on with velocity > 0 is pressed; note-off / velocity 0 is released.
-/// CCs: values >= 64 are pressed (MIDI switch convention).
 #[inline]
 pub(crate) fn is_pressed(message_type: MidiMessageType, value: u8) -> bool {
     match message_type {
@@ -201,7 +169,6 @@ pub(crate) fn is_pressed(message_type: MidiMessageType, value: u8) -> bool {
     }
 }
 
-/// Returns `None` if the value should not be applied (e.g. toggle not triggered).
 #[inline]
 pub(crate) fn compute_mapped_value(
     entry: &ResolvedMappingEntry,
@@ -215,7 +182,6 @@ pub(crate) fn compute_mapped_value(
     match entry.mode {
         MappingMode::Continuous => {
             if entry.is_toggle {
-                // Boolean parameter: snap instead of producing in-between values
                 return Some(if pressed { entry.max } else { entry.min });
             }
             let t = value as f32 / 127.0;
@@ -261,8 +227,8 @@ pub(crate) fn compute_mapped_value(
     }
 }
 
-const SEQ_HEADER_SIZE: usize = 16; // spa_pod + spa_pod_sequence_body
-const CONTROL_HEADER_SIZE: usize = 16; // spa_pod_control without value body
+const SEQ_HEADER_SIZE: usize = 16;
+const CONTROL_HEADER_SIZE: usize = 16;
 
 #[inline]
 fn read_u32(buf: &[u8], at: usize) -> u32 {
@@ -274,15 +240,11 @@ fn write_u32(buf: &mut [u8], at: usize, v: u32) {
     buf[at..at + 4].copy_from_slice(&v.to_ne_bytes());
 }
 
-/// Copy the spa_pod_sequence in `input` into `out`, keeping only whole controls
-/// that fit.  `out` always ends up holding a valid (possibly empty) sequence
-/// when it is at least 16 bytes long.  Returns the number of bytes written.
 pub fn copy_sequence_bounded(input: &[u8], out: &mut [u8]) -> usize {
     if out.len() < SEQ_HEADER_SIZE {
         return 0;
     }
     let seq_type = libspa::sys::SPA_TYPE_Sequence;
-    // Empty sequence: pod.size = body header only
     write_u32(out, 0, 8);
     write_u32(out, 4, seq_type);
     write_u32(out, 8, 0);
@@ -291,7 +253,6 @@ pub fn copy_sequence_bounded(input: &[u8], out: &mut [u8]) -> usize {
     if input.len() < SEQ_HEADER_SIZE || read_u32(input, 4) != seq_type {
         return SEQ_HEADER_SIZE;
     }
-    // Keep the unit field
     write_u32(out, 8, read_u32(input, 8));
 
     let end = (8 + read_u32(input, 0) as usize).min(input.len());
@@ -316,15 +277,6 @@ pub fn copy_sequence_bounded(input: &[u8], out: &mut [u8]) -> usize {
     written
 }
 
-/// Write the MIDI thru output for this cycle: the output port always gets a
-/// valid sequence (empty when there is no input), never larger than the
-/// output buffer.
-///
-/// # Safety
-/// - `out_port` must be null or a port_data pointer of a "8 bit raw midi" output port
-/// - `in_buf` must be null or a valid pointer returned by `pw_filter_get_dsp_buffer`
-///   for a "8 bit raw midi" input port
-/// - Must be called from the PipeWire RT process callback
 pub unsafe fn write_midi_output(out_port: *mut std::ffi::c_void, in_buf: *const std::ffi::c_void) {
     let input: &[u8] = if in_buf.is_null() {
         &[]
@@ -337,12 +289,6 @@ pub unsafe fn write_midi_output(out_port: *mut std::ffi::c_void, in_buf: *const 
     unsafe { write_midi_sequence(out_port, input) };
 }
 
-/// Write the spa_pod_sequence in `seq` (or an empty one) to a MIDI output
-/// port, keeping only whole controls that fit the port buffer.
-///
-/// # Safety
-/// - `out_port` must be null or a port_data pointer of a "8 bit raw midi" output port
-/// - Must be called from the PipeWire RT process callback
 pub unsafe fn write_midi_sequence(out_port: *mut std::ffi::c_void, seq: &[u8]) {
     if out_port.is_null() {
         return;
@@ -370,11 +316,8 @@ pub unsafe fn write_midi_sequence(out_port: *mut std::ffi::c_void, seq: &[u8]) {
     }
 }
 
-/// Bytes reserved per plugin MIDI output and cycle (events beyond are dropped).
 pub const MIDI_OUT_CAPACITY: usize = 32 * 1024;
 
-/// MIDI a plugin emitted on one output during a cycle, kept as a ready to
-/// copy spa_pod_sequence.  Preallocated; `push` never allocates.
 pub struct MidiOutBuffer {
     buf: Box<[u8]>,
     len: usize,
@@ -392,7 +335,6 @@ impl MidiOutBuffer {
         b
     }
 
-    /// Reset to an empty sequence.
     pub fn clear(&mut self) {
         write_u32(&mut self.buf, 0, 8);
         write_u32(&mut self.buf, 4, libspa::sys::SPA_TYPE_Sequence);
@@ -402,9 +344,6 @@ impl MidiOutBuffer {
         self.last_offset = 0;
     }
 
-    /// Append a MIDI message at frame `offset` of the cycle.  Offsets are
-    /// kept non-decreasing (an earlier one is moved to the last offset), as
-    /// sequence readers expect.  Returns false when the buffer is full.
     pub fn push(&mut self, offset: u32, data: &[u8]) -> bool {
         if data.is_empty() {
             return true;
@@ -433,9 +372,6 @@ impl MidiOutBuffer {
     }
 }
 
-/// Collects the MIDI a plugin produces on its MIDI outputs during one cycle.
-/// The plugin host pushes events with block-relative frames; the filter
-/// sets the block position and writes one sequence per output port.
 pub struct MidiSink {
     outs: Vec<MidiOutBuffer>,
     block_start: u32,
@@ -443,7 +379,6 @@ pub struct MidiSink {
 }
 
 impl MidiSink {
-    /// A sink for `ports` plugin MIDI outputs (0 = the plugin has none).
     pub fn new(ports: usize) -> Self {
         Self {
             outs: (0..ports).map(|_| MidiOutBuffer::new(MIDI_OUT_CAPACITY)).collect(),
@@ -467,8 +402,6 @@ impl MidiSink {
         self.block_len = len as u32;
     }
 
-    /// Queue a MIDI message the plugin emitted on output `port` at `frame`
-    /// of the current block.  Unknown ports and full buffers drop it.
     pub fn push(&mut self, port: usize, frame: u32, data: &[u8]) {
         let frame = frame.min(self.block_len.saturating_sub(1));
         if let Some(o) = self.outs.get_mut(port) {
@@ -476,7 +409,6 @@ impl MidiSink {
         }
     }
 
-    /// Forward input events to the first output (used while bypassed).
     pub fn thru(&mut self, events: &[RawMidiEvent]) {
         for e in events {
             let n = (e.size as usize).min(e.data.len());
@@ -489,10 +421,6 @@ impl MidiSink {
     }
 }
 
-/// Port names for a plugin's MIDI outputs, given the plugin's own names.
-/// No outputs or a single one gives `midi_out` (a single output keeps the
-/// name the passthrough port always had, so saved links still connect);
-/// several use the plugin's names, made unique, with `midi_out_N` fallbacks.
 pub fn midi_out_port_names(plugin_names: &[String]) -> Vec<String> {
     if plugin_names.len() <= 1 {
         return vec!["midi_out".to_string()];
@@ -519,7 +447,6 @@ pub fn midi_out_port_names(plugin_names: &[String]) -> Vec<String> {
     out
 }
 
-/// A single raw MIDI event extracted from a PipeWire DSP buffer.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RawMidiEvent {
     pub offset: u32,
@@ -535,14 +462,8 @@ impl RawMidiEvent {
     };
 }
 
-/// Maximum number of MIDI events we collect per process cycle (RT-safe, no heap).
 pub const MAX_MIDI_EVENTS: usize = 256;
 
-/// Extract raw MIDI events from a PipeWire DSP buffer into a fixed-size array.
-///
-/// # Safety
-/// - `dsp_buf` must be a valid pointer from `pw_filter_get_dsp_buffer` for a MIDI port
-/// - Must be called from the PipeWire RT process callback
 pub unsafe fn extract_midi_events(
     dsp_buf: *mut std::ffi::c_void,
     out: &mut [RawMidiEvent; MAX_MIDI_EVENTS],
@@ -581,10 +502,6 @@ pub unsafe fn extract_midi_events(
     }
 }
 
-/// Select the events that fall into the block `[start, start + len)` of a
-/// cycle of `total` frames, rebasing their offsets to the block start.
-/// Offsets at or beyond `total` are clamped into the last frame.
-/// Returns the number of events written to `out`.
 pub fn chunk_midi_events(
     events: &[RawMidiEvent],
     start: usize,
@@ -670,8 +587,6 @@ mod tests {
         compute_mapped_value(entry, state, MidiMessageType::Note, 0, 1, vel)
     }
 
-    // ---- Continuous mode ----
-
     #[test]
     fn continuous_min_value() {
         let (entry, _pu) = make_entry(0.0, 1.0, MappingMode::Continuous, false);
@@ -720,10 +635,9 @@ mod tests {
         let at_max = cc(&entry, &mut state, 127).unwrap();
         assert!((at_max - 20000.0).abs() < 1.0);
 
-        // Logarithmic midpoint should be geometric mean, not arithmetic
         let at_mid = cc(&entry, &mut state, 64).unwrap();
         let linear_mid = (20.0 + 20000.0) / 2.0;
-        assert!(at_mid < linear_mid); // log curve is below linear at midpoint
+        assert!(at_mid < linear_mid);
     }
 
     #[test]
@@ -748,12 +662,9 @@ mod tests {
         let mut state = MidiProcessingState::new();
         assert_eq!(cc(&entry, &mut state, 30), Some(0.0));
         assert_eq!(cc(&entry, &mut state, 100), Some(1.0));
-        // Soft note still switches on
         assert_eq!(note(&entry, &mut state, 5), Some(1.0));
         assert_eq!(note(&entry, &mut state, 0), Some(0.0));
     }
-
-    // ---- Momentary mode ----
 
     #[test]
     fn momentary_above_threshold() {
@@ -797,8 +708,6 @@ mod tests {
         assert_eq!(note(&entry, &mut state, 40), Some(1.0));
         assert_eq!(note(&entry, &mut state, 0), Some(0.0));
     }
-
-    // ---- Toggle mode ----
 
     #[test]
     fn toggle_first_press_turns_on() {
@@ -858,19 +767,14 @@ mod tests {
     fn toggle_state_is_per_type_channel_number() {
         let (entry, pu) = make_entry(0.0, 1.0, MappingMode::Toggle, false);
         let mut state = MidiProcessingState::new();
-        // CC 1 on channel 0 held down
         assert!(compute_mapped_value(&entry, &mut state, MidiMessageType::Cc, 0, 1, 127).is_some());
         pu.control_inputs[0].value.store(1.0);
-        // Same number on another channel / as a note is an independent button
         assert!(compute_mapped_value(&entry, &mut state, MidiMessageType::Cc, 1, 1, 127).is_some());
         assert!(
             compute_mapped_value(&entry, &mut state, MidiMessageType::Note, 0, 1, 127).is_some()
         );
-        // While the original is still considered held
         assert!(compute_mapped_value(&entry, &mut state, MidiMessageType::Cc, 0, 1, 127).is_none());
     }
-
-    // ---- handle_midi_message ----
 
     #[test]
     fn handle_message_pushes_parameter_event() {
@@ -890,7 +794,6 @@ mod tests {
                 value: 1.0
             })
         );
-        // Unmapped CC: nothing
         handle_midi_message(&mut state, &learn, &mappings, &mut tx, [0xB0, 2, 127]);
         assert!(rx.pop().is_err());
     }
@@ -905,7 +808,6 @@ mod tests {
 
         handle_midi_message(&mut state, &learn, &mappings, &mut tx, [0xB0, 1, 0]);
         handle_midi_message(&mut state, &learn, &mappings, &mut tx, [0xB0, 1, 127]);
-        // Parameter still applied even though the notification was dropped
         assert!((pu.control_inputs[0].value.load() - 1.0).abs() < 1e-6);
         assert_eq!(rx.slots(), 1);
     }
@@ -926,7 +828,6 @@ mod tests {
 
         handle_midi_message(&mut state, &learn, &mappings, &mut tx, [0x90, 1, 20]);
         assert_eq!(pu.control_inputs[0].value.load(), 1.0);
-        // Note-off with a non-zero release velocity is still a release
         handle_midi_message(&mut state, &learn, &mappings, &mut tx, [0x80, 1, 100]);
         assert_eq!(pu.control_inputs[0].value.load(), 0.0);
     }
@@ -939,7 +840,6 @@ mod tests {
         learn.set(true);
         let (mut tx, mut rx) = rtrb::RingBuffer::new(8);
 
-        // Note-off is not learned
         handle_midi_message(&mut state, &learn, &mappings, &mut tx, [0x83, 60, 0]);
         assert!(rx.pop().is_err());
         handle_midi_message(&mut state, &learn, &mappings, &mut tx, [0x93, 60, 5]);
@@ -978,8 +878,6 @@ mod tests {
             Ok(RtEvent::LearnCaptured { number: 7, .. })
         ));
     }
-
-    // ---- MIDI sequence forwarding ----
 
     fn build_sequence(events: &[(u32, &[u8])]) -> Vec<u8> {
         let mut v = vec![0u8; 16];
@@ -1020,7 +918,6 @@ mod tests {
     #[test]
     fn copy_sequence_truncates_to_capacity() {
         let input = build_sequence(&[(0, &[0x90, 60, 100]), (10, &[0x80, 60, 0])]);
-        // Header (16) + one control (16 + 3 -> 24 padded) = 40 bytes
         let mut out = vec![0u8; 50];
         let n = copy_sequence_bounded(&input, &mut out);
         assert_eq!(n, 40);
@@ -1038,13 +935,10 @@ mod tests {
     #[test]
     fn copy_sequence_rejects_truncated_input_control() {
         let mut input = build_sequence(&[(0, &[0x90, 60, 100])]);
-        // Claim a value size larger than the pod
         input[24..28].copy_from_slice(&100u32.to_ne_bytes());
         let mut out = vec![0u8; 256];
         assert_eq!(copy_sequence_bounded(&input, &mut out), 16);
     }
-
-    // ---- Block chunking of MIDI events ----
 
     fn ev(offset: u32) -> RawMidiEvent {
         RawMidiEvent {
@@ -1068,7 +962,6 @@ mod tests {
         assert_eq!(n, 3);
         assert_eq!(out[0].offset, 0);
         assert_eq!(out[1].offset, 10000 - 8192);
-        // Out-of-range offset is clamped to the last frame
         assert_eq!(out[2].offset, 12000 - 1 - 8192);
     }
 
@@ -1078,8 +971,6 @@ mod tests {
         let mut out = [RawMidiEvent::EMPTY; 2];
         assert_eq!(chunk_midi_events(&events, 0, 16, 16, &mut out), 2);
     }
-
-    // ---- RawMidiEvent ----
 
     #[test]
     fn raw_midi_event_copy() {
@@ -1094,7 +985,6 @@ mod tests {
         assert_eq!(copy.size, 3);
     }
 
-    /// (offset, bytes) of every control in a sequence built by MidiOutBuffer.
     fn controls(seq: &[u8]) -> Vec<(u32, Vec<u8>)> {
         let end = 8 + read_u32(seq, 0) as usize;
         let mut pos = SEQ_HEADER_SIZE;
@@ -1116,7 +1006,6 @@ mod tests {
         assert_eq!(b.as_bytes().len(), SEQ_HEADER_SIZE);
         assert!(b.push(5, &[0x90, 60, 100]));
         assert!(b.push(9, &[0xF0, 1, 2, 3, 4, 5, 0xF7]));
-        // An earlier offset is moved up so the sequence stays ordered
         assert!(b.push(2, &[0x80, 60, 0]));
         assert_eq!(
             controls(b.as_bytes()),
@@ -1126,7 +1015,6 @@ mod tests {
                 (9, vec![0x80, 60, 0]),
             ]
         );
-        // The result survives the bounded copy used to fill port buffers
         let mut out = vec![0u8; 1024];
         let n = copy_sequence_bounded(b.as_bytes(), &mut out);
         assert_eq!(&out[..n], b.as_bytes());
@@ -1150,9 +1038,7 @@ mod tests {
         sink.push(1, 10, &[0x90, 60, 100]);
         sink.set_block(64, 32);
         sink.push(1, 3, &[0x80, 60, 0]);
-        // Frames past the block are clamped into its last frame
         sink.push(0, 500, &[0xB0, 7, 1]);
-        // Unknown port: dropped
         sink.push(2, 0, &[0x90, 1, 1]);
         assert_eq!(controls(sink.output(0)), vec![(95, vec![0xB0, 7, 1])]);
         assert_eq!(

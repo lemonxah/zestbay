@@ -1,18 +1,8 @@
-//! MIDI controller mapping types.
-//!
-//! Each mapping binds a (device_name, channel, CC number) triple to a specific
-//! plugin parameter (instance_id, port_index).  Mappings are per-CC granularity:
-//! different parameters on the same plugin can come from different devices.
-
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
 use crate::plugin::types::PluginInstanceId;
-
-// ---------------------------------------------------------------------------
-// Mapping mode (toggle vs. momentary for button-type controls)
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum MidiMessageType {
@@ -21,70 +11,40 @@ pub enum MidiMessageType {
     Note,
 }
 
-/// How a MIDI CC value is interpreted when the target parameter is boolean-ish.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum MappingMode {
-    /// Continuous: CC 0-127 is mapped linearly to [min, max].
-    /// This is the default for sliders / knobs.
     #[default]
     Continuous,
-    /// Toggle: each "press" flips the parameter on/off.  A press is a CC
-    /// going from <= 63 to > 63, or a note-on (any velocity > 0) after a
-    /// note-off / velocity-0 note-on.
     Toggle,
-    /// Momentary: CC > 63 / note-on = on, CC <= 63 / note-off = off.
-    /// The parameter follows the button state exactly.
     Momentary,
 }
 
-// ---------------------------------------------------------------------------
-// A single CC mapping
-// ---------------------------------------------------------------------------
-
-/// Unique key for a CC source: which device, which MIDI channel, which CC number.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MidiCcSource {
-    /// PipeWire node name of the MIDI device (e.g. "Midi Through Port-0").
     pub device_name: String,
-    /// MIDI channel 0-15.  `None` means "any channel".
     pub channel: Option<u8>,
-    /// MIDI CC number 0-127 (when `message_type == Cc`) or note number (when `Note`).
     pub cc: u8,
     #[serde(default)]
     pub message_type: MidiMessageType,
 }
 
-/// Describes the target end of a mapping: which plugin parameter to control.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MidiCcTarget {
     pub instance_id: PluginInstanceId,
     pub port_index: usize,
 }
 
-/// A complete CC mapping: source CC -> target parameter + mode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MidiCcMapping {
     pub source: MidiCcSource,
     pub target: MidiCcTarget,
     pub mode: MappingMode,
-    /// Human-readable label for display (e.g. "LSP Compressor > Threshold").
     #[serde(default)]
     pub label: String,
 }
 
-// ---------------------------------------------------------------------------
-// Mapping table (owned by the manager, shared with the RT MIDI filter)
-// ---------------------------------------------------------------------------
-
-/// The mapping table used by the RT MIDI callback.
-///
-/// Lookups happen on the RT thread, so the table is shared via
-/// `Arc<MidiMappingTable>` and swapped atomically (the manager builds a new
-/// table and replaces the old `Arc` pointer).
 #[derive(Debug, Clone, Default)]
 pub struct MidiMappingTable {
-    /// Source -> mapping.  Because each source can only map to one target,
-    /// this is a 1:1 map.  Conflict detection is done at insert time.
     by_source: HashMap<MidiCcSource, MidiCcMapping>,
 }
 
@@ -95,7 +55,6 @@ impl MidiMappingTable {
     }
 
 
-    /// Insert a mapping.  Returns `Some(old_mapping)` if the source was already bound.
     pub fn insert(&mut self, mapping: MidiCcMapping) -> Option<MidiCcMapping> {
         self.by_source.insert(mapping.source.clone(), mapping)
     }
@@ -112,8 +71,6 @@ impl MidiMappingTable {
             .retain(|source, _| source.device_name != device_name);
     }
 
-    /// Lookup by source, but with wildcard channel matching.
-    /// First tries exact match, then tries `channel: None` (any-channel mapping).
     #[cfg(test)]
     pub fn get_with_wildcard(
         &self,
@@ -140,14 +97,11 @@ impl MidiMappingTable {
         self.by_source.get(&wildcard)
     }
 
-    /// Check if a source is already mapped.  Returns the label of the existing
-    /// mapping's target if so.
     #[cfg(test)]
     pub fn conflict_check(&self, source: &MidiCcSource) -> Option<&str> {
         self.by_source.get(source).map(|m| m.label.as_str())
     }
 
-    /// Build from a list of mappings (for loading from persistence).
     #[cfg(test)]
     pub fn from_mappings(mappings: Vec<MidiCcMapping>) -> Self {
         let mut table = Self::new();
@@ -157,22 +111,18 @@ impl MidiMappingTable {
         table
     }
 
-    /// Remove the mapping for a given source.
     pub fn remove(&mut self, source: &MidiCcSource) -> Option<MidiCcMapping> {
         self.by_source.remove(source)
     }
 
-    /// Lookup by source (used in the RT callback).
     pub fn get(&self, source: &MidiCcSource) -> Option<&MidiCcMapping> {
         self.by_source.get(source)
     }
 
-    /// Find an existing mapping for a target (instance_id + port_index).
     pub fn find_by_target(&self, target: &MidiCcTarget) -> Option<&MidiCcMapping> {
         self.by_source.values().find(|m| m.target == *target)
     }
 
-    /// All mappings (for persistence / UI).
     pub fn all_mappings(&self) -> Vec<&MidiCcMapping> {
         self.by_source.values().collect()
     }
@@ -199,8 +149,6 @@ mod tests {
             label: format!("test-{}-{}", instance_id, port_index),
         }
     }
-
-    // ---- MidiMappingTable basics ----
 
     #[test]
     fn table_insert_and_get() {
@@ -248,8 +196,6 @@ mod tests {
         assert!(table.remove(&source).is_none());
     }
 
-    // ---- remove_by_instance ----
-
     #[test]
     fn table_remove_by_instance() {
         let mut table = MidiMappingTable::new();
@@ -263,8 +209,6 @@ mod tests {
         assert_eq!(table.all_mappings()[0].target.instance_id, 200);
     }
 
-    // ---- remove_by_device ----
-
     #[test]
     fn table_remove_by_device() {
         let mut table = MidiMappingTable::new();
@@ -276,8 +220,6 @@ mod tests {
         assert_eq!(table.all_mappings().len(), 1);
         assert_eq!(table.all_mappings()[0].source.device_name, "device_b");
     }
-
-    // ---- get_with_wildcard ----
 
     #[test]
     fn table_get_with_wildcard_exact_match() {
@@ -292,10 +234,8 @@ mod tests {
     #[test]
     fn table_get_with_wildcard_falls_back_to_any_channel() {
         let mut table = MidiMappingTable::new();
-        // Insert with channel=None (wildcard)
         table.insert(make_mapping("dev", None, 10, 100, 0));
 
-        // Query with specific channel — should fall back to wildcard
         let result = table.get_with_wildcard("dev", 3, 10, MidiMessageType::Cc);
         assert!(result.is_some());
         assert_eq!(result.unwrap().target.instance_id, 100);
@@ -304,11 +244,11 @@ mod tests {
     #[test]
     fn table_get_with_wildcard_exact_preferred_over_wildcard() {
         let mut table = MidiMappingTable::new();
-        table.insert(make_mapping("dev", None, 10, 100, 0)); // wildcard
-        table.insert(make_mapping("dev", Some(5), 10, 200, 0)); // exact
+        table.insert(make_mapping("dev", None, 10, 100, 0));
+        table.insert(make_mapping("dev", Some(5), 10, 200, 0));
 
         let result = table.get_with_wildcard("dev", 5, 10, MidiMessageType::Cc);
-        assert_eq!(result.unwrap().target.instance_id, 200); // exact wins
+        assert_eq!(result.unwrap().target.instance_id, 200);
     }
 
     #[test]
@@ -316,8 +256,6 @@ mod tests {
         let table = MidiMappingTable::new();
         assert!(table.get_with_wildcard("dev", 0, 1, MidiMessageType::Cc).is_none());
     }
-
-    // ---- find_by_target ----
 
     #[test]
     fn table_find_by_target() {
@@ -332,8 +270,6 @@ mod tests {
         assert!(table.find_by_target(&missing).is_none());
     }
 
-    // ---- conflict_check ----
-
     #[test]
     fn table_conflict_check() {
         let mut table = MidiMappingTable::new();
@@ -346,8 +282,6 @@ mod tests {
         assert!(table.conflict_check(&source2).is_none());
     }
 
-    // ---- from_mappings ----
-
     #[test]
     fn table_from_mappings() {
         let mappings = vec![
@@ -357,8 +291,6 @@ mod tests {
         let table = MidiMappingTable::from_mappings(mappings);
         assert_eq!(table.all_mappings().len(), 2);
     }
-
-    // ---- Defaults ----
 
     #[test]
     fn mapping_mode_default_is_continuous() {

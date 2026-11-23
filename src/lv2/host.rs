@@ -17,15 +17,12 @@ fn next_instance_id() -> PluginInstanceId {
     NEXT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Sample rate of each live instance, keyed by its LV2_Handle, so UI code
-/// that only receives the handle can tell plugin UIs the real rate.
 static HANDLE_SAMPLE_RATES: OnceLock<Mutex<HashMap<usize, f64>>> = OnceLock::new();
 
 fn handle_sample_rates() -> &'static Mutex<HashMap<usize, f64>> {
     HANDLE_SAMPLE_RATES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Sample rate of the live instance owning `handle`, if any.
 pub fn sample_rate_for_handle(handle: *mut c_void) -> Option<f64> {
     if handle.is_null() {
         return None;
@@ -37,9 +34,6 @@ pub fn sample_rate_for_handle(handle: *mut c_void) -> Option<f64> {
         .copied()
 }
 
-/// Clamp a value to [min, max], tolerating NaN bounds (some LV2 plugins
-/// have unset min/max ranges).  If min or max is NaN, the value is returned
-/// as-is.
 fn safe_clamp(value: f32, min: f32, max: f32) -> f32 {
     if min.is_nan() || max.is_nan() {
         return value;
@@ -47,16 +41,13 @@ fn safe_clamp(value: f32, min: f32, max: f32) -> f32 {
     value.clamp(min, max)
 }
 
-/// Capacity of each atom port buffer in bytes (matches `buf-size#sequenceSize`).
 const ATOM_BUF_SIZE: usize = SEQUENCE_SIZE;
-/// Size of dummy buffers for ports of unsupported classes.
 const DUMMY_PORT_BYTES: usize = 64 * 1024;
 const MAX_BLOCK: usize = MAX_BLOCK_LENGTH as usize;
 
 const LV2_RESIZE_PORT_URI: &std::ffi::CStr = c"http://lv2plug.in/ns/ext/resize-port#resize";
 const LV2_URI_MAP_URI: &std::ffi::CStr = c"http://lv2plug.in/ns/ext/uri-map";
 
-// Data-less LV2 host capability flags
 const LV2_HARD_RT_CAPABLE_URI: &std::ffi::CStr = c"http://lv2plug.in/ns/lv2core#hardRTCapable";
 const LV2_IS_LIVE_URI: &std::ffi::CStr = c"http://lv2plug.in/ns/lv2core#isLive";
 const LV2_IN_PLACE_BROKEN_URI: &std::ffi::CStr = c"http://lv2plug.in/ns/lv2core#inPlaceBroken";
@@ -108,7 +99,6 @@ unsafe extern "C" fn uri_map_callback(
     }
 }
 
-/// Feature data the plugin may keep pointers to for its whole lifetime.
 struct HostFeatureData {
     resize_port: LV2_Resize_Port_Resize,
     uri_map: LV2_URI_Map_Feature,
@@ -122,7 +112,6 @@ fn read_u32(buf: &[u8], off: usize) -> u32 {
     u32::from_ne_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
 }
 
-/// Reset an input atom port to an empty `atom:Sequence` (header only).
 fn init_atom_input(buf: &mut [u8], sequence_type_urid: u32) {
     assert!(buf.len() >= 16, "atom buffer too small");
     write_u32(buf, 0, 8);
@@ -131,16 +120,12 @@ fn init_atom_input(buf: &mut [u8], sequence_type_urid: u32) {
     write_u32(buf, 12, 0);
 }
 
-/// Prepare an output atom port before `run()`: per the LV2 atom spec the
-/// host sets it to an `atom:Chunk` whose size is the available capacity.
 fn init_atom_output(buf: &mut [u8], chunk_type_urid: u32) {
     assert!(buf.len() >= 16, "atom buffer too small");
     write_u32(buf, 0, (buf.len() - 8) as u32);
     write_u32(buf, 4, chunk_type_urid);
 }
 
-/// Length of the atom sequence the plugin wrote to an output port, if it
-/// contains at least one event.
 fn produced_sequence_len(buf: &[u8], sequence_type_urid: u32) -> Option<usize> {
     if buf.len() < 16 {
         return None;
@@ -155,8 +140,6 @@ fn produced_sequence_len(buf: &[u8], sequence_type_urid: u32) -> Option<usize> {
     }
 }
 
-/// Call `f(frame, bytes)` for every `midi:MidiEvent` in the atom sequence a
-/// plugin wrote to an output port.  RT-safe.
 fn for_each_midi_event(
     buf: &[u8],
     sequence_type_urid: u32,
@@ -166,7 +149,6 @@ fn for_each_midi_event(
     let Some(total) = produced_sequence_len(buf, sequence_type_urid) else {
         return;
     };
-    // atom header(8) + sequence body header(8); events: frames(8) + atom(8 + body)
     let mut pos = 16;
     while pos + 16 <= total {
         let frames = i64::from_ne_bytes(buf[pos..pos + 8].try_into().unwrap());
@@ -183,9 +165,6 @@ fn for_each_midi_event(
     }
 }
 
-/// Fill an input atom port with queued UI atoms (at frame 0) followed by
-/// MIDI events.  RT-safe: no allocation, no blocking.  Returns the total
-/// atom size written (header included).
 fn fill_atom_input(
     buf: &mut [u8],
     sequence_type_urid: u32,
@@ -197,7 +176,6 @@ fn fill_atom_input(
     let cap = buf.len();
     let mut write_pos = 16usize;
 
-    // UI → plugin atoms (each an LV2_Atom: 8-byte header + body)
     while cap - write_pos >= 16 {
         match ui_atoms.pop_into_rt(&mut buf[write_pos + 8..]) {
             MsgPop::Data(len) => {
@@ -206,7 +184,7 @@ fn fill_atom_input(
                 }
                 let atom_total = 8 + read_u32(buf, write_pos + 8) as usize;
                 if atom_total > len {
-                    continue; // malformed: header claims more than was sent
+                    continue;
                 }
                 buf[write_pos..write_pos + 8].copy_from_slice(&0i64.to_ne_bytes());
                 let event_end = write_pos + 8 + atom_total;
@@ -216,7 +194,6 @@ fn fill_atom_input(
             }
             MsgPop::TooLarge(_) => {
                 if write_pos == 16 {
-                    // Can never fit this port; drop it rather than block the queue.
                     ui_atoms.discard_rt();
                     continue;
                 }
@@ -226,7 +203,6 @@ fn fill_atom_input(
         }
     }
 
-    // MIDI events: time_frames(8) + atom_size(4) + atom_type(4) + data(padded)
     for evt in midi_events {
         let midi_size = (evt.size as usize).min(evt.data.len());
         if midi_size == 0 {
@@ -244,12 +220,10 @@ fn fill_atom_input(
         write_pos += padded_event_size;
     }
 
-    // Sequence body size = total - atom header(8)
     write_u32(buf, 0, (write_pos - 8) as u32);
     write_pos
 }
 
-/// 8-byte aligned buffer for one atom port.
 pub struct AtomBuf {
     pub port_index: usize,
     data: Box<[u64]>,
@@ -275,16 +249,11 @@ impl AtomBuf {
 }
 
 pub struct Lv2PluginInstance {
-    #[allow(dead_code)] // held for ownership/diagnostics; not read
+    #[allow(dead_code)]
     pub id: PluginInstanceId,
-    // NOTE: field order is drop order.  `instance` must be dropped (plugin
-    // deactivated + freed) before the feature data and port buffers it
-    // points to; `Drop` stops the worker thread before any of this.
     instance: lilv::instance::ActiveInstance,
-    /// Worker thread for plugins that require the worker#schedule feature
     pub worker: Option<Lv2Worker>,
     _unused_worker_setup: Option<Lv2WorkerSetup>,
-    /// Keeps the lilv world alive for as long as the instance.
     _lilv_plugin: lilv::plugin::Plugin,
     _urid_map: Box<lv2_raw::urid::LV2UridMap>,
     _urid_unmap: Box<super::urid::LV2UridUnmap>,
@@ -292,27 +261,22 @@ pub struct Lv2PluginInstance {
     _options_setup: Lv2OptionsSetup,
     state_path_setup: Lv2StatePathSetup,
     _host_features: Box<HostFeatureData>,
-    /// Port memory the plugin reads/writes (RT-private).
     control_in_mem: Box<[f32]>,
     control_out_mem: Box<[f32]>,
     dummy_audio_in: Box<[f32]>,
     dummy_audio_out: Box<[f32]>,
     _dummy_ports: Vec<Box<[u64]>>,
     pub plugin_uri: String,
-    #[allow(dead_code)] // held for ownership/diagnostics; not read
+    #[allow(dead_code)]
     pub display_name: String,
     pub audio_input_indices: Vec<usize>,
     pub audio_output_indices: Vec<usize>,
-    /// Control port metadata.  `value` is the value at instantiation; the
-    /// live value is in `port_updates` (see `control_input_values()`).
     pub control_inputs: Vec<ControlPort>,
-    #[allow(dead_code)] // held for ownership/diagnostics; not read
+    #[allow(dead_code)]
     pub control_outputs: Vec<ControlPort>,
     pub atom_in_bufs: Vec<AtomBuf>,
     pub atom_out_bufs: Vec<AtomBuf>,
-    /// Names of the atom outputs that carry `midi:MidiEvent`, in port order.
     pub midi_output_names: Vec<String>,
-    /// Index into `atom_out_bufs` of each MIDI output.
     midi_out_slots: Vec<usize>,
     pub port_updates: SharedPortUpdates,
     atom_sequence_urid: u32,
@@ -320,15 +284,10 @@ pub struct Lv2PluginInstance {
     midi_event_urid: u32,
     bypassed: AtomicBool,
     pub sample_rate: f64,
-    /// Accumulated worker thread CPU time (ns) drained after each process() call
     pub last_worker_ns: u64,
-    /// LV2_State_Interface pointer (if the plugin provides it)
     state_iface: Option<std::ptr::NonNull<LV2_State_Interface>>,
-    /// Raw LV2_Handle for calling state save/restore
     lv2_handle: *mut c_void,
-    /// Plugin descriptor's extension_data function pointer (for data-access UI feature)
     extension_data_fn: Option<unsafe extern "C" fn(*const c_char) -> *const c_void>,
-    /// Shared reference to the URID mapper for state operations
     urid_mapper: Arc<UridMapper>,
 }
 
@@ -378,10 +337,6 @@ impl Lv2PluginInstance {
             .iter()
             .any(|f| f == "http://lv2plug.in/ns/ext/worker#schedule");
 
-        // Offer the schedule feature to every plugin: plugins that list it as
-        // an optional feature would otherwise silently run without their
-        // worker. Setup is cheap (rings only); the worker thread is spawned
-        // only if the plugin actually exposes the worker interface.
         let worker_setup = Some(Lv2WorkerSetup::new());
 
         let state_path_setup = Lv2StatePathSetup::new(&plugin_info.uri, &format!("instance-{}", id));
@@ -398,11 +353,6 @@ impl Lv2PluginInstance {
             },
         });
 
-        // lilv 0.2.4 depends on lv2_raw 0.2's LV2Feature while we use lv2_raw 0.3.
-        // Both versions have an identical #[repr(C)] layout:
-        //   { uri: *const c_char, data: *mut c_void }
-        // The only difference is libc types vs std::os::raw types (same ABI).
-        // We transmute the Vec to bridge the type boundary.
         let worker_feature;
         let resize_port_feature = lv2_raw::core::LV2Feature {
             uri: LV2_RESIZE_PORT_URI.as_ptr(),
@@ -446,7 +396,6 @@ impl Lv2PluginInstance {
             features_v3.push(&worker_feature);
         }
         let features = unsafe {
-            // SAFETY: lv2_raw 0.2 and 0.3 LV2Feature are layout-identical #[repr(C)] structs.
             std::mem::transmute::<Vec<&lv2_raw::core::LV2Feature>, Vec<_>>(features_v3)
         };
 
@@ -540,10 +489,6 @@ impl Lv2PluginInstance {
             }
         }
 
-        // Connect audio ports to persistent dummy buffers so that ALL ports
-        // are connected before activate(), as required by the LV2 spec.
-        // process() reconnects them to real buffers each cycle and falls
-        // back to these when the filter supplies fewer buffers.
         let mut dummy_audio_in: Box<[f32]> = vec![0.0f32; MAX_BLOCK].into();
         let mut dummy_audio_out: Box<[f32]> = vec![0.0f32; MAX_BLOCK].into();
         for &idx in &audio_input_indices {
@@ -570,8 +515,6 @@ impl Lv2PluginInstance {
             }
         }
 
-        // Ports of classes we don't otherwise handle still get valid memory
-        // because run() may touch every port.
         let known: std::collections::HashSet<usize> =
             plugin_info.ports.iter().map(|p| p.index).collect();
         let control_class = world.new_uri("http://lv2plug.in/ns/lv2core#ControlPort");
@@ -626,16 +569,8 @@ impl Lv2PluginInstance {
                 .collect(),
         });
 
-        // Activate the worker if needed: get the instance handle and worker
-        // interface BEFORE activation (extension_data is available on the
-        // un-activated instance).
         let lv2_handle = instance.handle();
 
-        // lv2_raw 0.2 declares `extension_data` as non-nullable
-        // `extern "C" fn(...)`, but the LV2 C spec allows it to be NULL
-        // ("If a plugin does not support any extension data, this field
-        // may be NULL").  Reading a null through a non-nullable fn type
-        // is UB, so we read the raw pointer value first.
         let has_extension_data = instance.descriptor().is_some_and(|d| {
             let raw: *const () =
                 unsafe { *(std::ptr::addr_of!(d.extension_data) as *const *const ()) };
@@ -674,8 +609,6 @@ impl Lv2PluginInstance {
                             plugin_info.name
                         );
                     }
-                    // Keep the schedule feature data alive: the plugin may
-                    // have stored a pointer to it.  Requests are never processed.
                     unused_worker_setup = Some(ws);
                     None
                 }
@@ -745,8 +678,6 @@ impl Lv2PluginInstance {
         })
     }
 
-    /// Run one block.  RT-safe: no allocation, locking or I/O.
-    /// `sample_count` must not exceed `MAX_BLOCK_LENGTH` (it is clamped).
     pub unsafe fn process(
         &mut self,
         inputs: &[&[f32]],
@@ -757,8 +688,6 @@ impl Lv2PluginInstance {
     ) {
         let sample_count = sample_count.min(MAX_BLOCK);
 
-        // Connect audio ports (buffer pointers change each cycle).  Ports
-        // without a (large enough) buffer use the persistent dummies.
         for (i, &port_idx) in self.audio_input_indices.iter().enumerate() {
             let ptr = match inputs.get(i) {
                 Some(buf) if buf.len() >= sample_count => buf.as_ptr(),
@@ -779,22 +708,17 @@ impl Lv2PluginInstance {
             }
         }
 
-        // Apply host-side parameter changes (set_parameter, MIDI CC, UI):
-        // the shared slot is authoritative for control inputs.
         for (mem, slot) in self
             .control_in_mem
             .iter_mut()
             .zip(self.port_updates.control_inputs.iter())
         {
-            // A non-finite value (e.g. a MIDI mapping over a port with unset
-            // ranges) must not reach the plugin; keep the last good one.
             let value = slot.value.load();
             if value.is_finite() {
                 *mem = value;
             }
         }
 
-        // Prepare atom input buffers (UI → plugin communication + MIDI events)
         for (ab, shared) in self
             .atom_in_bufs
             .iter_mut()
@@ -816,15 +740,10 @@ impl Lv2PluginInstance {
         {
             let _rt = RtScope::enter();
 
-            // Always call run() so the plugin keeps its internal state alive
-            // (visualizers, worker threads, etc.). When bypassed we just
-            // overwrite the audio output with a passthrough copy afterwards.
             unsafe {
                 self.instance.run(sample_count);
             }
 
-            // Deliver any pending worker responses after run()
-            // and drain accumulated worker thread CPU time for stats
             self.last_worker_ns = 0;
             if let Some(worker) = self.worker.as_mut() {
                 unsafe {
@@ -834,7 +753,6 @@ impl Lv2PluginInstance {
             }
         }
 
-        // When bypassed, overwrite plugin audio output with passthrough
         if self.bypassed.load(Ordering::Relaxed) {
             for (i, output) in outputs.iter_mut().enumerate() {
                 if i < inputs.len() {
@@ -848,7 +766,6 @@ impl Lv2PluginInstance {
             }
         }
 
-        // Plugin MIDI outputs → filter MIDI ports (input thru when bypassed)
         if self.bypassed.load(Ordering::Relaxed) {
             midi_out.thru(midi_events);
         } else {
@@ -862,7 +779,6 @@ impl Lv2PluginInstance {
             }
         }
 
-        // Only outputs are written back: the plugin owns their values.
         for (mem, slot) in self
             .control_out_mem
             .iter()
@@ -890,8 +806,6 @@ impl Lv2PluginInstance {
         self.port_updates.control_inputs.get(idx)
     }
 
-    /// Set a control input.  Only stores into the shared atomic slot; the
-    /// RT thread applies it at the start of the next block.
     pub fn set_parameter(&self, port_index: usize, value: f32) {
         if value.is_nan() {
             return;
@@ -909,8 +823,6 @@ impl Lv2PluginInstance {
         }
     }
 
-    /// Scope makePath/mapPath files to this persistent instance identity.
-    /// Must be called before `restore_state`.
     pub fn set_state_scope(&mut self, stable_id: &str) {
         if stable_id.is_empty() {
             return;
@@ -989,8 +901,6 @@ impl Lv2PluginInstance {
 
 impl Drop for Lv2PluginInstance {
     fn drop(&mut self) {
-        // The worker thread calls into the plugin; it must be gone before
-        // the instance is deactivated and freed (fields drop after this).
         if let Some(worker) = self.worker.as_mut() {
             worker.stop();
         }
@@ -1004,8 +914,6 @@ impl Drop for Lv2PluginInstance {
 mod tests {
     use super::*;
     use crate::midi::processing::RawMidiEvent;
-
-    // ---- safe_clamp ----
 
     #[test]
     fn safe_clamp_normal() {
@@ -1045,8 +953,6 @@ mod tests {
         assert_eq!(safe_clamp(0.0, -10.0, -1.0), -1.0);
     }
 
-    // ---- atom port helpers ----
-
     #[test]
     fn init_atom_input_is_empty_sequence() {
         let mut buf = vec![0xFFu8; 64];
@@ -1075,23 +981,18 @@ mod tests {
     #[test]
     fn produced_sequence_requires_events() {
         let mut buf = vec![0u8; 64];
-        // Untouched chunk → nothing produced
         init_atom_output(&mut buf, 7);
         assert_eq!(produced_sequence_len(&buf, 5), None);
-        // Empty sequence → nothing produced
         init_atom_input(&mut buf, 5);
         assert_eq!(produced_sequence_len(&buf, 5), None);
-        // Sequence with one 8-byte event body
         write_u32(&mut buf, 0, 8 + 24);
         assert_eq!(produced_sequence_len(&buf, 5), Some(40));
-        // Size larger than the buffer → rejected
         write_u32(&mut buf, 0, 1000);
         assert_eq!(produced_sequence_len(&buf, 5), None);
     }
 
     #[test]
     fn midi_events_are_read_from_output_sequence() {
-        // A plugin-written sequence: MIDI(type 2) at 3, other atom(9), MIDI at 40
         let mut buf = vec![0u8; 128];
         init_atom_input(&mut buf, 5);
         let mut pos = 16;
@@ -1112,7 +1013,6 @@ mod tests {
         for_each_midi_event(&buf, 5, 2, |frame, data| seen.push((frame, data.to_vec())));
         assert_eq!(seen, vec![(3, vec![0x90, 60, 100]), (40, vec![0xC1, 4])]);
 
-        // An untouched output (plugin wrote nothing) yields no events
         init_atom_output(&mut buf, 7);
         let mut count = 0;
         for_each_midi_event(&buf, 5, 2, |_, _| count += 1);
@@ -1140,24 +1040,19 @@ mod tests {
         let mut buf = vec![0u8; 256];
         let total = fill_atom_input(&mut buf, 1, 2, &ui, &midi);
 
-        // header(16) + ev1(8+8+3 → 24) + ev2(8+8+8 → 24) + midi(8+8+3 → 24)
         assert_eq!(total, 16 + 24 + 24 + 24);
         assert_eq!(read_u32(&buf, 0) as usize, total - 8);
         assert_eq!(read_u32(&buf, 4), 1);
-        // event 1
         assert_eq!(read_u32(&buf, 24), 3);
         assert_eq!(read_u32(&buf, 28), 77);
         assert_eq!(&buf[32..35], &[1, 2, 3]);
         assert_eq!(&buf[35..40], &[0, 0, 0, 0, 0]);
-        // event 2
         assert_eq!(read_u32(&buf, 48), 8);
         assert_eq!(read_u32(&buf, 52), 78);
-        // midi event
         assert_eq!(i64::from_ne_bytes(buf[64..72].try_into().unwrap()), 5);
         assert_eq!(read_u32(&buf, 72), 3);
         assert_eq!(read_u32(&buf, 76), 2);
         assert_eq!(&buf[80..83], &[0x90, 60, 100]);
-        // queue drained
         assert_eq!(ui.read(), None);
     }
 
@@ -1166,11 +1061,9 @@ mod tests {
         let ui = AtomPortBuffer::new(0);
         ui.write(&make_atom(1, &[0u8; 16]));
         ui.write(&make_atom(1, &[0u8; 16]));
-        // room for header + one 32-byte event only
         let mut buf = vec![0u8; 16 + 32 + 8];
         fill_atom_input(&mut buf, 1, 2, &ui, &[]);
         assert_eq!(read_u32(&buf, 0), 8 + 32);
-        // second message still queued for the next cycle
         assert!(ui.read().is_some());
     }
 

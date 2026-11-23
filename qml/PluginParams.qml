@@ -3,8 +3,6 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import ZestBay
 
-// Plugin Parameters (spec §6.7): header with category chip, name, URI and the
-// Bypass switch; filter row; scrolling card list of parameter rows.
 ZbWindow {
     id: pluginParams
     title: pluginName ? pluginName + " - Parameters" : "Plugin Parameters"
@@ -22,9 +20,7 @@ ZbWindow {
     property bool pluginBypassed: false
     property bool pluginEnabled: true
     property int instanceId: -1
-    // Port indices currently in paramModel (to detect a changed parameter set).
     property var paramPorts: []
-    // Bumped whenever MIDI mappings change so the mapping labels re-evaluate.
     property int mappingsRevision: 0
 
     property int midiLearnInstanceId: -1
@@ -33,15 +29,12 @@ ZbWindow {
     property string conflictSourceJson: ""
     property string conflictExistingLabel: ""
 
-    // Filter field text (matches name or symbol, case-insensitive).
     property string filterText: ""
 
     ListModel {
         id: paramModel
     }
 
-    // Parameter values arrive through pluginParameterChanged; this slow poll
-    // only keeps name/bypass (and the parameter set) in sync.
     Timer {
         id: refreshTimer
         interval: 1000
@@ -65,7 +58,6 @@ ZbWindow {
         }
     }
 
-    // Escape: cancel a value edit, then clear the filter, then close.
     Shortcut {
         sequence: "Escape"
         enabled: pluginParams.visible
@@ -94,7 +86,6 @@ ZbWindow {
         return -1
     }
 
-    // Parameter info by LV2 port index (not by list position).
     function findParamByPort(portIndex) {
         var row = rowForPort(portIndex)
         return row >= 0 ? paramModel.get(row) : null
@@ -105,7 +96,6 @@ ZbWindow {
             paramModel.clear()
             paramPorts = []
             filterField.text = ""
-            // A different plugin: don't follow the previous instance.
             instanceId = -1
         }
         pluginNodeId = nodeId
@@ -119,8 +109,6 @@ ZbWindow {
         if (pluginNodeId < 0) return
         try {
             var data = JSON.parse(controller.get_plugin_params_json(pluginNodeId))
-            // A reload (preset with state, sample-rate change) moves the
-            // plugin to a new node; follow the instance there.
             if (instanceId >= 0 && (!data || !data.parameters || data.instanceId !== instanceId)) {
                 var moved = controller.plugin_node_for_instance(instanceId)
                 if (moved >= 0 && moved !== pluginNodeId) {
@@ -157,7 +145,6 @@ ZbWindow {
                 }
                 paramPorts = ports
             } else {
-                // Same parameters: only touch values that actually differ.
                 for (var j = 0; j < params.length; j++) {
                     if (paramModel.get(j).value !== params[j].value)
                         paramModel.setProperty(j, "value", params[j].value)
@@ -169,7 +156,6 @@ ZbWindow {
         }
     }
 
-    // Send a value to the plugin and reflect it in the list immediately.
     function setParam(portIndex, value) {
         if (pluginNodeId < 0 || portIndex === undefined || value === undefined) return
         controller.set_plugin_parameter(pluginNodeId, portIndex, value)
@@ -217,7 +203,6 @@ ZbWindow {
         midiConflictDialog.open()
     }
 
-    // `revision` is only there so bindings re-run when mappings change.
     function getMidiMappingText(portIndex, revision) {
         if (instanceId < 0 || portIndex === undefined) return ""
         try {
@@ -233,7 +218,6 @@ ZbWindow {
         }
     }
 
-    // ─── MIDI mapping conflict ──────────────────────────────────────────
     Dialog {
         id: midiConflictDialog
         title: "MIDI mapping conflict"
@@ -243,7 +227,6 @@ ZbWindow {
         padding: 20
         topPadding: 12
 
-        // Escape / closing without choosing keeps the existing mapping.
         onRejected: {
             pluginParams.controller.dismiss_midi_conflict()
             pluginParams.clearMidiLearnState()
@@ -308,9 +291,6 @@ ZbWindow {
                     kind: "primary"
                     text: "Reassign"
                     onClicked: {
-                        // The backend remembers the learned mapping that hit the
-                        // conflict: it removes the existing mapping for that
-                        // control and adds the new one for this parameter.
                         pluginParams.controller.reassign_midi_mapping()
                         pluginParams.clearMidiLearnState()
                         midiConflictDialog.close()
@@ -320,7 +300,6 @@ ZbWindow {
         }
     }
 
-    // ─── Layout ─────────────────────────────────────────────────────────
     ColumnLayout {
         anchors.fill: parent
         anchors.leftMargin: Theme.dialogPadding
@@ -329,7 +308,6 @@ ZbWindow {
         anchors.bottomMargin: Theme.dialogPadding
         spacing: 12
 
-        // Header: category chip · name + URI · Bypass switch.
         RowLayout {
             Layout.fillWidth: true
             spacing: 16
@@ -423,7 +401,6 @@ ZbWindow {
             }
         }
 
-        // Filter row: search · count · Reset all.
         RowLayout {
             Layout.fillWidth: true
             spacing: 12
@@ -455,7 +432,6 @@ ZbWindow {
             }
         }
 
-        // Card list of parameter rows; the bar sits beside the rows.
         ZbCard {
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -482,7 +458,6 @@ ZbWindow {
                         required property int index
                         required property var model
 
-                        // Model row object: its role properties (value, ...) notify.
                         property var param: model
                         readonly property bool matches: pluginParams.matchesFilter(param.name, param.symbol,
                                                                                    pluginParams.filterText)
@@ -492,7 +467,6 @@ ZbWindow {
                                                                                      pluginParams.mappingsRevision)
                         readonly property real minValue: param.min !== undefined ? param.min : 0
                         readonly property real maxValue: param.max !== undefined ? param.max : 1
-                        // Balance / pan style ranges label their ends L … R.
                         readonly property bool bipolar: minValue < 0 && maxValue > 0
                                                         && /(^|[^a-z])(bal|balance|pan|panning)([^a-z]|$)/i.test((param.name || "") + " " + (param.symbol || ""))
 
@@ -507,7 +481,6 @@ ZbWindow {
                             width: parent.width - 2 * Theme.cardPadding
                             spacing: 8
 
-                            // Line 1: name · mapping · value · MIDI · reset.
                             RowLayout {
                                 Layout.fillWidth: true
                                 spacing: 8
@@ -522,7 +495,6 @@ ZbWindow {
                                     color: Theme.textPrimary
                                 }
 
-                                // Current MIDI mapping, with a remove control.
                                 Rectangle {
                                     visible: paramDelegate.midiMapping !== "" && !paramDelegate.isLearning
                                     implicitHeight: 22
@@ -593,7 +565,6 @@ ZbWindow {
 
                                 ZbValueField {
                                     id: valueField
-                                    // Marks this as a value editor for the Escape shortcut.
                                     readonly property bool paramEditor: true
                                     readonly property real current: paramDelegate.param.value !== undefined
                                                                     ? paramDelegate.param.value : 0
@@ -623,7 +594,6 @@ ZbWindow {
                                     }
                                 }
 
-                                // MIDI learn pill (mono 10, 26 tall).
                                 ZbButton {
                                     compact: true
                                     text: "MIDI"
@@ -650,7 +620,6 @@ ZbWindow {
                                     }
                                 }
 
-                                // Reset to default.
                                 ZbButton {
                                     compact: true
                                     iconName: "reset"
@@ -664,7 +633,6 @@ ZbWindow {
                                 }
                             }
 
-                            // Line 2: switch for toggles, otherwise slider + range.
                             Loader {
                                 Layout.fillWidth: true
                                 sourceComponent: paramDelegate.param.isToggle ? toggleComponent : sliderComponent
@@ -697,7 +665,6 @@ ZbWindow {
                                         spacing: 4
                                         ZbSlider {
                                             Layout.fillWidth: true
-                                            // Groove spans the row, aligned with the range labels.
                                             leftPadding: 0
                                             rightPadding: 0
                                             from: paramDelegate.minValue

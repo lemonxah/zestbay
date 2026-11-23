@@ -1,12 +1,9 @@
-// Zestins Compressor: feed-forward, stereo linked (louder channel), soft
-// knee, attack/release smoothing in the dB domain, makeup gain.
-
 #include "dsp.h"
 
 typedef struct {
     void *port[COMP_N];
     double rate;
-    float reduction_db; // smoothed gain reduction, >= 0
+    float reduction_db;
 } Compressor;
 
 static LV2_Handle instantiate(const LV2_Descriptor *d, double rate, const char *path,
@@ -25,7 +22,6 @@ static void connect(LV2_Handle h, uint32_t port, void *data) {
 
 static void activate(LV2_Handle h) { ((Compressor *)h)->reduction_db = 0; }
 
-// Static curve: gain reduction (dB, >= 0) for an input level in dB.
 static float curve(float in_db, float threshold, float ratio, float knee) {
     float over = in_db - threshold;
     float slope = 1.0f - 1.0f / ratio;

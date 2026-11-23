@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick.Controls
 
-// Root for every top-level window: theme colours, palette and default font.
 ApplicationWindow {
     color: Theme.bgPanel
     font.family: Theme.fontSans

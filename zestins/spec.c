@@ -1,5 +1,3 @@
-// Port tables of every Zestins plugin (see spec.h).
-
 #include <stddef.h>
 #include <string.h>
 

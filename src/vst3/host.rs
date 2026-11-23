@@ -1,18 +1,3 @@
-//! VST3 plugin host — instantiation and real-time processing.
-//!
-//! Threading model: the PipeWire main-loop thread is the VST3 UI/main
-//! thread (component setup, IEditController, IPlugView, IRunLoop, state).
-//! `process()` runs on the PipeWire data thread and never allocates or locks.
-//!
-//! Parameters travel through the atomic slots in `port_updates`
-//! (normalized values):
-//! - host → processor: `process()` diffs slots against an RT-private copy
-//!   of the last applied values and sends `inputParameterChanges`;
-//! - processor → host: `outputParameterChanges` are written into the slots;
-//! - slots → edit controller: `sync_controller()` (main thread) pushes any
-//!   slot value the controller doesn't hold yet via `setParamNormalized`;
-//! - plugin GUI → processor: `performEdit` writes the slot (see com_host).
-
 use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -27,37 +12,23 @@ use super::com_host::{
 };
 use crate::clap::threading::{self, RtGate};
 
-// VST3 crate defines these as u32 but the API expects i32 — cast once here.
 const K_AUDIO: i32 = vst3::Steinberg::Vst::MediaTypes_::kAudio as i32;
 const K_EVENT: i32 = vst3::Steinberg::Vst::MediaTypes_::kEvent as i32;
 const K_INPUT: i32 = vst3::Steinberg::Vst::BusDirections_::kInput as i32;
 const K_OUTPUT: i32 = vst3::Steinberg::Vst::BusDirections_::kOutput as i32;
 
-/// Largest block `process()` is ever called with (K4).
 pub const MAX_BLOCK: usize = 8192;
 
 use crate::plugin::types::*;
 
-// ---------------------------------------------------------------------------
-// RT-safe IParameterChanges / IParamValueQueue inline COM objects
-//
-// These are pre-allocated per-instance and reused every process() call.
-// No heap allocation happens during process().
-// ---------------------------------------------------------------------------
-
-/// Default number of input parameter changes (tests; instances size the
-/// queue list to their parameter count).
 #[cfg(test)]
 const MAX_PARAM_CHANGES: usize = 128;
 
-/// A single parameter value queue (one param, one point).
 #[repr(C)]
 struct InlineParamValueQueue {
     vtbl: *const IParamValueQueueVtbl,
     param_id: ParamID,
     value: ParamValue,
-    /// Sample offset of the point (0 for host edits, the event's offset
-    /// for MIDI controllers).
     offset: i32,
     used: bool,
 }
@@ -94,7 +65,6 @@ unsafe extern "system" fn ipvq_query_interface(
 }
 
 unsafe extern "system" fn ipvq_add_ref(_this: *mut FUnknown) -> uint32 {
-    // Inline object — never deallocated via refcount.
     1
 }
 
@@ -143,11 +113,9 @@ unsafe extern "system" fn ipvq_add_point(
     _value: ParamValue,
     _index: *mut int32,
 ) -> tresult {
-    // Input queues are read-only for the plugin.
     kResultFalse
 }
 
-/// Pre-allocated IParameterChanges for input parameter changes.
 #[repr(C)]
 struct InlineParameterChanges {
     vtbl: *const IParameterChangesVtbl,
@@ -219,7 +187,6 @@ unsafe extern "system" fn ipc_add_parameter_data(
     _id: *const ParamID,
     _index: *mut int32,
 ) -> *mut IParamValueQueue {
-    // Input changes are read-only for the plugin.
     std::ptr::null_mut()
 }
 
@@ -247,7 +214,6 @@ impl InlineParameterChanges {
         }
     }
 
-    /// Reset all queues for a new process() call.
     fn reset(&mut self) {
         for q in self.queues.iter_mut().take(self.used_count as usize) {
             q.used = false;
@@ -255,14 +221,10 @@ impl InlineParameterChanges {
         self.used_count = 0;
     }
 
-    /// Add a parameter change at sample offset 0. Returns false if full.
     fn add_change(&mut self, param_id: ParamID, value: ParamValue) -> bool {
         self.add_change_at(param_id, value, 0).is_some()
     }
 
-    /// Add a parameter change at `offset`. Returns the queue index, or None
-    /// if full.  A parameter must only be added once per block; later
-    /// values go through [`Self::update_change`].
     fn add_change_at(&mut self, param_id: ParamID, value: ParamValue, offset: i32) -> Option<usize> {
         let idx = self.used_count as usize;
         let queue = self.queues.get_mut(idx)?;
@@ -274,7 +236,6 @@ impl InlineParameterChanges {
         Some(idx)
     }
 
-    /// Replace the point of a queue added earlier in this block.
     fn update_change(&mut self, idx: usize, value: ParamValue, offset: i32) {
         if let Some(queue) = self.queues.get_mut(idx) {
             queue.value = value;
@@ -283,19 +244,12 @@ impl InlineParameterChanges {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Output parameter changes (plugin writes, host reads after process())
-// ---------------------------------------------------------------------------
-
-/// Output queue: keeps only the last point (the host only needs the final
-/// value of each block).
 #[repr(C)]
 struct OutputParamQueue {
     vtbl: *const IParamValueQueueVtbl,
     param_id: ParamID,
     value: ParamValue,
     points: i32,
-    /// Position in `OutputParameterChanges::touched`, or -1.
     slot: i32,
 }
 
@@ -357,15 +311,11 @@ unsafe extern "system" fn opvq_add_point(
     }
 }
 
-/// Pre-allocated IParameterChanges for output parameter changes.  One queue
-/// per known parameter (same index) plus a trailing sink for unknown ids.
 #[repr(C)]
 struct OutputParameterChanges {
     vtbl: *const IParameterChangesVtbl,
     queues: Vec<OutputParamQueue>,
-    /// Indices of queues used in this block (capacity == queues.len()).
     touched: Vec<usize>,
-    /// (ParamID, index), sorted by id.
     id_index: Vec<(ParamID, usize)>,
 }
 
@@ -446,7 +396,6 @@ impl OutputParameterChanges {
         self.queues.len() - 1
     }
 
-    /// Queue index and its position in `touched` for `id` (no allocation).
     fn queue_for(&mut self, id: ParamID) -> Option<(usize, i32)> {
         let q = match self.id_index.binary_search_by_key(&id, |&(pid, _)| pid) {
             Ok(pos) => self.id_index[pos].1,
@@ -474,21 +423,13 @@ impl OutputParameterChanges {
     }
 }
 
-// ---------------------------------------------------------------------------
-// RT-safe IEventList inline COM object for MIDI events
-// ---------------------------------------------------------------------------
-
-/// Max number of MIDI events per process call.
 const MAX_MIDI_EVENTS: usize = 512;
 
-/// Pre-allocated IEventList that holds note on/off and other MIDI events.
 #[repr(C)]
 struct InlineEventList {
     vtbl: *const IEventListVtbl,
     events: Vec<Event>,
     used_count: i32,
-    /// For the output list: where `addEvent` sends MIDI during `process`
-    /// (null outside of it, or while bypassed).
     sink: *mut crate::midi::processing::MidiSink,
 }
 
@@ -570,8 +511,6 @@ fn unit_to_7bit(v: f32) -> u8 {
     (v.clamp(0.0, 1.0) * 127.0).round() as u8
 }
 
-/// Convert a plugin output event to MIDI bytes (None for events without a
-/// MIDI equivalent).  SysEx data events are handled by `push_midi_output`.
 fn event_to_midi(e: &Event) -> Option<([u8; 3], usize)> {
     use Event_::EventTypes_ as T;
     let ch = |c: i16| c.clamp(0, 15) as u8;
@@ -580,7 +519,6 @@ fn event_to_midi(e: &Event) -> Option<([u8; 3], usize)> {
         match e.r#type as u32 {
             t if t == T::kNoteOnEvent => {
                 let ev = e.__field0.noteOn;
-                // Velocity 0 would read as a note off
                 Some(([0x90 | ch(ev.channel), key(ev.pitch)?, unit_to_7bit(ev.velocity).max(1)], 3))
             }
             t if t == T::kNoteOffEvent => {
@@ -614,10 +552,6 @@ fn event_to_midi(e: &Event) -> Option<([u8; 3], usize)> {
     }
 }
 
-/// Forward one plugin output event to `sink` on its event bus.
-///
-/// # Safety
-/// A SysEx data event's `bytes` must be valid for `size` bytes.
 unsafe fn push_midi_output(sink: &mut crate::midi::processing::MidiSink, e: &Event) {
     let port = e.busIndex.max(0) as usize;
     let frame = e.sampleOffset.max(0) as u32;
@@ -649,7 +583,6 @@ impl InlineEventList {
         self.used_count = 0;
     }
 
-    /// Next free event slot, or None if full (never grows).
     fn next_slot(&mut self) -> Option<&mut Event> {
         let idx = self.used_count as usize;
         let evt = self.events.get_mut(idx)?;
@@ -657,7 +590,6 @@ impl InlineEventList {
         Some(evt)
     }
 
-    /// Add a note-on event. Returns false if full.
     fn add_note_on(&mut self, sample_offset: i32, channel: i16, pitch: i16, velocity: f32) -> bool {
         let Some(evt) = self.next_slot() else {
             return false;
@@ -678,7 +610,6 @@ impl InlineEventList {
         true
     }
 
-    /// Add a note-off event. Returns false if full.
     fn add_note_off(&mut self, sample_offset: i32, channel: i16, pitch: i16, velocity: f32) -> bool {
         let Some(evt) = self.next_slot() else {
             return false;
@@ -698,7 +629,6 @@ impl InlineEventList {
         true
     }
 
-    /// Add a polyphonic key pressure event. Returns false if full.
     fn add_poly_pressure(&mut self, sample_offset: i32, channel: i16, pitch: i16, pressure: f32) -> bool {
         let Some(evt) = self.next_slot() else {
             return false;
@@ -717,7 +647,6 @@ impl InlineEventList {
         true
     }
 
-    /// Populate from raw PipeWire MIDI events.
     fn fill_from_raw(&mut self, midi_events: &[crate::midi::processing::RawMidiEvent]) {
         self.reset();
         for evt in midi_events {
@@ -734,7 +663,6 @@ impl InlineEventList {
             match msg_type {
                 0x90 => {
                     if velocity_raw == 0 {
-                        // Note-on with velocity 0 = note-off
                         self.add_note_off(offset, channel, pitch, 0.0);
                     } else {
                         self.add_note_on(offset, channel, pitch, velocity_raw as f32 / 127.0);
@@ -746,11 +674,7 @@ impl InlineEventList {
                 0xA0 => {
                     self.add_poly_pressure(offset, channel, pitch, velocity_raw as f32 / 127.0);
                 }
-                _ => {
-                    // Controllers, pitch bend and channel pressure are not
-                    // VST3 events: they reach the plugin as parameter changes
-                    // through its IMidiMapping (see `MidiMap`).
-                }
+                _ => {}
             }
         }
     }
@@ -762,8 +686,6 @@ fn next_instance_id() -> PluginInstanceId {
     NEXT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Keeps the dlopen handle alive. Must NOT be closed while any plugin from
-/// this library exists.
 struct Vst3Library {
     _handle: *mut std::ffi::c_void,
 }
@@ -771,62 +693,44 @@ struct Vst3Library {
 impl Drop for Vst3Library {
     fn drop(&mut self) {
         unsafe {
-            // Call ModuleExit if available
             let sym = libc::dlsym(self._handle, c"ModuleExit".as_ptr());
             if !sym.is_null() {
                 let module_exit: unsafe extern "system" fn() -> bool = std::mem::transmute(sym);
                 module_exit();
             }
-            // Intentionally do NOT dlclose — same rationale as CLAP
         }
     }
 }
 
-/// Per-parameter info stored on the instance (values live in the slots).
 #[derive(Debug, Clone)]
 pub struct Vst3Param {
     pub id: u32,
     pub port_index: usize,
     pub name: String,
-    /// Default in normalized [0, 1] range.
     pub default: f64,
-    /// Is this the bypass parameter?
-    #[allow(dead_code)] // always false: bypass params are filtered out of the list
+    #[allow(dead_code)]
     pub is_bypass: bool,
     pub is_toggle: bool,
-    /// VST3 `stepCount` (0 = continuous).
     pub step_count: u32,
 }
 
-/// MIDI controllers per channel in `IMidiMapping`: CC 0-127, channel
-/// pressure (128) and pitch bend (129).
 const MIDI_CONTROLLERS: usize = ControllerNumbers_::kCountCtrlNumber as usize;
 const MIDI_CHANNELS: usize = 16;
 const MIDI_UNASSIGNED: u16 = u16::MAX;
 
-/// A parameter the plugin assigned to a MIDI controller.
 struct MidiTarget {
     id: ParamID,
-    /// Index into the host's parameter slots, when the parameter is one of
-    /// the listed ones; None for the plugin's hidden controller parameters.
     slot: Option<usize>,
-    /// The block in which `queue` was added (hidden parameters only).
     block: u64,
     queue: usize,
 }
 
-/// The plugin's controller → parameter assignments (`IMidiMapping`, event
-/// bus 0).  VST3 has no controller events: CC, pitch bend and channel
-/// pressure must be delivered as changes of the assigned parameter.
 struct MidiMap {
-    /// `channel * MIDI_CONTROLLERS + controller` → index into `targets`.
     table: Vec<u16>,
     targets: Vec<MidiTarget>,
 }
 
 impl MidiMap {
-    /// Ask the controller for every assignment.  Main thread.  Returns None
-    /// when the plugin has no `IMidiMapping` or assigns nothing.
     unsafe fn query(controller: &vst3::ComPtr<IEditController>, ids: &[ParamID]) -> Option<Self> {
         let mapping = controller.cast::<IMidiMapping>()?;
         let mut pairs = Vec::new();
@@ -844,7 +748,6 @@ impl MidiMap {
         Self::from_assignments(&pairs, ids)
     }
 
-    /// Build from `(channel, controller, parameter id)` assignments.
     fn from_assignments(pairs: &[(usize, usize, ParamID)], ids: &[ParamID]) -> Option<Self> {
         let mut table = vec![MIDI_UNASSIGNED; MIDI_CHANNELS * MIDI_CONTROLLERS];
         let mut targets: Vec<MidiTarget> = Vec::new();
@@ -870,8 +773,6 @@ impl MidiMap {
     }
 }
 
-/// Controller number and normalized value of a MIDI message that VST3
-/// delivers as a parameter change, or None for any other message.
 fn midi_controller_value(evt: &crate::midi::processing::RawMidiEvent) -> Option<(usize, f64)> {
     let size = evt.size as usize;
     if size < 2 {
@@ -889,11 +790,7 @@ fn midi_controller_value(evt: &crate::midi::processing::RawMidiEvent) -> Option<
     }
 }
 
-/// Preallocated state used by `process()` (or by the main thread while the
-/// RT gate is suspended).
 struct RtState {
-    /// Counts `process()` calls; starts at 1 so a fresh `MidiTarget`
-    /// (block 0) never looks current.
     block: u64,
     midi_map: Option<MidiMap>,
     last_applied: Vec<f64>,
@@ -917,8 +814,6 @@ impl RtState {
             block: 1,
             midi_map: None,
             last_applied: initial,
-            // One queue per listed parameter, plus room for every hidden
-            // parameter a plugin may assign to a MIDI controller.
             input_param_changes: InlineParameterChanges::with_capacity(
                 ids.len() + MIDI_CHANNELS * MIDI_CONTROLLERS,
             ),
@@ -932,8 +827,6 @@ impl RtState {
             silence: vec![0.0; MAX_BLOCK],
             scratch: vec![0.0; MAX_BLOCK],
         };
-        // The pointer arrays never reallocate, so the per-bus views into
-        // them stay valid for the life of the instance.
         let mut off = 0;
         for &ch in input_buses {
             rt.in_bufs.push(bus_buffers(unsafe { rt.in_ptrs.as_mut_ptr().add(off) }, ch));
@@ -947,12 +840,6 @@ impl RtState {
         rt
     }
 
-    /// Turn CC, pitch bend and channel pressure into changes of the
-    /// parameters the plugin assigned to them.  Must run after
-    /// `input_param_changes.reset()` and before the host-edit pass: a listed
-    /// parameter is written to its slot and picked up there, a hidden one
-    /// gets its own queue at the event's sample offset (last value wins).
-    /// Nothing is allocated.
     fn apply_midi_controllers(
         &mut self,
         slots: &[PortSlot],
@@ -995,15 +882,11 @@ fn bus_buffers(ptrs: *mut *mut f32, channels: usize) -> AudioBusBuffers {
     buf
 }
 
-/// A running VST3 plugin instance.
 pub struct Vst3PluginInstance {
     component: vst3::ComPtr<IComponent>,
     processor: vst3::ComPtr<IAudioProcessor>,
     controller: Option<vst3::ComPtr<IEditController>>,
-    /// Component and edit controller are the same object.
     single_component: bool,
-    /// (component side, controller side) of a separate controller's
-    /// IConnectionPoint link.
     connection: Option<(vst3::ComPtr<IConnectionPoint>, vst3::ComPtr<IConnectionPoint>)>,
 
     pub plugin_id: String,
@@ -1012,9 +895,7 @@ pub struct Vst3PluginInstance {
     pub audio_input_channels: usize,
     pub audio_output_channels: usize,
 
-    /// Whether this plugin accepts MIDI input (has event input bus)
     pub has_midi_in: bool,
-    /// Names of the plugin's event output buses (one MIDI output each).
     pub midi_output_names: Vec<String>,
 
     input_bus_channels: Vec<usize>,
@@ -1028,39 +909,24 @@ pub struct Vst3PluginInstance {
     shared: Arc<Vst3SharedParams>,
 
     bypassed: AtomicBool,
-    /// Fixed at instantiation; a graph rate change requires a reload (K3).
     pub sample_rate: f64,
     active: bool,
     processing: bool,
     needs_restart: bool,
-    /// A restart left the plugin inactive or with a different bus layout:
-    /// the RT gate stays suspended until the instance is dropped.
     parked: bool,
 
     gate: RtGate,
     rt: RtState,
 
-    /// Host application COM object — kept alive for the plugin's lifetime.
     host_app: *mut HostApplication,
-    /// Component handler COM object — kept alive for the plugin's lifetime.
     component_handler: *mut HostComponentHandler,
 
-    /// Dropped last: ModuleExit must run after all plugin objects are released.
     _library: Vst3Library,
 }
 
 unsafe impl Send for Vst3PluginInstance {}
 
 impl Vst3PluginInstance {
-    /// Load a VST3 plugin from a `.vst3` bundle and instantiate it.
-    ///
-    /// `plugin_id` is the hex-encoded TUID (from the scanner).  `state`
-    /// (from `get_state`) is restored before the buses are queried and the
-    /// processor is set up, so state-dependent layouts come up right.
-    ///
-    /// # Safety
-    /// Calls into C plugin code via dlopen / COM vtable pointers.  Must be
-    /// called on the PipeWire thread (the VST3 main thread).
     pub unsafe fn new(
         bundle_path: &str,
         plugin_id: &str,
@@ -1072,7 +938,6 @@ impl Vst3PluginInstance {
             threading::set_main_thread();
             let instance_id = next_instance_id();
 
-            // Find the .so inside the bundle
             let so_path = super::scanner::find_bundle_binary(std::path::Path::new(bundle_path))?;
             let so_str = so_path.to_str()?;
             let c_path = CString::new(so_str).ok()?;
@@ -1126,7 +991,6 @@ impl Vst3PluginInstance {
 
             let component = vst3::ComPtr::<IComponent>::from_raw(obj as *mut IComponent)?;
 
-            // Host application COM object (IHostApplication)
             let host_app = new_host_application(std::ptr::null_mut());
 
             if component.initialize(host_app as *mut FUnknown) != kResultOk {
@@ -1147,7 +1011,6 @@ impl Vst3PluginInstance {
                 }
             };
 
-            // IEditController: same object (single component) or separate.
             let mut controller_cid: TUID = std::mem::zeroed();
             let has_separate_controller =
                 component.getControllerClassId(&mut controller_cid) == kResultOk;
@@ -1183,8 +1046,6 @@ impl Vst3PluginInstance {
                     None
                 };
 
-            // Connect a separate component ↔ controller via IConnectionPoint
-            // (required by e.g. Vital to expose params / create views).
             let mut connection = None;
             if let (Some(ctrl), false) = (&controller, single_component)
                 && let (Some(comp_cp), Some(ctrl_cp)) =
@@ -1199,7 +1060,6 @@ impl Vst3PluginInstance {
                 connection = Some((comp_cp, ctrl_cp));
             }
 
-            // Saved state (component, then controller) while inactive.
             let restored = match state {
                 Some(blob) => {
                     let ok = restore_state(&component, controller.as_ref(), blob);
@@ -1211,7 +1071,6 @@ impl Vst3PluginInstance {
                 None => false,
             };
 
-            // Otherwise pass the component's default state to the controller.
             if let Some(ctrl) = controller.as_ref().filter(|_| !restored) {
                 let comp_stream = super::com_host::new_memory_stream();
                 if component.getState(comp_stream as *mut IBStream) == kResultOk
@@ -1228,7 +1087,6 @@ impl Vst3PluginInstance {
                 );
             }
 
-            // Audio buses (activate all)
             let input_bus_channels = bus_channels(&component, K_INPUT);
             let output_bus_channels = bus_channels(&component, K_OUTPUT);
             for (dir, n) in [(K_INPUT, input_bus_channels.len()), (K_OUTPUT, output_bus_channels.len())] {
@@ -1239,7 +1097,6 @@ impl Vst3PluginInstance {
             let audio_input_channels: usize = input_bus_channels.iter().sum();
             let audio_output_channels: usize = output_bus_channels.iter().sum();
 
-            // Event (MIDI) buses
             let n_event_in = component.getBusCount(K_EVENT, K_INPUT);
             let n_event_out = component.getBusCount(K_EVENT, K_OUTPUT);
             let has_midi_in = n_event_in > 0;
@@ -1269,7 +1126,6 @@ impl Vst3PluginInstance {
                 midi_output_names.len(),
             );
 
-            // Parameters
             let mut params = Vec::new();
             let mut initial_values = Vec::new();
             let mut bypass_param_id: Option<u32> = None;
@@ -1320,11 +1176,6 @@ impl Vst3PluginInstance {
             let ids: Vec<ParamID> = params.iter().map(|p| p.id).collect();
             let shared = Arc::new(Vst3SharedParams::new(port_updates.clone(), ids.clone()));
 
-            // The handler needs the parameter list, and some plugins (Vital)
-            // only expose their parameters once component and controller are
-            // connected, so it is installed after connection and state load.
-            // Values are read from the controller here, after state load, so
-            // edits made during it are not lost.
             let component_handler = new_host_component_handler(instance_id, shared.clone());
             if let Some(ctrl) = &controller {
                 let ch_ptr = component_handler as *mut IComponentHandler;
@@ -1347,7 +1198,6 @@ impl Vst3PluginInstance {
                 }
             }
 
-            // From here on Drop performs the full teardown.
             let mut inst = Self {
                 component,
                 processor,
@@ -1386,8 +1236,6 @@ impl Vst3PluginInstance {
         }
     }
 
-    /// setupProcessing (K4: max block 8192) + setActive + setProcessing.
-    /// Main thread; the audio thread must not be processing.
     unsafe fn activate(&mut self) -> bool {
         unsafe {
             let mut setup = ProcessSetup {
@@ -1406,9 +1254,6 @@ impl Vst3PluginInstance {
             }
             self.active = true;
             self.processing = self.processor.setProcessing(1) == kResultOk;
-            // Not fatal on purpose: plugins may answer kNotImplemented, and
-            // some that process fine report an error (sfizz and Geonkick
-            // both do), so refusing to run them would break working plugins.
             if !self.processing {
                 log::warn!(
                     "VST3: setProcessing returned error for {} (continuing anyway)",
@@ -1419,8 +1264,6 @@ impl Vst3PluginInstance {
         }
     }
 
-    /// setProcessing(false) + setActive(false).  Main thread; the audio
-    /// thread must not be processing.
     unsafe fn deactivate(&mut self) {
         unsafe {
             if self.processing {
@@ -1434,11 +1277,6 @@ impl Vst3PluginInstance {
         }
     }
 
-    /// Process a block of audio.
-    ///
-    /// # Safety
-    /// Called from the PipeWire RT thread. The `inputs` and `outputs` slices
-    /// must be valid for `sample_count` frames.  Never allocates or locks.
     pub unsafe fn process(
         &mut self,
         inputs: &[&[f32]],
@@ -1457,8 +1295,6 @@ impl Vst3PluginInstance {
             midi_out.thru(midi_events);
             return;
         }
-        // While bypassed the plugin still runs, but its MIDI output is
-        // replaced by the input (like its audio).
         let bypassed = self.bypassed.load(Ordering::Relaxed);
         let sink: *mut crate::midi::processing::MidiSink = if bypassed {
             std::ptr::null_mut()
@@ -1492,7 +1328,6 @@ impl Vst3PluginInstance {
         } = self;
         let slots = &shared.port_updates.control_inputs;
 
-        // Host-side parameter changes → inputParameterChanges
         rt.input_param_changes.reset();
         rt.apply_midi_controllers(slots, midi_events, n);
         for (i, (slot, last)) in slots.iter().zip(rt.last_applied.iter_mut()).enumerate() {
@@ -1560,8 +1395,6 @@ impl Vst3PluginInstance {
         }
         rt.output_event_list.sink = std::ptr::null_mut();
 
-        // Plugin-originated changes → slots (synced to the controller by
-        // `sync_controller` on the main thread).
         let out = &rt.output_param_changes;
         for &q in &out.touched {
             let queue = &out.queues[q];
@@ -1574,9 +1407,6 @@ impl Vst3PluginInstance {
         }
     }
 
-    /// Set a parameter (normalized).  Only stores into the atomic slot;
-    /// `process()` forwards it to the processor and `sync_controller()` to
-    /// the edit controller.
     pub fn set_parameter(&self, port_index: usize, value: f32) {
         if self.params.iter().any(|p| p.port_index == port_index)
             && let Some(slot) = self
@@ -1589,8 +1419,6 @@ impl Vst3PluginInstance {
         }
     }
 
-    /// Push slot values the edit controller doesn't hold yet via
-    /// `setParamNormalized`.  Main thread only.
     pub fn sync_controller(&self) {
         let Some(ctrl) = &self.controller else {
             return;
@@ -1607,9 +1435,6 @@ impl Vst3PluginInstance {
         }
     }
 
-    /// Main-thread housekeeping; call on every manager tick.
-    ///
-    /// Syncs the edit controller and acts on `restartComponent` flags.
     pub fn idle(&mut self) {
         use vst3::Steinberg::Vst::RestartFlags_::*;
 
@@ -1634,9 +1459,6 @@ impl Vst3PluginInstance {
         }
     }
 
-    /// Re-query the plugin's MIDI controller assignments and hand the new
-    /// table to the audio side.  If the audio thread cannot be excluded
-    /// right now the request stays pending for the next tick.
     fn reload_midi_map(&mut self) {
         use vst3::Steinberg::Vst::RestartFlags_::kMidiCCAssignmentChanged;
         if !self.has_midi_in || self.parked {
@@ -1654,10 +1476,8 @@ impl Vst3PluginInstance {
         }
         std::mem::swap(&mut self.rt.midi_map, &mut map);
         self.gate.resume();
-        // `map` (the old table) is freed here, after audio has resumed.
     }
 
-    /// Re-read all parameter values from the edit controller into the slots.
     fn refresh_param_values(&self) {
         let Some(ctrl) = &self.controller else {
             return;
@@ -1669,20 +1489,10 @@ impl Vst3PluginInstance {
         }
     }
 
-    /// True after the plugin asked for kIoChanged / kReloadComponent.
     pub fn needs_restart(&self) -> bool {
         self.needs_restart
     }
 
-    /// Deactivate and reactivate the plugin in place (main thread).
-    ///
-    /// Returns false if the plugin could not be brought back with the same
-    /// audio bus layout; the caller must then reload the instance (K3
-    /// path).  If the audio thread could not be excluded in time nothing is
-    /// changed, the request stays pending and true is returned.
-    /// On failure the instance is parked: the audio thread stays excluded
-    /// (process() passes audio through without touching the plugin) until
-    /// it is dropped.
     pub fn restart(&mut self) -> bool {
         if self.parked {
             return false;
@@ -1709,14 +1519,10 @@ impl Vst3PluginInstance {
         ok
     }
 
-    /// True once a failed restart excluded the audio thread for good; the
-    /// instance must be reloaded.
     pub fn is_parked(&self) -> bool {
         self.parked
     }
 
-    /// Return a raw pointer to the IEditController (for GUI access).
-    /// Returns null if no controller is available.
     pub fn controller_ptr(&self) -> *mut IEditController {
         match self.controller {
             Some(ref ec) => ec.as_ptr(),
@@ -1749,10 +1555,6 @@ impl Vst3PluginInstance {
             .collect()
     }
 
-    /// Get the full plugin state as a byte vector (main thread).
-    ///
-    /// Format: `[comp_len: u32 LE][IComponent::getState][IEditController::getState]`.
-    /// Returns `None` if neither part could be saved.
     pub fn get_state(&self) -> Option<Vec<u8>> {
         unsafe {
             let comp_data = read_state(|s| self.component.getState(s));
@@ -1770,14 +1572,6 @@ impl Vst3PluginInstance {
         }
     }
 
-    /// Restore the full plugin state from a byte vector (from `get_state`).
-    ///
-    /// Order follows the VST3 spec: `IComponent::setState`, then
-    /// `IEditController::setComponentState` with the same data, then
-    /// `IEditController::setState`.  Slots are refreshed from the controller.
-    ///
-    /// # Safety
-    /// Calls into plugin code via COM vtable pointers (main thread).
     #[allow(dead_code)]
     pub unsafe fn set_state(&mut self, blob: &[u8]) -> bool {
         let ok = unsafe { restore_state(&self.component, self.controller.as_ref(), blob) };
@@ -1786,8 +1580,6 @@ impl Vst3PluginInstance {
     }
 }
 
-/// `IComponent::setState`, `IEditController::setComponentState` with the
-/// same data, then `IEditController::setState` (main thread).
 unsafe fn restore_state(
     component: &vst3::ComPtr<IComponent>,
     controller: Option<&vst3::ComPtr<IEditController>>,
@@ -1824,7 +1616,6 @@ unsafe fn restore_state(
     }
 }
 
-/// Run a `getState`-style call against a fresh memory stream.
 unsafe fn read_state(f: impl FnOnce(*mut IBStream) -> tresult) -> Option<Vec<u8>> {
     unsafe {
         let stream = super::com_host::new_memory_stream();
@@ -1835,7 +1626,6 @@ unsafe fn read_state(f: impl FnOnce(*mut IBStream) -> tresult) -> Option<Vec<u8>
     }
 }
 
-/// Run a `setState`-style call against a fresh stream holding `data`.
 unsafe fn write_state(data: &[u8], f: impl FnOnce(*mut IBStream) -> tresult) -> tresult {
     unsafe {
         let stream = super::com_host::new_memory_stream_from_data(data.to_vec());
@@ -1860,7 +1650,6 @@ fn decode_state_blob(blob: &[u8]) -> Option<(&[u8], &[u8])> {
     Some((comp, &blob[4 + comp_len..]))
 }
 
-/// Channel count of every audio bus in one direction.
 unsafe fn bus_channels(component: &vst3::ComPtr<IComponent>, dir: i32) -> Vec<usize> {
     unsafe {
         let mut out = Vec::new();
@@ -1876,8 +1665,6 @@ unsafe fn bus_channels(component: &vst3::ComPtr<IComponent>, dir: i32) -> Vec<us
 
 impl Drop for Vst3PluginInstance {
     fn drop(&mut self) {
-        // The filter is destroyed before the instance, so the audio thread
-        // can no longer enter process(); the gate just makes sure of it.
         super::ui::force_close_for_controller(self.controller_ptr());
         self.gate.suspend(Duration::from_secs(2));
         unsafe {
@@ -1893,7 +1680,6 @@ impl Drop for Vst3PluginInstance {
                     controller.as_ptr(),
                     std::ptr::null_mut(),
                 );
-                // A single-component plugin is terminated once, below.
                 if !self.single_component {
                     controller.terminate();
                 }
@@ -1908,7 +1694,6 @@ impl Drop for Vst3PluginInstance {
     }
 }
 
-/// Read a null-terminated UTF-16 string from a String128 ([u16; 128]).
 fn read_string128(buf: &[u16]) -> String {
     let chars: Vec<u16> = buf.iter().take_while(|&&c| c != 0).copied().collect();
     String::from_utf16(&chars).unwrap_or_else(|_| "?".to_string())
@@ -1918,8 +1703,6 @@ fn read_string128(buf: &[u16]) -> String {
 mod tests {
     use super::*;
 
-    // ---- MIDI controllers ----
-
     fn midi(offset: u32, data: [u8; 3], size: u8) -> crate::midi::processing::RawMidiEvent {
         crate::midi::processing::RawMidiEvent { offset, data, size }
     }
@@ -1928,22 +1711,18 @@ mod tests {
     fn midi_controller_value_decodes_cc_pressure_and_bend() {
         assert_eq!(midi_controller_value(&midi(0, [0xB3, 64, 127], 3)), Some((64, 1.0)));
         assert_eq!(midi_controller_value(&midi(0, [0xB0, 1, 0], 3)), Some((1, 0.0)));
-        // Channel pressure is a two-byte message.
         assert_eq!(midi_controller_value(&midi(0, [0xD0, 127, 0], 2)), Some((128, 1.0)));
         assert_eq!(midi_controller_value(&midi(0, [0xE0, 0x7F, 0x7F], 3)), Some((129, 1.0)));
         assert_eq!(midi_controller_value(&midi(0, [0xE0, 0, 0], 3)), Some((129, 0.0)));
         let (ctrl, centre) = midi_controller_value(&midi(0, [0xE0, 0, 0x40], 3)).unwrap();
         assert_eq!(ctrl, 129);
         assert!((centre - 0.5).abs() < 1e-4);
-        // Notes and truncated messages are not controllers.
         assert_eq!(midi_controller_value(&midi(0, [0x90, 60, 100], 3)), None);
         assert_eq!(midi_controller_value(&midi(0, [0xB0, 1, 0], 2)), None);
     }
 
     #[test]
     fn midi_controllers_become_parameter_changes() {
-        // Listed parameters 10 and 11; the plugin also has a hidden
-        // parameter 900 for the sustain pedal and 901 for pitch bend.
         let ids: [ParamID; 2] = [10, 11];
         let slots: Vec<PortSlot> = (0..2)
             .map(|i| PortSlot { port_index: i, value: AtomicF32::new(0.0) })
@@ -1959,33 +1738,29 @@ mod tests {
         assert_eq!(map.targets[1].slot, None);
 
         let events = [
-            midi(3, [0xB0, 64, 127], 3),  // pedal down
-            midi(5, [0xB0, 7, 127], 3),   // listed parameter 11
-            midi(9, [0xB1, 64, 0], 3),    // pedal up on channel 2: same parameter
-            midi(900, [0xE0, 0x7F, 0x7F], 3), // offset beyond the block
-            midi(0, [0xB0, 2, 50], 3),    // unassigned controller
-            midi(0, [0x90, 60, 100], 3),  // a note
+            midi(3, [0xB0, 64, 127], 3),
+            midi(5, [0xB0, 7, 127], 3),
+            midi(9, [0xB1, 64, 0], 3),
+            midi(900, [0xE0, 0x7F, 0x7F], 3),
+            midi(0, [0xB0, 2, 50], 3),
+            midi(0, [0x90, 60, 100], 3),
         ];
         rt.input_param_changes.reset();
         rt.apply_midi_controllers(&slots, &events, 64);
 
-        // Listed parameter: written to its slot for the host-edit pass.
         assert_eq!(slots[1].value.load(), 1.0);
         assert_eq!(slots[0].value.load(), 0.0);
-        // Hidden parameters: one queue each, last value and offset win.
         let pc = &rt.input_param_changes;
         assert_eq!(pc.used_count, 2);
         assert_eq!((pc.queues[0].param_id, pc.queues[0].value, pc.queues[0].offset), (900, 0.0, 9));
         assert_eq!((pc.queues[1].param_id, pc.queues[1].value, pc.queues[1].offset), (901, 1.0, 63));
 
-        // The next block starts fresh queues.
         rt.input_param_changes.reset();
         rt.apply_midi_controllers(&slots, &[midi(1, [0xB0, 64, 127], 3)], 64);
         let pc = &rt.input_param_changes;
         assert_eq!(pc.used_count, 1);
         assert_eq!((pc.queues[0].param_id, pc.queues[0].value, pc.queues[0].offset), (900, 1.0, 1));
 
-        // The point is reported to the plugin at its sample offset.
         let queue = &mut rt.input_param_changes.queues[0] as *mut InlineParamValueQueue
             as *mut IParamValueQueue;
         let (mut offset, mut value) = (-1i32, -1.0f64);
@@ -2001,8 +1776,6 @@ mod tests {
         rt.apply_midi_controllers(&[], &[midi(0, [0xB0, 1, 1], 3)], 16);
         assert_eq!(rt.input_param_changes.used_count, 0);
     }
-
-    // ---- InlineParameterChanges ----
 
     #[test]
     fn param_changes_new_is_empty() {
@@ -2046,7 +1819,6 @@ mod tests {
             assert!(pc.add_change(i as u32, 0.0));
         }
         assert_eq!(pc.used_count, MAX_PARAM_CHANGES as i32);
-        // Should fail at capacity
         assert!(!pc.add_change(999, 0.0));
         assert_eq!(pc.used_count, MAX_PARAM_CHANGES as i32);
     }
@@ -2063,8 +1835,6 @@ mod tests {
         assert_eq!(pc.queues[0].param_id, 3);
         assert!((pc.queues[0].value - 0.3).abs() < 1e-9);
     }
-
-    // ---- InlineEventList ----
 
     #[test]
     fn event_list_new_is_empty() {
@@ -2122,18 +1892,15 @@ mod tests {
             assert!(el.add_note_on(i as i32, 0, 60, 0.5));
         }
         assert_eq!(el.used_count, MAX_MIDI_EVENTS as i32);
-        // Should fail at capacity
         assert!(!el.add_note_on(0, 0, 60, 0.5));
     }
-
-    // ---- InlineEventList: fill_from_raw ----
 
     #[test]
     fn event_list_fill_from_raw_note_on() {
         let mut el = InlineEventList::new();
         let events = [crate::midi::processing::RawMidiEvent {
             offset: 10,
-            data: [0x90, 60, 100], // Note on, channel 0, pitch 60, velocity 100
+            data: [0x90, 60, 100],
             size: 3,
         }];
         el.fill_from_raw(&events);
@@ -2154,7 +1921,7 @@ mod tests {
         let mut el = InlineEventList::new();
         let events = [crate::midi::processing::RawMidiEvent {
             offset: 0,
-            data: [0x90, 64, 0], // Note on with velocity 0 = note off
+            data: [0x90, 64, 0],
             size: 3,
         }];
         el.fill_from_raw(&events);
@@ -2173,7 +1940,7 @@ mod tests {
         let mut el = InlineEventList::new();
         let events = [crate::midi::processing::RawMidiEvent {
             offset: 20,
-            data: [0x80, 72, 64], // Note off, channel 0, pitch 72, velocity 64
+            data: [0x80, 72, 64],
             size: 3,
         }];
         el.fill_from_raw(&events);
@@ -2192,7 +1959,7 @@ mod tests {
         let mut el = InlineEventList::new();
         let events = [crate::midi::processing::RawMidiEvent {
             offset: 0,
-            data: [0x95, 60, 80], // Note on, channel 5
+            data: [0x95, 60, 80],
             size: 3,
         }];
         el.fill_from_raw(&events);
@@ -2206,11 +1973,11 @@ mod tests {
         let mut el = InlineEventList::new();
         let events = [crate::midi::processing::RawMidiEvent {
             offset: 0,
-            data: [0xB0, 1, 64], // CC, channel 0, CC#1, value 64
+            data: [0xB0, 1, 64],
             size: 3,
         }];
         el.fill_from_raw(&events);
-        assert_eq!(el.used_count, 0); // CC messages not converted to VST3 events
+        assert_eq!(el.used_count, 0);
     }
 
     #[test]
@@ -2219,7 +1986,7 @@ mod tests {
         let events = [crate::midi::processing::RawMidiEvent {
             offset: 0,
             data: [0x90, 60, 0],
-            size: 2, // Too short (needs 3)
+            size: 2,
         }];
         el.fill_from_raw(&events);
         assert_eq!(el.used_count, 0);
@@ -2231,38 +1998,34 @@ mod tests {
         let events = [
             crate::midi::processing::RawMidiEvent {
                 offset: 0,
-                data: [0x90, 60, 100], // Note on
+                data: [0x90, 60, 100],
                 size: 3,
             },
             crate::midi::processing::RawMidiEvent {
                 offset: 48,
-                data: [0xB0, 1, 64], // CC (ignored)
+                data: [0xB0, 1, 64],
                 size: 3,
             },
             crate::midi::processing::RawMidiEvent {
                 offset: 96,
-                data: [0x80, 60, 0], // Note off
+                data: [0x80, 60, 0],
                 size: 3,
             },
         ];
         el.fill_from_raw(&events);
-        assert_eq!(el.used_count, 2); // Only note on + note off
+        assert_eq!(el.used_count, 2);
     }
 
     #[test]
     fn event_list_fill_from_raw_resets_first() {
         let mut el = InlineEventList::new();
-        // Fill with something first
         el.add_note_on(0, 0, 60, 0.5);
         el.add_note_on(0, 0, 64, 0.5);
         assert_eq!(el.used_count, 2);
 
-        // fill_from_raw should reset before filling
         el.fill_from_raw(&[]);
         assert_eq!(el.used_count, 0);
     }
-
-    // ---- read_string128 ----
 
     #[test]
     fn read_string128_basic() {
@@ -2299,11 +2062,8 @@ mod tests {
         assert_eq!(read_string128(&buf), "Über");
     }
 
-    // ---- State blob format ----
-
     #[test]
     fn state_blob_format_roundtrip() {
-        // Simulate the format: [comp_len: u32 LE][comp_data][ctrl_data]
         let comp_data = vec![1, 2, 3, 4, 5];
         let ctrl_data = vec![10, 20, 30];
 
@@ -2313,7 +2073,6 @@ mod tests {
         blob.extend_from_slice(&comp_data);
         blob.extend_from_slice(&ctrl_data);
 
-        // Parse it back (same logic as set_state)
         assert!(blob.len() >= 4);
         let parsed_comp_len = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]) as usize;
         assert_eq!(parsed_comp_len, 5);
@@ -2344,14 +2103,12 @@ mod tests {
 
     #[test]
     fn state_blob_too_short_rejected() {
-        // Less than 4 bytes
         let blob = [1, 2, 3];
-        assert!(blob.len() < 4); // would fail set_state's first check
+        assert!(blob.len() < 4);
 
-        // 4 bytes but comp_len says more data than exists
         let mut blob = Vec::new();
-        blob.extend_from_slice(&100u32.to_le_bytes()); // says 100 bytes of comp data
-        assert!(blob.len() < 4 + 100); // would fail set_state's second check
+        blob.extend_from_slice(&100u32.to_le_bytes());
+        assert!(blob.len() < 4 + 100);
     }
 
     #[test]
@@ -2389,8 +2146,6 @@ mod tests {
         assert!(decode_state_blob(&huge).is_none());
     }
 
-    // ---- OutputParameterChanges ----
-
     #[test]
     fn output_changes_capture_last_point_per_param() {
         unsafe {
@@ -2407,19 +2162,17 @@ mod tests {
             assert_eq!(opvq_add_point(q, 16, 0.75, &mut pidx), kResultOk);
             assert_eq!(pidx, 1);
 
-            // Same id returns the same queue and index.
             let mut index2 = -1;
             assert_eq!(opc_add_parameter_data(pc, &10, &mut index2), q);
             assert_eq!(index2, 0);
 
-            // Unknown id goes to the sink, still a valid queue.
             let mut index3 = -1;
             let sink = opc_add_parameter_data(pc, &999, &mut index3);
             assert!(!sink.is_null());
             assert_eq!(opvq_get_parameter_id(sink), 999);
 
             assert_eq!(opc_get_parameter_count(pc), 2);
-            assert_eq!(out.touched[0], 1); // ParamID 10 is parameter index 1
+            assert_eq!(out.touched[0], 1);
             assert_eq!(out.queues[1].value, 0.75);
             assert_eq!(out.queues[1].points, 2);
             assert_eq!(out.touched.capacity(), cap);

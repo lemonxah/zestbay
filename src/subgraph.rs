@@ -1,14 +1,9 @@
-//! Subgraphs (issue #17) and virtual devices: the saved model, the PipeWire
-//! nodes each one needs, and the pure planning of how links are rerouted
-//! when plugins are grouped or ungrouped. See design/GROUPS.md.
-
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
 use crate::pipewire::{LoopbackSpec, OwnedNodeSpec, PassSpec};
 
-/// Most channels a subgraph edge or virtual device may have.
 pub const MAX_CHANNELS: u32 = 16;
 
 fn two() -> u32 {
@@ -19,9 +14,6 @@ fn default_subgraph_name() -> String {
     "Subgraph".into()
 }
 
-/// A saved subgraph: plugins grouped behind an input and an output edge.
-/// Every field has a default, so files from older versions load; missing
-/// ids are filled in by `upgrade_subgraphs`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SubgraphDef {
@@ -37,16 +29,12 @@ pub struct SubgraphDef {
     pub midi_in: bool,
     #[serde(default)]
     pub midi_out: bool,
-    /// Offer the input edge to apps as an output device (Audio/Sink).
     #[serde(default)]
     pub as_sink: bool,
-    /// Offer the output edge to apps as an input device (Audio/Source).
     #[serde(default)]
     pub as_source: bool,
-    /// Stable ids of the member plugins.
     #[serde(default)]
     pub members: Vec<String>,
-    /// Pan/zoom of the subgraph's own view (owned by the UI).
     #[serde(default)]
     pub view: serde_json::Value,
 }
@@ -54,16 +42,11 @@ pub struct SubgraphDef {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum VirtualDeviceKind {
-    /// Apps play into it; its stream feeds onward (like "Comms Sink").
     #[default]
     Sink,
-    /// Apps record from it; its stream is fed from the graph.
     Source,
 }
 
-/// A virtual device ZestBay creates (a loopback pair). Older versions saved
-/// only `name` and `channels`; the rest defaults (a sink) and
-/// `upgrade_vdevs` fills in the id.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct VirtualDevice {
@@ -76,9 +59,6 @@ pub struct VirtualDevice {
     pub channels: u32,
 }
 
-/// Bring loaded virtual devices up to date: give entries from older files
-/// an id, keep channels in range and names unique. Returns the ids of the
-/// entries that came from the old format (no id).
 pub fn upgrade_vdevs(list: &mut Vec<VirtualDevice>) -> Vec<String> {
     let mut legacy = Vec::new();
     let mut names: Vec<String> = Vec::new();
@@ -95,8 +75,6 @@ pub fn upgrade_vdevs(list: &mut Vec<VirtualDevice>) -> Vec<String> {
     legacy
 }
 
-/// Same for subgraphs: ids for entries without one, unique names, I/O in
-/// range. Returns whether anything changed.
 pub fn upgrade_subgraphs(list: &mut [SubgraphDef]) -> bool {
     let mut changed = false;
     let mut names: Vec<String> = Vec::new();
@@ -117,7 +95,6 @@ pub fn upgrade_subgraphs(list: &mut [SubgraphDef]) -> bool {
     changed
 }
 
-/// Channel positions for `n` channels: MONO, FL FR, otherwise AUX0…
 pub fn channel_names(n: u32) -> Vec<String> {
     match n.min(MAX_CHANNELS) {
         0 => Vec::new(),
@@ -127,7 +104,6 @@ pub fn channel_names(n: u32) -> Vec<String> {
     }
 }
 
-/// A short unique id ("sg-…", "vd-…").
 pub fn new_id(prefix: &str) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
@@ -137,8 +113,6 @@ pub fn new_id(prefix: &str) -> String {
     format!("{prefix}-{:x}", nanos)
 }
 
-/// Device priority for nodes ZestBay exposes: below hardware, so a new
-/// device never becomes the default on its own.
 const DEVICE_PRIORITY: &str = "100";
 
 impl SubgraphDef {
@@ -148,7 +122,6 @@ impl SubgraphDef {
     pub fn has_out(&self) -> bool {
         self.outputs > 0 || (self.midi_out && !self.as_source)
     }
-    /// MIDI only passes through plain (non-device) edges.
     pub fn midi_in_active(&self) -> bool {
         self.midi_in && !self.as_sink
     }
@@ -156,7 +129,6 @@ impl SubgraphDef {
         self.midi_out && !self.as_source
     }
 
-    // Node names (display names, which links and rules are keyed by).
     pub fn in_ext_node(&self) -> String {
         format!("{} In", self.name)
     }
@@ -170,7 +142,6 @@ impl SubgraphDef {
         if self.as_source { format!("{} Out (internal)", self.name) } else { self.out_ext_node() }
     }
 
-    // Port names per channel.
     pub fn in_ext_port(&self, ch: &str) -> String {
         if self.as_sink { format!("playback_{ch}") } else { format!("in_{ch}") }
     }
@@ -199,7 +170,6 @@ impl SubgraphDef {
         ]
     }
 
-    /// The owned nodes this subgraph needs, by key (`None` = not needed).
     pub fn node_specs(&self) -> Vec<(String, Option<OwnedNodeSpec>)> {
         let in_spec = if !self.has_in() {
             None
@@ -292,8 +262,6 @@ impl VirtualDevice {
                 ("priority.driver".into(), DEVICE_PRIORITY.into()),
             ]
         };
-        // The stream half is routed by ZestBay (rules, the default node or
-        // by hand), not by the session manager.
         let stream = |suffix: &str| -> Vec<(String, String)> {
             vec![
                 tag(),
@@ -315,17 +283,12 @@ impl VirtualDevice {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Rerouting plans
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanMedia {
     Audio,
     Midi,
 }
 
-/// One end of a link, by display name (as links and rules are keyed).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PlanEnd {
     pub node: String,
@@ -338,14 +301,12 @@ impl PlanEnd {
     }
 }
 
-/// A live link as the planner sees it.
 #[derive(Debug, Clone)]
 pub struct PlanLink {
     pub id: u32,
     pub out: PlanEnd,
     pub inp: PlanEnd,
     pub media: PlanMedia,
-    /// Whether each end belongs to the selection being grouped.
     pub out_member: bool,
     pub in_member: bool,
 }
@@ -364,9 +325,6 @@ pub struct InferredIo {
     pub midi_out: bool,
 }
 
-/// Inputs/outputs for a new subgraph from the links crossing the selection:
-/// one channel per distinct member port wired from (to) outside. Stereo
-/// when nothing crosses.
 pub fn infer_io(links: &[PlanLink]) -> InferredIo {
     let (ins, outs) = boundary_ports(links);
     let count = |m: &BTreeMap<PlanEnd, usize>| (m.len() as u32).clamp(1, MAX_CHANNELS);
@@ -382,8 +340,6 @@ pub fn infer_io(links: &[PlanLink]) -> InferredIo {
     }
 }
 
-/// Distinct member audio ports wired from outside (inputs) and to outside
-/// (outputs), each numbered in a stable order (node, then port name).
 fn boundary_ports(links: &[PlanLink]) -> (BTreeMap<PlanEnd, usize>, BTreeMap<PlanEnd, usize>) {
     let mut ins: BTreeMap<PlanEnd, usize> = BTreeMap::new();
     let mut outs: BTreeMap<PlanEnd, usize> = BTreeMap::new();
@@ -404,16 +360,11 @@ fn boundary_ports(links: &[PlanLink]) -> (BTreeMap<PlanEnd, usize>, BTreeMap<Pla
     (ins, outs)
 }
 
-/// What grouping does to the links: crossing links are replaced by links
-/// through the subgraph's edges. `port_map_in` / `port_map_out` map a member
-/// port to the edge port that now stands for it (for rewriting rules).
 #[derive(Debug, Clone, Default)]
 pub struct GroupPlan {
     pub connects: Vec<NamedLink>,
     pub disconnects: Vec<u32>,
-    /// Member input (node, port) → (In ext node, In ext port).
     pub port_map_in: HashMap<PlanEnd, PlanEnd>,
-    /// Member output (node, port) → (Out ext node, Out ext port).
     pub port_map_out: HashMap<PlanEnd, PlanEnd>,
 }
 
@@ -481,14 +432,9 @@ pub fn plan_group(def: &SubgraphDef, links: &[PlanLink]) -> GroupPlan {
     plan
 }
 
-/// What ungrouping does: every path outside → In → member (and member →
-/// Out → outside) becomes a direct link again. `links` are all live links
-/// touching the subgraph's edge nodes; the edges are removed afterwards.
 pub fn plan_ungroup(def: &SubgraphDef, links: &[NamedLink]) -> Vec<NamedLink> {
     let mut direct = Vec::new();
     for (ext, int, is_in) in edge_port_pairs(def) {
-        // In: outside → ext input, int output → member.
-        // Out: member → int input, ext output → outside.
         let (srcs, dsts): (Vec<&NamedLink>, Vec<&NamedLink>) = if is_in {
             (
                 links.iter().filter(|l| l.inp == ext).collect(),
@@ -512,8 +458,6 @@ pub fn plan_ungroup(def: &SubgraphDef, links: &[NamedLink]) -> Vec<NamedLink> {
     direct
 }
 
-/// The (external, internal, is the In edge) port pairs of a subgraph's
-/// edges: one per channel, plus MIDI.
 pub fn edge_port_pairs(def: &SubgraphDef) -> Vec<(PlanEnd, PlanEnd, bool)> {
     let mut pairs = Vec::new();
     if def.has_in() {
@@ -543,9 +487,6 @@ pub fn edge_port_pairs(def: &SubgraphDef) -> Vec<(PlanEnd, PlanEnd, bool)> {
     pairs
 }
 
-/// Every edge endpoint of `old` → the endpoint standing for it in `new`
-/// (same edge, side and channel index; MIDI to MIDI). Endpoints with no
-/// counterpart (fewer channels, MIDI or the edge switched off) are absent.
 pub fn edge_endpoint_map(old: &SubgraphDef, new: &SubgraphDef) -> Vec<(PlanEnd, PlanEnd)> {
     let mut out = Vec::new();
     let pair = |out: &mut Vec<(PlanEnd, PlanEnd)>, a: (String, String), b: (String, String)| {
@@ -579,14 +520,12 @@ pub fn edge_endpoint_map(old: &SubgraphDef, new: &SubgraphDef) -> Vec<(PlanEnd, 
     out
 }
 
-/// Names of all edge nodes of a subgraph (display names).
 pub fn edge_node_names(def: &SubgraphDef) -> Vec<String> {
     let mut v = vec![def.in_ext_node(), def.in_int_node(), def.out_ext_node(), def.out_int_node()];
     v.dedup();
     v
 }
 
-/// A name not in `taken`: `base`, then "base 2", "base 3"…
 pub fn unique_name(base: &str, taken: &[String]) -> String {
     if !taken.iter().any(|t| t == base) {
         return base.to_string();
@@ -627,7 +566,6 @@ mod tests {
         }
     }
 
-    /// Mic → Gate → Comp → Headset, Gate and Comp selected.
     fn chain() -> Vec<PlanLink> {
         vec![
             link(1, "Mic", "capture_MONO", "Gate", "input_0", false, true),
@@ -649,10 +587,8 @@ mod tests {
     fn infer_counts_distinct_member_ports() {
         let io = infer_io(&chain());
         assert_eq!(io, InferredIo { inputs: 1, outputs: 1, midi_in: false, midi_out: false });
-        // Nothing crossing: stereo default.
         let io = infer_io(&[]);
         assert_eq!((io.inputs, io.outputs), (2, 2));
-        // MIDI only in: no audio inputs.
         let io = infer_io(&[link(1, "Piano", "midi_out", "Synth", "midi_in", false, true)]);
         assert_eq!((io.inputs, io.midi_in), (0, true));
     }
@@ -668,7 +604,6 @@ mod tests {
         assert!(plan.connects.contains(&c("Comp", "output_0", "Mic Chain Out", "in_MONO")));
         assert!(plan.connects.contains(&c("Mic Chain Out", "out_MONO", "Headset", "playback_FL")));
         assert!(plan.connects.contains(&c("Mic Chain Out", "out_MONO", "Headset", "playback_FR")));
-        // Comp → Out appears once even though two links left Comp's port.
         assert_eq!(plan.connects.iter().filter(|l| l.inp.node == "Mic Chain Out").count(), 1);
         assert_eq!(plan.port_map_in[&PlanEnd::new("Gate", "input_0")], PlanEnd::new("Mic Chain In", "in_MONO"));
     }
@@ -710,7 +645,6 @@ mod tests {
         let plan = plan_group(&d, &links);
         assert!(plan.connects.contains(&NamedLink { out: PlanEnd::new("Keys", "midi_out"), inp: PlanEnd::new("Mic Chain In", "midi_in") }));
         assert!(plan.connects.contains(&NamedLink { out: PlanEnd::new("Mic Chain In", "midi_out"), inp: PlanEnd::new("Piano", "midi_in") }));
-        // A device edge drops MIDI.
         d.as_sink = true;
         assert!(!d.midi_in_active());
     }
@@ -725,7 +659,6 @@ mod tests {
         let Some(OwnedNodeSpec::Loopback(lb)) = &specs[1].1 else { panic!("loopback expected") };
         assert!(lb.playback_props.contains(&("media.class".into(), "Audio/Source".into())));
         assert!(lb.capture_props.contains(&("node.autoconnect".into(), "false".into())));
-        // No inputs and no MIDI: no In edge.
         let d = def(0, 2);
         assert!(d.node_specs()[0].1.is_none());
     }
@@ -751,7 +684,6 @@ mod tests {
         assert!(has(("Mic Chain In", "in_FL"), ("Vocal Chain In", "in_FL")));
         assert!(has(("Mic Chain Out", "in_FR"), ("Vocal Chain Out (internal)", "input_FR")));
         assert!(has(("Mic Chain Out", "out_FR"), ("Vocal Chain Out", "capture_FR")));
-        // Fewer channels: the dropped channel has no counterpart.
         let mut mono = old.clone();
         mono.inputs = 1;
         let map = edge_endpoint_map(&old, &mono);
@@ -768,7 +700,6 @@ mod tests {
 
     #[test]
     fn old_virtual_devices_file_upgrades() {
-        // As written by older ZestBay versions: no id, no kind.
         let json = r#"[{"name":"Headphones","channels":2},{"name":"Media","channels":2},{"name":"Media"},{"name":"  "}]"#;
         let mut list: Vec<VirtualDevice> = serde_json::from_str(json).unwrap();
         let legacy = upgrade_vdevs(&mut list);
@@ -778,7 +709,6 @@ mod tests {
         assert_eq!(list[2].name, "Media 2");
         let ids: std::collections::HashSet<_> = list.iter().map(|v| v.id.clone()).collect();
         assert_eq!(ids.len(), 3);
-        // Already current: nothing to upgrade.
         assert!(upgrade_vdevs(&mut list).is_empty());
     }
 

@@ -1,12 +1,3 @@
-// Zestins UI: one X11 UI for every Zestins plugin, laid out from the port
-// specs in spec.c.  Controls become knobs, toggles, segmented choices or
-// steppers; control outputs become level meters or activity lights.
-//
-// Embedded in the host's window (ui:parent) and driven by ui:idleInterface;
-// draws with plain Xlib into a back buffer.
-//
-// Knobs: drag up/down (Shift for fine), mouse wheel, double-click to reset.
-
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -26,7 +17,7 @@
 #define GAP 10
 #define CELL_W 78
 #define CELL_H 92
-#define CHOICE_H 58 // label + button row
+#define CHOICE_H 58
 #define KNOB_D 44
 #define METER_H 20
 #define LED_H 22
@@ -69,15 +60,13 @@ typedef struct {
 
     Widget widget[MAX_WIDGETS];
     int n_widgets;
-    int drag;        // widget being dragged, -1 for none
+    int drag;
     int drag_y;
     float drag_norm;
-    int last_click;  // widget of the previous click, for double-click
+    int last_click;
     Time last_click_time;
     bool dirty;
 } UI;
-
-// ---- Values ---------------------------------------------------------------
 
 static bool is_log(const ZPort *p) { return (p->flags & ZF_LOG) && p->min > 0; }
 
@@ -145,8 +134,6 @@ static void set_value(UI *ui, Widget *w, float v) {
     ui->dirty = true;
 }
 
-// ---- Layout ---------------------------------------------------------------
-
 static int text_width(XFontStruct *f, const char *s) {
     return f ? XTextWidth(f, s, (int)strlen(s)) : (int)strlen(s) * 7;
 }
@@ -166,7 +153,6 @@ static void layout(UI *ui) {
     int x = PAD, y = HEADER + PAD, row_h = 0, max_x = 0;
     ui->n_widgets = 0;
 
-    // Controls, flowing left to right; ZF_ROW starts a new row.
     for (int i = 0; i < pl->n_ports && ui->n_widgets < MAX_WIDGETS; i++) {
         const ZPort *p = &pl->ports[i];
         if (p->kind != ZP_CONTROL_IN)
@@ -212,7 +198,6 @@ static void layout(UI *ui) {
     if (width < 360)
         width = 360;
 
-    // Meters: one full-width bar per output.
     bool any_output = false;
     for (int i = 0; i < pl->n_ports && ui->n_widgets < MAX_WIDGETS; i++) {
         const ZPort *p = &pl->ports[i];
@@ -226,7 +211,6 @@ static void layout(UI *ui) {
         y += METER_H + 6;
     }
 
-    // Lights, in one row.
     x = PAD;
     bool any_led = false;
     for (int i = 0; i < pl->n_ports && ui->n_widgets < MAX_WIDGETS; i++) {
@@ -247,8 +231,6 @@ static void layout(UI *ui) {
     ui->width = width;
     ui->height = y + PAD - (any_output || any_led ? 6 : GAP);
 }
-
-// ---- Drawing --------------------------------------------------------------
 
 static void color(UI *ui, int c) { XSetForeground(ui->dpy, ui->gc, ui->color[c]); }
 
@@ -274,7 +256,6 @@ static void text(UI *ui, XFontStruct *f, int x, int y, const char *s, int c) {
     XDrawString(ui->dpy, ui->back, ui->gc, x, y, s, (int)strlen(s));
 }
 
-// Text centred horizontally on cx, with its baseline at y.
 static void text_c(UI *ui, int cx, int y, const char *s, int c) {
     text(ui, ui->font, cx - text_width(ui->font, s) / 2, y, s, c);
 }
@@ -288,11 +269,9 @@ static void draw_knob(UI *ui, const Widget *w) {
 
     int kx = cx - KNOB_D / 2, ky = w->y + 20;
     float n = to_norm(p, w->value);
-    // 270 degrees from bottom-left (225) clockwise to bottom-right (-45).
     XSetLineAttributes(ui->dpy, ui->gc, 4, LineSolid, CapRound, JoinRound);
     color(ui, C_TRACK);
     XDrawArc(ui->dpy, ui->back, ui->gc, kx, ky, KNOB_D, KNOB_D, 225 * 64, -270 * 64);
-    // Bipolar controls fill from their zero point.
     float zero = (p->min < 0 && p->max > 0) ? to_norm(p, 0) : 0;
     int a0 = (int)((225 - 270 * zero) * 64);
     int sweep = (int)(-270 * (n - zero) * 64);
@@ -300,7 +279,6 @@ static void draw_knob(UI *ui, const Widget *w) {
         color(ui, C_ACCENT);
         XDrawArc(ui->dpy, ui->back, ui->gc, kx, ky, KNOB_D, KNOB_D, a0, sweep);
     }
-    // Cap and pointer.
     color(ui, C_KNOB);
     XFillArc(ui->dpy, ui->back, ui->gc, kx + 7, ky + 7, KNOB_D - 14, KNOB_D - 14, 0, 360 * 64);
     double ang = (225.0 - 270.0 * n) * M_PI / 180.0;
@@ -376,7 +354,6 @@ static void draw_meter(UI *ui, const Widget *w) {
         if (reduction) {
             fill_round(ui, bx, by, fill, bh, 4, C_AMBER);
         } else {
-            // Above 0 dBFS turns red.
             int zero = p->max > 0 ? (int)(to_norm(p, 0) * (float)bw) : bw;
             fill_round(ui, bx, by, fill < zero ? fill : zero, bh, 4, C_ACCENT);
             if (fill > zero)
@@ -414,7 +391,6 @@ static void draw(UI *ui) {
     color(ui, C_BORDER);
     XDrawLine(ui->dpy, ui->back, ui->gc, 0, HEADER, ui->width, HEADER);
 
-    // "Zestins MIDI Switch" -> brand mark + "MIDI Switch".
     const char *name = ui->plugin->name;
     if (!strncmp(name, "Zestins ", 8))
         name += 8;
@@ -441,8 +417,6 @@ static void draw(UI *ui) {
     XFlush(ui->dpy);
     ui->dirty = false;
 }
-
-// ---- Input ----------------------------------------------------------------
 
 static int widget_at(UI *ui, int x, int y) {
     for (int i = 0; i < ui->n_widgets; i++) {
@@ -510,8 +484,6 @@ static void motion(UI *ui, const XMotionEvent *e) {
     float range = (e->state & ShiftMask) ? 1000.0f : 200.0f;
     set_value(ui, w, from_norm(w->spec, ui->drag_norm + (float)(ui->drag_y - e->y) / range));
 }
-
-// ---- LV2 UI ---------------------------------------------------------------
 
 static unsigned long alloc_color(Display *dpy, const char *hex, unsigned long fallback) {
     XColor c;

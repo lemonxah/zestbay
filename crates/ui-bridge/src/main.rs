@@ -1,17 +1,3 @@
-//! ZestBay UI Bridge — standalone process for hosting LV2 plugin UIs.
-//!
-//! This binary runs in a separate process from the main ZestBay application.
-//! It creates native X11 windows and loads LV2 UI plugins directly (no suil,
-//! no GTK), matching the approach used by Carla. This avoids GLX/EGL conflicts
-//! that occur when Qt6/Wayland and X11/GLX coexist in the same process.
-//!
-//! KXStudio external UIs are hosted here too: they open a window of their
-//! own, so the bridge only shows them and drives them with `run()`.
-//!
-//! Communication with the host is via stdin/stdout newline-delimited JSON.
-//! When stdin reaches EOF (host exited or crashed) all windows are closed
-//! and the bridge exits.
-
 mod protocol;
 
 use protocol::{BridgeMessage, HostMessage};
@@ -22,10 +8,6 @@ use std::os::raw::{c_char, c_int, c_long, c_uint, c_ulong};
 use std::ptr;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-
-// ---------------------------------------------------------------------------
-// X11 FFI
-// ---------------------------------------------------------------------------
 
 #[link(name = "X11")]
 unsafe extern "C" {
@@ -94,7 +76,6 @@ struct XSetWindowAttributes {
     override_redirect: c_int, colormap: c_ulong, cursor: c_ulong,
 }
 
-/// XEvent is a 24-long union; only `type_` and casts to specific events are used.
 #[repr(C)]
 struct XEvent { pad: [c_long; 24] }
 
@@ -129,10 +110,6 @@ struct XWindowAttributes {
     map_state: c_int, all_event_masks: c_ulong, your_event_mask: c_ulong,
     do_not_propagate_mask: c_ulong, override_redirect: c_int, screen: *mut c_void,
 }
-
-// ---------------------------------------------------------------------------
-// LV2 UI types
-// ---------------------------------------------------------------------------
 
 const LV2_UI_PARENT_URI: &CStr = c"http://lv2plug.in/ns/extensions/ui#parent";
 const LV2_UI_RESIZE_URI: &CStr = c"http://lv2plug.in/ns/extensions/ui#resize";
@@ -190,7 +167,6 @@ struct LV2Option {
     context: u32, subject: u32, key: u32, size: u32, type_: u32, value: *const c_void,
 }
 
-/// `LV2_External_UI_Widget`: what an external UI hands back as its widget.
 #[repr(C)]
 struct ExternalUiWidget {
     run: Option<unsafe extern "C" fn(*mut ExternalUiWidget)>,
@@ -198,19 +174,12 @@ struct ExternalUiWidget {
     hide: Option<unsafe extern "C" fn(*mut ExternalUiWidget)>,
 }
 
-/// `LV2_External_UI_Host`.
 #[repr(C)]
 struct ExternalUiHost {
     ui_closed: Option<unsafe extern "C" fn(controller: *mut c_void)>,
     plugin_human_id: *const c_char,
 }
 
-// ---------------------------------------------------------------------------
-// URID mapping
-// ---------------------------------------------------------------------------
-
-/// URIDs minted by the bridge itself start here so they never collide with
-/// the host's (which are small and dense).
 const LOCAL_URID_BASE: u32 = 1 << 30;
 
 struct UridMapper {
@@ -223,7 +192,6 @@ impl UridMapper {
         Self { map: HashMap::new(), next_id: LOCAL_URID_BASE }
     }
 
-    /// Merge the host's mappings (authoritative).
     fn merge(&mut self, entries: Vec<(String, u32)>) {
         for (uri, id) in entries {
             self.map.insert(uri, id);
@@ -241,7 +209,6 @@ impl UridMapper {
     }
 }
 
-/// One process-wide mapper shared by all UIs.
 static URID_MAPPER: Mutex<Option<UridMapper>> = Mutex::new(None);
 
 fn map_uri(uri: &str) -> u32 {
@@ -256,10 +223,6 @@ unsafe extern "C" fn urid_map_callback(_handle: *mut c_void, uri: *const c_char)
     let uri_str = unsafe { CStr::from_ptr(uri) }.to_str().unwrap_or("");
     map_uri(uri_str)
 }
-
-// ---------------------------------------------------------------------------
-// Host communication
-// ---------------------------------------------------------------------------
 
 fn send_message(msg: &BridgeMessage) {
     if let Ok(mut line) = serde_json::to_vec(msg) {
@@ -284,7 +247,6 @@ fn base64_encode(data: &[u8]) -> String {
     out
 }
 
-/// Remove and return the next complete line (without '\n') from `buf`.
 fn take_line(buf: &mut Vec<u8>) -> Option<Vec<u8>> {
     let pos = buf.iter().position(|&b| b == b'\n')?;
     let mut line: Vec<u8> = buf.drain(..=pos).collect();
@@ -292,20 +254,11 @@ fn take_line(buf: &mut Vec<u8>) -> Option<Vec<u8>> {
     Some(line)
 }
 
-// ---------------------------------------------------------------------------
-// Plugin UI windows
-// ---------------------------------------------------------------------------
-
-/// The `LV2UI_Controller` handed to each UI: identifies which instance a
-/// port write belongs to.
 struct UiController {
     instance_id: u64,
-    /// An external UI reported its own window closed.
     ui_closed: AtomicBool,
 }
 
-/// Everything one UI references.  Always boxed and never moved while the
-/// UI lives: the UI holds pointers to the controller and feature data.
 struct PluginUiWindow {
     display: *mut c_void,
     host_window: c_ulong,
@@ -321,7 +274,6 @@ struct PluginUiWindow {
     resize: LV2UIResize,
     sample_rate: f32,
     options: [LV2Option; 2],
-    /// Set for an external UI (which has no host window or display).
     external: *mut ExternalUiWidget,
     external_host: ExternalUiHost,
     human_id: CString,
@@ -329,8 +281,6 @@ struct PluginUiWindow {
     feature_ptrs: Vec<*const LV2Feature>,
 }
 
-/// `ui_closed` of the external-UI host: noted here, acted on by the main
-/// loop (this usually runs inside the UI's `run()`).
 unsafe extern "C" fn external_ui_closed(controller: *mut c_void) {
     if controller.is_null() {
         return;
@@ -339,8 +289,6 @@ unsafe extern "C" fn external_ui_closed(controller: *mut c_void) {
     ctrl.ui_closed.store(true, Ordering::Release);
 }
 
-/// Load the UI library at `binary` and find the descriptor for `ui_uri`.
-/// The library stays loaded on success.
 unsafe fn load_ui_descriptor(
     binary: &CStr,
     ui_uri: &CStr,
@@ -428,7 +376,6 @@ fn open_ui(msg: HostMessage, windows: &mut HashMap<u64, Box<PluginUiWindow>>) ->
         unreachable!()
     };
 
-    // A re-open replaces the old window.
     if let Some(mut old) = windows.remove(&instance_id) {
         close_window(&mut old);
     }
@@ -461,7 +408,6 @@ fn open_ui(msg: HostMessage, windows: &mut HashMap<u64, Box<PluginUiWindow>>) ->
     }
 
     unsafe {
-        // Open our own X11 display (clean, no GTK/Qt/Wayland interference)
         let display = XOpenDisplay(ptr::null());
         if display.is_null() {
             return failed("XOpenDisplay failed".into());
@@ -488,7 +434,6 @@ fn open_ui(msg: HostMessage, windows: &mut HashMap<u64, Box<PluginUiWindow>>) ->
             return failed("XCreateWindow failed".into());
         }
 
-        // Window properties
         let c_title = CString::new(title).unwrap_or_else(|_| c"ZestBay Plugin".to_owned());
         XStoreName(display, host_window, c_title.as_ptr());
 
@@ -513,8 +458,6 @@ fn open_ui(msg: HostMessage, windows: &mut HashMap<u64, Box<PluginUiWindow>>) ->
             XCloseDisplay(display);
         };
 
-        // All UI-visible state lives in this box; pointers into it stay
-        // valid because the box itself is stored in `windows`.
         let sr_urid = map_uri("http://lv2plug.in/ns/ext/parameters#sampleRate");
         let float_urid = map_uri("http://lv2plug.in/ns/ext/atom#Float");
         let mut win = Box::new(PluginUiWindow {
@@ -558,7 +501,6 @@ fn open_ui(msg: HostMessage, windows: &mut HashMap<u64, Box<PluginUiWindow>>) ->
             .chain(std::iter::once(ptr::null()))
             .collect();
 
-        // Load UI binary
         let (lib, ui_descriptor) = match load_ui_descriptor(&c_binary, &c_ui_uri) {
             Ok(found) => found,
             Err(error) => {
@@ -567,7 +509,6 @@ fn open_ui(msg: HostMessage, windows: &mut HashMap<u64, Box<PluginUiWindow>>) ->
             }
         };
 
-        // Instantiate
         let mut widget: *mut c_void = ptr::null_mut();
         let controller_ptr = &mut win.controller as *mut UiController as *mut c_void;
         let ui_handle = if let Some(instantiate_fn) = (*ui_descriptor).instantiate {
@@ -590,7 +531,6 @@ fn open_ui(msg: HostMessage, windows: &mut HashMap<u64, Box<PluginUiWindow>>) ->
             return failed("UI instantiate returned null".into());
         }
 
-        // Check for idle interface
         let idle_iface = if let Some(ext_data) = (*ui_descriptor).extension_data {
             let ext = ext_data(LV2_UI_IDLE_INTERFACE.as_ptr());
             if ext.is_null() { None } else { Some(ext as *const LV2UiIdleInterface) }
@@ -598,7 +538,6 @@ fn open_ui(msg: HostMessage, windows: &mut HashMap<u64, Box<PluginUiWindow>>) ->
             None
         };
 
-        // Send initial port values
         if let Some(port_event_fn) = (*ui_descriptor).port_event {
             for &(port_index, value) in &control_values {
                 let val = value;
@@ -610,7 +549,6 @@ fn open_ui(msg: HostMessage, windows: &mut HashMap<u64, Box<PluginUiWindow>>) ->
             }
         }
 
-        // Show window — auto-detect child size
         let child = find_child_window(display, host_window);
         if child != 0 {
             let mut wa: XWindowAttributes = std::mem::zeroed();
@@ -634,7 +572,6 @@ fn open_ui(msg: HostMessage, windows: &mut HashMap<u64, Box<PluginUiWindow>>) ->
     }
 }
 
-/// The C strings a UI is opened with.
 struct UiNames {
     plugin_uri: CString,
     bundle: CString,
@@ -642,8 +579,6 @@ struct UiNames {
     ui_uri: CString,
 }
 
-/// Open a KXStudio external UI.  It has no host window: the UI shows its
-/// own, and reports that window being closed through `external_ui_closed`.
 fn open_external_ui(
     instance_id: u64,
     names: UiNames,
@@ -728,7 +663,6 @@ fn open_external_ui(
             if let Some(cleanup) = (*descriptor).cleanup {
                 cleanup(ui_handle);
             }
-            // Don't dlclose — the UI may have left statics or threads behind
             return failed("External UI gave no widget".into());
         }
 
@@ -778,7 +712,6 @@ fn find_child_window(display: *mut c_void, parent: c_ulong) -> c_ulong {
 
 fn idle_window(win: &mut PluginUiWindow) {
     unsafe {
-        // An external UI has no display of ours to pump.
         while !win.display.is_null() && XPending(win.display) > 0 {
             let mut event: XEvent = std::mem::zeroed();
             XNextEvent(win.display, &mut event);
@@ -815,7 +748,6 @@ fn idle_window(win: &mut PluginUiWindow) {
             }
         }
 
-        // Call idle interface
         if let Some(iface) = win.idle_iface
             && let Some(idle_fn) = (*iface).idle
             && idle_fn(win.ui_handle) != 0
@@ -823,7 +755,6 @@ fn idle_window(win: &mut PluginUiWindow) {
             win.closed = true;
         }
 
-        // An external UI does its own event handling and drawing in run().
         if !win.external.is_null()
             && !win.closed
             && !win.controller.ui_closed.load(Ordering::Acquire)
@@ -839,7 +770,6 @@ fn idle_window(win: &mut PluginUiWindow) {
 
 fn close_window(win: &mut PluginUiWindow) {
     unsafe {
-        // An external UI that closed its own window is not asked to hide it.
         if !win.external.is_null()
             && !win.ui_handle.is_null()
             && !win.controller.ui_closed.load(Ordering::Acquire)
@@ -858,7 +788,6 @@ fn close_window(win: &mut PluginUiWindow) {
         if !win.display.is_null() {
             XDestroyWindow(win.display, win.host_window);
             win.host_window = 0;
-            // Don't dlclose — plugin may have statics
             XCloseDisplay(win.display);
             win.display = ptr::null_mut();
         }
@@ -877,10 +806,6 @@ fn port_event(win: &PluginUiWindow, port_index: usize, value: f32) {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Main loop
-// ---------------------------------------------------------------------------
 
 enum Flow {
     Continue,
@@ -909,8 +834,6 @@ fn handle_message(msg: HostMessage, windows: &mut HashMap<u64, Box<PluginUiWindo
     Flow::Continue
 }
 
-/// Read whatever is available on (non-blocking) stdin into `buf`.
-/// Returns false on EOF or a fatal read error.
 fn read_stdin(buf: &mut Vec<u8>) -> bool {
     let mut chunk = [0u8; 4096];
     loop {
@@ -937,7 +860,6 @@ fn read_stdin(buf: &mut Vec<u8>) -> bool {
 fn main() {
     let mut windows: HashMap<u64, Box<PluginUiWindow>> = HashMap::new();
 
-    // Set stdin to non-blocking so we can interleave with X11 events
     unsafe {
         let fd = libc::STDIN_FILENO;
         let flags = libc::fcntl(fd, libc::F_GETFL);
@@ -970,7 +892,6 @@ fn main() {
             break;
         }
 
-        // Idle all windows
         let mut closed_ids = Vec::new();
         for (id, win) in windows.iter_mut() {
             idle_window(win);
@@ -986,11 +907,9 @@ fn main() {
             }
         }
 
-        // Sleep briefly to avoid busy-waiting (~60 fps UI refresh)
         std::thread::sleep(std::time::Duration::from_millis(16));
     }
 
-    // Host quit or went away: close everything.
     for (_, mut win) in windows.drain() {
         close_window(&mut win);
     }

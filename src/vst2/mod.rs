@@ -1,5 +1,3 @@
-//! Native Linux VST2 hosting (including Linux wrappers produced by yabridge).
-
 mod abi;
 pub mod filter;
 pub mod host;

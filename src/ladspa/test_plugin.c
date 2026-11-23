@@ -1,4 +1,3 @@
-// Minimal LADSPA plugin used by the ABI tests: out = in * gain.
 #include <ladspa.h>
 #include <stdlib.h>
 

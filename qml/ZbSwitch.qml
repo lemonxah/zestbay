@@ -1,8 +1,6 @@
 import QtQuick
 import QtQuick.Controls
 
-// Pill switch. Standard 40x22 (knob 18); compact 32x18 (knob 14) for lists.
-// Set `text` for a labelled switch (label left of the track).
 Switch {
     id: control
     property bool compact: false

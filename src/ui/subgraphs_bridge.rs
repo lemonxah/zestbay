@@ -1,7 +1,3 @@
-//! AppController invokables for subgraphs (issue #17) and virtual devices.
-//! A child module of `qobject_bridge`, so it shares the controller's state
-//! and private helpers.
-
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::time::{Duration, Instant};
@@ -13,17 +9,12 @@ use super::*;
 use crate::patchbay::EndpointMap;
 use crate::pipewire::OwnedNodeSpec;
 
-/// How long a reroute waits for its new links before removing the old ones
-/// anyway.
 const JOB_TIMEOUT: Duration = Duration::from_secs(5);
 
 const TEMPLATE_DIR: &str = "subgraph_templates";
 
-/// Delay before saved virtual devices are created at startup (the graph
-/// has to be known to detect name clashes).
 const VDEV_START_DELAY: Duration = Duration::from_secs(2);
 
-/// Keep the file as it was before an upgrade rewrote it (once).
 fn keep_pre_upgrade_copy(file: &str) {
     let src = config_path(file);
     let dst = config_path(&format!("{file}.pre-upgrade"));
@@ -35,8 +26,6 @@ fn keep_pre_upgrade_copy(file: &str) {
     }
 }
 
-/// A saved subgraph: settings, plugins (with state), internal wiring and
-/// layout. Nodes in `links`/`layout` are "#<member index>", "@in", "@out".
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct SubgraphTemplate {
@@ -85,7 +74,6 @@ fn cfg_name(cfg: &serde_json::Value) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// "Name #3" → "Name" (the suffix `unique_display_name` adds).
 fn strip_copy_suffix(name: &str) -> &str {
     match name.rsplit_once(" #") {
         Some((base, n)) if !base.is_empty() && !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => base,
@@ -93,7 +81,6 @@ fn strip_copy_suffix(name: &str) -> &str {
     }
 }
 
-/// A file name for a template: letters, digits, space, - and _.
 fn template_file_stem(name: &str) -> String {
     let stem: String = name
         .chars()
@@ -104,15 +91,6 @@ fn template_file_stem(name: &str) -> String {
 }
 
 impl qobject::AppController {
-    // ------------------------------------------------------------------
-    // Internal helpers (used by qobject_bridge too)
-    // ------------------------------------------------------------------
-
-    /// Load subgraphs.json and virtual_devices.json, upgrading files from
-    /// older versions (missing ids, kinds…; the original is kept as
-    /// `<file>.pre-upgrade`), and create the subgraphs' nodes. Virtual
-    /// devices are created a moment later, once the graph is known
-    /// (`start_virtual_devices`).
     pub(super) fn load_subgraphs(mut self: Pin<&mut Self>) {
         let mut defs: Vec<SubgraphDef> = load_config("subgraphs.json").ok().flatten().unwrap_or_default();
         let mut vdevs: Vec<VirtualDevice> =
@@ -144,16 +122,10 @@ impl qobject::AppController {
         }
     }
 
-    /// Create the saved virtual devices, skipping any whose name another
-    /// device already uses (e.g. one from PipeWire config): two devices with
-    /// one name would confuse rules and saved links. Entries upgraded from
-    /// an older file that clash are dropped (the old file is kept as
-    /// .pre-upgrade); current ones stay saved but aren't created.
     pub(super) fn start_virtual_devices(mut self: Pin<&mut Self>) {
         let Some(graph) = self.rust().graph.clone() else { return };
         let nodes = graph.get_all_nodes();
         if nodes.is_empty() {
-            // PipeWire isn't up yet: try again shortly.
             self.as_mut().rust_mut().subgraphs.vdev_start_at = Some(Instant::now() + VDEV_START_DELAY);
             return;
         }
@@ -223,7 +195,6 @@ impl qobject::AppController {
         write_config("virtual_devices.json", vdevs.as_bytes(), sgs.vdevs.is_empty());
     }
 
-    /// stable id → live node id of every running plugin.
     pub(super) fn member_nodes(&self) -> HashMap<String, u32> {
         self.rust()
             .plugin_manager
@@ -237,8 +208,6 @@ impl qobject::AppController {
             .unwrap_or_default()
     }
 
-    /// The node a link end is drawn on in the current view, or `None` when
-    /// the view doesn't show it.
     pub(super) fn view_node_for(&self, port_id: u32, real_node: u32) -> Option<u32> {
         let vm = &self.rust().subgraphs.vm;
         if let Some(&v) = vm.port_owner.get(&port_id) {
@@ -255,7 +224,6 @@ impl qobject::AppController {
         )
     }
 
-    /// JSON for the subgraph cards / Input and Output nodes of this view.
     pub(super) fn view_nodes_json(&self) -> Vec<serde_json::Value> {
         let sgs = &self.rust().subgraphs;
         let members = self.member_nodes();
@@ -293,8 +261,6 @@ impl qobject::AppController {
             .collect()
     }
 
-    /// Finish reroutes whose new links are up (or timed out): remove the
-    /// links they replace.
     pub(super) fn process_subgraph_jobs(mut self: Pin<&mut Self>) {
         let Some(graph) = self.rust().graph.clone() else { return };
         let nodes = graph.get_all_nodes();
@@ -342,7 +308,6 @@ impl qobject::AppController {
         }
     }
 
-    /// Remember links (by name) so they are made as soon as both ends exist.
     fn queue_links(mut self: Pin<&mut Self>, links: &[NamedLink]) {
         {
             let mut rust = self.as_mut().rust_mut();
@@ -362,7 +327,6 @@ impl qobject::AppController {
         self.as_mut().mark_links_dirty();
     }
 
-    /// Rewrite rules for new endpoints; saves and signals when they change.
     fn remap_rules_with(mut self: Pin<&mut Self>, targets: &EndpointMap, sources: &EndpointMap, skip: &HashSet<String>) {
         let changed = match self.as_mut().rust_mut().patchbay.as_mut() {
             Some(pb) => {
@@ -379,8 +343,6 @@ impl qobject::AppController {
         }
     }
 
-    /// Plugins (node id, stable id, display name) among `ids` that aren't in
-    /// a subgraph yet.
     fn groupable_plugins(&self, ids: &[u32]) -> Vec<(u32, String, String)> {
         let Some(mgr) = self.rust().plugin_manager.as_ref() else { return Vec::new() };
         let sgs = &self.rust().subgraphs;
@@ -397,7 +359,6 @@ impl qobject::AppController {
         out
     }
 
-    /// Names of the sinks and sources in the graph that aren't ZestBay's.
     fn device_names(&self) -> Vec<String> {
         let Some(graph) = self.rust().graph.as_ref() else { return Vec::new() };
         graph
@@ -429,7 +390,6 @@ impl qobject::AppController {
         Some(SavedPlugin::from(info))
     }
 
-    /// A template of a live subgraph (call after collecting plugin states).
     fn build_template(&self, def: &SubgraphDef, name: &str) -> Option<SubgraphTemplate> {
         let graph = self.rust().graph.clone()?;
         let plugins: Vec<SavedPlugin> = def.members.iter().filter_map(|m| self.saved_plugin_for(m)).collect();
@@ -486,8 +446,6 @@ impl qobject::AppController {
         })
     }
 
-    /// Create a subgraph from a template at (x, y). Returns
-    /// `{subgraphId, layout}` (layout key → [x, y] for the new nodes).
     fn insert_template(mut self: Pin<&mut Self>, tpl: SubgraphTemplate, x: f64, y: f64) -> QString {
         let taken = self.subgraph_names(None);
         let mut def = SubgraphDef {
@@ -508,7 +466,6 @@ impl qobject::AppController {
         layout.insert(format!("Subgraph:{}", def.id), serde_json::json!([x, y]));
         for (i, mut sp) in tpl.plugins.into_iter().enumerate() {
             sp.stable_id = uuid::Uuid::new_v4().to_string();
-            // "Gate #2" copies as "Gate #3", not "Gate #2 #2".
             let base = strip_copy_suffix(&sp.display_name).to_string();
             sp.display_name = self.unique_display_name(&base);
             if let Some(p) = tpl.layout.get(&format!("#{i}")) {
@@ -551,10 +508,6 @@ impl qobject::AppController {
         self.as_mut().subgraphs_changed();
         QString::from(&serde_json::json!({ "subgraphId": id, "layout": layout }).to_string())
     }
-
-    // ------------------------------------------------------------------
-    // Invokables
-    // ------------------------------------------------------------------
 
     pub fn get_subgraphs_json(self: Pin<&mut Self>) -> QString {
         let members = self.member_nodes();
@@ -657,8 +610,6 @@ impl qobject::AppController {
         let set: HashSet<u32> = plugins.iter().map(|(n, ..)| *n).collect();
         let plan = sg::plan_group(&def, &sgui::plan_links(&graph, &set));
 
-        // Rules that pointed at member ports from outside now point at the
-        // subgraph's edges (heuristic rules too, even with nothing linked).
         let member_names: HashSet<String> = plugins.iter().map(|(.., n)| n.clone()).collect();
         let mut targets = EndpointMap::default();
         for (from, to) in &plan.port_map_in {
@@ -723,8 +674,6 @@ impl qobject::AppController {
         }
         log::info!("Updating subgraph '{}'", new.name);
 
-        // The edges are rebuilt: carry their links (and rules) across by
-        // channel.
         let nodes = graph.get_all_nodes();
         let edges = Subgraphs::edges(&nodes, &id).all();
         let pairs: HashMap<PlanEnd, PlanEnd> = sg::edge_endpoint_map(&old, &new).into_iter().collect();
@@ -769,7 +718,6 @@ impl qobject::AppController {
         let links: Vec<NamedLink> = sgui::named_links_touching(&graph, &edges).into_iter().map(|(_, l)| l).collect();
         let direct = sg::plan_ungroup(&def, &links);
 
-        // Rules on the edges go back to the plugins behind them.
         let mut targets = EndpointMap::default();
         let mut sources = EndpointMap::default();
         for (ext, int, is_in) in sg::edge_port_pairs(&def) {

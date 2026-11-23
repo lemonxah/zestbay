@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick.Controls
 
-// Numeric value field: 64x26, mono 12, right-aligned, radius 6.
 TextField {
     id: control
     implicitWidth: 64

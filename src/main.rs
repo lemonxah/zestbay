@@ -23,22 +23,12 @@ use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QQmlEngine, QString, QU
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Global flag: when true, skip restoring saved plugins on startup.
 pub static SAFE_MODE: AtomicBool = AtomicBool::new(false);
 
-/// Global flag: when true, `persist_active_plugins()` becomes a no-op.
-/// Set during safe mode to prevent writing an empty plugin list over the
-/// user's saved plugins.json.
 pub static PLUGINS_FROZEN: AtomicBool = AtomicBool::new(false);
 
-/// Global flag: when true, skip the sandbox probe before plugin instantiation.
-/// Dangerous — a crashing plugin will take down the entire process.
 pub static NO_PROBE: AtomicBool = AtomicBool::new(false);
 
-/// End the process once everything is saved, without running atexit handlers
-/// or the static destructors of loaded libraries. Hosted plugins (Pianoteq,
-/// for one) can hit internal errors and hang in their own destructors while
-/// PipeWire and Qt threads are still running, which froze ZestBay on quit.
 pub fn exit_now(code: i32) -> ! {
     use std::io::Write;
     log::logger().flush();
@@ -53,44 +43,27 @@ unsafe extern "C" {
 }
 
 fn main() {
-    // Scanning needs no Qt, X11, tray or PipeWire initialization.
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).is_some_and(|arg| arg == "--scan-plugin") {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
         plugin::sandbox::run_scan_main(&args[2..]);
     }
-    // Plugin UIs (LV2/CLAP/VST3 X11 editors) call Xlib from several threads;
-    // Xlib must be put into thread-safe mode before any other Xlib call and
-    // before any thread is spawned.
     if unsafe { XInitThreads() } == 0 {
         eprintln!("XInitThreads failed; X11 plugin UIs may be unstable");
     }
-    // In-process LV2 GTK UIs are X11-embedded.  Set before any thread is
-    // spawned: setenv races with getenv on other threads.
     unsafe { std::env::set_var("GDK_BACKEND", "x11") };
-    // Every control is custom-drawn from the Theme tokens; the Basic style
-    // draws nothing of its own, so the UI looks the same on every desktop.
     unsafe { std::env::set_var("QT_QUICK_CONTROLS_STYLE", "Basic") };
-    // lilv only searches its compiled-in LV2 path; in a Flatpak point it at
-    // the user, extension and host plugin directories.
-    plugin::paths::ensure_app_plugin_dirs();
-    if let Some(lv2_path) = plugin::paths::flatpak_lv2_path() {
-        unsafe { std::env::set_var("LV2_PATH", lv2_path) };
-    }
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     color_scheme::start();
 
     let args: Vec<String> = std::env::args().collect();
 
-    // Handle --probe-plugin subcommand (used by exec_probe for clean-process probing)
     if let Some(pos) = args.iter().position(|a| a == "--probe-plugin") {
         let probe_args: Vec<String> = args[pos + 1..].to_vec();
         plugin::sandbox::run_probe_main(&probe_args);
-        // run_probe_main never returns
     }
 
-    // Before anything reads or writes the config.
     match session::parse_args(&args[1..]).and_then(session::init) {
         Ok(()) => {}
         Err(e) => {
@@ -114,10 +87,7 @@ fn main() {
 
     let mut app = QGuiApplication::new();
 
-    // Must match the installed .desktop file (Wayland app id, taskbar icon).
-    let desktop_file_name =
-        plugin::paths::flatpak_app_id().unwrap_or_else(|| "zestbay".to_string());
-    QGuiApplication::set_desktop_file_name(&QString::from(&desktop_file_name));
+    QGuiApplication::set_desktop_file_name(&QString::from("zestbay"));
 
     let mut engine = QQmlApplicationEngine::new();
 

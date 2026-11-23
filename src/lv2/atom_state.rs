@@ -1,5 +1,3 @@
-//! Persist URI references embedded in LV2 atoms independently of process-local
-//! URID allocation order. Also reads LSP mixer's public KVT state for labels.
 use super::{state::StateEntry, urid::UridMapper};
 const ATOM: &str = "http://lv2plug.in/ns/ext/atom#";
 fn word(data: &[u8], at: usize) -> Option<u32> {
@@ -44,8 +42,6 @@ pub fn references(data: &[u8], ty: &str, mapper: &UridMapper) -> Vec<(usize, Str
             if end - start < 8 {
                 return None;
             }
-            // Object ID zero denotes an anonymous object. Blank IDs are local
-            // labels, while Object/Resource IDs are URI references.
             if ty != format!("{ATOM}Blank") {
                 reference(data, at, mapper, out);
             }
@@ -111,8 +107,6 @@ pub fn port_label(uri: &str, entries: &[StateEntry], port: &str) -> Option<Strin
     if !is_lsp_mixer(uri) {
         return None;
     }
-    // PipeWire ports retain their stable input_N names. LSP's master
-    // input precedes its mixer channels in both mono and stereo layouts.
     let symbol;
     let port = if let Some(index) = port.strip_prefix("input_") {
         let index: usize = index.parse().ok()?;

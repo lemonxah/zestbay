@@ -126,9 +126,7 @@ const LV2_DATA_ACCESS_URI: &CStr = c"http://lv2plug.in/ns/ext/data-access";
 const LV2_INSTANCE_ACCESS_URI: &CStr = c"http://lv2plug.in/ns/ext/instance-access";
 const LV2_OPTIONS_URI: &CStr = c"http://lv2plug.in/ns/ext/options#options";
 
-/// How long `close_plugin_ui` waits for the GTK thread to destroy a UI.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
-/// Upper bound on atom output messages forwarded to a UI per timer tick.
 const MAX_ATOM_MESSAGES_PER_TICK: usize = 64;
 
 #[repr(C)]
@@ -157,9 +155,7 @@ const LV2_UI_GTK4: &str = "http://lv2plug.in/ns/extensions/ui#Gtk4UI";
 const LV2_UI_X11: &str = "http://lv2plug.in/ns/extensions/ui#X11UI";
 const LV2_UI_QT5: &str = "http://lv2plug.in/ns/extensions/ui#Qt5UI";
 
-/// KXStudio external UI: the UI opens a window of its own.
 const LV2_UI_EXTERNAL: &str = "http://kxstudio.sf.net/ns/lv2ext/external-ui#Widget";
-/// The same, under its old URI.
 const LV2_UI_EXTERNAL_OLD: &str = "http://lv2plug.in/ns/extensions/ui#external";
 
 const LV2_EXTERNAL_UI_HOST_URI: &CStr = c"http://kxstudio.sf.net/ns/lv2ext/external-ui#Host";
@@ -169,8 +165,6 @@ const LV2_UI_IDLE_FEATURE_URI: &CStr = c"http://lv2plug.in/ns/extensions/ui#idle
 
 const HOST_TYPE_URI: &str = "http://lv2plug.in/ns/extensions/ui#Gtk3UI";
 
-/// UI types in the order they are preferred.  Embeddable kinds first; an
-/// external UI is the fallback for plugins that have nothing else.
 const UI_PREFERENCE: [&str; 7] = [
     LV2_UI_GTK3,
     LV2_UI_X11,
@@ -181,7 +175,6 @@ const UI_PREFERENCE: [&str; 7] = [
     LV2_UI_GTK4,
 ];
 
-/// `LV2UI_Descriptor`.
 #[repr(C)]
 struct Lv2UiDescriptor {
     uri: *const c_char,
@@ -209,7 +202,6 @@ struct Lv2UiDescriptor {
     extension_data: Option<unsafe extern "C" fn(uri: *const c_char) -> *const c_void>,
 }
 
-/// `LV2_External_UI_Widget`: what an external UI hands back as its widget.
 #[repr(C)]
 struct ExternalUiWidget {
     run: Option<unsafe extern "C" fn(*mut ExternalUiWidget)>,
@@ -217,21 +209,18 @@ struct ExternalUiWidget {
     hide: Option<unsafe extern "C" fn(*mut ExternalUiWidget)>,
 }
 
-/// `LV2_External_UI_Host`.
 #[repr(C)]
 struct ExternalUiHost {
     ui_closed: Option<unsafe extern "C" fn(controller: *mut c_void)>,
     plugin_human_id: *const c_char,
 }
 
-/// `LV2UI_Port_Map`.
 #[repr(C)]
 struct Lv2UiPortMap {
     handle: *mut c_void,
     port_index: Option<SuilPortIndexFunc>,
 }
 
-/// The UI a plugin is opened with.
 struct SelectedUi {
     uri: String,
     type_uri: &'static str,
@@ -245,21 +234,14 @@ impl SelectedUi {
     }
 }
 
-/// Whether a UI asks for instance-access or data-access, which hand it
-/// pointers into the plugin instance (so it can only use them in-process).
 #[derive(Default)]
 struct UiInstanceAccess {
-    /// It cannot work without.
     required: bool,
-    /// It works without, but uses it when given (often for its displays).
     optional: bool,
 }
 
-/// Checked per UI: a bundle often has several UIs that differ here.
 fn ui_instance_access(world: &lilv::World, ui_uri: &str) -> UiInstanceAccess {
     let ui = world.new_uri(ui_uri);
-    // A UI's own data file (its feature lines) may not be loaded until
-    // asked for.
     let _ = world.load_resource(&ui);
     let features = [
         world.new_uri("http://lv2plug.in/ns/ext/instance-access"),
@@ -277,9 +259,6 @@ fn ui_instance_access(world: &lilv::World, ui_uri: &str) -> UiInstanceAccess {
     }
 }
 
-/// The long-standing X11 routing test: does any TTL file in the bundle
-/// mention instance-access alongside a requiredFeature?  Coarse (it covers
-/// every UI in the bundle), but it is what X11 UIs have been routed by.
 fn bundle_mentions_instance_access(bundle: &str) -> bool {
     let Ok(entries) = std::fs::read_dir(std::path::Path::new(bundle)) else {
         return false;
@@ -292,8 +271,6 @@ fn bundle_mentions_instance_access(bundle: &str) -> bool {
     })
 }
 
-/// The plugin's most preferred UI (see `UI_PREFERENCE`), whatever order
-/// the plugin lists its UIs in.
 fn select_ui(world: &lilv::World, plugin: &lilv::plugin::Plugin) -> Option<SelectedUi> {
     let uis = plugin.uis()?;
     let uis: Vec<_> = uis.iter().collect();
@@ -312,7 +289,6 @@ fn select_ui(world: &lilv::World, plugin: &lilv::plugin::Plugin) -> Option<Selec
             let Some(binary_path) = ui.binary_uri().and_then(|n| n.path().map(|(_, p)| p)) else {
                 continue;
             };
-            // LV2 hands UIs their bundle path with a trailing separator.
             let bundle_path = if bundle_path.ends_with('/') {
                 bundle_path
             } else {
@@ -329,16 +305,12 @@ fn select_ui(world: &lilv::World, plugin: &lilv::plugin::Plugin) -> Option<Selec
     None
 }
 
-/// Feature data handed to an in-process plugin UI.  The UI may keep
-/// pointers into it for its whole lifetime, so it is heap-allocated and
-/// freed only after the suil instance has been destroyed.
 struct UiHostFeatures {
     _urid_mapper: Arc<UridMapper>,
     urid_map: lv2_raw::urid::LV2UridMap,
     data_access: Option<LV2ExtensionDataFeature>,
     sample_rate: f32,
     options: [Lv2Option; 2],
-    /// External-UI host data, set up by `enable_external_ui`.
     external_host: ExternalUiHost,
     human_id: CString,
     port_map: Lv2UiPortMap,
@@ -363,7 +335,7 @@ impl UiHostFeatures {
             sample_rate,
             options: [
                 Lv2Option {
-                    context: 0, // LV2_OPTIONS_INSTANCE
+                    context: 0,
                     subject: 0,
                     key: sample_rate_urid,
                     size: std::mem::size_of::<f32>() as u32,
@@ -392,7 +364,6 @@ impl UiHostFeatures {
             feature_ptrs: Vec::new(),
         });
 
-        // All pointers below point into the box, which never moves.
         b.options[0].value = &b.sample_rate as *const f32 as *const c_void;
 
         let mut features = Vec::with_capacity(4);
@@ -430,9 +401,6 @@ impl UiHostFeatures {
             .collect();
     }
 
-    /// Add the features an external UI is given: the external-UI host
-    /// (under both its URIs), a port map, and idle support.  `controller`
-    /// is what `ui_closed` is called back with.
     fn enable_external_ui(&mut self, controller: *mut c_void, human_id: &str) {
         self.human_id = CString::new(human_id).unwrap_or_default();
         self.external_host = ExternalUiHost {
@@ -473,9 +441,7 @@ struct UiController {
     cmd_tx: Sender<PwCommand>,
     symbol_to_index: Vec<(String, usize)>,
     port_updates: Option<super::types::SharedPortUpdates>,
-    /// The UI's closing flag (shared with its timer).
     closing: Arc<AtomicBool>,
-    /// An external UI reported its window closed.
     ui_closed: AtomicBool,
 }
 
@@ -545,10 +511,8 @@ unsafe extern "C" fn port_index_callback(
     u32::MAX
 }
 
-/// Where port events and `run()` go.
 #[derive(Clone, Copy)]
 enum UiTarget {
-    /// Closed.
     None,
     Suil(*mut c_void),
     External {
@@ -582,8 +546,6 @@ impl UiTarget {
     }
 }
 
-/// An open UI: a suil UI in a GTK window, or an external UI with a window
-/// of its own.
 enum WindowKind {
     Suil {
         gtk_window: *mut c_void,
@@ -602,7 +564,6 @@ struct WindowState {
     controller_ptr: *mut c_void,
     timer_data: *mut UiTimerData,
     timer_source_id: c_uint,
-    /// Feature data the UI may reference; freed after the UI.
     _features: Box<UiHostFeatures>,
 }
 
@@ -614,17 +575,11 @@ struct UiTimerData {
     ui_handle: *mut c_void,
     closing: Arc<AtomicBool>,
     instance_id: u64,
-    /// Set to true when the timer callback returns 0 (auto-removed by GLib),
-    /// so handle_close_window knows not to call g_source_remove again.
     timer_removed: AtomicBool,
-    /// Cached control output values for change detection — only forward to
-    /// the UI when a value actually changed, to avoid overwhelming plugin UIs.
     prev_control_outputs: Vec<f32>,
-    /// Cached control input values for change detection.
     prev_control_inputs: Vec<f32>,
 }
 
-/// Forward each event of an `atom:Sequence` (as written by the plugin) to the UI.
 fn forward_sequence_events(td: &UiTimerData, port_index: usize, data: &[u8]) {
     if data.len() < 16 {
         return;
@@ -664,7 +619,6 @@ unsafe extern "C" fn ui_timer_callback(data: *mut c_void) -> c_int {
     if data.is_null() {
         return 0;
     }
-    // SAFETY: we need mutable access for the prev_control caches
     let td = unsafe { &mut *(data as *mut UiTimerData) };
     if td.closing.load(Ordering::Acquire) || td.target.is_none() {
         td.timer_removed.store(true, Ordering::Release);
@@ -681,7 +635,6 @@ unsafe extern "C" fn ui_timer_callback(data: *mut c_void) -> c_int {
         );
     };
 
-    // Forward control outputs to UI, but only when the value changed
     for (i, slot) in td.port_updates.control_outputs.iter().enumerate() {
         let val = slot.value.load();
         let prev = td.prev_control_outputs.get(i).copied().unwrap_or(f32::NAN);
@@ -693,7 +646,6 @@ unsafe extern "C" fn ui_timer_callback(data: *mut c_void) -> c_int {
         }
     }
 
-    // Forward control inputs to UI, but only when the value changed
     for (i, slot) in td.port_updates.control_inputs.iter().enumerate() {
         let val = slot.value.load();
         let prev = td.prev_control_inputs.get(i).copied().unwrap_or(f32::NAN);
@@ -731,7 +683,6 @@ unsafe extern "C" fn ui_timer_callback(data: *mut c_void) -> c_int {
         }
     }
 
-    // An external UI does its own event handling and drawing in run().
     if let UiTarget::External { widget, .. } = td.target
         && let Some(run) = unsafe { (*widget).run }
     {
@@ -746,7 +697,6 @@ enum GtkCommand {
     Close {
         instance_id: u64,
         destroyed_by_gtk: bool,
-        /// Dropped (or sent to) once the window is gone.
         ack: Option<std::sync::mpsc::Sender<()>>,
     },
     Shutdown,
@@ -765,10 +715,6 @@ struct OpenUiRequest {
     sample_rate: f32,
 }
 
-// SAFETY: lv2_handle is a raw LV2 plugin handle that must cross from the PW
-// thread to the GTK thread.  The GTK thread uses it read-only for data-access
-// and instance-access UI features.  The plugin instance outlives the UI
-// (close_plugin_ui blocks until the UI is destroyed).
 unsafe impl Send for OpenUiRequest {}
 type OnceArcMutex<A> = OnceLock<Arc<Mutex<A>>>;
 
@@ -779,9 +725,6 @@ static OPEN_UI_SET: OnceArcMutex<std::collections::HashSet<u64>> = OnceLock::new
 
 static CLOSING_FLAGS: OnceArcMutex<HashMap<u64, Arc<AtomicBool>>> = OnceLock::new();
 
-/// Instances whose GtkWindow has already been destroyed by GTK (user closed
-/// it) but whose Close command may not have been processed yet.  Prevents a
-/// second gtk_widget_destroy when a host-initiated Close is handled first.
 static GTK_DESTROYED: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 
 fn take_gtk_destroyed(instance_id: u64) -> bool {
@@ -931,7 +874,6 @@ unsafe extern "C" fn destroy_instance_id_data(data: *mut c_void, _closure: *mut 
 
 fn gtk_thread_main(cmd_rx: std::sync::mpsc::Receiver<GtkCommand>) {
     let _ = GTK_THREAD_ID.set(std::thread::current().id());
-    // GDK_BACKEND=x11 is set in main() before any thread is spawned.
     unsafe {
         gtk_init(ptr::null_mut(), ptr::null_mut());
     }
@@ -952,21 +894,9 @@ fn gtk_thread_main(cmd_rx: std::sync::mpsc::Receiver<GtkCommand>) {
     }
     log::info!("Persistent GTK thread exiting");
 
-    // Dropping the state drops the command receiver: later senders (and
-    // close_plugin_ui waiters) fail fast instead of hanging.
     let _ = unsafe { Box::from_raw(state) };
 }
 
-// ── SIGSEGV guard around UI instantiation ──
-//
-// Some UI toolkits (DPF/Pugl without GLX, ...) crash inside
-// suil_instance_new.  We catch SIGSEGV on the GTK thread only for the
-// duration of that call and siglongjmp back.  Faults on any other thread
-// (e.g. the RT thread) must never be redirected onto the GTK thread's jump
-// buffer: the handler restores the previous disposition and returns, so the
-// faulting instruction re-executes and crashes (or is handled) normally.
-
-/// Large enough for glibc's sigjmp_buf on x86_64 (200 B) and aarch64 (312 B).
 #[repr(C, align(16))]
 struct SigJmpBuf([u8; 512]);
 
@@ -988,13 +918,11 @@ unsafe extern "C" fn crash_handler(_sig: c_int) {
         CRASH_CAUGHT.store(true, Ordering::SeqCst);
         unsafe { siglongjmp(&raw mut CRASH_JUMP_BUF, 1) };
     }
-    // Not the armed thread: hand the fault back to the previous handler.
     unsafe {
         libc::sigaction(libc::SIGSEGV, &raw const CRASH_SAVED_HANDLER, ptr::null_mut());
     }
 }
 
-/// Arm the guard for the calling thread.  Must be paired with `disarm_crash_guard`.
 unsafe fn arm_crash_guard() {
     CRASH_CAUGHT.store(false, Ordering::SeqCst);
     CRASH_ARMED_THREAD.store(unsafe { libc::pthread_self() } as usize, Ordering::SeqCst);
@@ -1045,7 +973,6 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
 
     take_gtk_destroyed(instance_id);
 
-    // The GTK thread's own cached world.
     let (world, plugin) = match super::find_in_thread_world(&req.plugin_uri) {
         Some(found) => found,
         None => {
@@ -1114,8 +1041,6 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
         }
     };
 
-    // Shared by the timer, the controller (an external UI closing itself)
-    // and `closing_flags` (GTK destroying the window).
     let closing_flag = Arc::new(AtomicBool::new(false));
 
     let has_atom_inputs = !req.port_updates.atom_inputs.is_empty();
@@ -1157,7 +1082,6 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
         flags.insert(instance_id, closing_flag.clone());
     }
 
-    // Start receiving plugin → UI atom output.
     for atom_out in req.port_updates.atom_outputs.iter() {
         atom_out.set_listening(true);
     }
@@ -1176,7 +1100,6 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
         closing: closing_flag,
         instance_id,
         timer_removed: AtomicBool::new(false),
-        // Initialize with NaN so the first tick always sends all values
         prev_control_outputs: vec![f32::NAN; n_control_outputs],
         prev_control_inputs: vec![f32::NAN; n_control_inputs],
     }));
@@ -1203,7 +1126,6 @@ fn handle_open_window(state: &mut GtkThreadState, req: OpenUiRequest) {
         .send(PwEvent::Plugin(PluginEvent::PluginUiOpened { instance_id }));
 }
 
-/// The C strings a UI is opened with.
 struct UiCStrings {
     host_type: CString,
     plugin_uri: CString,
@@ -1213,7 +1135,6 @@ struct UiCStrings {
     binary_path: CString,
 }
 
-/// A UI that has been created and shown, before the host starts its timer.
 struct OpenedUi {
     kind: WindowKind,
     target: UiTarget,
@@ -1221,9 +1142,6 @@ struct OpenedUi {
     ui_handle: *mut c_void,
 }
 
-/// Open an embeddable UI (GTK3, X11, ...) through suil inside a GTK window.
-/// On failure the error has been reported and nothing is left to free but
-/// the controller, which stays the caller's.
 unsafe fn open_suil_ui(
     req: &OpenUiRequest,
     plugin_name: &str,
@@ -1256,7 +1174,6 @@ unsafe fn open_suil_ui(
             return None;
         }
 
-        // Catch DPF/Pugl crashes during suil_instance_new (GTK thread only).
         arm_crash_guard();
         let instance = if sigsetjmp(&raw mut CRASH_JUMP_BUF, 1) == 0 {
             suil_instance_new(
@@ -1271,7 +1188,6 @@ unsafe fn open_suil_ui(
                 features.as_ptr(),
             )
         } else {
-            // Returned here from siglongjmp after a crash
             ptr::null_mut()
         };
         disarm_crash_guard();
@@ -1357,7 +1273,6 @@ unsafe fn open_suil_ui(
     }
 }
 
-/// The last `dlerror()` message.
 fn dl_error() -> String {
     let err = unsafe { libc::dlerror() };
     if err.is_null() {
@@ -1367,10 +1282,6 @@ fn dl_error() -> String {
     }
 }
 
-/// Open a KXStudio external UI: the plugin's UI library is loaded directly
-/// (suil does not host this kind) and the UI shows a window of its own.
-/// The timer drives it with `run()`; it reports its window being closed
-/// through `external_ui_closed`.
 unsafe fn open_external_ui(
     req: &OpenUiRequest,
     names: &UiCStrings,
@@ -1385,8 +1296,6 @@ unsafe fn open_external_ui(
     };
 
     unsafe {
-        // Same path as the plugin's DSP binary for many plugins: dlopen then
-        // hands back the copy already loaded, which instance-access needs.
         let lib = libc::dlopen(names.binary_path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
         if lib.is_null() {
             return fail(format!("Cannot load the plugin UI library: {}", dl_error()));
@@ -1420,9 +1329,6 @@ unsafe fn open_external_ui(
             libc::dlclose(lib);
             return fail("The plugin UI cannot be instantiated".into());
         };
-        // From here on the library stays loaded: UI toolkits commonly leave
-        // threads and exit handlers behind, and unloading them under those
-        // crashes.  A later open reuses the loaded copy.
 
         let mut widget: *mut c_void = ptr::null_mut();
         arm_crash_guard();
@@ -1468,8 +1374,6 @@ unsafe fn open_external_ui(
             }
             disarm_crash_guard();
             if CRASH_CAUGHT.load(Ordering::SeqCst) {
-                // The UI is in an unknown state: leave it be rather than
-                // clean up into the crash.
                 return fail("The plugin UI crashed while showing its window".into());
             }
         }
@@ -1488,7 +1392,6 @@ unsafe fn open_external_ui(
     }
 }
 
-/// Give a freshly opened UI the current control values.
 unsafe fn send_control_values(target: UiTarget, values: &[(usize, f32)]) {
     for &(port_index, value) in values {
         unsafe {
@@ -1502,17 +1405,12 @@ unsafe fn send_control_values(target: UiTarget, values: &[(usize, f32)]) {
     }
 }
 
-/// `ui_closed` of the external-UI host: the user closed the UI's own
-/// window.  The UI is cleaned up from the GTK command loop, never from
-/// inside this callback (it usually runs inside the UI's `run()`).
 unsafe extern "C" fn external_ui_closed(controller: *mut c_void) {
     if controller.is_null() {
         return;
     }
     let ctrl = unsafe { &*(controller as *const UiController) };
     ctrl.ui_closed.store(true, Ordering::Release);
-    // A close already under way (the host's, or an earlier call) needs no
-    // second one.
     if ctrl.closing.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -1537,8 +1435,6 @@ fn handle_close_window(state: &mut GtkThreadState, instance_id: u64, destroyed_b
     unsafe {
         (*ws.timer_data).closing.store(true, Ordering::Release);
 
-        // Only remove the timer source if it hasn't already been auto-removed
-        // by GLib (when the callback returned 0).
         if !(*ws.timer_data).timer_removed.load(Ordering::Acquire) {
             g_source_remove(ws.timer_source_id);
         }
@@ -1562,7 +1458,6 @@ fn handle_close_window(state: &mut GtkThreadState, instance_id: u64, destroyed_b
                 handle,
                 widget,
             } => {
-                // A UI that closed its own window is not asked to hide it.
                 let ctrl = &*(ws.controller_ptr as *const UiController);
                 if !ctrl.ui_closed.load(Ordering::Acquire)
                     && let Some(hide) = (*widget).hide
@@ -1582,7 +1477,6 @@ fn handle_close_window(state: &mut GtkThreadState, instance_id: u64, destroyed_b
         drop(timer_data);
         drop(Box::from_raw(ws.controller_ptr as *mut UiController));
     }
-    // The UI is gone; its feature data can go too.
     drop(ws._features);
 
     if let Ok(mut flags) = closing_flags().lock() {
@@ -1601,14 +1495,9 @@ fn handle_close_window(state: &mut GtkThreadState, instance_id: u64, destroyed_b
     }
 }
 
-// ── Out-of-process UI bridge ──
-
-/// UI bridge client — spawned on first use, respawned if the child died,
-/// shut down by `shutdown_gtk_thread`.
 static UI_BRIDGE: Mutex<Option<super::ui_bridge_client::UiBridgeClient>> = Mutex::new(None);
 static UI_BRIDGE_SHUT_DOWN: AtomicBool = AtomicBool::new(false);
 
-/// Run `f` with a live bridge client, spawning (or respawning) it if needed.
 fn with_bridge<R>(
     event_tx: &Sender<PwEvent>,
     cmd_tx: &Sender<PwCommand>,
@@ -1649,7 +1538,7 @@ fn shutdown_bridge() {
     }
 }
 
-#[allow(clippy::too_many_arguments)] // public entry point; grouping the arguments would ripple through every caller
+#[allow(clippy::too_many_arguments)]
 pub fn open_plugin_ui(
     plugin_uri: &str,
     instance_id: u64,
@@ -1661,8 +1550,6 @@ pub fn open_plugin_ui(
     lv2_handle: *mut c_void,
     extension_data_fn: Option<unsafe extern "C" fn(*const c_char) -> *const c_void>,
 ) {
-    // The shared slots hold the live values; prefer them over the caller's
-    // snapshot.
     let mut control_values = control_values;
     for slot in port_updates
         .control_inputs
@@ -1681,7 +1568,6 @@ pub fn open_plugin_ui(
         48000.0
     }) as f32;
 
-    // Try to find the UI info to determine if it's X11
     let world = super::thread_world();
     let uri_node = world.new_uri(plugin_uri);
     let plugin = world.plugins().iter().find(|p| p.uri().as_uri() == uri_node.as_uri());
@@ -1696,11 +1582,6 @@ pub fn open_plugin_ui(
             .map(|ui| (ui.uri, ui.type_uri.to_string(), ui.bundle_path, ui.binary_path));
     }
 
-    // X11 and external UIs can run in the bridge process (which keeps their
-    // GLX/OpenGL away from ZestBay's own on Wayland), unless they need the
-    // plugin instance itself: then they must run in-process via the GTK
-    // thread.  The bridge also relays only control values to the UI, not
-    // atom messages from the plugin.
     let ui_type = ui_info.as_ref().map(|(_, t, _, _)| t.as_str());
     let is_x11_ui = ui_type == Some(LV2_UI_X11);
     let is_external_ui = ui_type.is_some_and(|t| t == LV2_UI_EXTERNAL || t == LV2_UI_EXTERNAL_OLD);
@@ -1710,8 +1591,6 @@ pub fn open_plugin_ui(
         .map(|(ui_uri, _, _, _)| ui_instance_access(&world, ui_uri))
         .unwrap_or_default();
     let needs_instance = if is_x11_ui {
-        // Unchanged for X11 UIs (they work as routed), except that one whose
-        // own description requires the instance always gets it.
         access.required
             || ui_info
                 .as_ref()
@@ -1745,7 +1624,6 @@ pub fn open_plugin_ui(
         log::warn!("UI bridge not available, falling back to an in-process UI");
     }
 
-    // For GTK UIs (or X11 fallback), use the old suil/GTK path
     let gtk_tx = ensure_gtk_thread();
     let tx = gtk_tx.lock().unwrap();
     let _ = tx.send(GtkCommand::Open(OpenUiRequest {
@@ -1762,36 +1640,20 @@ pub fn open_plugin_ui(
     }));
 }
 
-/// Result of [`close_plugin_ui`].
 pub enum UiCloseStatus {
-    /// No in-process UI can touch the plugin instance any more.
     Closed,
-    /// The GTK thread did not confirm in time: an in-process UI may still
-    /// use the instance (instance-access / data-access) until the close is
-    /// acknowledged, so the instance must be kept alive until then.
     Pending(PendingUiClose),
 }
 
-/// A close the GTK thread has not acknowledged yet.
 pub struct PendingUiClose(std::sync::mpsc::Receiver<()>);
 
 impl PendingUiClose {
-    /// True once the GTK thread destroyed the UI (or is gone).
     pub fn is_done(&self) -> bool {
         !matches!(self.0.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty))
     }
 }
 
-/// Close the plugin UI for `instance_id` (in-process or bridge).
-///
-/// For in-process UIs this blocks (up to ~2 s) until the GTK thread has
-/// destroyed the UI, so the caller may free the plugin instance afterwards.
-/// If the GTK thread does not confirm in time, `Pending` is returned and the
-/// instance must not be freed yet.  It does not wait when called on the GTK
-/// thread itself or when the GTK thread is not running.
 pub fn close_plugin_ui(instance_id: u64) -> UiCloseStatus {
-    // Bridge UIs live in another process and never touch the instance's
-    // memory; closing them is fire-and-forget.
     if let Ok(mut guard) = UI_BRIDGE.lock()
         && let Some(client) = guard.as_mut()
     {
@@ -1817,10 +1679,9 @@ pub fn close_plugin_ui(instance_id: u64) -> UiCloseStatus {
         destroyed_by_gtk: false,
         ack: Some(ack_tx),
     }) {
-        return UiCloseStatus::Closed; // GTK thread gone
+        return UiCloseStatus::Closed;
     }
     match ack_rx.recv_timeout(CLOSE_TIMEOUT) {
-        // Ok: closed.  Disconnected: the command was dropped (thread exiting).
         Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => UiCloseStatus::Closed,
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
             log::warn!(
@@ -1832,8 +1693,6 @@ pub fn close_plugin_ui(instance_id: u64) -> UiCloseStatus {
     }
 }
 
-/// Close all plugin UIs, stop the GTK thread and shut down the UI bridge
-/// process.  Called on application quit.
 pub fn shutdown_gtk_thread() {
     send_gtk_command(GtkCommand::Shutdown);
     shutdown_bridge();

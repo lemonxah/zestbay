@@ -1,8 +1,3 @@
-// Zestins Synth: 16 voices of sine, saw or square (PolyBLEP) with a linear
-// ADSR.  Handles note on/off, sustain pedal (CC 64), pitch bend (+-2
-// semitones), all notes off (CC 123) and all sound off (CC 120).  MIDI is
-// applied at its frame within the block.
-
 #include "dsp.h"
 
 #define VOICES 16
@@ -15,9 +10,9 @@ typedef struct {
     double phase;
     uint8_t channel, note;
     float velocity;
-    bool held;      // key down
-    bool sustained; // key up but held by the sustain pedal
-    uint32_t age;   // for voice stealing
+    bool held;
+    bool sustained;
+    uint32_t age;
 } Voice;
 
 typedef struct {
@@ -26,7 +21,7 @@ typedef struct {
     LV2_URID midi_event;
     Voice voice[VOICES];
     bool pedal[16];
-    float bend[16]; // semitones
+    float bend[16];
     uint32_t clock;
 } Synth;
 
@@ -64,7 +59,6 @@ static void release(Voice *v) {
 
 static void note_on(Synth *s, uint8_t ch, uint8_t note, uint8_t vel) {
     Voice *pick = NULL;
-    // Retrigger the same note, else a free voice, else the oldest one.
     for (int i = 0; i < VOICES && !pick; i++) {
         Voice *v = &s->voice[i];
         if (v->stage != ENV_OFF && v->channel == ch && v->note == note)
@@ -116,8 +110,7 @@ static void handle_midi(Synth *s, const uint8_t *m, uint32_t size) {
             note_on(s, ch, m[1] & 0x7F, m[2] & 0x7F);
             break;
         }
-        // velocity 0: note off
-        // fall through
+        __attribute__((fallthrough));
     case LV2_MIDI_MSG_NOTE_OFF:
         note_off(s, ch, m[1] & 0x7F);
         break;
@@ -163,14 +156,14 @@ static float osc(int wave, double p, double dt) {
         q -= floor(q);
         return (p < 0.5 ? 1.0f : -1.0f) + poly_blep(p, dt) - poly_blep(q, dt);
     }
-    default: // saw
+    default:
         return (float)(2.0 * p - 1.0) - poly_blep(p, dt);
     }
 }
 
 typedef struct {
     int wave;
-    float attack, decay, sustain, release; // per-sample steps / level
+    float attack, decay, sustain, release;
     float volume;
 } Params;
 

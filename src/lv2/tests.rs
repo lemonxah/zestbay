@@ -1,7 +1,3 @@
-//! LV2 host tests against the Zestins plugins (zestins/): the bundle is
-//! built with its own Makefile, loaded through lilv and run through
-//! `Lv2PluginInstance`, the same path ZestBay uses for any LV2 plugin.
-
 use super::host::Lv2PluginInstance;
 use super::scanner;
 use super::urid::UridMapper;
@@ -15,7 +11,6 @@ use std::sync::{Arc, OnceLock};
 const RATE: f64 = 48000.0;
 const BLOCK: usize = 256;
 
-/// Build zestins.lv2 once per test run (into target/, incrementally).
 fn bundle_dir() -> &'static PathBuf {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
@@ -44,10 +39,8 @@ fn world() -> lilv::World {
     world
 }
 
-/// MIDI sent on one output: (frame, bytes) per message.
 type MidiEvents = Vec<(u32, Vec<u8>)>;
 
-/// A Zestins plugin instance with helpers to drive it.
 struct Plug {
     inst: Lv2PluginInstance,
     info: PluginInfo,
@@ -97,7 +90,6 @@ impl Plug {
             .load()
     }
 
-    /// Run stereo audio through the plugin in blocks; returns [left, right].
     fn run(&mut self, left: &[f32], right: &[f32]) -> [Vec<f32>; 2] {
         let n = left.len();
         let mut out = [vec![0.0; n], vec![0.0; n]];
@@ -115,13 +107,11 @@ impl Plug {
         out
     }
 
-    /// Run `n` frames with no audio input (generators, instruments).
     fn render(&mut self, n: usize) -> [Vec<f32>; 2] {
         let silent = vec![0.0; n];
         self.run(&silent, &silent)
     }
 
-    /// One block with MIDI in; returns the audio and each MIDI output's events.
     fn midi_block(&mut self, input: &[RawMidiEvent]) -> ([Vec<f32>; 2], Vec<MidiEvents>) {
         let mut sink = MidiSink::new(self.inst.midi_output_names.len());
         sink.begin_cycle();
@@ -138,7 +128,6 @@ impl Plug {
     }
 }
 
-/// (offset, bytes) of every control in a spa_pod_sequence.
 fn decode(seq: &[u8]) -> MidiEvents {
     let u32_at = |at: usize| u32::from_ne_bytes(seq[at..at + 4].try_into().unwrap());
     let end = 8 + u32_at(0) as usize;
@@ -172,7 +161,6 @@ fn db(x: f32) -> f32 {
     20.0 * x.max(1e-9).log10()
 }
 
-/// The last `ms` milliseconds of a signal.
 fn tail(x: &[f32], ms: usize) -> &[f32] {
     &x[x.len() - ms * RATE as usize / 1000..]
 }
@@ -180,8 +168,6 @@ fn tail(x: &[f32], ms: usize) -> &[f32] {
 fn secs(s: f32) -> usize {
     (s * RATE as f32) as usize
 }
-
-// ---- Bundle ---------------------------------------------------------------
 
 #[test]
 fn every_zestin_is_found_compatible_and_has_a_ui() {
@@ -213,8 +199,6 @@ fn every_zestin_is_found_compatible_and_has_a_ui() {
         assert!(p.has_ui, "{} has no UI", p.name);
     }
 }
-
-// ---- Audio effects ----------------------------------------------------------
 
 #[test]
 fn utility_gain_mute_flip_and_balance() {
@@ -299,7 +283,6 @@ fn compressor_reduces_above_threshold() {
     let world = world();
     let mut c = Plug::new(&world, "compressor");
     c.set("knee", 0.0);
-    // -6 dBFS peaks, threshold -18, 4:1 -> about 9 dB of reduction.
     let x = sine(1000.0, 0.5, secs(1.0));
     let [l, _] = c.run(&x, &x);
     let reduction = c.output("reduction");
@@ -307,7 +290,6 @@ fn compressor_reduces_above_threshold() {
     let out_db = db(peak(tail(&l, 200)));
     assert!((out_db - -15.0).abs() < 1.5, "output {out_db} dB");
 
-    // Below the threshold nothing happens.
     let quiet = sine(1000.0, db_to_amp(-30.0), secs(1.0));
     let [l, _] = c.run(&quiet, &quiet);
     assert!(c.output("reduction") < 0.1);
@@ -321,7 +303,7 @@ fn delay_echoes_after_the_set_time() {
     d.set("time", 10.0);
     d.set("mix", 100.0);
     d.set("feedback", 0.0);
-    d.render(secs(2.0)); // let the delay time glide to 10 ms
+    d.render(secs(2.0));
     let mut x = vec![0.0; secs(0.05)];
     x[0] = 1.0;
     let [l, r] = d.run(&x, &x);
@@ -349,8 +331,6 @@ fn reverb_adds_a_tail_and_mix_zero_is_dry() {
     let (l, y) = (tail(&l, 50), tail(&y, 50));
     assert!(l.iter().zip(y).all(|(o, i)| (o - i).abs() < 1e-3), "dry only");
 }
-
-// ---- Sources ----------------------------------------------------------------
 
 #[test]
 fn tone_generator_plays_at_level_and_frequency() {
@@ -382,7 +362,7 @@ fn synth_plays_notes_and_releases_them() {
     let world = world();
     let mut s = Plug::new(&world, "synth");
     assert!(s.inst.midi_output_names.is_empty());
-    s.set("wave", 0.0); // sine
+    s.set("wave", 0.0);
     s.set("release", 50.0);
     let (first, _) = s.midi_block(&[ev(0, [0x90, 69, 127])]);
     assert!(peak(&first[0]) > 0.0);
@@ -395,7 +375,6 @@ fn synth_plays_notes_and_releases_them() {
     let [l, _] = s.render(secs(0.2));
     assert!(peak(tail(&l, 50)) < 1e-6, "released");
 
-    // Sustain pedal keeps the note after its key is released.
     s.midi_block(&[ev(0, [0xB0, 64, 127]), ev(1, [0x90, 60, 100]), ev(2, [0x80, 60, 0])]);
     let [l, _] = s.render(secs(0.3));
     assert!(peak(tail(&l, 50)) > 0.01, "sustained");
@@ -403,8 +382,6 @@ fn synth_plays_notes_and_releases_them() {
     let [l, _] = s.render(secs(0.2));
     assert!(peak(tail(&l, 50)) < 1e-6, "pedal up releases");
 }
-
-// ---- MIDI -------------------------------------------------------------------
 
 #[test]
 fn midi_switch_reports_every_output() {
@@ -427,7 +404,6 @@ fn midi_switch_follows_the_selected_output() {
     assert_eq!(s.output("activity_1"), 1.0);
     assert_eq!(s.output("activity_3"), 0.0);
 
-    // Switching releases the held note and the pedal on Out 1.
     s.set("output", 3.0);
     let (_, outs) = s.midi_block(&[ev(5, [0x90, 64, 90])]);
     assert_eq!(outs[0], vec![(0, vec![0x80, 60, 0]), (0, vec![0xB0, 64, 0])]);
@@ -435,7 +411,6 @@ fn midi_switch_follows_the_selected_output() {
     assert_eq!(outs[2], vec![(5, vec![0x90, 64, 90])]);
     assert_eq!(s.output("activity_3"), 1.0);
 
-    // Activity lights go out 150 ms after the last message.
     for _ in 0..30 {
         s.midi_block(&[]);
     }
@@ -466,13 +441,11 @@ fn midi_utility_transposes_remaps_and_keeps_note_offs_matched() {
     assert_eq!(outs[0], vec![(4, vec![0x92, 72, 50])]);
     assert_eq!(m.output("activity"), 1.0);
 
-    // Settings change while the note is held: its off still matches its on.
     m.set("transpose", 0.0);
     m.set("out_channel", 0.0);
     let (_, outs) = m.midi_block(&[ev(0, [0x80, 60, 0]), ev(1, [0xB0, 7, 100])]);
     assert_eq!(outs[0], vec![(0, vec![0x82, 72, 0]), (1, vec![0xB0, 7, 100])]);
 
-    // Input channel filter and fixed velocity.
     m.set("in_channel", 2.0);
     m.set("fixed_velocity", 90.0);
     let (_, outs) = m.midi_block(&[ev(0, [0x90, 60, 10]), ev(1, [0x91, 62, 10])]);

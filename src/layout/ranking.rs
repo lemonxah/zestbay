@@ -1,20 +1,5 @@
-// SPDX-License-Identifier: MIT
-//
-// Ranking phase: assign each node to a column/layer.
-//
-//   1. Break cycles (reverse DFS back edges; self-loops are dropped earlier).
-//   2. Longest-path ranking from sources.
-//   3. Tightening: nodes with more outgoing than incoming edges are pulled
-//      right toward their successors (shortens total edge length); source
-//      devices/streams stay in the leftmost column.
-//   4. Sink placement: sink-only nodes go to the rightmost column of their
-//      component; isolated sinks go to the global last column.
-//   5. Balancing of pass-through nodes into less populated columns.
-
 use super::graph::{LayoutGraph, LayoutNodeKind};
 
-/// Assign ranks to all nodes.  Afterwards every edge goes from a lower to a
-/// strictly higher rank and the minimum rank is 0.
 pub fn compute_ranks(graph: &mut LayoutGraph) {
     let n = graph.nodes.len();
     if n == 0 {
@@ -38,8 +23,6 @@ pub fn compute_ranks(graph: &mut LayoutGraph) {
         .all(|e| graph.nodes[e.to_node].rank > graph.nodes[e.from_node].rank));
 }
 
-/// Longest-path ranking: rank(v) = length of the longest path from a source.
-/// Returns the nodes in topological order.
 fn initial_ranking(graph: &mut LayoutGraph) -> Vec<usize> {
     let generations = graph.topological_generations();
     for (gen_idx, generation) in generations.iter().enumerate() {
@@ -58,10 +41,6 @@ fn is_sink_kind(kind: LayoutNodeKind) -> bool {
     matches!(kind, LayoutNodeKind::Sink | LayoutNodeKind::StreamInput)
 }
 
-/// Pull nodes with out-degree > in-degree as far right as their successors
-/// allow.  Moving such a node right by one shortens more edges than it
-/// lengthens, so this strictly reduces total edge length.  Processed in
-/// reverse topological order so successors are final first.
 fn tighten_ranks(graph: &mut LayoutGraph, topo_order: &[usize]) {
     for &v in topo_order.iter().rev() {
         let in_deg = graph.in_edges[v].len();
@@ -83,7 +62,6 @@ fn tighten_ranks(graph: &mut LayoutGraph, topo_order: &[usize]) {
     }
 }
 
-/// Shift each connected component so its minimum rank is 0.
 fn normalize_components(graph: &mut LayoutGraph) {
     for component in graph.connected_components() {
         let min_rank = component.iter().map(|&i| graph.nodes[i].rank).min().unwrap_or(0);
@@ -95,10 +73,6 @@ fn normalize_components(graph: &mut LayoutGraph) {
     }
 }
 
-/// Sink-only nodes (incoming but no outgoing edges) go to the last column of
-/// their component — except plugins with an unconnected output, which stay
-/// next to their input.  Isolated sink devices/streams go to the global last
-/// column, other isolated nodes to column 0.
 fn place_sinks(graph: &mut LayoutGraph) {
     let mut isolated_sinks = Vec::new();
     for component in graph.connected_components() {
@@ -131,57 +105,137 @@ fn place_sinks(graph: &mut LayoutGraph) {
     }
 }
 
-/// Balance: nodes with equal in-degree and out-degree can be moved within
-/// their feasible range to less populated columns to reduce column height
-/// variance.
-fn balance(graph: &mut LayoutGraph) {
-    let max_rank = graph.nodes.iter().map(|n| n.rank).max().unwrap_or(0);
-    let mut col_sizes: Vec<usize> = vec![0; (max_rank + 1) as usize];
-    for node in &graph.nodes {
-        col_sizes[node.rank as usize] += 1;
+const MAX_BALANCE_PASSES: usize = 8;
+const MIN_RELATIVE_GAIN: f64 = 1e-9;
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ColumnLoad {
+    count: usize,
+    content: f64,
+}
+
+impl ColumnLoad {
+    fn with(self, height: f64) -> Self {
+        Self {
+            count: self.count + 1,
+            content: self.content + height,
+        }
     }
 
-    for i in 0..graph.nodes.len() {
-        let in_deg = graph.in_edges[i].len();
-        let out_deg = graph.out_edges[i].len();
-        if in_deg != out_deg || in_deg == 0 {
-            continue;
+    fn without(self, height: f64) -> Self {
+        Self {
+            count: self.count - 1,
+            content: self.content - height,
         }
+    }
 
-        let current_rank = graph.nodes[i].rank;
-        let min_from_preds = graph.in_edges[i]
-            .iter()
-            .map(|&ei| graph.nodes[graph.edges[ei].from_node].rank + 1)
-            .max()
-            .unwrap_or(0);
-        let max_from_succs = graph.out_edges[i]
-            .iter()
-            .map(|&ei| graph.nodes[graph.edges[ei].to_node].rank - 1)
-            .min()
-            .unwrap_or(max_rank);
+    fn unevenness(self, margin_y: f64) -> f64 {
+        let stacked = self.content + self.count.saturating_sub(1) as f64 * margin_y;
+        stacked * stacked
+    }
+}
 
-        if min_from_preds > max_from_succs {
-            continue;
+fn balance(graph: &mut LayoutGraph) {
+    let Some(first_rank) = graph.nodes.iter().map(|n| n.rank).min() else {
+        return;
+    };
+    let last_rank = graph.nodes.iter().map(|n| n.rank).max().unwrap_or(first_rank);
+    let mut loads = vec![ColumnLoad::default(); (last_rank - first_rank + 1) as usize];
+    for node in &graph.nodes {
+        let load = &mut loads[(node.rank - first_rank) as usize];
+        *load = load.with(node.height);
+    }
+
+    let mut movable: Vec<usize> = (0..graph.nodes.len())
+        .filter(|&v| !graph.in_edges[v].is_empty() && !graph.out_edges[v].is_empty())
+        .collect();
+    movable.sort_by(|&a, &b| {
+        graph.nodes[b]
+            .height
+            .total_cmp(&graph.nodes[a].height)
+            .then(a.cmp(&b))
+    });
+
+    for _ in 0..MAX_BALANCE_PASSES {
+        let mut moved = false;
+        for &v in &movable {
+            let Some(target) = less_crowded_rank(graph, &loads, first_rank, v) else {
+                continue;
+            };
+            let height = graph.nodes[v].height;
+            let from = (graph.nodes[v].rank - first_rank) as usize;
+            let to = (target - first_rank) as usize;
+            loads[from] = loads[from].without(height);
+            loads[to] = loads[to].with(height);
+            graph.nodes[v].rank = target;
+            moved = true;
         }
-
-        let best_rank = (min_from_preds..=max_from_succs)
-            .min_by_key(|&r| col_sizes[r as usize])
-            .unwrap_or(current_rank);
-
-        if col_sizes[best_rank as usize] < col_sizes[current_rank as usize] {
-            col_sizes[current_rank as usize] -= 1;
-            col_sizes[best_rank as usize] += 1;
-            graph.nodes[i].rank = best_rank;
+        if !moved {
+            break;
         }
     }
 }
 
-/// Insert dummy nodes for all long-span edges (rank difference > 1).
-/// After this, every edge spans exactly one rank.
+fn less_crowded_rank(
+    graph: &LayoutGraph,
+    loads: &[ColumnLoad],
+    first_rank: i32,
+    v: usize,
+) -> Option<i32> {
+    let RankWindow { lowest, highest } = non_lengthening_window(graph, v)?;
+    let current = graph.nodes[v].rank;
+    let height = graph.nodes[v].height;
+    let margin_y = graph.config.margin_y;
+    let from = loads[(current - first_rank) as usize];
+    if from.count < 2 {
+        return None;
+    }
+    let from_before = from.unevenness(margin_y);
+    let from_after = from.without(height).unevenness(margin_y);
+
+    (lowest..=highest)
+        .filter(|&rank| rank != current)
+        .filter_map(|rank| {
+            let to = loads[(rank - first_rank) as usize];
+            let before = from_before + to.unevenness(margin_y);
+            let after = from_after + to.with(height).unevenness(margin_y);
+            let gain = before - after;
+            (gain > before * MIN_RELATIVE_GAIN).then_some((rank, gain))
+        })
+        .min_by(|a, b| {
+            b.1.total_cmp(&a.1)
+                .then((a.0 - current).abs().cmp(&(b.0 - current).abs()))
+                .then(a.0.cmp(&b.0))
+        })
+        .map(|(rank, _)| rank)
+}
+
+struct RankWindow {
+    lowest: i32,
+    highest: i32,
+}
+
+fn non_lengthening_window(graph: &LayoutGraph, v: usize) -> Option<RankWindow> {
+    let current = graph.nodes[v].rank;
+    let after_inputs = graph.in_edges[v]
+        .iter()
+        .map(|&ei| graph.nodes[graph.edges[ei].from_node].rank + 1)
+        .max()?;
+    let before_outputs = graph.out_edges[v]
+        .iter()
+        .map(|&ei| graph.nodes[graph.edges[ei].to_node].rank - 1)
+        .min()?;
+    let inputs = graph.in_edges[v].len();
+    let outputs = graph.out_edges[v].len();
+    Some(RankWindow {
+        lowest: if outputs > inputs { current } else { after_inputs },
+        highest: if inputs > outputs { current } else { before_outputs },
+    })
+}
+
 pub fn insert_dummy_nodes(graph: &mut LayoutGraph) {
     let original_edge_count = graph.edges.len();
 
-    // Collect edges that need splitting (to avoid borrow issues)
     type SplitEdge = (usize, usize, usize, i32, i32, Option<u32>, Option<u32>);
     let mut to_split: Vec<SplitEdge> = Vec::new();
     for ei in 0..original_edge_count {
@@ -201,16 +255,13 @@ pub fn insert_dummy_nodes(graph: &mut LayoutGraph) {
         }
     }
 
-    // Process each long edge: insert dummy nodes at each intermediate rank
     for (original_ei, from_node, to_node, from_rank, to_rank, from_port, to_port) in to_split {
         let mut prev_node = from_node;
 
         for rank in (from_rank + 1)..to_rank {
             let dummy_idx = graph.add_dummy_node(rank);
 
-            // Edge from previous to dummy
             if prev_node == from_node {
-                // First dummy: create edge with original from_port
                 let ei = graph.edges.len();
                 graph.edges.push(super::graph::LayoutEdge {
                     id: 0,
@@ -228,7 +279,6 @@ pub fn insert_dummy_nodes(graph: &mut LayoutGraph) {
             prev_node = dummy_idx;
         }
 
-        // Final edge: from last dummy to original target
         let ei = graph.edges.len();
         graph.edges.push(super::graph::LayoutEdge {
             id: 0,
@@ -240,8 +290,6 @@ pub fn insert_dummy_nodes(graph: &mut LayoutGraph) {
         graph.out_edges[prev_node].push(ei);
         graph.in_edges[to_node].push(ei);
 
-        // Remove the original long edge from adjacency lists
-        // (mark it as disconnected by removing from out/in lists)
         graph.out_edges[from_node].retain(|&e| e != original_ei);
         graph.in_edges[to_node].retain(|&e| e != original_ei);
     }
@@ -258,7 +306,6 @@ mod tests {
 
     #[test]
     fn cycle_nodes_spread_across_columns() {
-        // S → A → B → C → A, C → T
         let nodes = vec![
             (1, "S".into(), "Source", 100.0, 50.0),
             (2, "A".into(), "Plugin", 100.0, 50.0),
@@ -295,7 +342,6 @@ mod tests {
 
     #[test]
     fn sink_moves_to_component_last_column_and_generator_tightens() {
-        // Mic → EQ → Comp → Spk, Mic → Rec (sink), Gen(plugin, no inputs) → Comp
         let nodes = vec![
             (1, "Mic".into(), "Source", 100.0, 50.0),
             (2, "EQ".into(), "Plugin", 100.0, 50.0),
@@ -318,5 +364,272 @@ mod tests {
         assert_eq!(r[3], 3);
         assert_eq!(r[4], 3, "sink-only stream goes to last column");
         assert_eq!(r[5], 1, "generator pulled next to its successor");
+    }
+
+    fn graph_with_ranks(
+        specs: &[(&'static str, f64, i32)],
+        wires: &[(usize, usize)],
+    ) -> LayoutGraph {
+        let nodes = specs
+            .iter()
+            .enumerate()
+            .map(|(i, &(kind, height, _))| (i as u32, String::new(), kind, 100.0, height))
+            .collect();
+        let links = wires
+            .iter()
+            .enumerate()
+            .map(|(i, &(a, b))| (i as u32, a as u32, 0, b as u32, 0))
+            .collect();
+        let mut g = LayoutGraph::new(nodes, vec![], links, LayoutConfig::default());
+        for (node, spec) in g.nodes.iter_mut().zip(specs) {
+            node.rank = spec.2;
+        }
+        g
+    }
+
+    fn total_length(graph: &LayoutGraph) -> i32 {
+        graph
+            .edges
+            .iter()
+            .map(|e| graph.nodes[e.to_node].rank - graph.nodes[e.from_node].rank)
+            .sum()
+    }
+
+    fn used_ranks(graph: &LayoutGraph) -> std::collections::BTreeSet<i32> {
+        graph.nodes.iter().map(|n| n.rank).collect()
+    }
+
+    fn total_unevenness(graph: &LayoutGraph) -> f64 {
+        let mut loads: std::collections::BTreeMap<i32, ColumnLoad> = Default::default();
+        for node in &graph.nodes {
+            let load = loads.entry(node.rank).or_default();
+            *load = load.with(node.height);
+        }
+        loads
+            .values()
+            .map(|load| load.unevenness(graph.config.margin_y))
+            .sum()
+    }
+
+    const CHAIN_WITH_BYPASS: [(usize, usize); 6] = [(0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 4)];
+
+    fn chain_with_bypass(chain_heights: [f64; 3], bypass_height: f64) -> LayoutGraph {
+        let [a, b, c] = chain_heights;
+        graph_with_ranks(
+            &[
+                ("Source", 50.0, 0),
+                ("Plugin", a, 1),
+                ("Plugin", b, 2),
+                ("Plugin", c, 3),
+                ("Sink", 50.0, 4),
+                ("Plugin", bypass_height, 1),
+            ],
+            &CHAIN_WITH_BYPASS,
+        )
+    }
+
+    #[test]
+    fn balance_accepts_empty_and_unwired_graphs() {
+        let mut empty = graph_with_ranks(&[], &[]);
+        balance(&mut empty);
+        assert!(empty.nodes.is_empty());
+
+        let mut unwired = graph_with_ranks(
+            &[("Plugin", 500.0, 0), ("Plugin", 500.0, 0), ("Sink", 10.0, 1)],
+            &[],
+        );
+        balance(&mut unwired);
+        assert_eq!(ranks(&unwired), vec![0, 0, 1]);
+    }
+
+    #[test]
+    fn balance_moves_free_node_to_least_crowded_column() {
+        let mut g = chain_with_bypass([100.0, 20.0, 60.0], 80.0);
+        let length = total_length(&g);
+        balance(&mut g);
+        assert_eq!(ranks(&g), vec![0, 1, 2, 3, 4, 2]);
+        assert_eq!(total_length(&g), length);
+
+        let mut g = chain_with_bypass([100.0, 60.0, 20.0], 80.0);
+        balance(&mut g);
+        assert_eq!(ranks(&g)[5], 3);
+    }
+
+    #[test]
+    fn balance_reaches_through_the_whole_ranking() {
+        let mut g = chain_with_bypass([100.0, 20.0, 60.0], 80.0);
+        for node in &mut g.nodes {
+            node.rank = 0;
+        }
+        compute_ranks(&mut g);
+        assert_eq!(ranks(&g), vec![0, 1, 2, 3, 4, 2]);
+    }
+
+    #[test]
+    fn balance_prefers_the_nearest_of_equal_columns() {
+        let mut g = chain_with_bypass([100.0, 20.0, 20.0], 80.0);
+        balance(&mut g);
+        assert_eq!(ranks(&g)[5], 2);
+    }
+
+    #[test]
+    fn balance_keeps_node_in_place_on_a_tie() {
+        let mut g = chain_with_bypass([60.0, 60.0, 60.0], 60.0);
+        balance(&mut g);
+        assert_eq!(ranks(&g)[5], 1);
+
+        let mut g = chain_with_bypass([33.3, 33.3, 33.3], 77.7);
+        balance(&mut g);
+        assert_eq!(ranks(&g)[5], 1);
+    }
+
+    #[test]
+    fn balance_weighs_heights_rather_than_node_counts() {
+        let mut specs = vec![
+            ("Source", 50.0, 0),
+            ("Plugin", 400.0, 1),
+            ("Plugin", 20.0, 2),
+            ("Sink", 50.0, 3),
+            ("Plugin", 60.0, 1),
+            ("Plugin", 20.0, 2),
+            ("Plugin", 20.0, 2),
+        ];
+        let wires = [
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (0, 4),
+            (4, 3),
+            (1, 5),
+            (5, 3),
+            (1, 6),
+            (6, 3),
+        ];
+        let mut g = graph_with_ranks(&specs, &wires);
+        balance(&mut g);
+        assert_eq!(ranks(&g)[4], 2);
+
+        specs[1].1 = 40.0;
+        let mut g = graph_with_ranks(&specs, &wires);
+        balance(&mut g);
+        assert_eq!(ranks(&g)[4], 1);
+    }
+
+    #[test]
+    fn balance_never_lengthens_wires() {
+        let specs = [
+            ("Source", 50.0, 0),
+            ("Plugin", 300.0, 1),
+            ("Plugin", 10.0, 2),
+            ("Sink", 50.0, 3),
+            ("Plugin", 80.0, 1),
+        ];
+        let chain = [(0, 1), (1, 2), (2, 3)];
+
+        let more_inputs = [&chain[..], &[(0, 4), (0, 4), (4, 3)]].concat();
+        let mut g = graph_with_ranks(&specs, &more_inputs);
+        balance(&mut g);
+        assert_eq!(ranks(&g)[4], 1);
+
+        let more_outputs = [&chain[..], &[(0, 4), (4, 3), (4, 3)]].concat();
+        let mut g = graph_with_ranks(&specs, &more_outputs);
+        let length = total_length(&g);
+        balance(&mut g);
+        assert_eq!(ranks(&g)[4], 2);
+        assert_eq!(total_length(&g), length - 1);
+    }
+
+    #[test]
+    fn balance_leaves_sources_sinks_and_isolated_nodes() {
+        let mut g = graph_with_ranks(
+            &[
+                ("Source", 50.0, 0),
+                ("Plugin", 20.0, 1),
+                ("Plugin", 20.0, 2),
+                ("Sink", 50.0, 3),
+                ("Source", 400.0, 0),
+                ("Plugin", 400.0, 3),
+                ("Plugin", 400.0, 0),
+            ],
+            &[(0, 1), (1, 2), (2, 3), (4, 3), (0, 5)],
+        );
+        let before = ranks(&g);
+        balance(&mut g);
+        assert_eq!(ranks(&g), before);
+    }
+
+    #[test]
+    fn balance_never_empties_a_column() {
+        let mut g = graph_with_ranks(
+            &[("Source", 50.0, 0), ("Plugin", 80.0, 1), ("Sink", 50.0, 3)],
+            &[(0, 1), (1, 2)],
+        );
+        balance(&mut g);
+        assert_eq!(ranks(&g), vec![0, 1, 3]);
+    }
+
+    #[test]
+    fn balance_invariants_hold_on_random_graphs() {
+        let mut state = 0x5eed_1234_u64;
+        let mut next = move |bound: u64| {
+            state = state.wrapping_mul(0x5851_f42d_4c95_7f2d).wrapping_add(0x1405_7b7e_f767_814f);
+            (state >> 33) % bound
+        };
+        let mut moved_nodes = 0;
+        for _ in 0..200 {
+            let count = 5 + next(60) as usize;
+            let kinds = ["Plugin", "Source", "Sink", "Plugin", "Plugin"];
+            let specs: Vec<(&'static str, f64, i32)> = (0..count)
+                .map(|_| (kinds[next(5) as usize], 30.0 + next(400) as f64 * 0.7, 0))
+                .collect();
+            let wires: Vec<(usize, usize)> = (0..count + next(count as u64) as usize)
+                .map(|_| {
+                    let a = next(count as u64) as usize;
+                    let b = next(count as u64) as usize;
+                    (a.min(b), a.max(b))
+                })
+                .collect();
+            let mut g = graph_with_ranks(&specs, &wires);
+            let order = initial_ranking(&mut g);
+            tighten_ranks(&mut g, &order);
+            normalize_components(&mut g);
+            place_sinks(&mut g);
+
+            let before = ranks(&g);
+            let length = total_length(&g);
+            let used = used_ranks(&g);
+            let unevenness = total_unevenness(&g);
+            balance(&mut g);
+
+            assert!(g
+                .edges
+                .iter()
+                .all(|e| g.nodes[e.to_node].rank > g.nodes[e.from_node].rank));
+            assert!(total_length(&g) <= length);
+            assert!(used.is_subset(&used_ranks(&g)));
+            assert_eq!(used.first(), used_ranks(&g).first());
+            assert_eq!(used.last(), used_ranks(&g).last());
+            for (v, &rank) in before.iter().enumerate() {
+                if g.in_edges[v].is_empty() || g.out_edges[v].is_empty() {
+                    assert_eq!(g.nodes[v].rank, rank);
+                } else if g.nodes[v].rank != rank {
+                    moved_nodes += 1;
+                }
+            }
+            if ranks(&g) == before {
+                assert_eq!(total_unevenness(&g), unevenness);
+            } else {
+                assert!(total_unevenness(&g) < unevenness);
+            }
+
+            let after = ranks(&g);
+            let mut again = graph_with_ranks(&specs, &wires);
+            for (node, &rank) in again.nodes.iter_mut().zip(&before) {
+                node.rank = rank;
+            }
+            balance(&mut again);
+            assert_eq!(ranks(&again), after);
+        }
+        assert!(moved_nodes > 50);
     }
 }

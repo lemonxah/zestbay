@@ -1,9 +1,6 @@
 import QtQuick
 import QtQuick.Controls
 
-// Slider: 4 px groove (strong unfilled, accent filled), 14 px accent handle
-// with a 2 px surface ring. flush = no side padding, so the groove lines up
-// with min/max labels placed under it.
 Slider {
     id: control
     property bool flush: false

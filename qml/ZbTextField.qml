@@ -1,9 +1,6 @@
 import QtQuick
 import QtQuick.Controls
 
-// Plain text input (names, patterns): 32 px, sans 13, inset fill, strong
-// border; accent border + ring on focus. For search use ZbSearchField, for
-// numbers ZbValueField.
 TextField {
     id: control
     implicitHeight: Theme.controlHeight

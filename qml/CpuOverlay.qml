@@ -3,8 +3,6 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import ZestBay
 
-// CPU usage (spec §6.6): process CPU hero + legend, a 60 s log-scale chart of
-// process CPU and per-plugin DSP load, and the plugin DSP load table.
 ZbWindow {
     id: cpuOverlay
     title: "CPU usage"
@@ -16,24 +14,17 @@ ZbWindow {
 
     required property var controller
 
-    // ─── Data ───────────────────────────────────────────────────────────
-    readonly property int windowMs: 60000      // chart span (last 60 s)
-    readonly property int gapMs: 2500          // break a line across gaps longer than this
+    readonly property int windowMs: 60000
+    readonly property int gapMs: 2500
     readonly property int maxSlots: Theme.chartSeries.length
 
-    // Latest plugin snapshot, sorted by DSP % descending (table rows).
     property var pluginData: []
     property real totalPluginDsp: 0.0
 
-    // Built-in meters are one "Meters (N)" row (and one chart series);
-    // clicking it lists them underneath. The last poll is kept so the list
-    // can be rebuilt on a click without polling (polling takes the stats).
     property bool metersExpanded: false
-    property var lastRows: []      // non-meter rows + the meters row
+    property var lastRows: []
     property var lastMeters: []
 
-    // Table rows: the plugins and the meters row by DSP %, then (when
-    // expanded) the meters right under it, marked `child`.
     function buildRows() {
         var rows = []
         for (var i = 0; i < lastRows.length; i++) {
@@ -48,8 +39,6 @@ ZbWindow {
                 }
             }
         }
-        // A new array resets the list to the top; keep where the user
-        // scrolled to (clamped, in case the list got shorter).
         var keepY = pluginCpuList.contentY
         pluginData = rows
         var maxY = Math.max(0, rows.length * Theme.rowTable - pluginCpuList.height)
@@ -61,13 +50,6 @@ ZbWindow {
         buildRows()
     }
 
-    // Series state. Plain JS objects mutated in place; `revision` is bumped
-    // after every poll so bindings that read them re-evaluate.
-    //   series: { key, name, slot (-1 = folded into Other), points: [{t, v}],
-    //             latest, live }
-    // Slot 0 = process CPU, then plugins in order of first appearance. A
-    // plugin keeps its slot for the life of the window; beyond the chart's
-    // slots, plugins fold into one "Other" series.
     property var seriesByKey: ({})
     property var seriesOrder: []
     property int nextSlot: 1
@@ -87,8 +69,6 @@ ZbWindow {
         onActivated: cpuOverlay.visible = false
     }
 
-    // The only poller: get_plugin_cpu_json() takes the snapshots, so it must
-    // be read from exactly one place (refresh()).
     Timer {
         id: overlayRefreshTimer
         interval: 250
@@ -97,9 +77,6 @@ ZbWindow {
         onTriggered: cpuOverlay.refresh()
     }
 
-    // Smooth scrolling: redraw at ~30 fps with the time axis following the
-    // clock (one sample interval behind it, so the newest point slides in at
-    // the right edge instead of the chart jumping on every sample).
     property real viewT: 0
     property real hoverMouseX: -1
     Timer {
@@ -147,7 +124,6 @@ ZbWindow {
         try { hist = JSON.parse(controller.get_cpu_history()) || [] } catch (e) { hist = [] }
         var all = []
         try { all = JSON.parse(controller.get_plugin_cpu_json()) || [] } catch (e) { all = [] }
-        // Meters fold into one row: their summed load.
         var plugins = []
         var meters = []
         for (var a = 0; a < all.length; a++)
@@ -168,9 +144,6 @@ ZbWindow {
         for (var k = 0; k < seriesOrder.length; k++)
             seriesByKey[seriesOrder[k]].live = false
 
-        // Process CPU: the backend keeps an EMA sample per poll (percent of
-        // all cores). Take the newest; after a gap (window was hidden) backfill
-        // from the backend history, which is spaced by the poll interval.
         var proc = ensureSeries("cpu", "Process CPU", 0)
         var lastT = proc.points.length ? proc.points[proc.points.length - 1].t : 0
         if (now - lastT > gapMs && hist.length > 1) {
@@ -183,7 +156,6 @@ ZbWindow {
         }
         pushPoint(proc, now, hist.length ? (hist[hist.length - 1] || 0) : 0)
 
-        // Plugins: no history in the backend, so build it here per poll.
         var total = 0
         var otherSum = 0
         var anyOther = false
@@ -210,7 +182,6 @@ ZbWindow {
         if (anyOther)
             pushPoint(ensureSeries("other", "Other", -1), now, otherSum)
 
-        // Keep 60 s (plus one older point so lines reach the left edge).
         var cutoff = now - windowMs
         for (var j = 0; j < seriesOrder.length; j++) {
             var pts = seriesByKey[seriesOrder[j]].points
@@ -229,7 +200,6 @@ ZbWindow {
         chart.requestPaint()
     }
 
-    // Series drawn on the chart (process, plugin slots, then Other).
     function chartSeriesList(rev) {
         var list = []
         var other = null
@@ -256,7 +226,6 @@ ZbWindow {
         return us + " µs"
     }
 
-    // ─── Chart geometry (log y: 0.01 % … 100 %) ─────────────────────────
     readonly property real plotLeft: 44
     readonly property real plotRight: chart.width - 8
     readonly property real plotTop: 8
@@ -268,16 +237,15 @@ ZbWindow {
         return plotLeft + f * (plotRight - plotLeft)
     }
     function yFor(v) {
-        var lv = Math.log(Math.max(v, 0.01)) / Math.LN10   // -2 … 2
+        var lv = Math.log(Math.max(v, 0.01)) / Math.LN10
         lv = Math.min(2, lv)
         return plotBottom - (lv + 2) / 4 * (plotBottom - plotTop)
     }
 
-    // ─── Hover ──────────────────────────────────────────────────────────
     property bool hoverActive: false
     property real hoverX: 0
     property string hoverLabel: ""
-    property var hoverRows: []   // [{ name, color, value, text, y }]
+    property var hoverRows: []
 
     function nearestPoint(pts, t, tol) {
         var best = null
@@ -298,7 +266,6 @@ ZbWindow {
         hoverMouseX = mx
         var nowT = viewT > 0 ? viewT : lastPollT
         var t = nowT - (1 - (mx - plotLeft) / (plotRight - plotLeft)) * windowMs
-        // Snap to the nearest process sample so every series lines up.
         var proc = seriesByKey["cpu"]
         var snap = proc ? nearestPoint(proc.points, t, gapMs) : null
         if (snap) t = snap.t
@@ -320,7 +287,6 @@ ZbWindow {
         chart.requestPaint()
     }
 
-    // ─── Layout ─────────────────────────────────────────────────────────
     ColumnLayout {
         anchors.fill: parent
         anchors.leftMargin: Theme.dialogPadding
@@ -333,7 +299,6 @@ ZbWindow {
             title: "CPU usage"
         }
 
-        // Hero: process CPU + legend chips.
         RowLayout {
             id: heroRow
             Layout.fillWidth: true
@@ -369,7 +334,6 @@ ZbWindow {
 
             Item { Layout.fillWidth: true }
 
-            // Legend: right-aligned block, wraps to more lines when needed.
             Item {
                 id: legend
                 readonly property var items: cpuOverlay.chartSeriesList(cpuOverlay.revision)
@@ -378,7 +342,6 @@ ZbWindow {
                                                 Math.max(0, heroRow.width - heroCol.implicitWidth - 2 * heroRow.spacing))
                 Layout.preferredHeight: legendFlow.implicitHeight
 
-                // Single-line width, used only to size the block.
                 Row {
                     id: legendMeasure
                     visible: false
@@ -401,7 +364,6 @@ ZbWindow {
             }
         }
 
-        // Chart card.
         ZbCard {
             Layout.fillWidth: true
             Layout.preferredHeight: 220 + 12 + 8 + 2
@@ -430,7 +392,6 @@ ZbWindow {
                     ctx.font = Theme.sizeMono + "px \"" + Theme.fontMono + "\""
                     ctx.lineWidth = 1
 
-                    // Gridlines (log decades); the 0.01 % line is the baseline.
                     ctx.textAlign = "left"
                     ctx.textBaseline = "middle"
                     var gv = cpuOverlay.gridValues
@@ -445,7 +406,6 @@ ZbWindow {
                         ctx.fillText(gv[g] + "%", 0, gy)
                     }
 
-                    // x-axis: -60 s … now, every 15 s.
                     ctx.textBaseline = "bottom"
                     for (var k = 0; k <= 4; k++) {
                         var tx = L + k / 4 * (R - L)
@@ -453,7 +413,6 @@ ZbWindow {
                         ctx.fillText(k === 4 ? "now" : (-60 + 15 * k) + " s", tx, height)
                     }
 
-                    // Series: 2 px, round joins, clipped to the plot.
                     ctx.save()
                     ctx.beginPath()
                     ctx.rect(L, 0, R - L, height)
@@ -481,7 +440,6 @@ ZbWindow {
                     }
                     ctx.restore()
 
-                    // Hover: dashed crosshair + markers with a surface ring.
                     if (cpuOverlay.hoverActive) {
                         var hx = Math.round(cpuOverlay.hoverX) + 0.5
                         ctx.lineWidth = 1
@@ -518,7 +476,6 @@ ZbWindow {
                     }
                 }
 
-                // Tooltip (bible tooltip style; rows = series dot + name + value).
                 Item {
                     id: tip
                     visible: cpuOverlay.hoverActive
@@ -531,7 +488,6 @@ ZbWindow {
                     }
                     y: Math.max(0, Math.min(chartMouse.mouseY - height / 2, chart.height - height))
 
-                    // Soft menu shadow (no effects module on Qt 6.4).
                     Repeater {
                         model: 3
                         Rectangle {
@@ -600,7 +556,6 @@ ZbWindow {
             }
         }
 
-        // Plugin DSP load.
         RowLayout {
             Layout.fillWidth: true
             Layout.topMargin: 20
@@ -626,14 +581,12 @@ ZbWindow {
             Layout.fillHeight: true
             clip: true
 
-            // Column widths shared by header and rows.
             readonly property int colDsp: 72
             readonly property int colTime: 64
             readonly property int colShare: 150
             readonly property int colGap: 12
             readonly property int padX: Theme.cardPadding
 
-            // Header row 30, mono 10 uppercase.
             Item {
                 id: tableHeader
                 x: 1
@@ -664,7 +617,6 @@ ZbWindow {
                 }
             }
 
-            // Scroll area: the bar sits beside the rows, inside the card.
             Item {
                 anchors.top: tableHeader.bottom
                 anchors.left: parent.left
@@ -707,9 +659,6 @@ ZbWindow {
                             anchors.rightMargin: tableCard.padX
                             spacing: tableCard.colGap
 
-                            // Plugin: series dot + name (+ async worker line).
-                            // The meters row has a chevron; meters under it
-                            // are indented, with a hollow dot.
                             RowLayout {
                                 Layout.fillWidth: true
                                 Layout.preferredWidth: 0
@@ -769,7 +718,6 @@ ZbWindow {
                                 text: cpuOverlay.formatUs(row.plugin.lastUs || 0)
                             }
 
-                            // Share of total: 6 px bar + mono %.
                             RowLayout {
                                 Layout.fillWidth: false
                                 Layout.preferredWidth: tableCard.colShare - 10
@@ -838,7 +786,6 @@ ZbWindow {
         }
     }
 
-    // ─── Local building blocks ──────────────────────────────────────────
     Component {
         id: legendChip
         Row {
@@ -881,7 +828,6 @@ ZbWindow {
         elide: Text.ElideRight
     }
 
-    // Table numbers: mono 12 (the caption size), right-aligned.
     component NumberCell: Text {
         horizontalAlignment: Text.AlignRight
         font.family: Theme.fontMono

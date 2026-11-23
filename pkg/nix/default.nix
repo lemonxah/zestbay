@@ -20,15 +20,10 @@
 
 let
   root = ../..;
-  # cxx-qt finds every Qt tool and library through one `qmake -query`, but
-  # nixpkgs splits Qt into a store path per module (qmlcachegen lives in
-  # qtdeclarative, not qtbase), so give it one merged Qt prefix
   qtEnv = qt6.env "zestbay-qt-${qt6.qtbase.version}" [ qt6.qtdeclarative ];
 in
 rustPlatform.buildRustPackage {
   pname = "zestbay";
-  # Version and crates come from the repo itself, so nothing here needs
-  # updating per release
   version = (lib.importTOML (root + "/Cargo.toml")).package.version;
 
   src = lib.fileset.toSource {
@@ -43,14 +38,12 @@ rustPlatform.buildRustPackage {
       (root + "/fonts")
       (root + "/images")
       (root + "/LICENSE")
-      # Sources of the Zestins plugins, which the LV2 host tests build
       (root + "/zestins")
     ];
   };
 
   cargoLock.lockFile = root + "/Cargo.lock";
 
-  # Build the entire workspace (main binary + UI bridge)
   cargoBuildFlags = [ "--workspace" ];
 
   nativeBuildInputs = [
@@ -74,21 +67,17 @@ rustPlatform.buildRustPackage {
     dbus
   ];
 
-  # The LADSPA tests compile a fixture plugin (src/ladspa/test_plugin.c)
-  # against the system ladspa.h
   checkInputs = [ ladspa-header ];
 
   env = {
     LIBCLANG_PATH = "${clang.cc.lib}/lib";
   };
 
-  # Set here rather than in env: qtbase's setup hook exports its own QMAKE
   preBuild = ''
     export QMAKE=${qtEnv}/bin/qmake
   '';
 
   postInstall = ''
-    # zestbay looks for the UI bridge in <prefix>/lib/zestbay
     install -Dm755 $out/bin/zestbay-ui-bridge $out/lib/zestbay/zestbay-ui-bridge
     rm $out/bin/zestbay-ui-bridge
 

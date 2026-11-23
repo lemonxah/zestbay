@@ -52,7 +52,6 @@ impl UridMapper {
         inner.id_to_uri.get(urid as usize).cloned()
     }
 
-    /// Snapshot all URI→URID mappings for IPC transfer to bridge process.
     pub fn snapshot(&self) -> Vec<(String, u32)> {
         let inner = self.inner.lock().unwrap();
         inner

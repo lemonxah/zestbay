@@ -2,7 +2,6 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// About (spec §6.5): centred mark, wordmark and tagline over a key/value card.
 ZbWindow {
     id: aboutWindow
     title: "About ZestBay"
@@ -18,11 +17,8 @@ ZbWindow {
     readonly property string websiteUrl: "https://lemonxah.github.io/zestbay/"
     readonly property string issuesUrl: sourceUrl + "/issues"
 
-    // New-issue pages on GitHub. They open in the browser for the person to
-    // review and submit; nothing is sent from here. A bug report starts with
-    // the version, install kind and Qt version filled in.
     function bugReportUrl() {
-        var body = "ZestBay " + controller.get_app_version() + " (" + controller.get_install_kind() + "), Qt " + controller.get_qt_version()
+        var body = "ZestBay " + controller.get_app_version() + ", Qt " + controller.get_qt_version()
             + "\n\n**What happened?**\n\n\n**What did you expect?**\n\n\n**How can it be reproduced?**\n"
         return issuesUrl + "/new?labels=bug&body=" + encodeURIComponent(body)
     }
@@ -30,7 +26,6 @@ ZbWindow {
         var body = "**What would you like ZestBay to do?**\n\n\n**Why would it help?**\n"
         return issuesUrl + "/new?labels=enhancement&title=" + encodeURIComponent("Feature request: ") + "&body=" + encodeURIComponent(body)
     }
-    // No Theme token for this yet (spec §6.5): info-grid label column 96 px.
     readonly property int labelColumnWidth: 96
 
     function open() {
@@ -45,7 +40,6 @@ ZbWindow {
         onActivated: aboutWindow.visible = false
     }
 
-    // One key/value row; hairlines under each column (not under the last row).
     component InfoRow: ColumnLayout {
         id: infoRow
         property string label
@@ -97,7 +91,6 @@ ZbWindow {
         }
     }
 
-    // An accent link that opens in the browser.
     component LinkText: Text {
         id: linkText
         property string url
@@ -123,8 +116,6 @@ ZbWindow {
         anchors.rightMargin: Theme.dialogPadding
         spacing: 0
 
-        // The full logo with the wordmark: the only place the name is part
-        // of the logo (bible §7).
         ZbLogo {
             Layout.alignment: Qt.AlignHCenter
             size: 132
@@ -163,10 +154,6 @@ ZbWindow {
                     mono: true
                 }
                 InfoRow {
-                    label: "Install"
-                    value: aboutWindow.controller.get_install_kind()
-                }
-                InfoRow {
                     label: "Qt"
                     value: aboutWindow.controller.get_qt_version()
                     mono: true
@@ -203,7 +190,6 @@ ZbWindow {
             }
         }
 
-        // Both go to the GitHub issues, in the browser.
         RowLayout {
             Layout.fillWidth: true
             Layout.topMargin: Theme.grid * 4

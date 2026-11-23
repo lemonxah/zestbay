@@ -1,16 +1,3 @@
-//! CLAP plugin GUI support — embedded X11 window mode.
-//!
-//! CLAP plugins that support the `clap.gui` extension are embedded in a
-//! host-created X11 parent window.  Most Linux CLAP plugins (JUCE-based like
-//! Surge XT) only support embedded mode (`is_api_supported(X11, false)`).
-//!
-//! Threading: the PipeWire thread is the CLAP main thread.  GUI calls,
-//! timer callbacks (`clap.timer-support`), fd callbacks
-//! (`clap.posix-fd-support`) and host-window X11 events are all serviced on
-//! it from [`idle`], which the PipeWire manager calls on every timer tick.
-//! There are no helper threads, so once [`close_clap_gui`] (or the plugin
-//! instance's drop) returns no callback for that plugin can still run.
-
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -22,29 +9,18 @@ use super::x11::HostWindow;
 
 type ClapPlugin = clap_sys::plugin::clap_plugin;
 
-// ---------------------------------------------------------------------------
-// GUI state registry
-// ---------------------------------------------------------------------------
-
-/// Per-instance state for an open CLAP GUI (always embedded X11).
 struct ClapGuiState {
     plugin: *const ClapPlugin,
     gui_ext: *const clap_sys::ext::gui::clap_plugin_gui,
     window: HostWindow,
     event_tx: std::sync::mpsc::Sender<crate::pipewire::PwEvent>,
-    /// Resize requested by the plugin, applied on the main thread.
     pending_size: Option<(u32, u32)>,
-    /// The plugin reported its GUI closed (`clap_host_gui.closed`).
     close_requested: bool,
-    /// The plugin reported `closed(was_destroyed = true)`: it already
-    /// destroyed its GUI, so the host must not hide/destroy it again.
     plugin_destroyed: bool,
 }
 
 unsafe impl Send for ClapGuiState {}
 
-/// Global registry of open CLAP GUIs, keyed by instance_id.
-/// Never hold this lock while calling into plugin code.
 static OPEN_GUIS: Mutex<Option<HashMap<PluginInstanceId, ClapGuiState>>> = Mutex::new(None);
 
 fn with_guis<F, R>(f: F) -> R
@@ -55,10 +31,6 @@ where
     let map = lock.get_or_insert_with(HashMap::new);
     f(map)
 }
-
-// ---------------------------------------------------------------------------
-// Timer / fd registries (serviced from `idle` on the main thread)
-// ---------------------------------------------------------------------------
 
 struct TimerEntry {
     plugin: *const ClapPlugin,
@@ -76,7 +48,6 @@ struct FdEntry {
 
 unsafe impl Send for FdEntry {}
 
-/// Timer IDs are globally unique across all plugin instances.
 static TIMERS: Mutex<Option<HashMap<u32, TimerEntry>>> = Mutex::new(None);
 static NEXT_TIMER_ID: Mutex<u32> = Mutex::new(1);
 static FDS: Mutex<Vec<FdEntry>> = Mutex::new(Vec::new());
@@ -98,19 +69,11 @@ where
     f(&mut lock)
 }
 
-/// Remove every timer and fd registered by `plugin`.  After this returns no
-/// timer/fd callback for the plugin will be invoked.
 pub(crate) fn remove_plugin_callbacks(plugin: *const ClapPlugin) {
     with_timers(|t| t.retain(|_, e| !std::ptr::eq(e.plugin, plugin)));
     with_fds(|f| f.retain(|e| !std::ptr::eq(e.plugin, plugin)));
 }
 
-// ---------------------------------------------------------------------------
-// Main-thread pump
-// ---------------------------------------------------------------------------
-
-/// Service all CLAP GUIs, timers and fd handlers.  Must be called on the
-/// PipeWire (CLAP main) thread on every manager tick.
 pub fn idle() {
     if !threading::is_main_thread() {
         return;
@@ -168,7 +131,6 @@ fn fire_timers() {
         due
     });
     for id in due {
-        // Re-check: an earlier callback may have unregistered this timer.
         let Some(plugin) = with_timers(|t| t.get(&id).map(|e| e.plugin)) else {
             continue;
         };
@@ -253,15 +215,6 @@ unsafe fn plugin_ext<'a, T>(plugin: *const ClapPlugin, id: &std::ffi::CStr) -> O
     }
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-/// Open a CLAP plugin GUI in an embedded X11 window.
-///
-/// # Safety
-/// `plugin_ptr` must be a valid, live CLAP plugin pointer.  Must be called
-/// on the PipeWire (CLAP main) thread.
 pub unsafe fn open_clap_gui(
     plugin_ptr: *const ClapPlugin,
     instance_id: PluginInstanceId,
@@ -338,8 +291,6 @@ pub unsafe fn open_clap_gui(
         };
         let x11_window = window.window;
 
-        // Register before set_parent/show so resize requests made during
-        // embedding find the window.
         with_guis(|m| {
             m.insert(
                 instance_id,
@@ -387,9 +338,6 @@ pub unsafe fn open_clap_gui(
     }
 }
 
-/// Hide/destroy the plugin GUI.  Timers and fds the plugin registered stay:
-/// it may use them for non-GUI work and must unregister GUI ones itself.
-/// They are force-removed when the instance is dropped.
 unsafe fn destroy_plugin_gui(
     plugin: *const ClapPlugin,
     gui: &clap_sys::ext::gui::clap_plugin_gui,
@@ -405,8 +353,6 @@ unsafe fn destroy_plugin_gui(
     }
 }
 
-/// Destroy the plugin GUI, then the host window.  The state must already
-/// be removed from the registry.
 unsafe fn teardown(state: ClapGuiState) {
     if !state.plugin_destroyed {
         unsafe {
@@ -416,11 +362,6 @@ unsafe fn teardown(state: ClapGuiState) {
     drop(state.window);
 }
 
-/// Close a CLAP plugin GUI if it is open.
-///
-/// Must be called from the main (PW) thread.  When this returns the GUI is
-/// destroyed and no GUI callback for the plugin can still run.  Timers/fds
-/// the plugin still has registered stay until the instance is dropped.
 pub fn close_clap_gui(
     instance_id: PluginInstanceId,
     event_tx: &std::sync::mpsc::Sender<crate::pipewire::PwEvent>,
@@ -434,7 +375,6 @@ pub fn close_clap_gui(
     }
 }
 
-/// Close any GUI still open for `plugin` (used when the instance is dropped).
 pub(crate) fn force_close_for_plugin(plugin: *const ClapPlugin) {
     let found = with_guis(|m| {
         let id = m
@@ -453,7 +393,6 @@ pub(crate) fn force_close_for_plugin(plugin: *const ClapPlugin) {
     }
 }
 
-/// Check if a CLAP GUI is currently open for this instance.
 #[allow(dead_code)]
 pub fn is_gui_open(instance_id: PluginInstanceId) -> bool {
     with_guis(|m| m.contains_key(&instance_id))
@@ -468,12 +407,6 @@ unsafe fn host_plugin(host: *const clap_sys::host::clap_host) -> *const ClapPlug
         hd.plugin
     }
 }
-
-// ===========================================================================
-// Host extension statics — returned via host_get_extension
-// ===========================================================================
-
-// ---- clap_host_gui ----
 
 pub static CLAP_HOST_GUI: clap_sys::ext::gui::clap_host_gui = clap_sys::ext::gui::clap_host_gui {
     resize_hints_changed: Some(host_gui_resize_hints_changed),
@@ -505,7 +438,6 @@ unsafe extern "C" fn host_gui_request_resize(
         if on_main {
             unsafe { s.window.resize(width, height) };
         } else {
-            // Applied by the next `idle` on the thread that owns the Display.
             s.pending_size = Some((width, height));
         }
         true
@@ -533,16 +465,12 @@ unsafe extern "C" fn host_gui_closed(host: *const clap_sys::host::clap_host, was
     });
 }
 
-// ---- clap_host_timer_support ----
-
 pub static CLAP_HOST_TIMER_SUPPORT: clap_sys::ext::timer_support::clap_host_timer_support =
     clap_sys::ext::timer_support::clap_host_timer_support {
         register_timer: Some(host_timer_register),
         unregister_timer: Some(host_timer_unregister),
     };
 
-/// Resolve the plugin for a host callback (host_data, or the plugin whose
-/// GUI is being created on this thread).
 unsafe fn callback_plugin(host: *const clap_sys::host::clap_host) -> *const ClapPlugin {
     let p = unsafe { host_plugin(host) };
     if !p.is_null() {
@@ -599,8 +527,6 @@ unsafe extern "C" fn host_timer_unregister(
     removed
 }
 
-// ---- clap_host_posix_fd_support ----
-
 pub static CLAP_HOST_POSIX_FD_SUPPORT: clap_sys::ext::posix_fd_support::clap_host_posix_fd_support =
     clap_sys::ext::posix_fd_support::clap_host_posix_fd_support {
         register_fd: Some(host_register_fd),
@@ -652,8 +578,6 @@ unsafe extern "C" fn host_unregister_fd(host: *const clap_sys::host::clap_host, 
     })
 }
 
-// ---- clap_host_thread_check ----
-
 pub static CLAP_HOST_THREAD_CHECK: clap_sys::ext::thread_check::clap_host_thread_check =
     clap_sys::ext::thread_check::clap_host_thread_check {
         is_main_thread: Some(host_is_main_thread),
@@ -668,15 +592,11 @@ unsafe extern "C" fn host_is_audio_thread(_host: *const clap_sys::host::clap_hos
     threading::is_audio_thread()
 }
 
-// ---- Thread-local for current plugin being opened ----
-
 thread_local! {
     static CURRENT_PLUGIN_PTR: std::cell::Cell<*const ClapPlugin> =
         const { std::cell::Cell::new(std::ptr::null()) };
 }
 
-/// Set the current plugin pointer for the duration of GUI creation.
-/// This allows timer registration during gui.create() to find the plugin.
 pub fn with_current_plugin<F, R>(plugin: *const ClapPlugin, f: F) -> R
 where
     F: FnOnce() -> R,

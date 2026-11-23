@@ -1,4 +1,3 @@
-# Zestins: ZestBay's own LV2 plugins, built from the zestins/ folder.
 { lib
 , stdenv
 , pkg-config
@@ -11,7 +10,6 @@ let
 in
 stdenv.mkDerivation {
   pname = "zestins";
-  # Ships with ZestBay's version
   version = (lib.importTOML (root + "/Cargo.toml")).package.version;
 
   src = lib.fileset.toSource {

@@ -1,20 +1,7 @@
-// SPDX-License-Identifier: MIT
-//
-// Y-coordinate assignment using the Brandes-Köpf algorithm.
-// Runs in 4 directions (left→right / right→left alignment, each compacted
-// downward and upward) and combines them for a balanced layout.
-//
-// Reference: Brandes & Köpf, 2001 (doi:10.1007/3-540-45848-4_3), with the
-// class-shift computation done as a separate longest-path pass over the
-// class separation constraints (cf. Brandes, Walter & Zink, 2020 erratum).
-//
-// Expects every edge to span exactly one column (dummy nodes inserted).
-
 use std::collections::HashSet;
 
 use super::graph::{LayoutDirection, LayoutGraph};
 
-/// Assign y-coordinates to all nodes using Brandes-Köpf.
 pub fn assign_y_coords(graph: &mut LayoutGraph) {
     let n = graph.nodes.len();
     if n == 0 {
@@ -34,12 +21,8 @@ pub fn assign_y_coords(graph: &mut LayoutGraph) {
                 .map(|&(rl, up)| single(graph, rl, up))
                 .collect();
 
-            // Align all 4 layouts to the same origin before averaging.
             balance_layouts(&mut layouts);
 
-            // Average of the two median candidates.  Every candidate layout is
-            // overlap-free and separation is preserved by order statistics, so
-            // the combined layout is overlap-free too.
             (0..n)
                 .map(|i| {
                     let mut values: Vec<f64> = layouts.iter().map(|l| l[i]).collect();
@@ -59,12 +42,6 @@ pub fn assign_y_coords(graph: &mut LayoutGraph) {
     }
 }
 
-/// Mark type-1 conflicts: non-inner edges that cross an inner segment
-/// (dummy→dummy edge).  Inner segments get alignment priority so long edges
-/// stay straight.  Returns the set of marked (from_node, to_node) pairs.
-///
-/// Linear per layer pair: `l` continues from where the previous segment
-/// stopped instead of rescanning from 0.
 fn mark_type1_conflicts(graph: &LayoutGraph) -> HashSet<(usize, usize)> {
     let mut marked = HashSet::new();
 
@@ -114,8 +91,6 @@ fn mark_type1_conflicts(graph: &LayoutGraph) -> HashSet<(usize, usize)> {
     marked
 }
 
-/// Per-direction working state.  Columns are stored in "local" vertical order
-/// (reversed for upward compaction) so the core algorithm is always top-down.
 struct Bk<'a> {
     graph: &'a LayoutGraph,
     cols: Vec<Vec<usize>>,
@@ -160,14 +135,11 @@ impl<'a> Bk<'a> {
         }
     }
 
-    /// Minimum distance between the tops of `a` and `b`, where `a` directly
-    /// precedes `b` in local order.  Physically the upper node's height counts.
     fn delta(&self, a: usize, b: usize) -> f64 {
         let upper = if self.up { b } else { a };
         self.graph.nodes[upper].height + self.margin_y
     }
 
-    /// Neighbours of `v` in the previously swept column, sorted by local position.
     fn sweep_neighbors(&self, v: usize, right_to_left: bool, prev_col: usize) -> Vec<usize> {
         let g = self.graph;
         let mut nbrs: Vec<usize> = if right_to_left {
@@ -253,8 +225,6 @@ impl<'a> Bk<'a> {
         }
     }
 
-    /// Place every block relative to its class, then separate the classes.
-    /// Returns top-down local y per node (all finite).
     fn vertical_compaction(&mut self) -> Vec<f64> {
         let n = self.graph.nodes.len();
         for v in 0..n {
@@ -266,7 +236,6 @@ impl<'a> Bk<'a> {
         let rel = |s: &Self, v: usize| s.y[s.root[v]].unwrap_or(0.0);
         let class = |s: &Self, v: usize| s.sink[s.root[v]];
 
-        // Class separation constraints: shift[cb] >= shift[ca] + weight.
         let mut out: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
         let mut indeg = vec![0usize; n];
         for col in &self.cols {
@@ -281,7 +250,6 @@ impl<'a> Bk<'a> {
             }
         }
 
-        // Longest path over the class DAG (Kahn, deterministic FIFO order).
         let mut shift = vec![0.0f64; n];
         let mut queue: std::collections::VecDeque<usize> =
             (0..n).filter(|&c| self.sink[c] == c && indeg[c] == 0).collect();
@@ -297,9 +265,6 @@ impl<'a> Bk<'a> {
                     }
                 }
             }
-            // Defensive: a cyclic class graph should not occur; if it does,
-            // force the lowest pending class through (the sweep below keeps
-            // the result overlap-free).
             match (0..n).find(|&c| self.sink[c] == c && !done[c]) {
                 Some(c) => {
                     indeg[c] = 0;
@@ -311,7 +276,6 @@ impl<'a> Bk<'a> {
 
         let mut ys: Vec<f64> = (0..n).map(|v| rel(self, v) + shift[class(self, v)]).collect();
 
-        // Safety net: guarantee separation within every column.
         for col in &self.cols {
             for win in col.windows(2) {
                 let (a, b) = (win[0], win[1]);
@@ -325,8 +289,6 @@ impl<'a> Bk<'a> {
     }
 }
 
-/// Compute y-coordinates (top-left) for a single direction.
-/// Returns a vec of y values indexed by node index.
 fn compute_single_direction(
     graph: &LayoutGraph,
     marked: &HashSet<(usize, usize)>,
@@ -343,7 +305,6 @@ fn compute_single_direction(
     }
 }
 
-/// Align all layouts so their minimum y is 0 before median averaging.
 fn balance_layouts(layouts: &mut [Vec<f64>]) {
     for layout in layouts.iter_mut() {
         let min_val = layout.iter().copied().fold(f64::INFINITY, f64::min);

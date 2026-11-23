@@ -1,21 +1,9 @@
-//! Per-plugin parameter presets.
-//!
-//! A preset is a named set of parameter values for one plugin (keyed by the
-//! plugin URI). Each plugin can have one default preset, which is applied to
-//! new instances of it. Which preset an instance has selected is remembered
-//! per instance (by its stable id), so the node can show it after a restart.
-//!
-//! Only parameter values are stored. Plugin state that isn't exposed as a
-//! parameter (sample paths, internal patches) is not part of a preset.
-
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use crate::lv2::Lv2ParameterValue;
 use crate::lv2::state::StateEntry;
 
-/// Where a preset's copies of an LV2 plugin's state files live. The name is
-/// hex-encoded so distinct preset names never share a directory.
 fn preset_files_dir(plugin_uri: &str, name: &str) -> PathBuf {
     let encoded: String = name.bytes().map(|b| format!("{b:02x}")).collect();
     dirs::config_dir()
@@ -26,10 +14,6 @@ fn preset_files_dir(plugin_uri: &str, name: &str) -> PathBuf {
         .join(encoded)
 }
 
-/// Snapshot the files an LV2 instance keeps in its state directory (made via
-/// the state makePath/mapPath features) into the preset, so the preset can be
-/// applied to any other instance. State entries refer to those files by
-/// paths relative to the instance's directory.
 pub fn store_preset_files(plugin_uri: &str, scope: &str, name: &str) {
     let src = crate::lv2::state::instance_state_dir(plugin_uri, scope);
     let dst = preset_files_dir(plugin_uri, name);
@@ -39,8 +23,6 @@ pub fn store_preset_files(plugin_uri: &str, scope: &str, name: &str) {
     }
 }
 
-/// Copy a preset's state files into an instance's state directory, before
-/// the preset's state is restored into it.
 pub fn restore_preset_files(plugin_uri: &str, scope: &str, name: &str) {
     let src = preset_files_dir(plugin_uri, name);
     let dst = crate::lv2::state::instance_state_dir(plugin_uri, scope);
@@ -49,7 +31,6 @@ pub fn restore_preset_files(plugin_uri: &str, scope: &str, name: &str) {
     }
 }
 
-/// Remove a preset's stored state files.
 pub fn delete_preset_files(plugin_uri: &str, name: &str) {
     let _ = std::fs::remove_dir_all(preset_files_dir(plugin_uri, name));
 }
@@ -65,11 +46,8 @@ pub struct PresetParam {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Preset {
     pub params: Vec<PresetParam>,
-    /// LV2 plugin state (things that aren't parameters, such as the LSP
-    /// mixer's channel names). Empty for plugins without state.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lv2_state: Vec<StateEntry>,
-    /// User-chosen port names, by port name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub port_names: BTreeMap<String, String>,
 }
@@ -84,10 +62,8 @@ pub struct PluginPresets {
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default)]
 pub struct PresetStore {
-    /// By plugin URI.
     #[serde(default)]
     pub plugins: BTreeMap<String, PluginPresets>,
-    /// Instance stable id -> the preset it has selected.
     #[serde(default)]
     pub selected: HashMap<String, String>,
 }
@@ -97,7 +73,6 @@ impl PresetStore {
         self.plugins.is_empty() && self.selected.is_empty()
     }
 
-    /// Preset names for a plugin, sorted.
     pub fn names(&self, uri: &str) -> Vec<String> {
         self.plugins
             .get(uri)
@@ -123,8 +98,6 @@ impl PresetStore {
             .filter(|name| self.get(uri, name).is_some())
     }
 
-    /// Create the preset, or overwrite it if the name exists. Returns true
-    /// if it already existed.
     pub fn save(
         &mut self,
         uri: &str,
@@ -152,15 +125,12 @@ impl PresetStore {
             .is_some()
     }
 
-    /// Replace a preset's stored LV2 state (a fresher snapshot arrived after
-    /// the preset was saved).
     pub fn set_lv2_state(&mut self, uri: &str, name: &str, lv2_state: Vec<StateEntry>) {
         if let Some(p) = self.plugins.get_mut(uri).and_then(|p| p.presets.get_mut(name)) {
             p.lv2_state = lv2_state;
         }
     }
 
-    /// Store the port names a preset is saved with.
     pub fn set_port_names(&mut self, uri: &str, name: &str, port_names: &BTreeMap<String, String>) {
         if let Some(p) = self.plugins.get_mut(uri).and_then(|p| p.presets.get_mut(name)) {
             p.port_names = port_names.clone();
@@ -177,12 +147,8 @@ impl PresetStore {
                 self.plugins.remove(uri);
             }
         }
-        // Instances that had it selected need no cleanup: selected_name()
-        // ignores a selection whose preset no longer exists.
     }
 
-    /// Make `name` the plugin's default, or clear it with None. A name that
-    /// doesn't exist is ignored.
     pub fn set_default(&mut self, uri: &str, name: Option<&str>) {
         match name {
             Some(n) if self.get(uri, n).is_some() => {
@@ -209,33 +175,18 @@ impl PresetStore {
     }
 }
 
-/// Whether the instance's port names differ from the ones `preset` was
-/// saved with. A preset saved without port names leaves them alone, so it
-/// never differs.
 pub fn port_names_differ(preset: &Preset, port_names: &BTreeMap<String, String>) -> bool {
     !preset.port_names.is_empty() && preset.port_names != *port_names
 }
 
-/// The (port_index, value) pairs to apply `preset` to an instance with
-/// `params`. Parameters are matched by symbol, falling back to the port
-/// index when the symbol is empty. Parameters the instance doesn't have are
-/// skipped.
 pub fn values_to_apply(preset: &Preset, params: &[Lv2ParameterValue]) -> Vec<(usize, f32)> {
     ParamIndex::new(params).values_to_apply(preset)
 }
 
-/// An instance's parameters indexed by the keys a preset matches on, so a
-/// preset is compared in linear time (this runs for every plugin on every
-/// graph refresh, and plugins can have thousands of parameters).  Each
-/// lookup returns the first parameter in list order that matches, like a
-/// linear search would.
 struct ParamIndex<'a> {
     params: &'a [Lv2ParameterValue],
-    /// First parameter with each (non-empty) symbol.
     by_symbol: std::collections::HashMap<&'a str, usize>,
-    /// First parameter with each port index.
     by_port: std::collections::HashMap<usize, usize>,
-    /// First parameter without a symbol for each port index.
     unnamed_by_port: std::collections::HashMap<usize, usize>,
 }
 
@@ -258,8 +209,6 @@ impl<'a> ParamIndex<'a> {
         index
     }
 
-    /// The parameter a preset entry applies to: by symbol, or by port index
-    /// when either side has no symbol.
     fn target(&self, pp: &PresetParam) -> Option<&'a Lv2ParameterValue> {
         let pos = if pp.symbol.is_empty() {
             self.by_port.get(&pp.port_index).copied()
@@ -294,14 +243,10 @@ fn clamp_to(p: &Lv2ParameterValue, v: f32) -> f32 {
     if p.max > p.min { v.clamp(p.min, p.max) } else { v }
 }
 
-/// Whether applying `preset` would change the plugin's LV2 state.
 pub fn state_differs(preset: &Preset, current: &[StateEntry]) -> bool {
     !preset.lv2_state.is_empty() && preset.lv2_state != current
 }
 
-/// What differs between the instance and the preset, for display: one line
-/// per changed parameter ("Gain: 1.000 \u{2192} 0.982", preset value first),
-/// plus a line if the plugin state differs.
 pub fn differences(preset: &Preset, params: &[Lv2ParameterValue], state: &[StateEntry]) -> Vec<String> {
     let index = ParamIndex::new(params);
     let mut out: Vec<String> = index
@@ -321,7 +266,6 @@ pub fn differences(preset: &Preset, params: &[Lv2ParameterValue], state: &[State
     out
 }
 
-/// Whether the instance's current values or state differ from the preset.
 pub fn is_modified(preset: &Preset, params: &[Lv2ParameterValue], state: &[StateEntry]) -> bool {
     if state_differs(preset, state) {
         return true;
@@ -351,8 +295,6 @@ mod tests {
         }
     }
 
-    /// The linear search `ParamIndex` replaced; the index must agree with
-    /// it, including which of several candidates comes first.
     fn values_to_apply_linear(preset: &Preset, params: &[Lv2ParameterValue]) -> Vec<(usize, f32)> {
         preset
             .params
@@ -379,8 +321,6 @@ mod tests {
             port_index,
             value,
         };
-        // Named, unnamed, duplicated symbols, duplicated port indices, and
-        // an unnamed parameter sharing a port index with a named one.
         let params = vec![
             param(0, "gain", 1.0),
             param(1, "", 2.0),
@@ -492,7 +432,6 @@ mod tests {
         assert!(state_differs(preset, &[entry("urn:k", "Other")]));
         assert!(is_modified(preset, &[param(0, "gain", 2.0)], &[entry("urn:k", "Other")]));
         assert!(!is_modified(preset, &[param(0, "gain", 2.0)], &names));
-        // A preset with no stored state never reports a state difference.
         s.save("urn:p", "B", &[param(0, "gain", 2.0)], &[]);
         assert!(!state_differs(s.get("urn:p", "B").unwrap(), &names));
     }

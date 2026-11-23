@@ -2,8 +2,6 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// Patchbay Rules (spec §6.2): dialog shell, filterable card list of rules,
-// footer with secondary actions left and "Apply rules now" as the primary.
 ZbWindow {
     id: ruleEditor
     title: "Patchbay Rules"
@@ -21,8 +19,6 @@ ZbWindow {
     property var backups: []
     property string pendingRestoreFilename: ""
 
-    // Indices into `rules` that match the filter. The list model is the
-    // count (not the array) so reloading rules keeps the scroll position.
     readonly property var filteredIdx: computeFilter(rules, filterField.text)
     readonly property int enabledCount: {
         var n = 0;
@@ -53,7 +49,6 @@ ZbWindow {
         return out;
     }
 
-    // Badge tone for a rule endpoint type (bible §2.4).
     function typeTone(t) {
         if (t === "Source" || t === "Duplex") return "teal";
         if (t === "Sink") return "blue";
@@ -105,14 +100,12 @@ ZbWindow {
         }
     }
 
-    // Escape closes the window (open sub-dialogs handle Escape themselves).
     Shortcut {
         sequence: "Escape"
         enabled: ruleEditor.active && !ruleEditor.popupOpen
         onActivated: ruleEditor.close()
     }
 
-    // Sub-dialogs use ZbDialog (in-window modal shell).
     component BodyText: Text {
         font.family: Theme.fontSans
         font.pixelSize: Theme.sizeBody
@@ -127,8 +120,6 @@ ZbWindow {
         wrapMode: Text.WordWrap
     }
 
-    // Footer matching ZbDialog's, for sub-dialogs that need their own
-    // buttons (a primary that can be disabled, or extra actions on the left).
     component DialogFooter: Item {
         default property alias buttons: footerRow.data
         implicitHeight: footerRow.implicitHeight + 16 + 20
@@ -226,7 +217,6 @@ ZbWindow {
         }
     }
 
-    // ─── Add rule ───────────────────────────────────────────────────────
     ZbDialog {
         id: addRuleDialog
         title: "Add rule"
@@ -352,7 +342,6 @@ ZbWindow {
         }
     }
 
-    // ─── Backups ────────────────────────────────────────────────────────
     ZbDialog {
         id: backupsDialog
         title: "Backups"
@@ -360,7 +349,6 @@ ZbWindow {
 
         onAboutToShow: ruleEditor.loadBackups()
 
-        // List dialog: "Save backup…" left, Close right, no primary.
         footer: DialogFooter {
             ZbButton {
                 text: "Save backup…"
@@ -495,7 +483,6 @@ ZbWindow {
         }
     }
 
-    // ─── Main content ───────────────────────────────────────────────────
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: Theme.dialogPadding
@@ -576,8 +563,6 @@ ZbWindow {
                             Layout.preferredWidth: 0
                             spacing: 3
 
-                            // Line 1: source + badge → target + badge, one line;
-                            // the two names share what's left and elide.
                             Item {
                                 id: line1
                                 Layout.fillWidth: true

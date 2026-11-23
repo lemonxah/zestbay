@@ -3,7 +3,6 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import QtQml.Models
 
-// Add plugin dialog (design spec §6.3, 880x700).
 ZbWindow {
     id: pluginBrowser
     title: "Add plugin"
@@ -15,19 +14,12 @@ ZbWindow {
 
     required property var controller
 
-    // Emitted with the new plugin's display name when one is added.
     signal pluginAdded(string displayName)
-    // Emitted when the browser closes without adding a plugin.
     signal cancelled()
-    // Emitted with a subgraph template's file name when one is inserted.
     signal templateChosen(string file)
 
-    // Saved subgraphs can be inserted (not while inside a subgraph: no nesting).
     property bool allowSubgraphs: true
     property var templates: []
-    // Flatpak only: where users put their own plugins ("" when native).
-    readonly property string appPluginFolder: controller.get_app_plugin_folder()
-
     property bool addedPlugin: false
 
     Connections {
@@ -308,7 +300,6 @@ ZbWindow {
             }
         }
 
-        // Plugin list card
         ZbCard {
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -502,30 +493,6 @@ ZbWindow {
                     bottomMargin: Theme.scrollGap
                     rightMargin: Theme.scrollGap
                 }
-            }
-        }
-
-        // Flatpak: the sandbox only sees Flathub plugin packages and this
-        // app's own folder, so say where users' own plugins go.
-        RowLayout {
-            visible: pluginBrowser.appPluginFolder !== ""
-            Layout.fillWidth: true
-            spacing: 12
-
-            Text {
-                Layout.fillWidth: true
-                wrapMode: Text.WordWrap
-                font.family: Theme.fontSans
-                font.pixelSize: Theme.sizeCaption
-                color: Theme.textMuted
-                text: "Your own plugins (e.g. Pianoteq): put them in the lv2, vst (VST2), vst3, clap or ladspa folder inside "
-                      + pluginBrowser.appPluginFolder.replace(/^\/home\/[^\/]+/, "~")
-                      + ", then restart ZestBay. Free plugins are on Flathub as org.freedesktop.LinuxAudio.Plugins.*."
-            }
-            ZbButton {
-                text: "Open folder"
-                compact: true
-                onClicked: Qt.openUrlExternally("file://" + pluginBrowser.appPluginFolder)
             }
         }
     }

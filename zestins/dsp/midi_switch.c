@@ -1,15 +1,10 @@
-// Zestins MIDI Switch: all incoming MIDI goes to the output picked by the
-// Output control.  On a switch, notes still held and a pressed sustain pedal
-// are released on the previous output so nothing hangs there.  Each output
-// has an activity light that stays on for 150 ms after MIDI was sent.
-
 #include "dsp.h"
 
 typedef struct {
     void *port[SWITCH_N];
     LV2_URID atom_sequence, midi_event;
     uint32_t activity_hold;
-    uint32_t activity[SWITCH_OUTPUTS]; // samples left with the light on
+    uint32_t activity[SWITCH_OUTPUTS];
     int active;
     bool held[16][128];
     bool sustain[16];
@@ -43,7 +38,6 @@ static void activate(LV2_Handle h) {
     memset(s->activity, 0, sizeof(s->activity));
 }
 
-// Release what is still sounding on output `idx`.
 static void release_all(Switch *s, int idx, uint32_t capacity) {
     LV2_Atom_Sequence *out = s->port[SWITCH_OUT_1 + idx];
     for (int ch = 0; ch < 16; ch++) {
@@ -63,7 +57,6 @@ static void release_all(Switch *s, int idx, uint32_t capacity) {
     s->activity[idx] = s->activity_hold;
 }
 
-// Remember which notes and pedals are down on the active output.
 static void track(Switch *s, const uint8_t *msg, uint32_t size) {
     if (size < 3)
         return;

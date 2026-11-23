@@ -1,15 +1,9 @@
-// Zestins MIDI Utility: passes only the chosen input channel (or all),
-// moves messages to another channel, transposes notes and scales or fixes
-// note velocities.  A note's off always matches its on, even when the
-// settings change while it is held.
-
 #include "dsp.h"
 
 typedef struct {
     void *port[MUTIL_N];
     LV2_URID atom_sequence, midi_event;
     uint32_t activity_hold, activity;
-    // Where each sounding input note went: channel + 1 and note (0 = not sounding).
     uint8_t sent_channel[16][128];
     uint8_t sent_note[16][128];
 } MidiUtility;
@@ -45,8 +39,8 @@ static void run(LV2_Handle h, uint32_t n) {
     LV2_Atom_Sequence *out = m->port[MUTIL_MIDI_OUT];
     uint32_t capacity = midi_out_begin(out, m->atom_sequence);
 
-    int in_channel = (int)(ctl(m->port[MUTIL_IN_CHANNEL], 0) + 0.5f);   // 0 = all
-    int out_channel = (int)(ctl(m->port[MUTIL_OUT_CHANNEL], 0) + 0.5f); // 0 = same
+    int in_channel = (int)(ctl(m->port[MUTIL_IN_CHANNEL], 0) + 0.5f);
+    int out_channel = (int)(ctl(m->port[MUTIL_OUT_CHANNEL], 0) + 0.5f);
     int transpose = (int)lroundf(ctl(m->port[MUTIL_TRANSPOSE], 0));
     float velocity = ctl(m->port[MUTIL_VELOCITY], 100) * 0.01f;
     int fixed = (int)(ctl(m->port[MUTIL_FIXED_VELOCITY], 0) + 0.5f);
@@ -59,7 +53,6 @@ static void run(LV2_Handle h, uint32_t n) {
             const uint8_t *src = (const uint8_t *)(ev + 1);
             uint8_t status = src[0];
             if (status >= 0xF0 || ev->body.size > 3) {
-                // System messages pass untouched.
                 lv2_atom_sequence_append_event(out, capacity, ev);
                 continue;
             }
@@ -86,7 +79,7 @@ static void run(LV2_Handle h, uint32_t n) {
             } else if (is_off) {
                 uint8_t sent = m->sent_channel[ch][src[1]];
                 if (!sent)
-                    continue; // never sent (filtered or out of range)
+                    continue;
                 msg[0] = (uint8_t)(LV2_MIDI_MSG_NOTE_OFF | (sent - 1));
                 msg[1] = m->sent_note[ch][src[1]];
                 msg[2] = ev->body.size == 3 ? src[2] : 0;

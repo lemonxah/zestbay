@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 use super::graph::LayoutGraph;
 
 pub fn wrap_columns(graph: &mut LayoutGraph) {

@@ -18,27 +18,16 @@ use super::types::*;
 type StateEntry = crate::lv2::state::StateEntry;
 type InstanceMap<V> = RefCell<HashMap<u64, Rc<RefCell<V>>>>;
 
-/// Backoff between reconnection attempts after the PipeWire connection is lost.
 const RECONNECT_MIN: Duration = Duration::from_secs(1);
 const RECONNECT_MAX: Duration = Duration::from_secs(8);
-/// How long a reloaded/reconnected plugin's links are retried by port name.
 const RELINK_TIMEOUT_RELOAD: Duration = Duration::from_secs(10);
 const RELINK_TIMEOUT_RECONNECT: Duration = Duration::from_secs(30);
-/// Sandbox probes run in parallel on worker threads; instantiation stays in order.
 const MAX_PARALLEL_PROBES: usize = 4;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
-/// Minimum time between two sample-rate reloads of the same instance.
 const MIN_RELOAD_INTERVAL: Duration = Duration::from_secs(5);
-/// A plugin that needs a layout-changing restart again this soon after being
-/// (re)loaded counts as a rapid repeat.
 const RESTART_LOOP_WINDOW: Duration = Duration::from_secs(10);
-/// Rapid restart reloads allowed before the plugin is left silenced.
 const MAX_RAPID_RESTART_RELOADS: u32 = 2;
-/// How often parameter changes made inside plugins are reported.
 const PARAM_REPORT_INTERVAL: Duration = Duration::from_millis(100);
-/// A link requested this recently is assumed to be on its way: a second
-/// request for the same ports (e.g. patchbay rules and saved-link restore
-/// both connecting at startup) is dropped instead of failing with EEXIST.
 const LINK_REQUEST_GRACE: Duration = Duration::from_secs(1);
 
 enum InternalOp {
@@ -46,8 +35,6 @@ enum InternalOp {
         output_port_id: ObjectId,
         input_port_id: ObjectId,
     },
-    /// Destroy `link_id`, but only if it still connects the same two ports
-    /// (PipeWire reuses object IDs).
     Disconnect {
         link_id: ObjectId,
         output_port_id: ObjectId,
@@ -71,7 +58,6 @@ enum ProbeStatus {
     Done(crate::plugin::sandbox::ProbeOutcome),
 }
 
-/// Everything needed to (re-)create a plugin instance.
 struct AddRequest {
     plugin_uri: String,
     instance_id: u64,
@@ -81,17 +67,14 @@ struct AddRequest {
     stable_id: String,
     lv2_state: Vec<StateEntry>,
     plugin_state: Option<Vec<u8>>,
-    /// Parameter values applied after state restore (reload / reconnect).
     params: Vec<(usize, f32)>,
     bypassed: bool,
     enabled: bool,
-    /// Rate to instantiate at; None = current graph rate.
     sample_rate: Option<u32>,
     probe: ProbeStatus,
 }
 
 impl AddRequest {
-    /// Poll the sandbox probe. Returns true once a verdict is available.
     fn probe_finished(&mut self) -> bool {
         match &self.probe {
             ProbeStatus::Done(_) => true,
@@ -103,7 +86,6 @@ impl AddRequest {
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => false,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    // Probe worker died; fail open like exec_probe does.
                     self.probe = ProbeStatus::Done(crate::plugin::sandbox::ProbeOutcome::Ok);
                     true
                 }
@@ -112,8 +94,6 @@ impl AddRequest {
     }
 }
 
-/// Detects plugins that need a layout-changing restart (and so a reload)
-/// again right after every reload.
 #[derive(Default)]
 struct RestartLoopGuard {
     last_reload: Option<Instant>,
@@ -121,8 +101,6 @@ struct RestartLoopGuard {
 }
 
 impl RestartLoopGuard {
-    /// A restart-triggered reload is wanted at `now`.  Returns false when the
-    /// plugin keeps needing one right after being reloaded.
     fn allow(&mut self, now: Instant) -> bool {
         match self.last_reload {
             Some(t) if now.duration_since(t) < RESTART_LOOP_WINDOW => self.rapid += 1,
@@ -136,8 +114,6 @@ impl RestartLoopGuard {
     }
 }
 
-/// An LV2 instance whose in-process UI did not confirm closing in time. Its
-/// filter is gone; the instance stays alive until the UI is destroyed.
 struct Lv2Zombie {
     _instance: Rc<RefCell<crate::lv2::host::Lv2PluginInstance>>,
     pending: crate::lv2::ui::PendingUiClose,
@@ -152,12 +128,9 @@ struct PluginMeta {
     stable_id: String,
 }
 
-/// One side of a link to re-create by name after a plugin reload/reconnect.
 #[derive(Clone)]
 struct RelinkEnd {
-    /// Plugin endpoint: resolved through the instance's current node.
     instance_id: Option<u64>,
-    /// Last known node id (tried first for non-plugin endpoints).
     node_id: ObjectId,
     node_name: String,
     port_name: String,
@@ -170,19 +143,15 @@ struct PendingRelink {
     deadline: Instant,
 }
 
-/// State that survives a PipeWire reconnect.
 #[derive(Default)]
 struct Carryover {
     midi_mappings: crate::midi::MidiMappingTable,
     plugins: Vec<AddRequest>,
     relinks: Vec<PendingRelink>,
     lv2_zombies: Vec<Lv2Zombie>,
-    /// Owned nodes (subgraph boundaries, virtual devices) to re-create.
     owned: Vec<(String, OwnedNodeSpec)>,
 }
 
-/// Routes UI commands to the currently running PipeWire loop. While the
-/// connection is down, commands that still make sense later are deferred.
 #[derive(Default)]
 struct Router {
     tx: Option<pipewire::channel::Sender<PwCommand>>,
@@ -230,8 +199,6 @@ pub fn start(
         }
     });
 
-    // The tick also pumps CLAP/VST3 GUIs (this thread is their main thread),
-    // so keep it short enough for plugin windows to stay responsive.
     let tick = tick_interval_ms.clamp(1, 20);
     let cooldown = operation_cooldown_ms.max(1);
     let cmd_tx_for_pw = cmd_tx.clone();
@@ -286,7 +253,6 @@ pub fn start(
     (event_rx, cmd_tx)
 }
 
-/// Forget every object of a dead connection and tell the UI.
 fn clear_graph(graph: &GraphState, event_tx: &Sender<PwEvent>) {
     for link in graph.get_all_links() {
         let _ = event_tx.send(PwEvent::LinkRemoved(link.id));
@@ -332,7 +298,6 @@ fn run_pipewire_thread(
         event_tx: event_tx.clone(),
         cmd_tx: cmd_tx.clone(),
         urid_mapper: urid_mapper.clone(),
-        // Config defaults until the core info / process clock tell us more.
         default_rate: Cell::new(48000),
         live_rate: Cell::new(0),
         quantum: Cell::new(1024),
@@ -394,7 +359,6 @@ fn run_pipewire_thread(
             .error(move |id, seq, res, message| {
                 if id == pipewire::core::PW_ID_CORE && res == -libc::EPIPE {
                     log::error!("PipeWire connection lost: {}", message);
-                    // Stop routing commands into this loop before it stops.
                     router.lock().unwrap_or_else(|e| e.into_inner()).tx = None;
                     *lost.borrow_mut() = Some(format!("PipeWire connection lost ({})", message));
                     mainloop.quit();
@@ -427,8 +391,6 @@ fn run_pipewire_thread(
         move |cmd| host.handle_command(cmd)
     });
 
-    // Re-create what the previous connection had, then replay commands that
-    // arrived while disconnected (in order).
     {
         let mut ops = host.pending_ops.borrow_mut();
         for req in carry.plugins.drain(..) {
@@ -485,7 +447,6 @@ fn run_pipewire_thread(
         .unwrap_or_else(|| "PipeWire main loop stopped".to_string()))
 }
 
-/// All state owned by the PipeWire thread for one connection.
 struct Host {
     graph: Arc<GraphState>,
     context: ContextRc,
@@ -494,11 +455,8 @@ struct Host {
     event_tx: Sender<PwEvent>,
     cmd_tx: Sender<PwCommand>,
     urid_mapper: Arc<crate::lv2::urid::UridMapper>,
-    /// `default.clock.rate` from the core properties (config default).
     default_rate: Cell<u32>,
-    /// Rate actually observed on a running filter's process clock (0 = unknown).
     live_rate: Cell<u32>,
-    /// `default.clock.quantum`, passed to LV2 as the nominal block length.
     quantum: Cell<u32>,
     operation_cooldown: Duration,
 
@@ -517,25 +475,18 @@ struct Host {
     midi_mapping_table: RefCell<crate::midi::MidiMappingTable>,
 
     pending_ops: RefCell<VecDeque<InternalOp>>,
-    /// (output port, input port) → when a link between them was requested.
     requested_links: RefCell<HashMap<(ObjectId, ObjectId), Instant>>,
     relinks: RefCell<Vec<PendingRelink>>,
     last_reload: RefCell<HashMap<u64, Instant>>,
     restart_guards: RefCell<HashMap<u64, RestartLoopGuard>>,
-    /// Kept parked (silent) after restart-reloading too often.
     silenced: RefCell<HashSet<u64>>,
     lv2_zombies: RefCell<Vec<Lv2Zombie>>,
-    /// Parameter values last reported to the UI, per instance.
     reported_params: RefCell<HashMap<u64, Vec<(usize, f32)>>>,
-    /// Last LV2 state that saved successfully per instance. A plugin whose
-    /// save fails during a reload falls back to this instead of coming back
-    /// with its state wiped.
     last_lv2_state: RefCell<HashMap<u64, Vec<crate::lv2::state::StateEntry>>>,
     last_param_report: Cell<Instant>,
     last_label_report: Cell<Instant>,
     last_op_time: Cell<Instant>,
     changes_pending: Cell<bool>,
-    /// Owned nodes by key, with the spec they were created from.
     owned: RefCell<HashMap<String, (OwnedNodeSpec, OwnedNode)>>,
 }
 
@@ -547,25 +498,16 @@ impl Host {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Registry
-    // -----------------------------------------------------------------------
-
     fn on_global(&self, global: &GlobalObject<&DictRef>) {
         match global.type_ {
             ObjectType::Node => {
                 if let Some(node) = parse_node(global) {
-                    // PluginAdded is sent once per instantiation by the
-                    // plugin's filter (drain_events), not from here.
-
-                    // filter out nodes with no names by default
                     let hide = crate::pipewire::HIDE_UNNAMED_NODES
                         .load(std::sync::atomic::Ordering::Relaxed);
                     if hide && node.name.is_empty() {
                         return;
                     }
 
-                    // filter out the PulseAudio Volume Control nodes
                     if node.name == "PulseAudio Volume Control" {
                         return;
                     }
@@ -607,9 +549,6 @@ impl Host {
     }
 
     fn on_global_remove(&self, id: ObjectId) {
-        // PipeWire destroys links together with their ports/nodes, so links
-        // dropped here are only forgotten — never destroyed by us (the ID may
-        // already belong to a new object).
         if self.graph.remove_node(id).is_some() {
             for link_id in self.graph.cleanup_node(id) {
                 let _ = self.event_tx.send(PwEvent::LinkRemoved(link_id));
@@ -631,10 +570,6 @@ impl Host {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Commands
-    // -----------------------------------------------------------------------
-
     fn handle_command(&self, cmd: PwCommand) {
         match cmd {
             PwCommand::SetPluginParameter {
@@ -642,7 +577,6 @@ impl Host {
                 port_index,
                 value,
             } => {
-                // The clamped value the slot now holds.
                 let applied: Option<Option<f32>> =
                     if let Some(inst) = self.lv2_instances.borrow().get(&instance_id) {
                         let inst = inst.borrow_mut();
@@ -682,8 +616,6 @@ impl Host {
                                 }));
                     }
                     Some(None) => {}
-                    // Not instantiated yet (e.g. replayed after a reconnect):
-                    // apply it when the queued add runs.
                     None => {
                         self.patch_queued_add(instance_id, |req| {
                             upsert_param(&mut req.params, port_index, value)
@@ -752,7 +684,6 @@ impl Host {
                 port_index,
                 ..
             } => {
-                // Only one filter learns at a time.
                 self.set_learn_mode_all(false);
                 if let Some(filter) = self.lv2_filters.borrow().get(&instance_id) {
                     filter.set_learn_mode(true);
@@ -792,8 +723,6 @@ impl Host {
                 self.remove_midi_mappings_where(|m| m.target.instance_id == instance_id);
             }
             PwCommand::RemoveMidiMappingsForDevice { device_name } => {
-                // Learned mappings store the name reported with the captured
-                // CC (the plugin node's display name), so match on that.
                 let n = self.remove_midi_mappings_where(|m| m.source.device_name == device_name);
                 log::info!("Removed {} MIDI mapping(s) for device '{}'", n, device_name);
             }
@@ -855,8 +784,6 @@ impl Host {
         }
     }
 
-    /// Create, re-create or remove an owned node. An unchanged spec is a
-    /// no-op, so replayed commands don't churn the node.
     fn set_owned_node(&self, key: String, spec: Option<OwnedNodeSpec>) {
         let mut owned = self.owned.borrow_mut();
         if let (Some(new), Some((old, _))) = (&spec, owned.get(&key))
@@ -901,11 +828,8 @@ impl Host {
         }
     }
 
-    /// Apply `f` to the queued (not yet instantiated) add of `instance_id`,
-    /// if there is one.
     fn patch_queued_add(&self, instance_id: u64, f: impl FnOnce(&mut AddRequest)) {
         let mut ops = self.pending_ops.borrow_mut();
-        // The last queued add is the one that ends up live.
         let queued = ops.iter_mut().rev().find_map(|op| match op {
             InternalOp::AddPlugin(req) if req.instance_id == instance_id => Some(req),
             _ => None,
@@ -916,8 +840,6 @@ impl Host {
         }
     }
 
-    /// The plugin is not loaded this session; the UI keeps its saved
-    /// configuration.  Sends `PluginSkipped` + a non-fatal `PluginError`.
     fn skip_plugin(&self, instance_id: u64, reason: &str) {
         let _ = self
             .event_tx
@@ -966,7 +888,6 @@ impl Host {
                 output_port_id,
                 input_port_id,
             } => {
-                // A reconnect right after this must not be taken for a duplicate.
                 self.requested_links
                     .borrow_mut()
                     .remove(&(output_port_id, input_port_id));
@@ -1011,7 +932,6 @@ impl Host {
                                 fatal: true,
                             }));
                     } else {
-                        // Timeouts and load failures may be transient.
                         self.skip_plugin(req.instance_id, &format!("It {}", outcome.describe()));
                     }
                     return;
@@ -1032,9 +952,6 @@ impl Host {
             }
             InternalOp::OpenPluginUI { instance_id } => self.open_plugin_ui(instance_id),
             InternalOp::ClosePluginUI { instance_id } => {
-                // The instance stays alive, so an unconfirmed close is harmless.
-                // The LV2 close waits for the GTK thread; skip it for
-                // instances that cannot have an LV2 window.
                 if !self.is_non_lv2_instance(instance_id) {
                     let _ = crate::lv2::ui::close_plugin_ui(instance_id);
                 }
@@ -1045,17 +962,11 @@ impl Host {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Timer
-    // -----------------------------------------------------------------------
-
     fn tick(&self) {
         let now = Instant::now();
 
         self.drain_filter_events();
         self.report_param_changes(now);
-        // Channel names are LSP KVT strings rather than numeric parameters.
-        // Snapshot them on the control loop; the UI persists changed labels.
         if now.duration_since(self.last_label_report.get()) >= Duration::from_secs(1) {
             self.last_label_report.set(now);
             for (&instance_id, instance) in self.lv2_instances.borrow().iter() {
@@ -1076,9 +987,6 @@ impl Host {
         self.release_lv2_zombies();
         self.check_sample_rates(now);
 
-        // Link and UI operations are cheap: run them right away instead of
-        // queueing them behind plugin adds (and their probes).  A UI op for
-        // an instance with an add/remove still queued keeps its place.
         let quick_ops: Vec<InternalOp> = {
             let mut ops = self.pending_ops.borrow_mut();
             let mut quick = Vec::new();
@@ -1114,8 +1022,6 @@ impl Host {
         self.start_probes();
         self.resolve_relinks(now);
 
-        // Plugin operations: one per cooldown, strictly in queue order. An add
-        // whose sandbox probe is still running holds back everything after it.
         if now.duration_since(self.last_op_time.get()) >= self.operation_cooldown {
             let ready = match self.pending_ops.borrow_mut().front_mut() {
                 None => false,
@@ -1138,17 +1044,11 @@ impl Host {
         }
     }
 
-    /// CLAP/VST3 main-thread work: GUI timers/fds/X11 events, plugin
-    /// callbacks, controller sync and restart requests. This thread is the
-    /// plugins' main thread, so this must run on every tick.
     fn pump_plugin_hosts(&self, now: Instant) {
         crate::clap::ui::idle();
         crate::vst3::ui::idle();
         crate::vst2::ui::idle();
 
-        // A failed restart parks the instance (audio thread excluded) until
-        // it is dropped, so a parked instance is reloaded on every tick
-        // until that succeeds (or the loop guard gives up).
         let mut parked: Vec<u64> = Vec::new();
         let clap: Vec<(u64, Rc<RefCell<crate::clap::host::ClapPluginInstance>>)> = self
             .clap_instances
@@ -1204,9 +1104,6 @@ impl Host {
         }
     }
 
-    /// Reload an instance a failed restart left parked.  Not throttled (it
-    /// is silent until reloaded), but plugins that keep needing it right
-    /// after every reload are left silenced.
     fn reload_parked(&self, instance_id: u64, now: Instant) {
         if self.silenced.borrow().contains(&instance_id) {
             return;
@@ -1248,8 +1145,6 @@ impl Host {
         self.reload_plugin(instance_id, self.current_rate(), now);
     }
 
-    /// Report parameter changes made inside plugins (GUI edits, output
-    /// params, rescans, MIDI mappings) that no command echoed.
     fn report_param_changes(&self, now: Instant) {
         if now.duration_since(self.last_param_report.get()) < PARAM_REPORT_INTERVAL {
             return;
@@ -1276,7 +1171,6 @@ impl Host {
         let mut reported = self.reported_params.borrow_mut();
         for (instance_id, values) in current {
             let Some(prev) = reported.get_mut(&instance_id) else {
-                // New instance: its values so far are the baseline.
                 reported.insert(instance_id, values);
                 continue;
             };
@@ -1292,7 +1186,6 @@ impl Host {
         }
     }
 
-    /// Free LV2 instances whose late UI close has been acknowledged.
     fn release_lv2_zombies(&self) {
         if self.lv2_zombies.borrow().is_empty() {
             return;
@@ -1328,8 +1221,6 @@ impl Host {
         }
     }
 
-    /// Start sandbox probes for queued adds (on worker threads so the
-    /// PipeWire loop keeps running).
     fn start_probes(&self) {
         let mut ops = self.pending_ops.borrow_mut();
         let mut running = ops
@@ -1356,12 +1247,10 @@ impl Host {
                 _ => ("lv2", quantum),
             };
             let uri = req.plugin_uri.clone();
-            // ZestBay's own built-in plugins need no isolation check.
             if crate::ladspa::builtin::is_builtin_uri(&uri) {
                 req.probe = ProbeStatus::Done(crate::plugin::sandbox::ProbeOutcome::Ok);
                 continue;
             }
-            // CLAP/VST3: hand the probe the library path so the child doesn't scan.
             let lib = req
                 .scan_info
                 .as_ref()
@@ -1374,9 +1263,6 @@ impl Host {
                     _ => None,
                 });
             if fmt != "lv2" && lib.is_none() {
-                // Discovery already finished without finding this plugin.
-                // Instantiation will report it missing; don't make a probe
-                // start a second full scan just to reach the same verdict.
                 req.probe = ProbeStatus::Done(crate::plugin::sandbox::ProbeOutcome::Ok);
                 continue;
             }
@@ -1407,12 +1293,6 @@ impl Host {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Plugin lifecycle
-    // -----------------------------------------------------------------------
-
-    /// Instantiate `req`.  On failure the plugin is skipped for this session
-    /// (non-fatal) and false is returned.
     fn add_plugin(&self, req: &AddRequest) -> bool {
         let sr = req.sample_rate.unwrap_or_else(|| self.current_rate()) as f64;
         let result =
@@ -1463,9 +1343,6 @@ impl Host {
                 stable_id: req.stable_id.clone(),
             },
         );
-        // The UI has no other source for names, ranges and defaults: the
-        // catalog may still be scanning, and CLAP/VST3 only expose their
-        // parameters on a live instance.
         if let Some(params) = self.instance_parameters(req.instance_id) {
             let _ = self
                 .event_tx
@@ -1474,8 +1351,6 @@ impl Host {
                     params,
                 }));
         }
-        // New filters start without resolved mappings; mappings restored
-        // before the plugin existed take effect now.
         self.rebuild_resolved_mappings();
         log::info!(
             "{} filter created for instance {} at {} Hz, waiting for node ID...",
@@ -1487,7 +1362,6 @@ impl Host {
     }
 
     fn instantiate_lv2(&self, req: &AddRequest, sr: f64) -> Result<(), String> {
-        // One loaded world per thread, reused (reloaded only on a miss).
         let (world, lilv_plugin) = crate::lv2::find_in_thread_world(&req.plugin_uri)
             .ok_or_else(|| format!("Plugin not found: {}", req.plugin_uri))?;
         let plugin_info = build_plugin_info(&world, &lilv_plugin)
@@ -1565,7 +1439,6 @@ impl Host {
             .clone()
             .or_else(|| crate::clap::scanner::cached_plugin(&req.plugin_uri))
             .ok_or_else(|| format!("CLAP plugin not found: {}", req.plugin_uri))?;
-        // The saved state is loaded before activation (state-dependent ports).
         let inst = unsafe {
             crate::clap::host::ClapPluginInstance::new(
                 &info.library_path,
@@ -1617,7 +1490,6 @@ impl Host {
             .clone()
             .or_else(|| crate::vst3::scanner::cached_plugin(&req.plugin_uri))
             .ok_or_else(|| format!("VST3 plugin not found: {}", req.plugin_uri))?;
-        // The saved state is restored before setup/activation.
         let inst = unsafe {
             crate::vst3::host::Vst3PluginInstance::new(
                 &info.library_path,
@@ -1669,7 +1541,6 @@ impl Host {
             .clone()
             .or_else(|| crate::vst2::scanner::cached_plugin(&req.plugin_uri))
             .ok_or_else(|| format!("VST2 plugin not found: {}", req.plugin_uri))?;
-        // The saved state is restored before setup/activation.
         let inst = unsafe {
             crate::vst2::host::Vst2PluginInstance::new(
                 &info.library_path,
@@ -1746,7 +1617,6 @@ impl Host {
             audio_outputs: inst.audio_output_channels,
             has_midi_in: inst.has_midi_in,
             midi_outputs: Vec::new(),
-            // Built-in meters are audio only: no MIDI in or thru.
             midi_ports: !crate::ladspa::builtin::is_builtin_uri(&req.plugin_uri),
             enabled: req.enabled,
         };
@@ -1767,15 +1637,12 @@ impl Host {
         self.ladspa_filters
             .borrow_mut()
             .insert(req.instance_id, filter);
-        // A built-in meter: the graph reads its levels.
         if let Some(updates) = meter_levels {
             crate::ladspa::builtin::register(req.instance_id, updates);
         }
         Ok(())
     }
 
-    /// Tear down one plugin: close its UI (blocks until closed), destroy the
-    /// filter (stops processing), then drop the instance. Emits nothing.
     fn remove_plugin(&self, instance_id: u64) -> bool {
         let found = if self.lv2_instances.borrow().contains_key(&instance_id) {
             let ui = crate::lv2::ui::close_plugin_ui(instance_id);
@@ -1783,8 +1650,6 @@ impl Host {
             drop(filter);
             let inst = self.lv2_instances.borrow_mut().remove(&instance_id);
             match (ui, inst) {
-                // An in-process UI may still use the instance: keep it alive
-                // until the GTK thread confirms the close.
                 (crate::lv2::ui::UiCloseStatus::Pending(pending), Some(instance)) => {
                     log::warn!(
                         "Keeping LV2 instance {} alive until its UI has closed",
@@ -1835,8 +1700,6 @@ impl Host {
         found
     }
 
-    /// Capture everything needed to re-create a live plugin as it is now.
-    /// True for a running CLAP, VST3, VST2 or LADSPA instance.
     fn is_non_lv2_instance(&self, instance_id: u64) -> bool {
         self.clap_instances.borrow().contains_key(&instance_id)
             || self.vst3_instances.borrow().contains_key(&instance_id)
@@ -1844,8 +1707,6 @@ impl Host {
             || self.ladspa_instances.borrow().contains_key(&instance_id)
     }
 
-    /// `remove_plugin` forgets the last good LV2 state; a reload restores
-    /// it, so a plugin whose `save` keeps failing survives further reloads.
     fn remember_lv2_state(&self, req: &AddRequest) {
         if !req.lv2_state.is_empty() {
             self.last_lv2_state
@@ -1854,7 +1715,6 @@ impl Host {
         }
     }
 
-    /// The parameter list of a running instance of any format.
     fn instance_parameters(
         &self,
         instance_id: u64,
@@ -1944,7 +1804,6 @@ impl Host {
                     .iter()
                     .map(|p| (p.port_index, p.value))
                     .collect();
-                // LADSPA has no state API: parameters are the whole state.
                 (Vec::new(), None, params, inst.is_bypassed())
             };
 
@@ -1962,7 +1821,6 @@ impl Host {
             bypassed,
             enabled,
             sample_rate: None,
-            // Already proven safe in this process.
             probe: ProbeStatus::Done(crate::plugin::sandbox::ProbeOutcome::Ok),
         })
     }
@@ -2004,7 +1862,6 @@ impl Host {
             .find(|&id| self.plugin_node_id(id) == Some(node_id))
     }
 
-    /// Links currently attached to the plugin's node, as name-based relinks.
     fn plugin_links(
         &self,
         instance_id: u64,
@@ -2046,7 +1903,6 @@ impl Host {
             Some(iid) => self.plugin_node_id(iid)?,
             None => match self.graph.get_node(end.node_id) {
                 Some(n) if n.name == end.node_name => n.id,
-                // Runs every tick while a relink is pending.
                 _ => self.graph.find_node_id_by_name(&end.node_name)?,
             },
         };
@@ -2097,8 +1953,6 @@ impl Host {
         self.relinks.borrow_mut().extend(keep);
     }
 
-    /// K3: reload plugins whose filter runs at a different rate than the
-    /// instance was created with.
     fn check_sample_rates(&self, now: Instant) {
         let mut mismatched: Vec<(u64, u32)> = Vec::new();
         let mut check = |id: u64, graph_rate: u32, instance_rate: f64| {
@@ -2147,8 +2001,6 @@ impl Host {
         }
     }
 
-    /// Re-create a plugin in place (same instance id / name / stable id) at
-    /// `rate`, restoring state, parameters, bypass and links.
     fn reload_plugin(&self, instance_id: u64, rate: u32, now: Instant) {
         let Some(mut req) = self.snapshot_plugin(instance_id) else {
             return;
@@ -2171,9 +2023,6 @@ impl Host {
         }
     }
 
-    /// Re-create a live plugin in place with new LV2 state and parameter
-    /// values (applying a preset). A plugin whose add is still queued just
-    /// has its pending request patched.
     fn reload_plugin_with_state(
         &self,
         instance_id: u64,
@@ -2208,13 +2057,10 @@ impl Host {
         }
     }
 
-    /// Tear everything down (connection lost). Returns what must be
-    /// re-created on the next connection.
     fn teardown_all(&self) -> (Vec<AddRequest>, Vec<PendingRelink>) {
         let mut ids: Vec<u64> = self.meta.borrow().keys().copied().collect();
         ids.sort_unstable();
 
-        // Queued ops: removals win over snapshots, unstarted adds carry over.
         let mut removed: HashSet<u64> = HashSet::new();
         let mut queued_adds: Vec<AddRequest> = Vec::new();
         for op in self.pending_ops.borrow_mut().drain(..) {
@@ -2272,10 +2118,7 @@ impl Host {
         (plugins, relinks)
     }
 
-    /// K2: one `PluginStateSaved` per live plugin, then `PluginStatesDone`.
     fn send_plugin_states(&self) {
-        // A failed save sends nothing for that plugin, so the UI keeps the
-        // state it already has.
         for (&instance_id, inst) in self.lv2_instances.borrow().iter() {
             let inst = inst.borrow();
             let lv2_state = if inst.has_state_interface() {
@@ -2406,10 +2249,6 @@ impl Host {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // MIDI mappings
-    // -----------------------------------------------------------------------
-
     fn add_midi_mapping(&self, mapping: crate::midi::MidiCcMapping) {
         let existing = self
             .midi_mapping_table
@@ -2429,7 +2268,6 @@ impl Host {
             return;
         }
 
-        // A target has at most one source: replace (and report) the old one.
         let old_source = self
             .midi_mapping_table
             .borrow()
@@ -2449,7 +2287,6 @@ impl Host {
             .send(PwEvent::Plugin(PluginEvent::MidiMappingAdded(mapping)));
     }
 
-    /// Remove matching mappings, emitting `MidiMappingRemoved` for each.
     fn remove_midi_mappings_where(
         &self,
         pred: impl Fn(&crate::midi::MidiCcMapping) -> bool,
@@ -2554,7 +2391,6 @@ impl Host {
                 max: p.max as f32,
                 mode: mapping.mode,
                 source: mapping.source.clone(),
-                // CLAP exposes no scale hint; map linearly.
                 is_logarithmic: false,
                 is_toggle: p.is_toggle,
                 step_count: p.step_count,
@@ -2611,7 +2447,6 @@ impl Host {
             });
         }
 
-        // Normal while restoring: mappings arrive before their plugins.
         log::debug!(
             "MIDI mapping target instance {} not loaded yet",
             instance_id
@@ -2620,9 +2455,6 @@ impl Host {
     }
 }
 
-/// Subgraph tag and virtual device id of a node ZestBay created, from its
-/// `node.name` (`zestbay.subgraph.<id>.in[.int]`, `zestbay.subgraph.<id>.out[.int]`,
-/// `zestbay.vdev.<id>[.in|.out]`). A device edge has a device media class.
 pub(crate) fn owned_node_tags(
     node_name: &str,
     media_class: &str,
@@ -2728,9 +2560,6 @@ fn parse_node(global: &GlobalObject<&DictRef>) -> Option<Node> {
         .map(|v| v == "jack")
         .unwrap_or(false);
     let is_bridge = effective_class.contains("Bridge");
-    // The registry doesn't announce `node.virtual`, so also treat a sink or
-    // source with no backing device (null sinks, loopbacks, combine sinks)
-    // as virtual: hardware nodes always carry `device.id`.
     let is_virtual = props
         .get("node.virtual")
         .map(|v| v.eq_ignore_ascii_case("true"))
@@ -2740,10 +2569,7 @@ fn parse_node(global: &GlobalObject<&DictRef>) -> Option<Node> {
             && !is_jack
             && !is_bridge);
 
-    // ZestBay's own nodes are recognised by node.name: the registry only
-    // forwards a fixed set of properties, not the zestbay.* tags.
     let (subgraph, vdev_id) = owned_node_tags(&name, &media_class);
-    // A pass-through boundary has inputs and outputs whatever its class.
     let node_type = match &subgraph {
         Some(tag) if tag.side == SubgraphSide::Both => Some(NodeType::Duplex),
         _ => node_type,
@@ -2764,8 +2590,6 @@ fn parse_node(global: &GlobalObject<&DictRef>) -> Option<Node> {
     })
 }
 
-/// Media type of a port from its `format.dsp` (authoritative when present),
-/// then its name, then its node's media type.
 fn port_media_type(
     format_dsp: Option<&str>,
     name: &str,
@@ -2923,7 +2747,6 @@ fn build_plugin_info(
     })
 }
 
-/// Current (port index, value) of every control input slot.
 fn slot_values(updates: &crate::plugin::types::PortUpdates) -> Vec<(usize, f32)> {
     updates
         .control_inputs
@@ -2940,7 +2763,6 @@ fn slot_value(updates: &crate::plugin::types::PortUpdates, port_index: usize) ->
         .map(|s| s.value.load())
 }
 
-/// Set `port_index` to `value` in a (port, value) list, adding it if absent.
 fn upsert_param(params: &mut Vec<(usize, f32)>, port_index: usize, value: f32) {
     match params.iter_mut().find(|(p, _)| *p == port_index) {
         Some(entry) => entry.1 = value,
@@ -2948,8 +2770,6 @@ fn upsert_param(params: &mut Vec<(usize, f32)>, port_index: usize, value: f32) {
     }
 }
 
-/// Values in `current` that differ from `reported`, which is updated to
-/// `current`.  If the port list changed, `reported` is just reset.
 fn diff_params(reported: &mut Vec<(usize, f32)>, current: &[(usize, f32)]) -> Vec<(usize, f32)> {
     let same_ports =
         reported.len() == current.len() && reported.iter().zip(current).all(|(a, b)| a.0 == b.0);
@@ -2967,8 +2787,6 @@ fn diff_params(reported: &mut Vec<(usize, f32)>, current: &[(usize, f32)]) -> Ve
     changed
 }
 
-/// A link from a node to itself is only allowed between different port
-/// groups (e.g. two devices behind one MIDI bridge node).
 fn is_allowed_same_node_link(output: &Port, input: &Port) -> bool {
     matches!(
         (&output.port_group, &input.port_group),
@@ -3010,9 +2828,6 @@ fn create_link(
         return;
     }
 
-    // Reject cross-media-type links (e.g. Midi → Audio or Audio → Midi)
-    // PipeWire will reject these anyway, but catching them here avoids
-    // infinite retry loops from patchbay auto-rules.
     if let (Some(out_mt), Some(in_mt)) = (output_port.media_type, input_port.media_type)
         && out_mt != in_mt
     {
@@ -3133,7 +2948,6 @@ mod tests {
         assert!(g.allow(t0));
         assert!(g.allow(t0 + Duration::from_secs(5)));
         assert!(g.allow(t0 + Duration::from_secs(9)));
-        // Ran fine for longer than the window: a fresh streak.
         let later = t0 + Duration::from_secs(9) + RESTART_LOOP_WINDOW;
         assert!(g.allow(later));
         assert!(g.allow(later + Duration::from_secs(1)));

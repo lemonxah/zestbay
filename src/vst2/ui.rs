@@ -1,7 +1,3 @@
-//! VST2 X11 editors. All window and dispatcher calls run on the plugin main
-//! thread. Resize callbacks only publish atomic requests, avoiding reentry
-//! into a borrowed GUI registry from inside the plugin's dispatcher.
-
 use super::abi::{eff, *};
 use crate::clap::x11::HostWindow;
 use crate::pipewire::{PluginEvent, PwEvent};
@@ -39,7 +35,6 @@ unsafe fn size(effect: *mut Effect) -> Option<(u32, u32)> {
     }
 }
 
-/// `effect` remains live until its editor is closed; main thread only.
 pub unsafe fn open_vst2_gui(
     effect: *mut Effect,
     instance_id: u64,
@@ -58,7 +53,6 @@ pub unsafe fn open_vst2_gui(
         let Some(window) = HostWindow::open(name, width, height) else {
             return;
         };
-        // Linux VST2 uses the X11 Window ID encoded as a pointer-sized value.
         dispatch(effect, eff::EDIT_OPEN, 0, 0, window.window as *mut _, 0.0);
         if let Some((w, h)) = size(effect) {
             window.resize(w, h);
@@ -79,7 +73,6 @@ pub unsafe fn open_vst2_gui(
 }
 
 pub fn idle() {
-    // Take ownership so no RefCell borrow crosses a call into foreign code.
     let mut editors = EDITORS.with(|m| std::mem::take(&mut *m.borrow_mut()));
     editors.retain(|id, editor| unsafe {
         if editor.window.pump() {

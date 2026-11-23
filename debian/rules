@@ -1,13 +1,9 @@
 #!/usr/bin/make -f
-# Builds offline (Launchpad has no network): the crates are vendored into
-# vendor/ in the orig tarball by pkg/deb/build-ppa.sh.
 
 export DH_VERBOSE = 1
 export CARGO_HOME = $(CURDIR)/debian/cargo-home
 export CARGO_TARGET_DIR = $(CURDIR)/target
 
-# ZestBay needs Rust >= 1.88 (edition 2024 with let chains). Use the newest versioned toolchain
-# (rust-1.NN) if installed, otherwise the default one.
 RUST_BIN := $(lastword $(sort $(wildcard /usr/lib/rust-1.*/bin)))
 ifneq ($(RUST_BIN),)
 export PATH := $(RUST_BIN):$(PATH)
@@ -44,7 +40,6 @@ override_dh_auto_install:
 	  LDFLAGS="$(shell dpkg-buildflags --get LDFLAGS)" \
 	  DESTDIR=$(CURDIR)/debian/zestins LV2_DIR=/usr/lib/lv2
 
-# Rust binaries: dwz has nothing useful to do and can fail on them
 override_dh_dwz:
 
 override_dh_auto_clean:

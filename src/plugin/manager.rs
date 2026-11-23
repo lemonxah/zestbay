@@ -1,22 +1,12 @@
-//! Unified plugin manager that wraps format-specific backends (LV2, CLAP, VST3).
-//!
-//! This is the single entry-point that the UI and PipeWire layers talk to for
-//! plugin catalog queries, instance registration, and parameter bookkeeping.
-
 use std::collections::HashMap;
 
 use super::types::*;
 
-/// A unified manager holding the catalog of available plugins (from all
-/// formats) and the registry of active plugin instances.
 pub struct PluginManager {
-    /// All available plugins, merged from all format-specific scanners.
     available_plugins: Vec<PluginInfo>,
-    /// Currently active instances, keyed by instance ID.
     active_instances: HashMap<PluginInstanceId, PluginInstanceInfo>,
     startup_complete: bool,
-    /// The sample rate reported by PipeWire (set after PW init).
-    #[allow(dead_code)] // written at init; no reader yet
+    #[allow(dead_code)]
     pub sample_rate: f64,
 }
 
@@ -30,8 +20,6 @@ impl PluginManager {
         }
     }
 
-    // ----- Catalog -----
-
     pub fn startup_complete(&self) -> bool {
         self.startup_complete
     }
@@ -40,17 +28,12 @@ impl PluginManager {
         self.startup_complete = true;
     }
 
-    /// Forget every instance and go back to "starting up", for loading
-    /// another session. The catalog of available plugins stays.
     pub fn reset_for_new_session(&mut self) {
         self.active_instances.clear();
         self.startup_complete = false;
     }
 
-    /// Replace the entire catalog (called after scanning all formats).
     pub fn set_available_plugins(&mut self, plugins: Vec<PluginInfo>) {
-        // Backfill old saves and refresh paths for relocated plugins. Keep a
-        // directly restored descriptor if its library is outside search dirs.
         for instance in self.active_instances.values_mut() {
             if instance.format != PluginFormat::Lv2
                 && let Some(info) = plugins.iter().find(|p| {
@@ -67,8 +50,6 @@ impl PluginManager {
         &self.available_plugins
     }
 
-    /// A catalog plugin, or one of ZestBay's built-ins (which the catalog,
-    /// and so the browser, never lists).
     pub fn find_plugin(&self, uri: &str) -> Option<&PluginInfo> {
         self.available_plugins
             .iter()
@@ -94,8 +75,6 @@ impl PluginManager {
             .find(|p| p.uri == uri && p.format == format)
             .or_else(|| crate::ladspa::builtin::info(uri).filter(|p| p.format == format))
     }
-
-    // ----- Active instances -----
 
     pub fn register_instance(&mut self, info: PluginInstanceInfo) {
         self.active_instances.insert(info.id, info);
@@ -139,10 +118,6 @@ impl PluginManager {
         }
     }
 
-    /// Replace an instance's parameter list with the one its running host
-    /// reported.  Names, ranges and defaults come from `described`; a value
-    /// this side already holds (a saved or just-edited one) is kept, matched
-    /// by symbol and otherwise by port index.
     pub fn describe_parameters(
         &mut self,
         instance_id: PluginInstanceId,
@@ -282,8 +257,6 @@ mod tests {
 
     #[test]
     fn described_parameters_take_metadata_and_keep_saved_values() {
-        // What a restore before the catalog scan leaves behind: saved
-        // values with no names and a 0..1 range.
         let mut manager = manager_with(vec![
             param(0, "gain", "", 12.0, 1.0),
             param(1, "", "", 0.25, 1.0),
@@ -291,11 +264,8 @@ mod tests {
         manager.describe_parameters(
             1,
             vec![
-                // Port order changed since the save: matched by symbol.
                 param(3, "gain", "Gain", 0.0, 24.0),
-                // No symbol on the saved side: matched by port index.
                 param(1, "mix", "Mix", 1.0, 1.0),
-                // New parameter: the host's value stands.
                 param(2, "tone", "Tone", 0.7, 1.0),
             ],
         );
@@ -314,7 +284,6 @@ mod tests {
         let params = &manager.get_instance(1).unwrap().parameters;
         assert_eq!(params.len(), 1);
         assert_eq!((params[0].name.as_str(), params[0].value), ("Cutoff", 0.3));
-        // Unknown instances are ignored.
         manager.describe_parameters(99, vec![param(0, "x", "X", 0.0, 1.0)]);
     }
 }

@@ -1,5 +1,3 @@
-//! LADSPA plugin hosting (audio and control ports; no UI, MIDI or state).
-
 mod abi;
 pub mod builtin;
 pub mod filter;

@@ -1,12 +1,3 @@
-//! Host-side client for the UI bridge process.
-//!
-//! Spawns `zestbay-ui-bridge` as a child process and communicates
-//! via stdin/stdout newline-delimited JSON messages.
-//!
-//! Besides forwarding open/close requests, the client runs a small pump
-//! thread that mirrors control-port changes (plugin outputs and host-side
-//! parameter changes) to the bridge UIs, like the in-process GTK timer does.
-
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
@@ -25,16 +16,13 @@ use crate::ui_bridge::protocol::{BridgeMessage, HostMessage};
 const PUMP_INTERVAL: Duration = Duration::from_millis(33);
 const QUIT_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// A UI hosted by the bridge.
 struct BridgeInstance {
     port_updates: SharedPortUpdates,
-    /// Last value sent per slot (control inputs, then control outputs).
     prev: Vec<f32>,
 }
 
 struct BridgeShared {
     instances: Mutex<HashMap<u64, BridgeInstance>>,
-    /// Cleared when the bridge's stdout closes (child exited or crashed).
     alive: AtomicBool,
 }
 
@@ -46,7 +34,6 @@ fn encode_line(msg: &HostMessage) -> Option<Vec<u8>> {
 
 pub struct UiBridgeClient {
     child: Child,
-    /// Complete lines (JSON + '\n') for the stdin writer thread.
     stdin_tx: Option<Sender<Vec<u8>>>,
     shared: Arc<BridgeShared>,
     pump_stop: Arc<AtomicBool>,
@@ -59,9 +46,6 @@ impl UiBridgeClient {
         event_tx: Sender<PwEvent>,
         cmd_tx: Sender<PwCommand>,
     ) -> Result<Self, String> {
-        // Find the bridge binary: check next to our executable first, then
-        // <prefix>/lib/zestbay of our own prefix (e.g. /app in a Flatpak),
-        // then the system install location.
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
@@ -88,10 +72,7 @@ impl UiBridgeClient {
         let mut child = Command::new(&bridge_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit()) // bridge errors go to our stderr
-            // Force Mesa GLX client library — avoids NVIDIA/Mesa vendor
-            // mismatch on Wayland/XWayland where the server is Mesa but
-            // the host process loaded NVIDIA's EGL.
+            .stderr(Stdio::inherit())
             .env("__GLX_VENDOR_LIBRARY_NAME", "mesa")
             .spawn()
             .map_err(|e| format!("Failed to spawn UI bridge: {}", e))?;
@@ -104,7 +85,6 @@ impl UiBridgeClient {
             alive: AtomicBool::new(true),
         });
 
-        // Stdin writer thread: one write_all per complete line.
         let (stdin_tx, stdin_rx) = std::sync::mpsc::channel::<Vec<u8>>();
         std::thread::Builder::new()
             .name("ui-bridge-stdin".into())
@@ -115,11 +95,9 @@ impl UiBridgeClient {
                         break;
                     }
                 }
-                // Dropping stdin closes the pipe: the bridge sees EOF and exits.
             })
             .map_err(|e| format!("Failed to spawn stdin thread: {}", e))?;
 
-        // Stdout reader thread
         let reader_shared = shared.clone();
         std::thread::Builder::new()
             .name("ui-bridge-stdout".into())
@@ -139,7 +117,6 @@ impl UiBridgeClient {
             })
             .map_err(|e| format!("Failed to spawn stdout thread: {}", e))?;
 
-        // Port event pump
         let pump_stop = Arc::new(AtomicBool::new(false));
         let pump_thread = {
             let shared = shared.clone();
@@ -168,7 +145,6 @@ impl UiBridgeClient {
         }
     }
 
-    /// Whether the child process is still running and talking to us.
     pub fn is_alive(&mut self) -> bool {
         if self.shut_down || !self.shared.alive.load(Ordering::Acquire) {
             return false;
@@ -186,9 +162,6 @@ impl UiBridgeClient {
         }
     }
 
-    /// Ask the bridge to open a UI.  Re-opening an instance that is already
-    /// open closes the old window first.  Returns false if the request could
-    /// not be sent.
     #[allow(clippy::too_many_arguments)]
     pub fn open_ui(
         &mut self,
@@ -208,11 +181,6 @@ impl UiBridgeClient {
             return false;
         }
         if self.is_open(instance_id) {
-            // The bridge answers a Close with Closed{id}; closing and
-            // re-registering here would let that reply remove the fresh
-            // entry and report the new window as closed. A window the
-            // bridge closed itself has already been unregistered by its
-            // Closed message, so "open" here means it really is open.
             log::info!(
                 "UI bridge: UI for instance {} is already open",
                 instance_id
@@ -232,12 +200,10 @@ impl UiBridgeClient {
             title: format!("ZestBay — {}", display_name),
             control_values,
             urid_map,
-            lv2_handle: 0, // Not usable across processes
+            lv2_handle: 0,
             sample_rate,
         };
 
-        // Register before sending so the pump starts mirroring right away;
-        // initial values were sent with Open.
         let prev: Vec<f32> = port_updates
             .control_inputs
             .iter()
@@ -263,8 +229,6 @@ impl UiBridgeClient {
         }
     }
 
-    /// Close the bridge UI for `instance_id` if it is open.  Returns whether
-    /// it was open.
     pub fn close_ui(&mut self, instance_id: u64) -> bool {
         let was_open = match self.shared.instances.lock() {
             Ok(mut map) => map.remove(&instance_id).is_some(),
@@ -284,8 +248,6 @@ impl UiBridgeClient {
             .unwrap_or(false)
     }
 
-    /// Ask the bridge to quit and reap the child (killing it if it does not
-    /// exit within a couple of seconds).  Idempotent.
     pub fn shutdown(&mut self) {
         if self.shut_down {
             return;
@@ -297,7 +259,6 @@ impl UiBridgeClient {
         if let Some(pump) = self.pump_thread.take() {
             let _ = pump.join();
         }
-        // Last sender gone → writer thread exits → bridge stdin hits EOF.
         self.stdin_tx = None;
 
         let deadline = Instant::now() + QUIT_TIMEOUT;
@@ -430,7 +391,6 @@ fn bridge_reader(
     }
 }
 
-/// Collect port events for values that changed since the last call.
 fn collect_port_events(map: &mut HashMap<u64, BridgeInstance>) -> Vec<HostMessage> {
     let mut out = Vec::new();
     for (&instance_id, inst) in map.iter_mut() {

@@ -2,17 +2,13 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// Create or edit a virtual device: an output device (sink) apps play into,
-// whose stream ZestBay routes onward, or an input device (source) apps
-// record from. Both halves appear on the graph, like loopback devices from
-// PipeWire config.
 ZbDialog {
     id: dialog
 
-    property string vdevId: ""          // "" = create
+    property string vdevId: ""
     property alias deviceName: nameField.text
     property alias channels: channelStepper.value
-    property int kindIndex: 0           // 0 = output (sink), 1 = input (source)
+    property int kindIndex: 0
 
     signal submitted(string name, string kind, int channels)
 

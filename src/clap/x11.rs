@@ -1,14 +1,5 @@
-//! Minimal Xlib bindings and the host window used by the embedded CLAP and
-//! VST3 GUIs.
-//!
-//! Each GUI gets its own Display connection which is only ever used from the
-//! plugin main thread (the PipeWire thread): creation, event pumping,
-//! resizing and destruction all happen there.  Declarations match Xlib (and
-//! `src/lv2/x11_ui.rs`) exactly.
-
 use std::os::raw::{c_char, c_int, c_long, c_uint, c_ulong, c_void};
 
-/// Error handler that swallows the error instead of exiting the process.
 unsafe extern "C" fn ignore_x_error(_display: *mut c_void, _event: *mut c_void) -> c_int {
     0
 }
@@ -68,8 +59,6 @@ unsafe extern "C" {
     fn XFree(data: *mut c_void) -> c_int;
 }
 
-// XEvent is a 192-byte union; only the type and a few ClientMessage bytes
-// are read (unaligned) below.
 #[repr(C)]
 struct XEvent {
     type_: c_int,
@@ -89,10 +78,8 @@ const CLIENT_MESSAGE: c_int = 33;
 const REVERT_TO_PARENT: c_int = 2;
 const CURRENT_TIME: c_ulong = 0;
 
-/// Offset of `data.l[0]` in XClientMessageEvent on LP64.
 const CLIENT_MESSAGE_DATA_OFFSET: usize = 56;
 
-/// A top-level X11 window that hosts an embedded plugin GUI.
 pub struct HostWindow {
     display: *mut c_void,
     pub window: c_ulong,
@@ -100,14 +87,9 @@ pub struct HostWindow {
     child: c_ulong,
 }
 
-// Stored in global GUI registries; only ever used on the main thread.
 unsafe impl Send for HostWindow {}
 
 impl HostWindow {
-    /// Open a display connection and map a top-level window of the given size.
-    ///
-    /// # Safety
-    /// Must be called on the plugin main thread.
     pub unsafe fn open(title: &str, width: u32, height: u32) -> Option<Self> {
         unsafe {
             let display = XOpenDisplay(std::ptr::null());
@@ -146,8 +128,6 @@ impl HostWindow {
             XSetWMProtocols(display, window, protocols.as_mut_ptr(), 1);
 
             XMapWindow(display, window);
-            // Make sure the window exists on the server before a plugin
-            // (e.g. yabridge) tries to reparent into it.
             XSync(display, 0);
 
             Some(Self {
@@ -159,8 +139,6 @@ impl HostWindow {
         }
     }
 
-    /// # Safety
-    /// Main thread only.
     pub unsafe fn resize(&self, width: u32, height: u32) {
         unsafe {
             XResizeWindow(self.display, self.window, width.max(1), height.max(1));
@@ -168,19 +146,12 @@ impl HostWindow {
         }
     }
 
-    /// # Safety
-    /// Main thread only.
     pub unsafe fn flush(&self) {
         unsafe {
             XFlush(self.display);
         }
     }
 
-    /// Drain pending events.  Returns true if the user asked to close the
-    /// window.  Keyboard focus is forwarded to an embedded child window.
-    ///
-    /// # Safety
-    /// Main thread only.
     pub unsafe fn pump(&mut self) -> bool {
         unsafe {
             let mut close = false;
@@ -204,11 +175,6 @@ impl HostWindow {
                             log::debug!("X11: plugin child window 0x{:x} detected", child);
                         }
                     }
-                    // The plugin may have destroyed or reparented its
-                    // child window; the default Xlib error handler
-                    // would exit the whole process on BadWindow.
-                    // Swap in a tolerant handler just for this call
-                    // so other Xlib users' handlers stay intact.
                     FOCUS_IN if self.child != 0 => {
                         let previous = XSetErrorHandler(Some(ignore_x_error));
                         XSetInputFocus(self.display, self.child, REVERT_TO_PARENT, CURRENT_TIME);

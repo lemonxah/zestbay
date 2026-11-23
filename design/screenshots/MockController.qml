@@ -1,7 +1,5 @@
 import QtQuick
 
-// Stand-in for the Rust AppController when rendering screenshots
-// (design/screenshots/render.sh). Sample data only; nothing touches PipeWire.
 QtObject {
     id: mock
     readonly property bool light: Qt.application.arguments.indexOf("light") >= 0
@@ -12,7 +10,6 @@ QtObject {
     property int node_count: nodes.length
     property int link_count: links.length
     property string cpu_usage: "1.4%"
-    // Background plugin scan (status bar): finished.
     property bool plugins_scanning: false
     property real plugin_scan_progress: -1
     property bool plugins_rescanning: false
@@ -33,11 +30,8 @@ QtObject {
     signal session_changing()
     signal session_changed()
 
-    // The subgraph the view is inside ("" = main graph; "sub" on the command
-    // line starts inside "Mic Chain").
     property string view: Qt.application.arguments.indexOf("sub") >= 0 ? "sg-1" : ""
 
-    // ---- Graph ----------------------------------------------------------
     function stereoIn(base) {
         return [{ id: base + 1, name: "playback_FL", direction: "Input", mediaType: "Audio" },
                 { id: base + 2, name: "playback_FR", direction: "Input", mediaType: "Audio" }]
@@ -62,8 +56,6 @@ QtObject {
         { id: 41, name: "Headphones", type: "Sink", layoutKey: "Sink:Headphones", ready: true },
         { id: 50, name: "Mic Chain", type: "Subgraph", subgraphId: "sg-1", layoutKey: "Subgraph:sg-1", ready: true,
           memberCount: 1, missing: 0, inputs: 1, outputs: 2, asSink: false, asSource: true },
-        // Built-in meters: one shown as a card, two snapped onto a port
-        // (their cards are hidden; see get_hidden_json / get_docked_meters_json).
         { id: 60, name: "Meter (2 ch)", type: "Plugin", layoutKey: "LADSPA:Meter (2 ch)", pluginFormat: "LADSPA", pluginHasUi: false, meterChannels: 2, ready: true },
         { id: 61, name: "Daw Sink in meter", type: "Plugin", layoutKey: "LADSPA:Daw Sink in meter", pluginFormat: "LADSPA", pluginHasUi: false, meterChannels: 2, ready: true },
         { id: 62, name: "Microphone out meter", type: "Plugin", layoutKey: "LADSPA:Microphone out meter", pluginFormat: "LADSPA", pluginHasUi: false, meterChannels: 1, ready: true }
@@ -76,7 +68,6 @@ QtObject {
         }
         return a
     }
-    // Inside "Mic Chain": its plugin between the Input and Output nodes.
     property var subNodes: [
         { id: 11, name: "LSP Gate Mono", type: "Plugin", layoutKey: "LV2:LSP Gate Mono", pluginFormat: "LV2", pluginHasUi: true, ready: true },
         { id: 51, name: "Input", type: "SubgraphInput", subgraphId: "sg-1", layoutKey: "SubgraphIn:sg-1", ready: true },
@@ -140,7 +131,6 @@ QtObject {
         "LADSPA:Meter (2 ch)": [576, 480], "LADSPA:Daw Sink in meter": [576, 600], "LADSPA:Microphone out meter": [576, 648]
     })
 
-    // ---- Dialog data ----------------------------------------------------
     property var rules: [
         { id: "r1", sourcePattern: "Firefox", sourceType: "App Out", targetPattern: "Media Sink", targetType: "Sink", sourceLabel: "Firefox", targetLabel: "Media Sink", enabled: true, portMappings: [{ outputPort: "output_FL", inputPort: "playback_FL" }, { outputPort: "output_FR", inputPort: "playback_FR" }] },
         { id: "r2", sourcePattern: "Spotify", sourceType: "App Out", targetPattern: "Media Sink", targetType: "Sink", sourceLabel: "Spotify", targetLabel: "Media Sink", enabled: true, portMappings: [{ outputPort: "output_FL", inputPort: "playback_FL" }, { outputPort: "output_FR", inputPort: "playback_FR" }] },
@@ -172,13 +162,9 @@ QtObject {
     ] })
     property var cpuHist: (function() {
         var a = []
-        // 600 samples at the 100 ms poll = the CPU chart's full 60 s.
         for (var i = 0; i < 600; i++) a.push(0.9 + Math.sin(i / 7) * 0.35 + Math.sin(i / 2.3) * 0.12 + (i % 37 === 0 ? 4 : 0))
         return a })()
 
-    // ---- Presets (the preset row on plugin nodes) ------------------------
-    // The "main-presets" shot shows the mixer with a changed value so the
-    // dropdown's "Changed:" line is visible.
     readonly property bool presetsShot: Qt.application.arguments.indexOf("main-presets") >= 0
     property var presetNames: ({
         10: ["Concert Grand", "Studio Close", "Upright"],
@@ -211,7 +197,6 @@ QtObject {
     function set_default_plugin_preset(id, name) {}
     function start_new_plugin_preset(id) {}
 
-    // ---- API ------------------------------------------------------------
     property Timer _kick: Timer { interval: 200; running: true; onTriggered: mock.graph_changed() }
     function init() {}
     function poll_events() {}
@@ -234,7 +219,6 @@ QtObject {
         return JSON.stringify({ "LADSPA:Daw Sink in meter": "dest", "LADSPA:Microphone out meter": "source" })
     }
     function save_docked_meters(j) {}
-    // Levels (linear, 1.0 = 0 dBFS) with a slow wobble so the bars look alive.
     function meter_levels_json() {
         var t = Date.now() / 1000
         var w = function(base, f) { return base * (1 + 0.08 * Math.sin(t * f)) }
@@ -272,8 +256,6 @@ QtObject {
     }
     function get_app_version() { return "1.0.0" }
     function get_qt_version() { return "6.12.0" }
-    function get_install_kind() { return "Native" }
-    function get_app_plugin_folder() { return "" }
     function auto_layout(a, b, c) { return "{}" }
     function save_layout(j) {}
     function save_viewport(j) {}
@@ -299,7 +281,6 @@ QtObject {
     function blocked_reason(o, i) { return "" }
     function get_blocked_pairs_json() { return JSON.stringify([{ source: 13, target: 41, ruleId: "r8", label: "Spotify \u2192 Headphones" }]) }
     signal rules_changed()
-    // ---- Subgraphs and virtual devices ----
     function get_subgraphs_json() {
         return JSON.stringify({ current: view, subgraphs: [{ id: "sg-1", name: "Mic Chain", inputs: 1, outputs: 2, midiIn: false, midiOut: false,
                                                             asSink: false, asSource: true, memberCount: 1, missing: 0,
@@ -325,7 +306,6 @@ QtObject {
     function add_virtual_device(n, k, c) { return "" }
     function update_virtual_device(id, n, c) {}
     function remove_virtual_device(id) {}
-    // ---- Sessions ----
     property string sessionName: "studio"
     function get_sessions_json() {
         return JSON.stringify({ current: sessionName, path: "/home/user/.config/zestbay/sessions/" + sessionName,

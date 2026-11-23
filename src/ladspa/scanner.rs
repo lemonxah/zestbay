@@ -1,6 +1,3 @@
-//! LADSPA discovery. Library inspection runs only in isolated scan
-//! processes, since loading a library executes plugin code.
-
 use super::abi::{self, *};
 use crate::clap::scanner::ScanCache;
 use crate::plugin::types::*;
@@ -15,7 +12,6 @@ const SEARCH_DIRS: &[&str] = &[
     "/usr/local/lib64/ladspa",
 ];
 
-/// Sample rate used to resolve rate-dependent port ranges in the catalog.
 const SCAN_RATE: f64 = 48000.0;
 
 static CACHE: ScanCache = ScanCache::new();
@@ -37,14 +33,13 @@ pub fn find_plugin(uri: &str) -> Option<PluginInfo> {
 }
 
 pub(crate) fn discover_plugins() -> Vec<PathBuf> {
-    let dirs = crate::plugin::paths::search_dirs("LADSPA_PATH", SEARCH_DIRS, "ladspa", "LADSPA");
+    let dirs = crate::plugin::paths::search_dirs("LADSPA_PATH", SEARCH_DIRS, "LADSPA");
     crate::plugin::scan::discover(&dirs, "so", true)
 }
 
 pub(crate) fn scan_discovered(paths: &[PathBuf], progress: &(impl Fn() + Sync)) -> Vec<PluginInfo> {
     let mut plugins = crate::plugin::scan::scan_libraries("ladspa", paths, progress);
     plugins.sort_by_cached_key(|p| p.name.to_lowercase());
-    // Prefer the first search root when a library is installed twice.
     let mut seen = HashSet::new();
     plugins.retain(|p| seen.insert(p.uri.clone()));
     CACHE.store(&plugins);
@@ -52,9 +47,6 @@ pub(crate) fn scan_discovered(paths: &[PathBuf], progress: &(impl Fn() + Sync)) 
     plugins
 }
 
-/// `ladspa:<file name>:<label>`. Labels are unique within a library (unique
-/// IDs are not always), and the file name keeps sessions valid when a
-/// library moves between search directories.
 pub(super) fn plugin_uri(path: &Path, label: &str) -> String {
     format!(
         "ladspa:{}:{}",
@@ -63,7 +55,6 @@ pub(super) fn plugin_uri(path: &Path, label: &str) -> String {
     )
 }
 
-/// The label part of a URI made by [`plugin_uri`].
 pub(super) fn parse_label(uri: &str) -> Option<&str> {
     let (file, label) = uri.strip_prefix("ladspa:")?.split_once(':')?;
     (!file.is_empty() && !label.is_empty()).then_some(label)
@@ -83,13 +74,10 @@ pub(crate) fn scan_ladspa_file(path: &Path, plugins: &mut Vec<PluginInfo>) {
                 plugins.push(info);
             }
         }
-        // Keep the library loaded: this process exits right after reporting,
-        // and unloading plugin code buys nothing.
         std::mem::forget(lib);
     }
 }
 
-/// `None` for descriptors the host cannot use.
 pub(super) unsafe fn describe(path: &Path, desc: &Descriptor) -> Option<PluginInfo> {
     unsafe {
         let label = abi::cstr(desc.label);
@@ -125,7 +113,6 @@ pub(super) unsafe fn describe(path: &Path, desc: &Descriptor) -> Option<PluginIn
             let audio = flags & PORT_AUDIO != 0;
             let control = flags & PORT_CONTROL != 0;
             if input == output || audio == control {
-                // Not a valid port; skip it (the host connects it to scratch).
                 continue;
             }
             let (port_type, symbol) = match (audio, input) {

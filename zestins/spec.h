@@ -1,9 +1,3 @@
-// Zestins plugin specs: the single description of every plugin's ports.
-//
-// The DSP code uses the port enums below, ttlgen.c writes the LV2 .ttl files
-// from zestins_plugins[], and the X11 UI lays itself out from the same table,
-// so the three can't drift apart.
-
 #ifndef ZESTINS_SPEC_H
 #define ZESTINS_SPEC_H
 
@@ -20,13 +14,13 @@ typedef enum {
 } ZPortKind;
 
 enum {
-    ZF_TOGGLE = 1 << 0,  // on/off control
-    ZF_INTEGER = 1 << 1, // whole numbers only
-    ZF_LOG = 1 << 2,     // logarithmic scale (min must be > 0)
-    ZF_ENUM = 1 << 3,    // one of `labels`, values min, min + 1, ...
-    ZF_METER = 1 << 4,   // output shown as a level bar
-    ZF_LED = 1 << 5,     // output shown as an on/off light (value > 0.5)
-    ZF_ROW = 1 << 6,     // UI: start a new row of controls at this port
+    ZF_TOGGLE = 1 << 0,
+    ZF_INTEGER = 1 << 1,
+    ZF_LOG = 1 << 2,
+    ZF_ENUM = 1 << 3,
+    ZF_METER = 1 << 4,
+    ZF_LED = 1 << 5,
+    ZF_ROW = 1 << 6,
 };
 
 typedef struct {
@@ -35,15 +29,15 @@ typedef struct {
     ZPortKind kind;
     float min, max, def;
     unsigned flags;
-    const char *unit;          // "dB", "ms", "Hz", "%", "st" or NULL
-    const char *const *labels; // ZF_ENUM labels, NULL-terminated
+    const char *unit;
+    const char *const *labels;
 } ZPort;
 
 typedef struct {
     const char *uri;
     const char *ui_uri;
     const char *name;
-    const char *lv2_class; // e.g. "lv2:DelayPlugin"
+    const char *lv2_class;
     const char *comment;
     const ZPort *ports;
     int n_ports;
@@ -53,8 +47,6 @@ extern const ZPlugin zestins_plugins[];
 extern const int zestins_n_plugins;
 
 const ZPlugin *zestins_find(const char *uri);
-
-// ---- Port indices -------------------------------------------------------
 
 enum { UTIL_IN_L, UTIL_IN_R, UTIL_OUT_L, UTIL_OUT_R, UTIL_GAIN, UTIL_PAN, UTIL_MUTE,
        UTIL_INVERT_L, UTIL_INVERT_R, UTIL_MONO, UTIL_N };

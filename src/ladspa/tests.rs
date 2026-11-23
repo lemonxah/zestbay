@@ -90,16 +90,15 @@ fn process_applies_parameter_and_reports_control_output() {
     let info = fx.scan().remove(0);
     let inst = fx.instance(&info);
     assert_eq!((inst.audio_input_channels, inst.audio_output_channels), (1, 1));
-    assert_eq!(run(&inst, &[1.0, 0.5]), vec![1.0, 0.5]); // default gain 1
+    assert_eq!(run(&inst, &[1.0, 0.5]), vec![1.0, 0.5]);
     inst.set_parameter(0, 0.5);
     assert_eq!(run(&inst, &[1.0, 0.5]), vec![0.5, 0.25]);
     assert_eq!(inst.port_updates.control_outputs[0].value.load(), 0.25);
-    // Out-of-range and non-finite values are clamped / ignored.
     inst.set_parameter(0, 100.0);
     assert_eq!(inst.get_parameters()[0].value, 2.0);
     inst.set_parameter(0, f32::NAN);
     assert_eq!(inst.get_parameters()[0].value, 2.0);
-    inst.set_parameter(99, 1.0); // unknown port: ignored
+    inst.set_parameter(99, 1.0);
 }
 
 #[test]
@@ -131,9 +130,7 @@ fn missing_ports_do_not_crash() {
     let fx = Fixture::new(&[]);
     let info = fx.scan().remove(0);
     let inst = fx.instance(&info);
-    // No input and no output buffers from the graph.
     unsafe { inst.process(&[], &mut [], 32, &[]) };
-    // Extra output channels are silenced.
     let mut a = vec![1.0; 8];
     let mut b = vec![1.0; 8];
     unsafe { inst.process(&[&[1.0; 8][..]], &mut [&mut a[..], &mut b[..]], 8, &[]) };

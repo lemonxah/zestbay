@@ -3,8 +3,6 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import ZestBay
 
-// MIDI mappings: the dialog shell (bible §6.1) with a filterable card list
-// of CC/note → parameter mappings. Mono for CC numbers, channels and modes.
 ZbWindow {
     id: midiMappings
     title: "MIDI Mappings"
@@ -18,8 +16,6 @@ ZbWindow {
 
     property var mappings: []
 
-    // Indices into `mappings` matching the filter; the list model is the
-    // count so reloads keep the scroll position.
     readonly property var filteredIdx: computeFilter(mappings, filterField.text)
 
     function computeFilter(list, text) {
@@ -39,7 +35,6 @@ ZbWindow {
         return out
     }
 
-    // "CC 7 · ch 1" / "Note 60 · any ch"
     function sourceText(src) {
         var kind = src.message_type === "Note" ? "Note " : "CC "
         var num = src.cc !== undefined && src.cc !== null ? src.cc : "?"

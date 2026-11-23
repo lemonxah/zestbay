@@ -1,16 +1,9 @@
-//! Format-agnostic plugin types used across LV2, CLAP, and VST3 backends.
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-/// Unique identifier for a running plugin instance (format-agnostic).
 pub type PluginInstanceId = u64;
-
-// ---------------------------------------------------------------------------
-// Plugin format
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PluginFormat {
@@ -39,19 +32,12 @@ impl std::fmt::Display for PluginFormat {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Port types (unified across formats)
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PluginPortType {
     AudioInput,
     AudioOutput,
     ControlInput,
     ControlOutput,
-    /// LV2 atom ports (MIDI / atom events).  CLAP and VST3 handle MIDI
-    /// through their own event mechanisms, so these are LV2-specific in
-    /// practice but still kept in the unified enum for completeness.
     AtomInput,
     AtomOutput,
 }
@@ -84,10 +70,6 @@ impl PluginPortType {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Port info
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginPortInfo {
     pub index: usize,
@@ -97,21 +79,13 @@ pub struct PluginPortInfo {
     pub default_value: f32,
     pub min_value: f32,
     pub max_value: f32,
-    /// Whether this port is a boolean toggle (e.g. LV2 `lv2:toggled`,
-    /// CLAP stepped 0–1, VST3 `stepCount == 1`).
     #[serde(default)]
     pub is_toggle: bool,
-    /// Number of discrete steps between min and max (0 = continuous).
     #[serde(default)]
     pub step_count: u32,
-    /// Port declares a logarithmic scale (LV2 `pprops:logarithmic`).
     #[serde(default)]
     pub is_logarithmic: bool,
 }
-
-// ---------------------------------------------------------------------------
-// Plugin category
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PluginCategory {
@@ -209,14 +183,8 @@ impl PluginCategory {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Plugin info (catalog entry — available but not necessarily instantiated)
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginInfo {
-    /// Unique identifier for this plugin.  For LV2 this is the URI, for CLAP
-    /// the plugin-id string, for VST3 the class-id hex string.
     pub uri: String,
     pub name: String,
     pub format: PluginFormat,
@@ -229,10 +197,7 @@ pub struct PluginInfo {
     pub control_outputs: usize,
     pub required_features: Vec<String>,
     pub compatible: bool,
-    /// Whether the plugin provides a native UI.
     pub has_ui: bool,
-    /// Filesystem path to the plugin library (.clap file, .vst3 bundle).
-    /// Empty for LV2 (which uses lilv for discovery).
     #[serde(default)]
     pub library_path: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -256,10 +221,6 @@ impl PluginInfo {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Parameter value (runtime state of one control parameter)
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone)]
 pub struct ParameterValue {
     pub port_index: usize,
@@ -272,17 +233,12 @@ pub struct ParameterValue {
     pub is_toggle: bool,
 }
 
-// ---------------------------------------------------------------------------
-// Instance info (metadata about a running plugin — kept in the manager)
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone)]
 pub struct PluginInstanceInfo {
     pub id: PluginInstanceId,
     pub stable_id: String,
     pub plugin_uri: String,
     pub format: PluginFormat,
-    /// Descriptor and library path for starting without a catalog scan.
     pub scan_info: Option<PluginInfo>,
     pub display_name: String,
     pub pw_node_id: Option<u32>,
@@ -290,18 +246,10 @@ pub struct PluginInstanceInfo {
     pub active: bool,
     pub bypassed: bool,
     pub enabled: bool,
-    /// Cached LV2 state entries (populated from PW thread on remove, used for persistence)
     pub lv2_state: Vec<crate::lv2::state::StateEntry>,
-    /// Cached CLAP/VST3 opaque state blob, used for persistence
     pub plugin_state: Option<Vec<u8>>,
-    /// User-chosen port names, keyed by the port's own name. Saved with the
-    /// plugin and with its presets.
     pub port_names: std::collections::BTreeMap<String, String>,
 }
-
-// ---------------------------------------------------------------------------
-// Lock-free port synchronisation primitives (shared between RT and UI threads)
-// ---------------------------------------------------------------------------
 
 #[derive(Debug)]
 pub struct AtomicF32(AtomicU32);
@@ -316,8 +264,6 @@ impl AtomicF32 {
     pub fn store(&self, val: f32) {
         self.0.store(val.to_bits(), Ordering::Relaxed);
     }
-    /// Store `new` only if the value is still bit-for-bit `current`.
-    /// Returns whether it was stored.
     pub fn replace_if(&self, current: f32, new: f32) -> bool {
         self.0
             .compare_exchange(
@@ -335,27 +281,17 @@ pub struct PortSlot {
     pub value: AtomicF32,
 }
 
-// ---------------------------------------------------------------------------
-// Lock-free message ring (length-prefixed byte messages over an rtrb SPSC ring)
-// ---------------------------------------------------------------------------
-
-/// Result of popping a message into a caller-provided buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MsgPop {
     Empty,
-    /// A message of this many bytes was copied into the buffer.
     Data(usize),
-    /// The next message (this many bytes) does not fit; it was left queued.
     TooLarge(usize),
 }
 
 const MSG_HEADER: usize = 4;
 
-/// Producer half of a length-prefixed message ring.  Never allocates.
 pub struct MsgProducer(rtrb::Producer<u8>);
 
-/// Consumer half of a length-prefixed message ring.  Never allocates
-/// (except `pop_vec`, which is for non-RT callers).
 pub struct MsgConsumer(rtrb::Consumer<u8>);
 
 pub fn msg_ring(capacity: usize) -> (MsgProducer, MsgConsumer) {
@@ -364,13 +300,10 @@ pub fn msg_ring(capacity: usize) -> (MsgProducer, MsgConsumer) {
 }
 
 impl MsgProducer {
-    /// Push one message.  Returns false (dropping it) if there is not
-    /// enough free space.  Header and payload are committed together.
     pub fn push(&mut self, data: &[u8]) -> bool {
         self.push_parts(&[data])
     }
 
-    /// Push one message made of several concatenated parts.
     pub fn push_parts(&mut self, parts: &[&[u8]]) -> bool {
         let len: usize = parts.iter().map(|p| p.len()).sum();
         let Ok(len32) = u32::try_from(len) else {
@@ -406,7 +339,6 @@ impl MsgProducer {
 }
 
 impl MsgConsumer {
-    /// Length of the next complete message, if any.
     pub fn peek_len(&mut self) -> Option<usize> {
         let chunk = self.0.read_chunk(MSG_HEADER).ok()?;
         let (a, b) = chunk.as_slices();
@@ -422,7 +354,6 @@ impl MsgConsumer {
         }
     }
 
-    /// Copy the next message into `out` and consume it.
     pub fn pop_into(&mut self, out: &mut [u8]) -> MsgPop {
         let Some(len) = self.peek_len() else {
             return MsgPop::Empty;
@@ -446,7 +377,6 @@ impl MsgConsumer {
         MsgPop::Data(len)
     }
 
-    /// Drop the next message without reading it.
     pub fn discard(&mut self) -> bool {
         let Some(len) = self.peek_len() else {
             return false;
@@ -457,7 +387,6 @@ impl MsgConsumer {
         true
     }
 
-    /// Pop the next message into a freshly allocated Vec (non-RT only).
     pub fn pop_vec(&mut self) -> Option<Vec<u8>> {
         let len = self.peek_len()?;
         let mut out = vec![0u8; len];
@@ -472,20 +401,8 @@ impl MsgConsumer {
     }
 }
 
-/// Default capacity of an [`AtomPortBuffer`] ring, in bytes.
 pub const ATOM_RING_CAPACITY: usize = 256 * 1024;
 
-/// Lock-free queue of atom messages for one atom port.
-///
-/// * Atom inputs (UI → plugin): UI threads `write()`, the RT thread drains
-///   with `pop_into_rt()` each cycle; messages are queued, not overwritten.
-/// * Atom outputs (plugin → UI): the RT thread `write_rt()`s the output
-///   sequence after `run()` (only while a UI is listening), the UI drains
-///   with `read()`.
-///
-/// Each side sits behind a mutex only so the struct can be shared through an
-/// `Arc`; the RT side uses `try_lock`, which never blocks (it is the sole
-/// user of its half).
 pub struct AtomPortBuffer {
     pub port_index: usize,
     producer: parking_lot::Mutex<MsgProducer>,
@@ -508,13 +425,10 @@ impl AtomPortBuffer {
         }
     }
 
-    /// Queue a message (non-RT producer).  Returns false if the queue is full.
     pub fn write(&self, data: &[u8]) -> bool {
         self.producer.lock().push(data)
     }
 
-    /// Queue a message from the RT thread.  Never blocks or allocates;
-    /// drops the message if the queue is full or contended.
     pub fn write_rt(&self, data: &[u8]) -> bool {
         match self.producer.try_lock() {
             Some(mut p) => p.push(data),
@@ -522,12 +436,10 @@ impl AtomPortBuffer {
         }
     }
 
-    /// Pop the next message (non-RT consumer).
     pub fn read(&self) -> Option<Vec<u8>> {
         self.consumer.lock().pop_vec()
     }
 
-    /// Pop the next message into `out` from the RT thread.
     pub fn pop_into_rt(&self, out: &mut [u8]) -> MsgPop {
         match self.consumer.try_lock() {
             Some(mut c) => c.pop_into(out),
@@ -535,8 +447,6 @@ impl AtomPortBuffer {
         }
     }
 
-    /// Drop the next queued message from the RT thread (e.g. one that can
-    /// never fit the plugin's port buffer).
     pub fn discard_rt(&self) -> bool {
         match self.consumer.try_lock() {
             Some(mut c) => c.discard(),
@@ -548,8 +458,6 @@ impl AtomPortBuffer {
         self.consumer.lock().clear();
     }
 
-    /// Whether a consumer (UI) wants plugin→UI output.  The RT thread skips
-    /// writing output messages while nobody listens.
     pub fn is_listening(&self) -> bool {
         self.listening.load(Ordering::Acquire)
     }
@@ -588,8 +496,6 @@ mod tests {
 
     use super::*;
 
-    // ---- AtomicF32 ----
-
     #[test]
     fn atomic_f32_store_load() {
         let a = AtomicF32::new(0.0);
@@ -616,8 +522,6 @@ mod tests {
         assert!(a.load().is_nan());
     }
 
-    // ---- PortSlot ----
-
     #[test]
     fn port_slot_basic() {
         let slot = PortSlot {
@@ -628,8 +532,6 @@ mod tests {
         assert!((slot.value.load() - 0.42).abs() < 1e-5);
     }
 
-    // ---- AtomPortBuffer ----
-
     #[test]
     fn atom_port_buffer_write_then_read() {
         let buf = AtomPortBuffer::new(0);
@@ -637,7 +539,6 @@ mod tests {
         let data = buf.read();
         assert_eq!(data, Some(b"hello".to_vec()));
 
-        // Second read should be empty (consumed)
         let data2 = buf.read();
         assert_eq!(data2, None);
     }
@@ -702,8 +603,6 @@ mod tests {
         assert_eq!(c.peek_len(), None);
     }
 
-    // ---- PortUpdates ----
-
     #[test]
     fn port_updates_snapshot_all() {
         let pu = PortUpdates {
@@ -734,8 +633,6 @@ mod tests {
         assert!((snapshot[2].1 - 0.3).abs() < 1e-5);
     }
 
-    // ---- PluginFormat ----
-
     #[test]
     fn plugin_format_as_str() {
         assert_eq!(PluginFormat::Lv2.as_str(), "LV2");
@@ -749,8 +646,6 @@ mod tests {
         assert_eq!(format!("{}", PluginFormat::Clap), "CLAP");
         assert_eq!(format!("{}", PluginFormat::Vst3), "VST3");
     }
-
-    // ---- PluginPortType ----
 
     #[test]
     fn port_type_predicates() {
@@ -772,8 +667,6 @@ mod tests {
         assert!(PluginPortType::AtomOutput.is_output());
         assert!(!PluginPortType::AudioInput.is_output());
     }
-
-    // ---- PluginCategory ----
 
     #[test]
     fn category_from_class_label() {
@@ -858,8 +751,6 @@ mod tests {
             "Custom"
         );
     }
-
-    // ---- PluginInfo helpers ----
 
     #[test]
     fn plugin_info_is_effect() {

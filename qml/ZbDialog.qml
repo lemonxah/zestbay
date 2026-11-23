@@ -2,14 +2,11 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// In-window modal dialog (confirmations, rename, errors): title 18/600,
-// content, footer with an optional secondary button left of the primary.
-// Escape / secondary = reject(); primary = accept().
 Dialog {
     id: control
     property string primaryText: "OK"
-    property string secondaryText: ""     // empty = no secondary button
-    property bool primaryEnabled: true    // e.g. false until required fields are filled
+    property string secondaryText: ""
+    property bool primaryEnabled: true
 
     modal: true
     padding: Theme.dialogPadding

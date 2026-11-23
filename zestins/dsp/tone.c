@@ -1,6 +1,3 @@
-// Zestins Tone Generator: sine, square, saw (both band-limited with
-// PolyBLEP), white or pink noise at a set level.  Same signal on both sides.
-
 #include "dsp.h"
 
 typedef struct {
@@ -34,7 +31,6 @@ static void activate(LV2_Handle h) {
     smooth_init(&t->level, 0, t->rate);
 }
 
-// White noise in [-1, 1) from a xorshift32 generator.
 static float white(Tone *t) {
     uint32_t x = t->rng;
     x ^= x << 13;
@@ -44,7 +40,6 @@ static float white(Tone *t) {
     return (float)x / 2147483648.0f - 1.0f;
 }
 
-// Pink noise: Paul Kellet's filter on white noise.
 static float pink(Tone *t) {
     float w = white(t);
     float *b = t->pink;

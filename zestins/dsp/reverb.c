@@ -1,8 +1,3 @@
-// Zestins Reverb: a Schroeder/Moorer room (the classic "Freeverb" layout):
-// eight damped feedback combs in parallel feeding four allpasses, per
-// channel, with the right channel's delays slightly longer for width.
-// Freeze holds the current tail indefinitely.
-
 #include "dsp.h"
 
 #define COMBS 8
@@ -10,14 +5,13 @@
 #define SPREAD 23
 #define FIXED_GAIN 0.015f
 
-// Delay lengths in samples at 44.1 kHz; scaled to the actual rate.
 static const int comb_tuning[COMBS] = { 1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617 };
 static const int allpass_tuning[ALLPASSES] = { 556, 441, 341, 225 };
 
 typedef struct {
     float *buf;
     uint32_t size, pos;
-    float store; // damping lowpass state
+    float store;
 } Comb;
 
 typedef struct {

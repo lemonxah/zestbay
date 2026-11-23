@@ -1,29 +1,3 @@
-//! OSC remote control: plugins can be enabled, disabled and tuned over UDP.
-//!
-//! The server runs on its own thread, decodes packets into `OscRequest`s and
-//! hands them to the UI thread, which owns all plugin state and applies them
-//! (see `AppController::poll_osc`). Links are deliberately not controllable.
-//!
-//! Addresses (`<plugin>` is the plugin's name as shown, lowercased with
-//! anything but letters and digits turned into `_` -- "Reverb 1" is
-//! `reverb_1` -- or its stable id):
-//!
-//! ```text
-//! /zestbay/plugins                           query: lists the plugins
-//! /zestbay/sessions                          query: lists the sessions
-//! /zestbay/session/load             "name"   switch to another session
-//! /zestbay/plugin/<plugin>/enable   1|0      hard on / off (off = silent)
-//! /zestbay/plugin/<plugin>/bypass   1|0      bypass on / off (audio passes through)
-//! /zestbay/plugin/<plugin>/toggle            flip on/off
-//! /zestbay/plugin/<plugin>/param/<param> v   set a value in the parameter's own range
-//! /zestbay/plugin/<plugin>/param/<param>/normalized v   set it from 0.0 to 1.0
-//! /zestbay/plugin/<plugin>/preset   "name"   apply a saved preset
-//! /zestbay/plugin/<plugin>/params            query: lists the parameters
-//! ```
-//!
-//! `<param>` is the parameter's symbol, its name in the same lowercase form,
-//! or its port index. Queries are answered to the sender's address.
-
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -62,7 +36,6 @@ pub struct OscRequest {
     pub from: SocketAddr,
 }
 
-/// Lowercase letters and digits, everything else folded into single `_`.
 pub fn slug(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -94,7 +67,6 @@ fn string(arg: &OscType) -> Option<String> {
     }
 }
 
-/// Turn one message into an action. Err says why it isn't one (for the log).
 pub fn parse(addr: &str, args: &[OscType]) -> Result<OscAction, String> {
     let parts: Vec<&str> = addr.split('/').skip(1).collect();
     match parts.as_slice() {
@@ -117,7 +89,6 @@ pub fn parse(addr: &str, args: &[OscType]) -> Result<OscAction, String> {
                     Ok(OscAction::Bypass { plugin, bypassed: on })
                 }
                 ["toggle"] => {
-                    // A button sends 1 on press and 0 on release: act on press.
                     match args.first().and_then(number) {
                         Some(v) if v <= 0.5 => Err("toggle release ignored".into()),
                         _ => Ok(OscAction::Toggle { plugin }),
@@ -186,8 +157,6 @@ impl OscServer {
         })
     }
 
-    /// Requests received since the last call. A parameter set again before
-    /// it is applied only counts once, so a fast fader doesn't pile up.
     pub fn drain(&self) -> Vec<OscRequest> {
         let mut out: Vec<OscRequest> = Vec::new();
         while let Ok(req) = self.rx.try_recv() {
@@ -293,7 +262,6 @@ mod tests {
             parse("/zestbay/plugin/reverb/bypass", &[OscType::Bool(true)]),
             Ok(OscAction::Bypass { plugin: "reverb".into(), bypassed: true })
         );
-        // No argument means "on" (enable) / "bypassed" (bypass).
         assert_eq!(
             parse("/zestbay/plugin/reverb/enable", &[]),
             Ok(OscAction::Enable { plugin: "reverb".into(), enabled: true })

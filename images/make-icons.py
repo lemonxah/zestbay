@@ -1,19 +1,4 @@
 #!/usr/bin/env python3
-"""Generate every raster icon from the logo mark.
-
-The mark itself (images/logo/zestbay-mark.svg) is built by
-images/trace-logo.py; run that first if the logo changed.
-Needs `rsvg-convert` (librsvg) and Pillow. Run from anywhere:
-
-    python3 images/make-icons.py
-
-Outputs:
-  images/logo/zestbay-launcher.svg    mark on a bg.panel rounded square (app icon)
-  images/zesticon.png                 launcher, 256 px (native packages)
-  images/zesttray.png                 tray mark, 256 px (native packages)
-  images/zesttray-{22,32,64}.argb     tray mark as raw ARGB32 for src/tray.rs
-  pkg/flatpak/icons/NxN/...           Flatpak app icons, named by app id
-"""
 
 import re
 import subprocess
@@ -23,15 +8,11 @@ from pathlib import Path
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parent.parent
-APP_ID = "io.github.lemonxah.ZestBay"
-PANEL_DARK = "#1a1d23"      # bg.panel (dark theme)
+PANEL_DARK = "#1a1d23"
 MARK_SVG = ROOT / "images/logo/zestbay-mark.svg"
 
 
 def square_svg(pad: float, background: str = "") -> str:
-    """The (wide) mark centred in a 64x64 square without distortion, with
-    `pad` (fraction of the size) around it, optionally on a rounded-square
-    `background` (radius 22 % of the size)."""
     mark = MARK_SVG.read_text()
     vb = re.search(r'viewBox="([^"]+)"', mark).group(1)
     body = mark[mark.index(">", mark.index("<svg")) + 1:mark.rindex("</svg>")]
@@ -57,10 +38,10 @@ def render(svg: Path, size: int, out: Path) -> None:
 def write_argb(png: Path, out: Path) -> None:
     rgba = Image.open(png).convert("RGBA").tobytes()
     data = bytearray(len(rgba))
-    data[0::4] = rgba[3::4]  # A
-    data[1::4] = rgba[0::4]  # R
-    data[2::4] = rgba[1::4]  # G
-    data[3::4] = rgba[2::4]  # B
+    data[0::4] = rgba[3::4]
+    data[1::4] = rgba[0::4]
+    data[2::4] = rgba[1::4]
+    data[3::4] = rgba[2::4]
     out.write_bytes(bytes(data))
 
 
@@ -68,12 +49,12 @@ def main() -> None:
     logo = ROOT / "images/logo"
     launcher = logo / "zestbay-launcher.svg"
     launcher.write_text(square_svg(0.08, PANEL_DARK))
-    stale = logo / "zestbay-mark-light.svg"   # the old single-colour mark
+    stale = logo / "zestbay-mark-light.svg"
     if stale.exists():
         stale.unlink()
 
     with tempfile.TemporaryDirectory() as tmp:
-        tray = Path(tmp) / "tray.svg"           # mark centred in a square
+        tray = Path(tmp) / "tray.svg"
         tray.write_text(square_svg(0.02))
         render(launcher, 256, ROOT / "images/zesticon.png")
         render(tray, 256, ROOT / "images/zesttray.png")
@@ -81,10 +62,6 @@ def main() -> None:
             png = Path(tmp) / f"tray{size}.png"
             render(tray, size, png)
             write_argb(png, ROOT / f"images/zesttray-{size}.argb")
-
-        icons = ROOT / "pkg/flatpak/icons"
-        for size in (16, 22, 32, 48, 128, 256, 512):
-            render(launcher, size, icons / f"{size}x{size}/{APP_ID}.png")
 
 
 if __name__ == "__main__":

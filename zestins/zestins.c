@@ -1,5 +1,3 @@
-// Entry point of zestins.so: the LV2 descriptor of every Zestins plugin.
-
 #include <stddef.h>
 
 #include <lv2/core/lv2.h>

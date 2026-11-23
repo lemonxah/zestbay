@@ -2,8 +2,6 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// Manage plugins: the active plugin instances (list left, details right).
-// Follows the dialog shell (bible §6.1) with card lists and parameter rows.
 ZbWindow {
     id: pluginManager
     title: "Manage plugins"
@@ -16,14 +14,11 @@ ZbWindow {
     required property var controller
 
     property var plugins: []
-    // Selection is tracked by stable id: the list is reloaded (and may be
-    // reordered) on every refresh.
     property string selectedStableId: ""
     property int selectedIndex: indexOfPlugin(plugins, selectedStableId)
     property var selectedPlugin: selectedIndex >= 0 ? plugins[selectedIndex] : null
     readonly property var selectedParams: selectedPlugin && selectedPlugin.parameters ? selectedPlugin.parameters : []
 
-    // Two-click confirmation for "Remove plugin" (cleared after a few seconds).
     property bool confirmRemove: false
     onSelectedStableIdChanged: confirmRemove = false
 
@@ -94,7 +89,6 @@ ZbWindow {
             Layout.fillHeight: true
             spacing: 16
 
-            // ── Active plugin list ──────────────────────────────────────
             ZbCard {
                 Layout.preferredWidth: 280
                 Layout.fillHeight: true
@@ -114,8 +108,6 @@ ZbWindow {
                     }
                     clip: true
                     boundsBehavior: Flickable.StopAtBounds
-                    // Int model: the list is reloaded every 500 ms; an array
-                    // model would rebuild every delegate (and reset scroll).
                     model: pluginManager.plugins.length
                     currentIndex: pluginManager.selectedIndex
                     highlightFollowsCurrentItem: false
@@ -132,7 +124,6 @@ ZbWindow {
                         height: Theme.rowRule
                         color: selected || pluginMouse.containsMouse ? Theme.bgHover : "transparent"
 
-                        // Selection marker (accent: selection).
                         Rectangle {
                             visible: pluginRow.selected
                             anchors.left: parent.left
@@ -210,7 +201,6 @@ ZbWindow {
                 }
             }
 
-            // ── Details of the selected plugin ──────────────────────────
             Item {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
@@ -229,7 +219,6 @@ ZbWindow {
                     anchors.fill: parent
                     spacing: 16
 
-                    // Name, URI and actions
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: 8
@@ -309,7 +298,6 @@ ZbWindow {
                         }
                     }
 
-                    // Parameters section
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: 8

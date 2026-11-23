@@ -1,5 +1,3 @@
-// Zestins Utility: gain, balance, mute, polarity flip and mono sum.
-
 #include "dsp.h"
 
 typedef struct {
@@ -37,7 +35,6 @@ static void run(LV2_Handle h, uint32_t n) {
 
     float gain = ctl(u->port[UTIL_MUTE], 0) > 0.5f ? 0.0f : db_to_gain(ctl(u->port[UTIL_GAIN], 0));
     float pan = clampf(ctl(u->port[UTIL_PAN], 0), -1, 1);
-    // Balance: turning one side down leaves the other at unity.
     float target_l = gain * fminf(1.0f, 1.0f - pan);
     float target_r = gain * fminf(1.0f, 1.0f + pan);
     if (ctl(u->port[UTIL_INVERT_L], 0) > 0.5f)

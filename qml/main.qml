@@ -49,8 +49,6 @@ ZbWindow {
             mainWindow.loadCustomThemes();
             if (prefs.palette)
                 Theme.palette = prefs.palette;
-            // New nodes may still be repositioned until their rule has had
-            // time to connect them.
             if (prefs.rule_settle_ms !== undefined)
                 graphView.settleWindowMs = Math.max(8000, prefs.rule_settle_ms + 4000);
             if (prefs.start_minimized) {
@@ -105,7 +103,6 @@ ZbWindow {
         value: controller.desktop_color_scheme
     }
 
-    // Rule counts for the toolbar Rules button.
     property int ruleCount: 0
     function refreshRuleCount() {
         try {
@@ -153,8 +150,6 @@ ZbWindow {
             mainWindow.refreshRuleCount();
         }
         function onError_occurred(message) {
-            // Errors can arrive in bursts (e.g. while PipeWire reconnects):
-            // add to the open dialog instead of replacing it.
             if (errorDialog.visible) {
                 if (errorDialogText.text.indexOf(message) < 0) {
                     var combined = errorDialogText.text + "\n\n" + message;
@@ -224,13 +219,11 @@ ZbWindow {
         }
     }
 
-    // ---- Sessions (toolbar dropdown) --------------------------------------
     property var sessionInfo: ({
             current: "",
             path: "",
             sessions: []
         })
-    // The session's name, or the folder's name when opened with --session_path.
     readonly property string sessionLabel: sessionInfo.current !== "" ? sessionInfo.current : (sessionInfo.path.split("/").filter(s => s.length > 0).pop() || "Session")
     property string pendingSession: ""
 
@@ -392,7 +385,6 @@ ZbWindow {
         onTriggered: controller.poll_events()
     }
 
-    // Toolbar / menu grid controls; persisted like the Preferences rows.
     function setSnapToGrid(on) {
         controller.set_preference("snap_to_grid", String(on));
         graphView.snapToGrid = on;
@@ -402,9 +394,6 @@ ZbWindow {
         graphView.gridSize = px;
     }
 
-    // Two densities, each a pixel value with three named presets:
-    //  - graph density: the gap between nodes (node spacing, px);
-    //  - card density: how big the node cards are (the height of a port row, px).
     readonly property var densityPresets: [
         { name: "Compact", px: 8 },
         { name: "Normal", px: 20 },
@@ -457,7 +446,6 @@ ZbWindow {
         onActivated: searchField.forceActiveFocus()
     }
 
-    // Writes each plugin's current settings back into its selected preset.
     Shortcut {
         sequence: "Ctrl+S"
         onActivated: {
@@ -467,7 +455,6 @@ ZbWindow {
         }
     }
 
-    // ---- Toolbar (replaces the menu bar; design bible §6.4) -------------
     header: Rectangle {
         implicitHeight: Theme.toolbarHeight
         color: Theme.bgPanel
@@ -499,8 +486,6 @@ ZbWindow {
                 Layout.rightMargin: 1
             }
 
-            // Session picker: the open session's name; the menu lists the
-            // folders in the sessions directory.
             ZbButton {
                 id: sessionButton
                 Layout.rightMargin: 12
@@ -518,8 +503,6 @@ ZbWindow {
                 ZbMenu {
                     id: sessionMenu
                     implicitWidth: 220
-                    // One Repeater for every row: a Menu puts Repeater items
-                    // after its static items, so "New session…" would come first.
                     Repeater {
                         model: mainWindow.sessionInfo.sessions.map(n => ({ name: n, isNew: false })).concat([{ name: "New session\u2026", isNew: true }])
                         delegate: ZbMenuItem {
@@ -527,7 +510,6 @@ ZbWindow {
                             implicitWidth: 208
                             text: modelData.name
                             selected: !modelData.isNew && modelData.name === mainWindow.sessionInfo.current
-                            // Room for the delete button.
                             rightPadding: modelData.isNew || selected ? 10 : 36
                             onTriggered: {
                                 if (modelData.isNew) {
@@ -591,7 +573,6 @@ ZbWindow {
                 onClicked: mainWindow.addPluginAtCenter()
             }
 
-            // Rules: accent dot while rules are active, rule count pill.
             ZbButton {
                 id: rulesButton
                 implicitWidth: rulesRow.implicitWidth + 24
@@ -633,7 +614,6 @@ ZbWindow {
                 Layout.rightMargin: 4
             }
 
-            // Zoom cluster: [−] [100%] [+] [fit], one bordered group.
             Rectangle {
                 implicitHeight: Theme.controlHeight
                 implicitWidth: zoomRow.implicitWidth + 2
@@ -679,7 +659,6 @@ ZbWindow {
                 }
             }
 
-            // Grid cluster: [snap to grid toggle] [grid size ▾].
             Rectangle {
                 implicitHeight: Theme.controlHeight
                 implicitWidth: gridRow.implicitWidth + 2
@@ -728,9 +707,6 @@ ZbWindow {
                 }
             }
 
-            // Density cluster: [graph density ▾] [card density ▾]. Graph
-            // density is the gap between nodes; card density is how big the
-            // cards are. Each: presets, pixel values, re-space now.
             Rectangle {
                 implicitHeight: Theme.controlHeight
                 implicitWidth: densityRow.implicitWidth + 2
@@ -872,7 +848,6 @@ ZbWindow {
                 textColor: Theme.textIcon
                 onClicked: appMenu.popup(menuButton, menuButton.width - appMenu.width, menuButton.height + 6)
 
-                // The old File / Patchbay / Help menus.
                 ZbMenu {
                     id: appMenu
                     ZbMenuItem {
@@ -882,7 +857,6 @@ ZbWindow {
                         onToggled: controller.toggle_patchbay(!controller.patchbay_enabled)
                     }
                     ZbMenuItem {
-                        // Off: rules only add links; nothing they don't cover is removed.
                         text: "Exclusive mode"
                         checkable: true
                         enabled: controller.patchbay_enabled
@@ -947,9 +921,6 @@ ZbWindow {
         onActivated: controller.request_quit()
     }
 
-    // A cell of the zoom cluster: icon or label, no own border.
-    // A cell of a toolbar cluster (zoom, grid): icon and/or label, no own
-    // border. `active` = toggle on (accentFaint + accent, like a plugin's On).
     component ZoomCell: AbstractButton {
         id: cell
         property string iconName: ""
@@ -961,8 +932,6 @@ ZbWindow {
         width: Theme.controlHeight
         height: Theme.controlHeight - 2
         hoverEnabled: true
-        // Clicking a toolbar cell must not take the keyboard from the canvas
-        // (W, Delete, arrows, Ctrl+Z … keep working); Tab still reaches it.
         focusPolicy: Qt.TabFocus
         background: Rectangle {
             radius: Theme.radiusControl - 1
@@ -1002,7 +971,6 @@ ZbWindow {
         }
     }
 
-    // ---- Status bar -----------------------------------------------------
     footer: Rectangle {
         implicitHeight: Theme.statusBarHeight
         color: Theme.bgPanel
@@ -1096,7 +1064,6 @@ ZbWindow {
                 }
             }
 
-            // CPU sparkline + readout; click for the CPU usage window.
             Item {
                 implicitWidth: cpuRow.implicitWidth
                 implicitHeight: cpuRow.implicitHeight
@@ -1110,9 +1077,6 @@ ZbWindow {
                         height: 14
                         property var cpuData: []
 
-                        // Redraw on every poll, not on cpu_usage changes: the
-                        // rounded text often stays the same while the history
-                        // moves, which made the line freeze and then jump.
                         Timer {
                             interval: pollTimer.interval
                             running: mainWindow.visible
@@ -1136,8 +1100,6 @@ ZbWindow {
                         onPaint: {
                             var ctx = getContext("2d");
                             ctx.reset();
-                            // All 120 samples: each poll shifts the line by
-                            // about half a pixel, so it scrolls smoothly.
                             var d = cpuData;
                             if (d.length < 2)
                                 return;
@@ -1171,7 +1133,6 @@ ZbWindow {
                 }
             }
 
-            // Rules chip: accent while active, neutral when off.
             Rectangle {
                 implicitHeight: 20
                 implicitWidth: chipRow.implicitWidth + 16
@@ -1284,8 +1245,6 @@ ZbWindow {
         controller: controller
     }
 
-    // Every shortcut, grouped: ? on the canvas, F1, the menu, the canvas's
-    // help button.
     ShortcutsDialog {
         id: shortcutsDialog
     }

@@ -1,6 +1,5 @@
 import QtQuick
 
-// UPPERCASE section label: 11/600, +0.08em, text.muted.
 Text {
     font.family: Theme.fontSans
     font.pixelSize: Theme.sizeSection

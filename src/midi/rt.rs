@@ -1,16 +1,3 @@
-//! RT plumbing shared by the LV2 / CLAP / VST3 plugin filter nodes.
-//!
-//! Each filter is split into two halves:
-//! - `FilterRt`: owned by the PipeWire RT callback (port pointers, scratch
-//!   buffers, MIDI toggle state, the event queue producer).  Never touched
-//!   by the main thread while the filter is connected.
-//! - `FilterMain`: owned by the filter node on the PipeWire main loop
-//!   (event queue consumer, retired mapping tables).
-//!
-//! Both halves share a `FilterShared` that only contains atomics.
-//!
-//! Nothing on the RT path allocates, locks, frees or sends on a channel.
-
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
@@ -23,16 +10,12 @@ use super::processing::{
 };
 use crate::plugin::cpu_stats::PluginTimingSlot;
 
-/// Largest block ever passed to a plugin's `process()`.  Larger cycles are split.
 pub const MAX_BLOCK: usize = 8192;
 
-/// Capacity of the per-filter RT -> main event queue.  Events are dropped when full.
 pub const RT_EVENT_CAPACITY: usize = 1024;
 
-/// Cycles longer than this are considered bogus and skipped.
 const MAX_CYCLE: usize = 1 << 20;
 
-/// Split a cycle of `n` frames into consecutive `(start, len)` blocks of at most `max` frames.
 pub fn block_chunks(n: usize, max: usize) -> impl Iterator<Item = (usize, usize)> {
     let max = max.max(1);
     (0..n.div_ceil(max)).map(move |i| {
@@ -41,8 +24,6 @@ pub fn block_chunks(n: usize, max: usize) -> impl Iterator<Item = (usize, usize)
     })
 }
 
-/// Frames of the block `[start, start + len)` that lie inside a buffer of
-/// `cap` frames (0 for a missing buffer).
 #[inline]
 pub fn available_frames(missing: bool, cap: usize, start: usize, len: usize) -> usize {
     if missing {
@@ -52,13 +33,6 @@ pub fn available_frames(missing: bool, cap: usize, start: usize, len: usize) -> 
     }
 }
 
-/// Same as `pw_filter_get_dsp_buffer`, but also reports the buffer capacity
-/// in frames, and returns null (instead of PipeWire's fixed-size silence
-/// buffer) for a port without buffers.
-///
-/// # Safety
-/// `port` must be null or a port_data pointer of a DSP port of a connected
-/// filter; must be called from the RT process callback.
 unsafe fn dsp_buffer(
     port: *mut std::ffi::c_void,
     n_samples: usize,
@@ -92,21 +66,10 @@ unsafe fn dsp_buffer(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Lock-free mapping table swap
-// ---------------------------------------------------------------------------
-
-/// Holds the current `ResolvedMappings` as a raw `Arc` pointer.  The main
-/// thread publishes new tables and keeps the old ones alive (see
-/// `FilterMain`) until the RT thread can no longer be using them, so the RT
-/// thread never drops the last reference.
 pub struct MappingSwap {
     current: AtomicPtr<ResolvedMappings>,
-    /// Incremented by the main thread after every swap.
     published: AtomicU64,
-    /// Highest epoch the RT thread has finished a cycle with.
     rt_seen: AtomicU64,
-    /// RT is between `rt_enter` and `rt_exit`.
     in_cycle: AtomicBool,
 }
 
@@ -120,19 +83,14 @@ impl MappingSwap {
         }
     }
 
-    /// Main thread: install `new`, returning the previous table and the epoch
-    /// after which it may be released.
     pub fn publish(&self, new: Arc<ResolvedMappings>) -> (u64, Arc<ResolvedMappings>) {
         let old = self
             .current
             .swap(Arc::into_raw(new) as *mut _, Ordering::SeqCst);
         let epoch = self.published.fetch_add(1, Ordering::SeqCst) + 1;
-        // SAFETY: `old` came from Arc::into_raw in new()/publish()
         (epoch, unsafe { Arc::from_raw(old) })
     }
 
-    /// RT: start using the table.  The returned pointer stays valid until the
-    /// matching `rt_exit`.
     pub fn rt_enter(&self) -> (u64, *const ResolvedMappings) {
         self.in_cycle.store(true, Ordering::SeqCst);
         let epoch = self.published.load(Ordering::SeqCst);
@@ -140,14 +98,11 @@ impl MappingSwap {
         (epoch, ptr)
     }
 
-    /// RT: done with the table obtained from `rt_enter`.
     pub fn rt_exit(&self, epoch: u64) {
         self.rt_seen.store(epoch, Ordering::SeqCst);
         self.in_cycle.store(false, Ordering::SeqCst);
     }
 
-    /// Main thread: whether a table retired at `epoch` can no longer be in use by RT.
-    /// Must be evaluated after the corresponding `publish`.
     fn releasable(&self) -> impl Fn(u64) -> bool {
         let idle = !self.in_cycle.load(Ordering::SeqCst);
         let seen = self.rt_seen.load(Ordering::SeqCst);
@@ -159,20 +114,13 @@ impl Drop for MappingSwap {
     fn drop(&mut self) {
         let p = *self.current.get_mut();
         if !p.is_null() {
-            // SAFETY: from Arc::into_raw; RT is gone once the swap is dropped
             unsafe { drop(Arc::from_raw(p)) };
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Shared state
-// ---------------------------------------------------------------------------
-
-/// State shared between the RT callback and the main thread (atomics only).
 pub struct FilterShared {
     pub shutting_down: AtomicBool,
-    /// Set by `state_changed` once the filter reached PAUSED/STREAMING.
     pub ready: AtomicBool,
     pub graph_rate: AtomicU32,
     pub enabled: AtomicBool,
@@ -180,20 +128,13 @@ pub struct FilterShared {
     pub mappings: MappingSwap,
 }
 
-/// Port data pointers of a filter (null where a port could not be created).
 pub struct FilterPorts {
     pub inputs: Vec<*mut std::ffi::c_void>,
     pub outputs: Vec<*mut std::ffi::c_void>,
     pub midi_in: *mut std::ffi::c_void,
-    /// One port per plugin MIDI output, or a single MIDI thru port when the
-    /// plugin has none (see `midi_out_port_names`).
     pub midi_outs: Vec<*mut std::ffi::c_void>,
 }
 
-/// Add the MIDI ports of a plugin filter: `midi_in`, plus one output per
-/// name in `plugin_midi_outputs` (or a single thru `midi_out` when empty).
-/// `add_port` adds a "8 bit raw midi" port to the (not yet connected)
-/// filter and returns its port data, or null.
 pub fn add_midi_ports(
     ports: &mut FilterPorts,
     display_name: &str,
@@ -206,7 +147,6 @@ pub fn add_midi_ports(
         log::error!("Failed to add MIDI input port for {}", display_name);
     }
     for out_name in super::processing::midi_out_port_names(plugin_midi_outputs) {
-        // midi_out_port_names strips NULs
         let name = std::ffi::CString::new(out_name.as_str()).unwrap();
         let port = add_port(libspa::sys::SPA_DIRECTION_OUTPUT, &name);
         if port.is_null() {
@@ -216,8 +156,6 @@ pub fn add_midi_ports(
     }
 }
 
-/// Create the two halves of a filter.  `plugin_midi_outs` is the number of
-/// MIDI outputs the plugin has (0 = the filter's MIDI out is a thru).
 pub fn new_filter_halves(
     ports: FilterPorts,
     has_midi_in: bool,
@@ -263,10 +201,6 @@ pub fn new_filter_halves(
     (main, rt)
 }
 
-// ---------------------------------------------------------------------------
-// Main-thread half
-// ---------------------------------------------------------------------------
-
 pub struct FilterMain {
     pub shared: Arc<FilterShared>,
     events: RefCell<rtrb::Consumer<RtEvent>>,
@@ -301,7 +235,6 @@ impl FilterMain {
         self.release_retired();
     }
 
-    /// Drop retired mapping tables the RT thread can no longer reference.
     fn release_retired(&self) {
         let mut retired = self.retired.borrow_mut();
         if retired.is_empty() {
@@ -311,8 +244,6 @@ impl FilterMain {
         retired.retain(|(epoch, _)| !releasable(*epoch));
     }
 
-    /// Convert queued RT events into `PwEvent`s.  `node_id` is only called
-    /// until the PluginAdded event has been sent.
     pub fn drain_events(
         &self,
         event_tx: &std::sync::mpsc::Sender<crate::pipewire::PwEvent>,
@@ -370,27 +301,17 @@ impl FilterMain {
     }
 }
 
-// ---------------------------------------------------------------------------
-// RT half
-// ---------------------------------------------------------------------------
-
 pub struct FilterRt {
     shared: Arc<FilterShared>,
     ports: FilterPorts,
     has_midi_in: bool,
     cpu_slot: Arc<PluginTimingSlot>,
-    /// MIDI the plugin emits on its MIDI outputs (no ports = thru mode).
     midi_sink: MidiSink,
     midi_state: MidiProcessingState,
     events: rtrb::Producer<RtEvent>,
-    /// Port buffers for the current cycle with their capacity in frames.
     in_bufs: Vec<(*const f32, usize)>,
     out_bufs: Vec<(*mut f32, usize)>,
-    /// `MAX_BLOCK` frames per port: inputs first, then outputs.  Used for
-    /// ports without a buffer (or with one too small for the cycle).
     scratch: Vec<f32>,
-    /// Preallocated slice lists handed to the plugin; emptied after every
-    /// cycle so no reference outlives the buffers.
     in_slices: Vec<&'static [f32]>,
     out_slices: Vec<&'static mut [f32]>,
     midi_events: [RawMidiEvent; MAX_MIDI_EVENTS],
@@ -399,14 +320,6 @@ pub struct FilterRt {
 }
 
 impl FilterRt {
-    /// Run one PipeWire process cycle.  `process` is called once per block of
-    /// at most `MAX_BLOCK` frames with (inputs, outputs, frames, midi events,
-    /// MIDI output sink) and returns the worker time (ns) spent on behalf of
-    /// that block.
-    ///
-    /// # Safety
-    /// Must be called from the filter's RT process callback with the
-    /// `position` pointer PipeWire passed in.
     pub unsafe fn run_cycle<F>(
         &mut self,
         position: *mut libspa::sys::spa_io_position,
@@ -472,7 +385,6 @@ impl FilterRt {
                 return;
             }
 
-            // Without plugin MIDI outputs the MIDI out port is a thru.
             if self.midi_sink.port_count() == 0
                 && let Some(&out) = self.ports.midi_outs.first()
             {
@@ -498,8 +410,6 @@ impl FilterRt {
             self.out_slices.clear();
             let scratch = self.scratch.as_mut_ptr();
 
-            // SAFETY (both loops): a port buffer is only addressed within its
-            // capacity; scratch region k holds MAX_BLOCK >= len frames.
             for (i, &(p, cap)) in self.in_bufs.iter().enumerate() {
                 let avail = available_frames(p.is_null(), cap, start, len);
                 let s: &'static [f32] = unsafe {
@@ -544,8 +454,6 @@ impl FilterRt {
             );
             self.out_slices.clear();
 
-            // Outputs whose buffer only partly covers this block were
-            // rendered into scratch: copy back what fits.
             for (j, &(p, cap)) in self.out_bufs.iter().enumerate() {
                 let avail = available_frames(p.is_null(), cap, start, len);
                 if avail > 0 && avail < len {
@@ -564,7 +472,6 @@ impl FilterRt {
 
         for i in 0..self.midi_sink.port_count() {
             if let Some(&port) = self.ports.midi_outs.get(i) {
-                // SAFETY: port data of a MIDI output port, RT callback
                 unsafe { write_midi_sequence(port, self.midi_sink.output(i)) };
             }
         }
@@ -615,7 +522,6 @@ mod tests {
     #[test]
     fn mapping_swap_retires_until_rt_moves_on() {
         let swap = MappingSwap::new(Arc::new(ResolvedMappings::empty()));
-        // RT is mid-cycle with the initial table
         let (e0, p0) = swap.rt_enter();
         let initial = p0;
 
@@ -623,16 +529,12 @@ mod tests {
         assert_eq!(Arc::as_ptr(&old), initial);
         assert!(!swap.releasable()(epoch));
 
-        // RT finishes the old cycle: still possibly using an epoch < retired
         swap.rt_exit(e0);
-        // ...but it is idle now, so releasing is safe
         assert!(swap.releasable()(epoch));
 
-        // A new cycle sees the new table and the new epoch
         let (e1, p1) = swap.rt_enter();
         assert_eq!(e1, epoch);
         assert_ne!(p1, initial);
-        // Conservative while a cycle is running
         assert!(!swap.releasable()(epoch));
         swap.rt_exit(e1);
         assert!(swap.releasable()(epoch));

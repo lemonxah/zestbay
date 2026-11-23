@@ -1,6 +1,3 @@
-//! LADSPA 1.1 ABI (`ladspa.h`) and port metadata helpers shared by the
-//! scanner and the host.
-
 use std::ffi::{CStr, c_char, c_int, c_ulong, c_void};
 
 pub const PORT_INPUT: c_int = 0x1;
@@ -60,17 +57,12 @@ pub struct Descriptor {
 
 pub type DescriptorFn = unsafe extern "C" fn(c_ulong) -> *const Descriptor;
 
-/// A dlopen'ed LADSPA library. Closed on drop. ZestBay's built-in plugins
-/// come as a library with no handle (see `builtin`).
 pub struct Library {
     handle: *mut c_void,
     entry: DescriptorFn,
 }
 
 impl Library {
-    /// # Safety
-    /// Runs the library's initialisers; the module must match this process's
-    /// architecture.
     pub unsafe fn open(path: &std::path::Path) -> Option<Self> {
         use std::os::unix::ffi::OsStrExt;
         if super::builtin::is_builtin_library(path) {
@@ -94,10 +86,6 @@ impl Library {
         Some(Self { handle, entry })
     }
 
-    /// Descriptor `index`, or null past the end of the library.
-    ///
-    /// # Safety
-    /// Calls plugin code. The pointer is valid while `self` lives.
     pub unsafe fn descriptor(&self, index: usize) -> *const Descriptor {
         unsafe { (self.entry)(index as c_ulong) }
     }
@@ -111,10 +99,7 @@ impl Drop for Library {
     }
 }
 
-/// Upper bound on descriptors per library, against buggy plugins that never
-/// return null.
 pub const MAX_DESCRIPTORS: usize = 4096;
-/// Upper bound on ports per plugin.
 pub const MAX_PORTS: usize = 1024;
 
 pub unsafe fn cstr(ptr: *const c_char) -> String {
@@ -125,7 +110,6 @@ pub unsafe fn cstr(ptr: *const c_char) -> String {
     }
 }
 
-/// Range, default and flags of a control port, resolved for `sample_rate`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ControlMeta {
     pub min: f32,
@@ -136,7 +120,6 @@ pub struct ControlMeta {
     pub steps: u32,
 }
 
-/// Resolve the range hints of a control port per `ladspa.h`.
 pub fn control_meta(hint: PortRangeHint, sample_rate: f64) -> ControlMeta {
     let h = hint.hint;
     let scale = if h & HINT_SAMPLE_RATE != 0 { sample_rate as f32 } else { 1.0 };
@@ -173,7 +156,6 @@ pub fn control_meta(hint: PortRangeHint, sample_rate: f64) -> ControlMeta {
         (lo.unwrap_or(f32::NAN), hi.unwrap_or(f32::NAN))
     };
     let mut default = default.unwrap_or(f32::NAN);
-    // Unbounded ends and missing defaults get usable values.
     if default.is_nan() {
         default = if min.is_finite() {
             min.max(0.0).min(if max.is_finite() { max } else { f32::MAX })

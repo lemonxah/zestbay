@@ -1,8 +1,3 @@
-//! LV2 State extension implementation.
-//!
-//! Allows saving and restoring arbitrary plugin state (KVT entries,
-//! channel labels, etc.) via the `LV2_State_Interface` extension.
-
 use std::ffi::c_void;
 use std::os::raw::c_char;
 use std::sync::Arc;
@@ -74,7 +69,7 @@ impl StateEntry {
     pub fn new_string(key_uri: &str, value: &str) -> Self {
         let atom_string_uri = "http://lv2plug.in/ns/ext/atom#String";
         let mut bytes = value.as_bytes().to_vec();
-        bytes.push(0); // null-terminated C string
+        bytes.push(0);
         Self {
             key_uri: key_uri.to_string(),
             type_uri: atom_string_uri.to_string(),
@@ -101,8 +96,6 @@ unsafe extern "C" fn store_callback(
     unsafe {
         let ctx = &mut *(handle as *mut StoreContext);
         if flags & LV2_STATE_IS_POD == 0 {
-            // Values are persisted as JSON bytes; non-POD data (pointers,
-            // handles) cannot survive that.
             log::warn!(
                 "LV2 state: skipping non-POD value for key {:?}",
                 ctx.mapper.unmap(key)
@@ -159,7 +152,6 @@ unsafe extern "C" fn retrieve_callback(
         let ctx = &*(handle as *const RetrieveContext);
         for entry in &ctx.entries {
             if entry.key_urid == key {
-                // The LV2 state spec allows NULL for each output parameter.
                 if !size.is_null() {
                     *size = entry.data.len();
                 }
@@ -242,7 +234,6 @@ pub unsafe fn restore_plugin_state(
     }
 }
 
-/// NULL-terminated pointer array over `features` (which must outlive it).
 fn feature_ptrs(features: &[lv2_raw::core::LV2Feature]) -> Vec<*const lv2_raw::core::LV2Feature> {
     features
         .iter()
@@ -250,8 +241,6 @@ fn feature_ptrs(features: &[lv2_raw::core::LV2Feature]) -> Vec<*const lv2_raw::c
         .chain(std::iter::once(std::ptr::null()))
         .collect()
 }
-
-// ── State path features (makePath, freePath, mapPath) ──
 
 const LV2_STATE_MAKE_PATH_URI: &std::ffi::CStr = c"http://lv2plug.in/ns/ext/state#makePath";
 const LV2_STATE_FREE_PATH_URI: &std::ffi::CStr = c"http://lv2plug.in/ns/ext/state#freePath";
@@ -280,9 +269,7 @@ struct LV2_State_Map_Path {
 }
 
 struct StatePathContext {
-    /// Per-plugin-URI base directory.
     base_dir: std::path::PathBuf,
-    /// Per-instance directory (base_dir/<scope>); changed by `set_scope`.
     state_dir: parking_lot::Mutex<std::path::PathBuf>,
 }
 
@@ -292,8 +279,6 @@ impl StatePathContext {
     }
 }
 
-/// Directory holding the state files (makePath/mapPath) of one plugin
-/// instance, identified by its stable id.
 pub fn instance_state_dir(plugin_uri: &str, scope: &str) -> std::path::PathBuf {
     crate::session::dir()
         .join("plugin-state")
@@ -301,8 +286,6 @@ pub fn instance_state_dir(plugin_uri: &str, scope: &str) -> std::path::PathBuf {
         .join(sanitize_uri(scope))
 }
 
-/// Recursively copy the regular files and directories of `src` into `dst`
-/// (created if needed). A missing `src` copies nothing; symlinks are skipped.
 pub fn copy_dir_contents(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
     if !src.is_dir() {
         return Ok(());
@@ -429,8 +412,6 @@ pub struct Lv2StatePathSetup {
 unsafe impl Send for Lv2StatePathSetup {}
 
 impl Lv2StatePathSetup {
-    /// `default_scope` names the per-instance directory used until
-    /// `set_scope` is called (so unscoped instances never share files).
     pub fn new(plugin_uri: &str, default_scope: &str) -> Self {
         let base_dir = crate::session::dir()
             .join("plugin-state")
@@ -468,7 +449,6 @@ impl Lv2StatePathSetup {
         }
     }
 
-    /// Scope makePath/mapPath files to a persistent instance identity.
     pub fn set_scope(&self, scope: &str) {
         let ctx = unsafe { &*self.ctx_ptr };
         *ctx.state_dir.lock() = ctx.base_dir.join(sanitize_uri(scope));
@@ -479,7 +459,6 @@ impl Lv2StatePathSetup {
         unsafe { &*self.ctx_ptr }.dir()
     }
 
-    /// makePath, freePath and mapPath features (for instantiate/save/restore).
     pub fn make_features(&self) -> [lv2_raw::core::LV2Feature; 3] {
         [
             self.make_make_path_feature(),
@@ -552,7 +531,6 @@ mod tests {
         };
         let handle = &ctx as *const RetrieveContext as LV2_State_Handle;
         unsafe {
-            // All outputs NULL is legal per the LV2 state spec.
             let p = retrieve_callback(
                 handle,
                 7,

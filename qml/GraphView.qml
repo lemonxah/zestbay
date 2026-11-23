@@ -14,13 +14,10 @@ Item {
     property real panX: 0
     property real panY: 0
     property bool viewportLoaded: false
-    // Set once the first refresh with nodes has checked that the restored
-    // viewport actually shows some of them.
     property bool initialViewChecked: false
 
     readonly property real minZoom: 0.25
     readonly property real maxZoom: 3.0
-    // Screen pixels of the graph that panning/zooming must leave in view.
     readonly property real minVisibleContent: 80
 
     property var nodePositions: ({})
@@ -43,54 +40,22 @@ Item {
     property real dragOffsetX: 0
     property real dragOffsetY: 0
 
-    // In-hand placement: when >= 0, this node follows the cursor until the
-    // user left-clicks to drop it (or Escape to drop in place). Used when a
-    // newly added plugin can't find a free spot near the add-point.
     property int placingNodeId: -1
 
-    // Nodes that appeared without any links yet, placed provisionally near the
-    // cluster. Once a patchbay rule connects them, they get repositioned next to
-    // the node that picked them up. Map of nodeId -> true.
     property var awaitingLinkPlacement: ({})
 
-    // Nodes positioned automatically (not by the user, not from a saved
-    // layout). Only these may be moved by the backwards-link correction pass;
-    // a user drag removes the node from this set. Map of nodeId -> true.
     property var autoPlaced: ({})
 
-    // Layout key each node's position was assigned under (saved, added or
-    // auto-placed); dropped once the user moves the node. A node can change
-    // key while keeping its id (a plugin's filter node first appears untyped
-    // as "Unknown:<name>"), and then its saved position must still be applied.
-    // placedBaseById holds the node's own layoutKey at that time: when only
-    // the "#n" suffix of the unique key changes (another node of the same
-    // name went away) the node must stay where it is.
     property var placedKeyById: ({})
     property var placedBaseById: ({})
 
-    // When each node first appeared: nodeId -> { t: ms, seq: refresh number }.
-    // Automatic repositioning (waiting for a rule to link the node, fixing a
-    // backward wire) only ever touches a node inside settleWindowMs of its
-    // appearance; after that it stays where it is until the user moves it.
     property var appearedAt: ({})
     property int refreshSeq: 0
-    // Longer than it takes a patchbay rule to connect a new node (main.qml
-    // widens it when the rule settle time is raised).
     property int settleWindowMs: 8000
-    // Graph density (preference node_spacing_px; 8 compact, 20 normal, 40
-    // spacious): the gap automatic placement leaves between stacked nodes,
-    // in graph units. A column beside a peer is 2.5x as far away, leaving
-    // room for the wires. Auto layout uses the same two gaps. (How big the
-    // cards are is the separate cardRow below.)
     property real nodeSpacing: 20
     readonly property real placeColumnGap: Math.round(nodeSpacing * 2.5)
-    // Node card density (preference card_row_px; 18 compact, 22 normal, 26
-    // spacious): the height of a port row. Everything on the card scales
-    // with it (Theme.nodeScale). Cards are re-measured at once and cards that
-    // now overlap are pushed apart (one undo step); the rest of the layout
-    // stays until Auto layout.
     property int cardRow: 22
-    property int densityMoved: 0   // nodes moved by the last card size change
+    property int densityMoved: 0
     onCardRowChanged: {
         Theme.cardRow = cardRow;
         applyDensity();
@@ -98,7 +63,7 @@ Item {
     function applyDensity() {
         densityMoved = 0;
         if (!layoutLoaded)
-            return;   // nothing measured or placed yet
+            return;
         refreshData();
         var before = {};
         for (var i = 0; i < nodes.length; i++) {
@@ -117,9 +82,6 @@ Item {
         canvas.requestPaint();
     }
 
-    // Push overlapping cards apart: the lower one moves down just clear of the
-    // upper one, keeping the node spacing (on the grid); when only the lower
-    // one is pinned, the upper one moves up instead.
     function separateOverlaps() {
         var gap = nodeSpacing;
         for (var pass = 0; pass < 40; pass++) {
@@ -171,8 +133,6 @@ Item {
 
     property int connectFromPortId: -1
     property string connectFromDir: ""
-    // Right-drag from a port: the drag wire is red and dropping it on a port
-    // blocks that node pair instead of connecting it.
     property bool connectBlocking: false
     property real connectPressX: 0
     property real connectPressY: 0
@@ -181,19 +141,11 @@ Item {
 
     property var nodes: []
     property var links: []
-    // Node pairs under an enabled block rule: [{source, target, ruleId, label}],
-    // drawn as red ⊘ lines. blockGeom holds their last drawn curves for
-    // hit-testing.
     property var blockedPairs: []
     property var blockGeom: []
     property var contextBlock: null
-    // Block lines can be selected by clicking them (and removed with Delete,
-    // which removes their rule). Keys are blockKey(); a box selection and
-    // Ctrl+A never take them, so Delete can't remove rules by accident.
-    // hoveredBlockKey is the block line under the cursor ("" for none).
     property var selectedBlocks: ({})
     property string hoveredBlockKey: ""
-    // Left-drag over a port that a block rule forbids: the wire turns red.
     property int connectHoverPortId: -1
     property bool connectTargetBlocked: false
     property var portsByNode: ({})
@@ -221,23 +173,12 @@ Item {
     property var selectedNodes: ({})
     property bool groupDragging: false
 
-    // What a left-drag on empty canvas does: "grab" pans the view (the same
-    // as a middle-drag), "select" draws a selection box. Switched with the
-    // buttons at the canvas's top-left or with W; saved as the drag_mode
-    // preference.
     property string dragMode: "grab"
-    // Left-drag pan in grab mode. grabMoved tells a drag from a click: a
-    // click on empty canvas clears the selection, a pan keeps it.
     property bool grabPanning: false
     property bool grabMoved: false
-    // The cursor is over empty canvas (no node, pin, button or wire).
     property bool hoverEmpty: false
     onDragModeChanged: updateCursor()
 
-    // Temporary overrides of the drag mode while a key is held: Space makes
-    // a left-drag pan from anywhere (even over a node); Shift makes a
-    // left-drag on empty canvas draw a selection box in grab mode. The hint
-    // at the bottom of the canvas names the override and shows when it is on.
     property bool spaceHeld: false
     property bool shiftHeld: false
     property bool spacePanning: false
@@ -248,12 +189,9 @@ Item {
         spaceHeld = false;
         shiftHeld = false;
     }
-    // A selection box that adds to the selection it started with (Shift or
-    // Ctrl held when it began).
     property bool selectAdditive: false
     property var selectBaseNodes: ({})
     property var selectBaseLinks: ({})
-    // Where the node(s) being dragged started, for undo.
     property var dragStartPos: null
 
     function setDragMode(mode) {
@@ -264,62 +202,38 @@ Item {
     }
 
     function toggleDragMode() {
-        // Not in the middle of a left-drag: it would change meaning under the hand.
         if (grabPanning || spacePanning || selectDragging)
             return;
         setDragMode(dragMode === "grab" ? "select" : "grab");
     }
 
     property int contextNodeId: -1
-    // Plugin port under the right-click that opened the node menu (-1: none).
     property int contextPortId: -1
     property var contextNode: null
-    // Canvas point of the last right-click on empty canvas (for "Add Plugin...").
     property var contextCanvasPos: null
 
-    // Subgraphs (design/GROUPS.md): the subgraph this view is inside ("" =
-    // main graph), the main graph's pan/zoom to return to, and a fit to run
-    // once a freshly opened subgraph has been laid out.
     property string currentSubgraph: ""
     property string currentSubgraphName: ""
     property var mainViewport: null
     property bool fitAfterRefresh: false
     readonly property bool contextIsSubgraph: contextNode !== null && contextNode.type === "Subgraph"
     readonly property bool contextIsVdev: contextNode !== null && !!contextNode.vdevId
-    // Links the wire context menu acts on: the right-clicked link, or the
-    // whole selection when the right-clicked link is part of it.
     property var contextLinkIds: []
-    // Where the next user-added plugin should appear; consumed by the plugin
-    // node named pendingPluginName (or any new plugin when the name is empty).
     property var pendingPluginPosition: null
     property string pendingPluginName: ""
     property string defaultNodeKey: ""
 
-    // Local bypass overrides for instant visual feedback
-    // Maps nodeId -> bool (true = bypassed). An entry is dropped as soon as a
-    // refresh reports the backend's bypass state, or when the node goes away.
     property var localBypassState: ({})
     property var localEnabledState: ({})
 
-    // Per-node caches, rebuilt by refreshData(): sorted port lists, node
-    // heights, and the unique layout key of each node.
     property var sortedPortsByNode: ({})
     property var nodeHeights: ({})
     property var uniqueKeyById: ({})
-    // Node widths need text measurement (a canvas context); recomputed on the
-    // next paint after the data or theme changed.
     property bool widthsDirty: true
 
-    // Snap guides: drawn while dragging
-    readonly property real snapThreshold: 5  // pixels in canvas space
-    // Gap between nodes when snapping beside/above/below one, and when a
-    // dropped node is pushed off another (graph units = px at 100 % zoom).
-    // Set from preferences (snap_gap_px).
+    readonly property real snapThreshold: 5
     property real snapGap: 10
 
-    // Snap to grid (preferences snap_to_grid / grid_size_px): node positions
-    // land on multiples of gridSize (graph units); the dot grid uses the
-    // same pitch. Auto layout follows it too.
     property bool snapToGrid: true
     property real gridSize: 24
 
@@ -343,43 +257,28 @@ Item {
         canvas.requestPaint();
     }
 
-    // Group drag: positions of the dragged nodes and the cursor at the start,
-    // so snapping never accumulates across mouse moves.
     property var groupDragStart: ({})
     property real groupDragStartX: 0
     property real groupDragStartY: 0
-    property var activeSnapLines: []  // [{axis:"x"|"y", pos: number}]
+    property var activeSnapLines: []
 
-    // Node card geometry comes from the Theme (design bible §6.5).
     readonly property real minNodeWidth: Theme.nodeWidth
     readonly property real maxNodeWidth: Theme.nodeWidthPlugin
     readonly property real portRadius: Theme.nodePin / 2
     property var nodeWidths: ({})
 
-    // Per-node layout (visible ports, collapse state, height), rebuilt by
-    // refreshData(); see computeNodeLayout().
     property var nodeLayouts: ({})
-    // Ports with at least one link: portId -> true.
     property var connectedPorts: ({})
-    // Plugins whose collapsed ports the user expanded (session only):
-    // layoutKey -> true.
     property var expandedNodes: ({})
-    // Collapse a side's trailing free ports only when at least this many.
     readonly property int collapseMinHidden: 3
 
-    // Toolbar search: non-matching nodes dim, matching ports get a ring.
     property string searchText: ""
     onSearchTextChanged: canvas.requestPaint()
 
-    // Hover state (canvas repaint + pin tooltip).
     property int hoveredPortId: -1
     property int hoveredLinkId: -1
-    // The node under the cursor (its pins count): highlighted on the canvas.
-    // nameTruncated: nodeId -> true while drawNode had to cut its title short
-    // (a popup then shows the full name); not bound to anything.
     property int hoveredNodeId: -1
     property var nameTruncated: ({})
-    // Preset selector on plugin cards: nodeId -> {name, isDefault, modified, count}
     property var presetInfo: ({})
     property int presetMenuNodeId: -1
     property var presetMenuNames: []
@@ -388,9 +287,8 @@ Item {
     property var presetMenuChanges: []
     property var presetSaveNames: []
     property int presetSaveNodeId: -1
-    property string hoveredButton: ""   // "<nodeId>:<key>" for footer buttons / toggle row
+    property string hoveredButton: ""
 
-    // Redraw graph when system theme changes
     Connections {
         target: controller
         function onRules_changed() {
@@ -398,8 +296,6 @@ Item {
         }
     }
 
-    // A session switch: save the viewport into the old session, then forget
-    // its layout and load the new one's.
     Connections {
         target: controller
         function onSession_changing() {
@@ -463,7 +359,6 @@ Item {
         return b.ruleId + "|" + b.source + "|" + b.target;
     }
 
-    // Selected block lines whose rule or pair has gone are dropped.
     function pruneSelectedBlocks() {
         var live = {};
         for (var i = 0; i < blockedPairs.length; i++)
@@ -482,9 +377,6 @@ Item {
             hoveredBlockKey = "";
     }
 
-    // The block line nearest to the cursor within linkHitPx screen pixels:
-    // { g: geometry, dist } (canvas units), or null. The ⊘ marker is a bigger
-    // target than the thin line.
     function blockHit(sx, sy) {
         var c = toCanvas(sx, sy);
         var threshold = linkHitPx / zoom;
@@ -510,8 +402,6 @@ Item {
         return h ? h.g : null;
     }
 
-    // The wire under the cursor: a link or a block line, whichever is nearer
-    // ({ link: id or -1, block: geometry or null }; at most one is set).
     function wireAt(sx, sy) {
         var lh = linkHit(sx, sy);
         var bh = blockHit(sx, sy);
@@ -553,8 +443,6 @@ Item {
         };
     }
 
-    // Selection entries remember what they referred to, so a recycled
-    // PipeWire id can never make a selection point at an unrelated object.
     function linkSig(link) {
         return {
             o: link.outputPortId,
@@ -599,9 +487,6 @@ Item {
         return ax.length - bx.length;
     }
 
-    // While a refresh runs, layout and pin saves are collected and written
-    // once at the end: every write is an fsync on the UI thread, and a
-    // refresh can place many new nodes.
     property int deferSaveDepth: 0
     property var pendingLayoutJson: null
     property var pendingPinnedJson: null
@@ -628,8 +513,6 @@ Item {
     }
 
     function refreshDataNow() {
-        // Follow the controller's view (it leaves a subgraph by itself when
-        // the subgraph is ungrouped or deleted).
         var sgView = controller.get_subgraph_view ? controller.get_subgraph_view() : "";
         if (sgView !== currentSubgraph) {
             if (sgView === "" && mainViewport) {
@@ -738,7 +621,6 @@ Item {
             }
         }
         portsByNode = newPorts;
-        // Links or ports changed under a plugin being dragged: re-plan.
         if (insertPreview && dragNodeId >= 0) {
             insertPreview = null;
             updateInsertPreview(dragNodeId);
@@ -779,7 +661,6 @@ Item {
         nodeHeights = newHeights;
         updateSnapStates();
         uniqueKeyById = buildUniqueLayoutKeys();
-        // Placement below needs the real widths, not the first paint's.
         calculateNodeWidths();
         widthsDirty = true;
 
@@ -791,14 +672,8 @@ Item {
             }
         }
         portMediaTypes = newPortMedia;
-        // Port ids can be recycled across refreshes.
         dragSourcePortId = -1;
 
-        // Drop per-id state for nodes that no longer exist. PipeWire recycles
-        // object ids (and bridge sub-node ids can change), so a stale entry
-        // would hand a brand-new node some old node's position and bypass the
-        // savedLayout restore below — the pin/saved position would be ignored
-        // and then overwritten by the next persistLayout().
         var liveIds = {};
         for (var lv = 0; lv < nodes.length; lv++)
             liveIds[nodes[lv].id] = true;
@@ -827,8 +702,6 @@ Item {
                 delete appearedAt[staleT];
         }
 
-        // Selections must refer to the same objects they did when made: drop
-        // entries whose id vanished or now belongs to something else.
         var liveNodeById = {};
         for (var ln = 0; ln < nodes.length; ln++)
             liveNodeById[nodes[ln].id] = nodes[ln];
@@ -860,7 +733,6 @@ Item {
         if (linksPruned)
             selectedLinks = keptLinks;
 
-        // The backend's bypass state wins once it is reported.
         var bypassPruned = false;
         for (var bpId in localBypassState) {
             var bpNode = liveNodeById[bpId];
@@ -893,10 +765,6 @@ Item {
                 var placedKey = placedKeyById[n.id];
                 if (placedKey !== undefined && placedKey !== key) {
                     if (placedBaseById[n.id] !== baseKey && key && savedLayout[key]) {
-                        // Same node, new key (a plugin's filter node gets its
-                        // type), and the user hasn't moved it since it was
-                        // placed: apply the position saved for the new key, or
-                        // the next persistLayout() would overwrite it.
                         var resaved = savedLayout[key];
                         nodePositions[n.id] = {
                             x: resaved[0],
@@ -905,9 +773,6 @@ Item {
                         delete autoPlaced[n.id];
                         delete awaitingLinkPlacement[n.id];
                     } else {
-                        // Only the "#n" suffix moved because another node of
-                        // the same name went away: the node stays put, and its
-                        // position is saved under the key it has now.
                         persistLayout();
                     }
                     placedKeyById[n.id] = key;
@@ -924,12 +789,6 @@ Item {
             appeared.push(n.id);
 
             if (key && savedLayout[key]) {
-                // Known position from a previous session/placement. Restore it
-                // and never auto-move it — a device toggling off/on (new
-                // PipeWire id, same layoutKey) must reappear where the user
-                // left it. Only if something else has taken the spot in the
-                // meantime does it move to the nearest free slot (pins are
-                // restored exactly, always).
                 var saved = savedLayout[key];
                 var restored = {
                     x: saved[0],
@@ -941,9 +800,6 @@ Item {
                     persistLayout();
                 }
             } else if (n.type === "Plugin" && pendingPluginPosition && (pendingPluginName === "" || n.name === pendingPluginName)) {
-                // User-added plugin: try to drop it on a free spot near the
-                // add-point. If there's no room nearby, place it "in hand" so the
-                // user can position it themselves.
                 var anchor = pendingPluginPosition;
                 pendingPluginPosition = null;
                 pendingPluginName = "";
@@ -959,12 +815,6 @@ Item {
                     startPlacing(n.id);
                 }
             } else {
-                // Auto-appearing node (hardware device, stream). If a patchbay
-                // rule has already linked it, drop it next to the node that
-                // picked it up. Otherwise place it provisionally — beside the
-                // default node if one is set (that's where a ruleless node will
-                // connect), else with its own kind inside the view — and let
-                // the second pass reposition it if its links show up shortly.
                 autoPlaced[n.id] = true;
                 if (!placeNearPeer(n)) {
                     var pa = provisionalAnchor(n);
@@ -977,7 +827,6 @@ Item {
                 }
             }
 
-            // Auto-pin plugins so their manual placement sticks across restarts.
             if (n.type === "Plugin" && n.layoutKey && !pinnedNodes[n.layoutKey]) {
                 pinnedNodes[n.layoutKey] = true;
                 pinnedNodes = pinnedNodes;
@@ -985,31 +834,20 @@ Item {
             }
         }
 
-        // Second placement pass: a node that appeared a moment ago without
-        // links moves beside its peer once a rule has connected it. Only the
-        // newcomer moves (see placementPeer); a node that has been sitting
-        // there longer than settleWindowMs is settled and stays.
         var stillAwaiting = {};
         for (var aid in awaitingLinkPlacement) {
             var anode = findNodeData(parseInt(aid));
             if (!anode)
-                // node vanished — forget it
                 continue;
             if (nodeIsPinned(anode) || !isFresh(anode.id) || nodeIdIsHidden(anode.id))
-                // pinned, settled or hidden — it stays where it is
                 continue;
             if (placeNearPeer(anode))
                 continue;
             if (!nodeHasLinks(anode.id))
-                stillAwaiting[aid] = true;   // no peer yet, keep waiting
-            // else: linked, but it is the anchor its newer peers move to.
+                stillAwaiting[aid] = true;
         }
         awaitingLinkPlacement = stillAwaiting;
 
-        // Third pass: fix freshly auto-placed nodes whose links flow backwards
-        // (the line's input end sits left of its output end). One-shot per
-        // node, and only for nodes that just appeared and the user never
-        // touched — settled, pinned or hand-placed nodes are sacred.
         for (var bid in autoPlaced) {
             if (awaitingLinkPlacement[bid])
                 continue;
@@ -1029,8 +867,6 @@ Item {
         noteAppeared(appeared);
         processPendingMeterAttach();
 
-        // A restored viewport (or one saved on a bigger screen) may show none of
-        // the graph; bring it back into view once, on the first populated refresh.
         if (!initialViewChecked && nodes.length > 0 && width > 0 && height > 0) {
             initialViewChecked = true;
             var b = contentBounds();
@@ -1038,7 +874,6 @@ Item {
                 fitToView();
         }
 
-        // A subgraph opened for the first time: frame its nodes.
         if (fitAfterRefresh && nodes.length > 0 && width > 0 && height > 0) {
             fitAfterRefresh = false;
             Qt.callLater(fitToView);
@@ -1048,13 +883,6 @@ Item {
         repaintTimer.restart();
     }
 
-    // True if any link touching `nodeId` runs right-to-left: the input end
-    // (peer's left edge) is left of the output end (source's right edge).
-    // Equivalent to the link line's angle atan2(dy, dx) being outside ±90°.
-    // A small tolerance ignores near-vertical links between stacked nodes.
-    // Hidden nodes (including snapped meters) take no part in placement:
-    // they are not obstacles, anchors or reasons to move, and they are not
-    // moved themselves, so nothing jumps because of a card you can't see.
     function nodeIdIsHidden(nodeId) {
         var n = findNodeData(nodeId);
         return !!(n && n.layoutKey && hiddenNodes[n.layoutKey]);
@@ -1080,19 +908,15 @@ Item {
         return false;
     }
 
-    // A node is pinned if its layout key is in the pinned set. Pinned nodes are
-    // never auto-moved — pins are honored above all else.
     function nodeIsPinned(node) {
         return !!(node && node.layoutKey && pinnedNodes[node.layoutKey]);
     }
 
-    // Still inside the settle window after it first appeared?
     function isFresh(nodeId) {
         var a = appearedAt[nodeId];
         return !!a && Date.now() - a.t <= settleWindowMs;
     }
 
-    // Linked to a visible node (links to hidden ones don't count).
     function nodeHasLinks(nodeId) {
         for (var li = 0; li < links.length; li++) {
             var l = links[li];
@@ -1104,8 +928,6 @@ Item {
         return false;
     }
 
-    // How readily a node gives way when two unsettled nodes get linked:
-    // streams come to devices and plugins, never the other way round.
     function placementMobility(node) {
         if (node.type === "StreamOutput" || node.type === "StreamInput")
             return 2;
@@ -1114,9 +936,6 @@ Item {
         return 1;
     }
 
-    // May `node` be placed beside `peer`? A settled peer is always an anchor.
-    // When the peer is itself still waiting for placement, only one of the
-    // two moves: the more mobile kind, else the one that appeared later.
     function peerAnchors(node, peer) {
         if (!awaitingLinkPlacement[peer.id] || !isFresh(peer.id))
             return true;
@@ -1130,9 +949,6 @@ Item {
         return node.id > peer.id;
     }
 
-    // The linked, positioned node that `node` should sit beside, as
-    // { peer, nodeFeedsPeer } (nodeFeedsPeer: node output → peer input, so
-    // the node belongs on the peer's left), or null.
     function placementPeer(node) {
         var nodeId = node.id;
         for (var li = 0; li < links.length; li++) {
@@ -1160,10 +976,6 @@ Item {
         return null;
     }
 
-    // If `node` is linked to an already-positioned peer, place it beside that
-    // peer (downstream → the column to the peer's right, upstream → to its
-    // left) in the nearest free slot. Returns true if placed. Pinned nodes
-    // are never moved.
     function placeNearPeer(node) {
         if (nodeIsPinned(node))
             return false;
@@ -1177,10 +989,6 @@ Item {
         return true;
     }
 
-    // Top-left anchor placing `node` directly beside `peer`: to the peer's left
-    // when the node feeds the peer (signal flows node → peer), otherwise to its
-    // right, placeColumnGap away, at the peer's level. `dir` is the side the
-    // search may spill to (-1 further left, 1 further right).
     function adjacentAnchor(node, peer, nodeFeedsPeer) {
         var peerPos = nodePositions[peer.id];
         var w = getNodeWidth(node.id);
@@ -1205,8 +1013,6 @@ Item {
         return null;
     }
 
-    // Position in the signal flow, used to guess which side of a peer a node
-    // belongs on before any links exist (sources left → sinks right).
     function flowRank(type) {
         if (type === "Source")
             return 0;
@@ -1216,14 +1022,9 @@ Item {
             return 3;
         if (type === "Sink" || type === "Duplex")
             return 4;
-        return 2;  // Plugin / Unknown — middle
+        return 2;
     }
 
-    // Where to drop a freshly-appeared node before its links exist: beside the
-    // default node if one is set (a ruleless node connects there), otherwise
-    // with its own kind inside the view. The second pass corrects this if
-    // real links arrive shortly; if the node never connects, it stays here.
-    // Returns { x, y, dir } for findFreeSpot.
     function provisionalAnchor(node) {
         var defNode = findNodeByLayoutKey(defaultNodeKey);
         if (defNode && defNode.id !== node.id && nodePositions[defNode.id] && !(defNode.layoutKey && hiddenNodes[defNode.layoutKey])) {
@@ -1257,12 +1058,9 @@ Item {
                 var oh = calculateNodeHeight(other);
                 var ow = getNodeWidth(other.id) || minNodeWidth;
 
-                // Check AABB overlap
                 if (pos.x < opos.x + ow && pos.x + w > opos.x && pos.y < opos.y + oh && pos.y + h > opos.y) {
-                    // Calculate vertical overlap amounts
-                    var overlapTop = opos.y + oh - pos.y;    // how far into the other from the top
-                    var overlapBot = pos.y + h - opos.y;     // how far into the other from the bottom
-                    // Snap above unless the node is mostly past the other (>70% overlap from top)
+                    var overlapTop = opos.y + oh - pos.y;
+                    var overlapBot = pos.y + h - opos.y;
                     var minH = Math.min(h, oh);
                     if (overlapTop < minH * 0.7) {
                         pos = {
@@ -1289,12 +1087,6 @@ Item {
         }
     }
 
-    // Snap a node's position to nearby nodes.
-    // Snaps left-edge to left-edge, and top/bottom edges within snapThreshold.
-    // Returns { x, y, lines } where lines are the snap guide descriptors.
-    // ---- Grid --------------------------------------------------------------
-
-    // Nearest grid point to p (unchanged when snap to grid is off).
     function gridPos(p) {
         if (!snapToGrid || !p)
             return p;
@@ -1304,8 +1096,6 @@ Item {
         };
     }
 
-    // Put every visible node on the grid (when snapping is switched on or
-    // the grid size changes), then separate any that now overlap.
     function alignAllToGrid() {
         var moved = false;
         for (var i = 0; i < nodes.length; i++) {
@@ -1331,10 +1121,6 @@ Item {
         canvas.requestPaint();
     }
 
-    // Shift-drag snapping against the other visible nodes (canvas units).
-    // Aligning edges (left/left, top/top, bottom/bottom) snaps flush;
-    // stacking above/below or placing beside another node keeps `snapGap`
-    // between them. Returns { x, y, lines } with guide lines to draw.
     function computeSnap(nodeId, rawX, rawY, skipIds) {
         var w = getNodeWidth(nodeId) || minNodeWidth;
         var node = findNodeData(nodeId);
@@ -1349,8 +1135,6 @@ Item {
             gy: 0
         };
 
-        // Candidate position `value` for this axis; `guide` is the edge of
-        // the other node that the guide line marks.
         function tryX(value, guide) {
             var d = Math.abs(rawX - value);
             if (d < best.dx) {
@@ -1368,8 +1152,6 @@ Item {
             }
         }
 
-        // Only nodes at least partly on screen: when zoomed in, a drag must
-        // not snap to something the user can't see.
         var visL = -panX / zoom;
         var visT = -panY / zoom;
         var visR = (width - panX) / zoom;
@@ -1390,14 +1172,14 @@ Item {
             var oh = calculateNodeHeight(other);
             if (opos.x + ow < visL || opos.x > visR || opos.y + oh < visT || opos.y > visB)
                 continue;
-            tryX(opos.x, opos.x);                          // left edges aligned
-            tryX(opos.x + ow + gap, opos.x + ow);          // to the right of it
-            tryX(opos.x - gap - w, opos.x);                // to the left of it
+            tryX(opos.x, opos.x);
+            tryX(opos.x + ow + gap, opos.x + ow);
+            tryX(opos.x - gap - w, opos.x);
 
-            tryY(opos.y, opos.y);                          // tops aligned
-            tryY(opos.y + oh - h, opos.y + oh);            // bottoms aligned
-            tryY(opos.y + oh + gap, opos.y + oh);          // stacked below it
-            tryY(opos.y - gap - h, opos.y);                // stacked above it
+            tryY(opos.y, opos.y);
+            tryY(opos.y + oh - h, opos.y + oh);
+            tryY(opos.y + oh + gap, opos.y + oh);
+            tryY(opos.y - gap - h, opos.y);
         }
 
         var lines = [];
@@ -1480,10 +1262,6 @@ Item {
     readonly property bool contextIsMeter: contextNode !== null && isMeterNode(contextNode)
     readonly property bool contextCanBeDefault: contextNode !== null && (contextNode.type === "Sink" || contextNode.type === "Duplex" || contextNode.type === "Plugin")
 
-    // Device / sink: Hide · Pin · — · Set as default.
-    // Plugin: Hide · Pin · — · Set as default · — · Group into subgraph… · Rename… · Open UI… · — · Remove plugin.
-    // Subgraph: Open · Rename / edit… · Duplicate · Save as template… · — · Hide · Pin · — · Ungroup · Delete subgraph.
-    // Virtual device: … · — · Edit virtual device… · Remove virtual device.
     ZbMenu {
         id: nodeContextMenu
 
@@ -1791,7 +1569,6 @@ Item {
         }
     }
 
-    // Right-clicked block line: the rule · Remove block
     ZbMenu {
         id: blockContextMenu
         onClosed: {
@@ -1815,7 +1592,6 @@ Item {
         }
     }
 
-    // Right-clicked wire: Disconnect · Block this connection
     ZbMenu {
         id: linkContextMenu
 
@@ -1836,7 +1612,6 @@ Item {
         }
     }
 
-    // Right-click on a port or its name: Rename port… (plugins) · Disconnect.
     ZbMenu {
         id: portContextMenu
 
@@ -1862,7 +1637,6 @@ Item {
         }
     }
 
-    // Delete selected links · Block selected links · — · Add plugin… · — · Unhide all · Fit to view · Reset zoom · Auto layout
     ZbMenu {
         id: canvasContextMenu
 
@@ -1925,7 +1699,6 @@ Item {
             }
         }
 
-        // Built-in meters: added here, never through the plugin browser.
         ZbMenu {
             title: "Add meter"
             ZbMenuItem {
@@ -2029,7 +1802,6 @@ Item {
             if (mode === "create") {
                 var newId = controller.create_subgraph(JSON.stringify(nodeIds), JSON.stringify(cfg));
                 if (newId && groupAnchor) {
-                    // The card takes the place of the plugins it replaces.
                     savedLayout["Subgraph:" + newId] = [groupAnchor.x, groupAnchor.y];
                     controller.save_layout(JSON.stringify(savedLayout));
                 }
@@ -2050,7 +1822,6 @@ Item {
         }
     }
 
-    // Preset selector: pick a preset, make one the default, or delete it.
     ZbMenu {
         id: presetMenu
 
@@ -2088,9 +1859,7 @@ Item {
 
         ZbMenuSeparator {}
 
-        // Why the name shows a "*": the first difference from the saved preset.
         ZbMenuItem {
-            // Just the parameter name (the values are in the log): the menu is narrow.
             text: "Changed: " + (graphView.presetMenuChanges.length > 0 ? graphView.presetMenuChanges[0].split(": ")[0] : "") + (graphView.presetMenuChanges.length > 1 ? "  (+" + (graphView.presetMenuChanges.length - 1) + " more)" : "")
             enabled: false
             visible: graphView.presetMenuChanges.length > 0
@@ -2126,10 +1895,8 @@ Item {
         }
     }
 
-    // Save the plugin's current settings as a new preset, or over an existing one.
     ZbDialog {
         id: presetSaveDialog
-        // The plugin's currently selected preset ("" for none), offered as an update target.
         property string selectedName: ""
         readonly property string trimmed: presetNameField.text.trim()
         readonly property bool exists: graphView.presetSaveNames.indexOf(trimmed) >= 0
@@ -2229,7 +1996,6 @@ Item {
         onAccepted: controller.delete_subgraph(subgraphId)
     }
 
-    // Delete key with plugins, subgraphs or virtual devices selected.
     ZbDialog {
         id: deleteSelectionDialog
         title: "Delete selection?"
@@ -2242,7 +2008,6 @@ Item {
             id: deleteLines
             width: parent ? parent.width : 360
             spacing: 6
-            // It was opened from the keyboard: Enter confirms, Esc cancels.
             Keys.onReturnPressed: deleteSelectionDialog.accept()
             Keys.onEnterPressed: deleteSelectionDialog.accept()
             Repeater {
@@ -2324,9 +2089,6 @@ Item {
         }
     }
 
-    // Drag preview of dropping a plugin on a wire: the wires that would be
-    // split (remove: {linkId: true}) and the ghost wires that would replace
-    // them (add: [[outPortId, inPortId]]).  null when there is nothing to show.
     property var insertPreview: null
 
     function updateInsertPreview(nodeId) {
@@ -2441,10 +2203,6 @@ Item {
             controller.save_pinned(json);
     }
 
-    // Build a mapping from node.id → unique layout key, disambiguating nodes
-    // that share a layoutKey by appending #1, #2, ... in node-id (creation)
-    // order. Used for both saving and restoring layout.json, so duplicates get
-    // distinct, stable keys and never persist ephemeral ids.
     function buildUniqueLayoutKeys() {
         var sorted = [];
         for (var i = 0; i < nodes.length; i++) {
@@ -2470,8 +2228,6 @@ Item {
         return result;
     }
 
-    // Sizes of the visible nodes, keyed by node id. Hidden nodes are left out
-    // so the backend doesn't lay them out.
     function collectNodeSizes() {
         var sizesObj = {};
         for (var ni = 0; ni < nodes.length; ni++) {
@@ -2497,7 +2253,6 @@ Item {
         return pinned;
     }
 
-    // Visible nodes (not hidden) and how many of them are pinned.
     function visibleNodeCount() {
         var c = 0;
         for (var i = 0; i < nodes.length; i++) {
@@ -2516,11 +2271,6 @@ Item {
         return c;
     }
 
-    // Auto layout, as the button, the L key and the menus ask for it. Pinned
-    // nodes stay where they are, so when every node is pinned there is
-    // nothing it may move: ask whether to lay out the pinned ones too.
-    // includePinned (Shift+L, Shift-click, the menu item) lays out everything;
-    // pinned nodes keep their pin, at their new place.
     function requestAutoLayout(includePinned) {
         var total = visibleNodeCount();
         if (total === 0) {
@@ -2541,9 +2291,6 @@ Item {
         var pinnedJson = includePinned ? "{}" : JSON.stringify(collectPinnedPositions());
         var resultJson = controller.auto_layout(sizesJson, pinnedJson, snapToGrid ? gridSize : 0);
         try {
-            // Result is keyed by node id. Only the laid-out nodes move; hidden
-            // nodes keep their positions and saved entries for absent devices
-            // and plugins stay in savedLayout (persistLayout merges into it).
             var positions = JSON.parse(resultJson);
             var before = {};
             for (var ni = 0; ni < nodes.length; ni++) {
@@ -2575,7 +2322,6 @@ Item {
         }
     }
 
-    // Every node is pinned: offer to lay out the pinned ones as well.
     ZbDialog {
         id: autoLayoutAllDialog
         title: "Everything is pinned"
@@ -2593,7 +2339,6 @@ Item {
         onAccepted: graphView.runAutoLayout(true)
     }
 
-    // Rects of the visible, positioned nodes other than `exceptId`.
     function placementObstacles(exceptId) {
         var obstacles = [];
         for (var oi = 0; oi < nodes.length; oi++) {
@@ -2615,8 +2360,6 @@ Item {
         return obstacles;
     }
 
-    // Does a node of size w×h placed at (x, y) clear every obstacle rect,
-    // keeping at least `gap` between them?
     function spotIsFree(x, y, w, h, obstacles, gap) {
         var eps = 1e-6;
         for (var oi = 0; oi < obstacles.length; oi++) {
@@ -2627,9 +2370,6 @@ Item {
         return true;
     }
 
-    // Would `node` at (x, y) sit on top of another visible node? Only a real
-    // overlap counts (a third of the smaller card each way), so cards that
-    // merely touch after one of them grew are left alone.
     function spotIsTaken(node, x, y) {
         var w = getNodeWidth(node.id);
         var h = calculateNodeHeight(node);
@@ -2644,9 +2384,6 @@ Item {
         return false;
     }
 
-    // The free y nearest to `anchorY` for a w×h node in the column at `x`:
-    // the anchor itself, or just below / above one of the nodes in the way
-    // (on the grid when snapping). There always is one. Ties go below.
     function columnSlot(x, anchorY, w, h, obstacles, gap) {
         if (spotIsFree(x, anchorY, w, h, obstacles, gap))
             return anchorY;
@@ -2674,13 +2411,6 @@ Item {
         return best !== null ? best : anchorY;
     }
 
-    // The free spot for `node` nearest to (anchorX, anchorY): stacked in the
-    // anchor's column (the nearest slot below or above), or, once that column
-    // would put it too far away, in the next column over. `dir` is the side
-    // further columns may be on: -1 left, 1 right (so a node placed beside a
-    // peer never ends up behind it), 0 either. When `bounded`, a spot far
-    // from the anchor is refused and null returned (the caller falls back to
-    // in-hand placement); otherwise there always is a spot.
     function findFreeSpot(node, anchorX, anchorY, dir, bounded) {
         var w = getNodeWidth(node.id);
         var h = calculateNodeHeight(node);
@@ -2703,7 +2433,6 @@ Item {
             var dy = Math.abs(y - a.y);
             if (bounded && (Math.abs(k) > 1 || dy > 2 * (h + gap)))
                 continue;
-            // A column further out costs as much as a tall stack in this one.
             var cost = dy + Math.abs(k) * colStep * 1.5;
             if (cost < bestCost) {
                 bestCost = cost;
@@ -2716,10 +2445,6 @@ Item {
         return best;
     }
 
-    // Where an unlinked newcomer goes: into the column of a node of its own
-    // kind that is on screen, else into the view at the place its kind has
-    // in the signal flow (sources left … sinks right), below the canvas's
-    // top-left controls. Returns { x, y, dir } for findFreeSpot.
     function kindAnchor(node) {
         var w = getNodeWidth(node.id);
         var rank = flowRank(node.type);
@@ -2769,14 +2494,12 @@ Item {
         };
     }
 
-    // Begin in-hand placement: the node tracks the cursor until dropped.
     function startPlacing(nodeId) {
         placingNodeId = nodeId;
         activeSnapLines = [];
         canvas.requestPaint();
     }
 
-    // Finish in-hand placement, leaving the node wherever it currently sits.
     function finishPlacing() {
         if (placingNodeId < 0)
             return;
@@ -2819,7 +2542,6 @@ Item {
         return "stream";
     }
 
-    // Category of a node for its header chip: { color, glyph }.
     function nodeCategory(node) {
         var type = node.type;
         if (node.mediaType === "Midi" || (node.layoutKey || "").indexOf("MidiBridge:") === 0)
@@ -2881,41 +2603,27 @@ Item {
         return Theme.sigAudio;
     }
 
-    // How many of a side's ports stay visible when collapsed: everything up
-    // to the last connected port, and at least two.
     function visiblePortCount(ports) {
         var last = -1;
         for (var i = 0; i < ports.length; i++) {
             if (connectedPorts[ports[i].id])
                 last = i;
         }
-        return Math.min(ports.length, Math.max(last + 1, 3)); // 3 cause the top one is the midi out
+        return Math.min(ports.length, Math.max(last + 1, 3));
     }
 
-    // Visible ports, collapse state and height of a node card. Plugins with
-    // many trailing unconnected ports fold them into one "n more" row.
-    // ---- Built-in meters ----------------------------------------------
-    // A meter node is a plugin node (so it can be dropped on wires, removed,
-    // saved...) drawn without presets or footer: one level bar per channel
-    // in its port rows. The canvas draws the bar tracks; the live levels are
-    // items over the canvas (meterLayer), so levels never repaint the canvas.
     function isMeterNode(n) {
         return !!n && n.type === "Plugin" && (n.meterChannels || 0) > 0;
     }
 
-    // Node ids of the meter nodes, changed only when that set changes.
     property var meterNodeIds: []
-    // Where the last paint put each drawn meter node: nodeId -> {sx, sy (screen),
-    // w, h, zoom, alpha, channels}. Hidden or undrawn meters are absent.
     property var meterFrames: ({})
-    // Latest levels: nodeId -> [linear level per channel].
     property var meterLevels: ({})
 
     readonly property real meterFloorDb: -60
     readonly property real meterHotFrac: (-12 - meterFloorDb) / -meterFloorDb
     readonly property real meterClipFrac: (-3 - meterFloorDb) / -meterFloorDb
 
-    // 0..1 along the bar for a linear level (-60 dBFS .. 0 dBFS).
     function levelFraction(level) {
         if (!(level > 0))
             return 0;
@@ -2923,13 +2631,10 @@ Item {
         return Math.max(0, Math.min(1, (db - meterFloorDb) / -meterFloorDb));
     }
 
-    // Audio, or not yet known (a port's format can settle after it shows).
     function isAudioRow(port) {
         return port.mediaType !== "Midi" && port.mediaType !== "Video";
     }
 
-    // Port rows of a meter node's audio inputs: channel k's bar is in row
-    // meterRows(node)[k].
     function meterRows(node) {
         var ins = nodeLayout(node).inputs;
         var rows = [];
@@ -2940,7 +2645,6 @@ Item {
         return rows;
     }
 
-    // The bar in port row `row` of a meter card `nw` wide, in card coordinates.
     function meterBarRect(nw, row) {
         var rowH = Theme.nodePortRow;
         var h = Math.max(4, Math.round(rowH * 0.32));
@@ -2966,27 +2670,11 @@ Item {
             meterLevels = {};
     }
 
-    // ---- Snapped meters --------------------------------------------------
-    // A meter can be snapped onto either end of the wire it sits on: its
-    // card is hidden (it is a hidden node, so it is out of the way for
-    // clicks, selection and layout) and each channel's level is drawn under
-    // the port it snapped to, which then stands for the meter's own port:
-    //   "source": the output feeding the meter stands for the meter's
-    //             output (its outgoing wires start there);
-    //   "dest":   the input the meter feeds stands for the meter's input
-    //             (its incoming wires end there).
-    // Connecting to such a port connects to the meter's port instead, and
-    // wires on it that skip the meter are drawn dashed. The meter still
-    // runs in PipeWire.
-    property var dockedMeters: ({})   // layoutKey -> "source" | "dest"
-    // Bars to draw this paint, by "meterId:channel" (stable while the graph is).
+    property var dockedMeters: ({})
     property var dockBarIds: []
     property var dockBarFrames: ({})
-    // Snapped-to port id -> the meter port it stands for (this paint).
     property var snapRedirect: ({})
 
-    // A snapped meter's own wire into or out of the port it snapped to:
-    // both ends at that port, so it is neither drawn nor clickable.
     function isSnapInternal(fromPos, toPos) {
         return (fromPos.alias || toPos.alias) && fromPos.cx === toPos.cx && fromPos.cy === toPos.cy;
     }
@@ -3113,8 +2801,6 @@ Item {
         }
     }
 
-    // Every snapped meter (including any whose port is missing), as one
-    // undo step.
     function snappedMeterCount() {
         var n = 0;
         for (var k in dockedMeters)
@@ -3143,15 +2829,8 @@ Item {
             });
     }
 
-    // Dragging a meter card over a node it is wired to: the snap that
-    // dropping it there makes, {meterId, nodeId, side, ports: [snapped-to
-    // port ids]}, or null. Drawn as an accent ring on the node and preview
-    // bars on those ports.
     property var snapPreview: null
 
-    // The snap for dropping `meter` at screen (sx, sy): onto the node under
-    // the cursor, if that node feeds the meter (source) or is fed by it
-    // (dest), the snap is valid, and every bar would land on that node.
     function meterSnapCandidate(meter, sx, sy) {
         if (!isMeterNode(meter))
             return null;
@@ -3198,9 +2877,6 @@ Item {
         return null;
     }
 
-    // A snapped bar under the label of the port whose pin is at (cx, cy),
-    // in scene coordinates: ending at the label's right edge for outputs,
-    // starting at its left edge for inputs.
     readonly property real dockBarW: 64
     readonly property real dockBarH: 3
     function dockBarRect(cx, cy, output) {
@@ -3212,9 +2888,6 @@ Item {
         };
     }
 
-    // Connect out → in in place of `oldLink` (a wire that skipped a meter):
-    // the new wire goes through the meter, the old one is removed. One undo
-    // step.
     function connectReplacing(outPort, inPort, oldLink) {
         var parts = [];
         if (!findLinkByPorts(outPort, inPort)) {
@@ -3250,13 +2923,6 @@ Item {
         });
     }
 
-    // ---- Metering a node's inputs or outputs ---------------------------
-    // "Meter inputs/outputs" on a node: one meter per (up to) 8 of its audio
-    // ports, each snapped onto the node, with every wire on those ports
-    // moved onto the meter (port → meter → old destinations for outputs,
-    // old sources → meter → port for inputs). Meters are created
-    // asynchronously, so each one waits here until its node and ports
-    // exist: {name, hostId, side, hostPorts, t, hidden}.
     property var pendingMeterAttach: []
 
     function audioPortsOf(nodeId, outputs) {
@@ -3268,7 +2934,6 @@ Item {
         return ids;
     }
 
-    // Meter sizes covering n ports: 8s, then the largest that fits (1..6).
     function meterChunks(n) {
         var out = [];
         while (n > 0) {
@@ -3331,8 +2996,6 @@ Item {
                 keep.push(job);
                 continue;
             }
-            // Hidden and snapped from the moment it shows up; its card waits
-            // beside the host for when it is unsnapped.
             if (!job.hidden) {
                 job.hidden = true;
                 hiddenNodes[meter.layoutKey] = true;
@@ -3354,7 +3017,6 @@ Item {
                     keep.push(job);
                 continue;
             }
-            // Wire: new paths first, then drop the old ones (no gap).
             var drop = [];
             for (var k = 0; k < job.hostPorts.length; k++) {
                 var hp = job.hostPorts[k];
@@ -3389,8 +3051,6 @@ Item {
         }
     }
 
-    // Remove the meters snapped onto a node. Removing a meter joins the
-    // wires on its two sides, so the node's wiring is as before.
     function removeMetersOn(nodeId) {
         var keys = metersSnappedOn(nodeId);
         for (var i = 0; i < keys.length; i++) {
@@ -3402,7 +3062,6 @@ Item {
         }
     }
 
-    // The port a new wire on `portId` should really use.
     function snapTargetPort(portId) {
         var r = snapRedirect[portId];
         return r !== undefined ? r : portId;
@@ -3416,8 +3075,6 @@ Item {
         return isMeterNode(n) && !!n.layoutKey && !!dockedMeters[n.layoutKey];
     }
 
-    // Per channel: the meter's input and output port, the ports feeding the
-    // input (srcs; src is the first or -1) and the ports its output feeds.
     function meterChannelPorts(node) {
         var sp = getSortedPorts(node.id);
         var ins = sp.inputs.filter(isAudioRow);
@@ -3444,12 +3101,6 @@ Item {
         return chans;
     }
 
-    // Can this meter snap to `side`? The snapped-to port stands for one
-    // meter port, so it must be unambiguous: snapping to the source needs
-    // each channel fed by at most one port (and fed, if it feeds anything);
-    // snapping to the destination needs each channel to feed at most one
-    // port (and feed one, if it is fed). Otherwise a wire would vanish.
-    // At least one channel needs the port its bar would sit on.
     function canSnapMeter(node, side) {
         if (!isMeterNode(node) || !node.layoutKey)
             return false;
@@ -3472,12 +3123,6 @@ Item {
         return any;
     }
 
-    // ---- Meter names -----------------------------------------------------
-    // A snapped meter is named after where it sits ("Daw Sink in meter",
-    // "Pianoteq 9 out 9-16 meter") and gets its default name back when
-    // unsnapped, unless the user named it. A plugin's layout key holds its
-    // name, so a rename moves the meter's hidden/snapped/pinned entries to
-    // the new key, and remembers old -> new for undo entries made before.
     property var meterKeyAlias: ({})
 
     function resolveMeterKey(key) {
@@ -3491,7 +3136,6 @@ Item {
         return /^Meter \(\d ch\)( #\d+)?$/.test(name) || / (in|out)( \d+(-\d+)?)? meter( #\d+)?$/.test(name);
     }
 
-    // "<host> in|out[ a-b] meter" for bars on `anchorPorts` of host `hostId`.
     function snapMeterName(hostId, side, anchorPorts) {
         var host = findNodeData(hostId);
         if (!host)
@@ -3512,7 +3156,6 @@ Item {
         return host.name + " " + (side === "source" ? "out" : "in") + range + " meter";
     }
 
-    // The name for `meter` snapped to `side`, from its current wiring.
     function snapMeterNameFromLinks(meter, side) {
         var chans = meterChannelPorts(meter);
         var anchors = [];
@@ -3530,12 +3173,9 @@ Item {
         return hostId >= 0 ? snapMeterName(hostId, side, anchors) : "";
     }
 
-    // Rename `meter` (to its default name when `base` is "") and move its
-    // layout-key entries along.
     function renameMeter(meter, base) {
         if (!meter || !isAutoMeterName(meter.name))
             return;
-        // Snapped but its host is not known yet: keep the name for now.
         if (base === "" && meter.layoutKey && dockedMeters[meter.layoutKey])
             return;
         var oldKey = meter.layoutKey;
@@ -3596,7 +3236,6 @@ Item {
         });
     }
 
-    // Layout keys of the meters snapped onto `nodeId`'s ports.
     function metersSnappedOn(nodeId) {
         var keys = [];
         for (var id in dockBarFrames) {
@@ -3698,7 +3337,6 @@ Item {
         return nodeLayout(node).height;
     }
 
-    // Fixed card widths: devices, sinks and streams 184; plugins 208.
     function calculateNodeWidths() {
         var newWidths = {};
         for (var ni = 0; ni < nodes.length; ni++) {
@@ -3740,7 +3378,6 @@ Item {
         };
     }
 
-    // Canvas-space bounding box of all visible (non-hidden) nodes, or null.
     function contentBounds() {
         var b = null;
         for (var i = 0; i < nodes.length; i++) {
@@ -3769,8 +3406,6 @@ Item {
         return b;
     }
 
-    // Keep at least minVisibleContent screen px of the graph inside the
-    // viewport so it can't be panned or zoomed out of reach.
     function clampPan() {
         var b = contentBounds();
         if (!b || width <= 0 || height <= 0)
@@ -3789,7 +3424,6 @@ Item {
             panY -= t - (height - keepY);
     }
 
-    // Zoom to `newZoom` keeping the canvas point under screen (sx, sy) fixed.
     function zoomAt(sx, sy, newZoom) {
         hideNameTip();
         newZoom = Math.max(minZoom, Math.min(maxZoom, newZoom));
@@ -3801,12 +3435,10 @@ Item {
         canvas.requestPaint();
     }
 
-    // Center the view on all visible nodes, zoomed to fit (never above 100%).
     function fitToView() {
         fitBounds(contentBounds());
     }
 
-    // Center the view on the selected nodes (all of them when none are).
     function frameSelection() {
         var b = null;
         for (var k in selectedNodes) {
@@ -3833,9 +3465,6 @@ Item {
         fitBounds(b || contentBounds());
     }
 
-    // Zoom (never above 100%) and pan so the canvas box `b` is centred in
-    // the part of the view that the top-left controls and the bottom hint
-    // leave free.
     function fitBounds(b) {
         if (!b || width <= 0 || height <= 0) {
             zoom = 1.0;
@@ -3856,8 +3485,6 @@ Item {
         canvas.requestPaint();
     }
 
-    // Scrollable range (canvas space) for one axis: the padded graph extent
-    // united with the current view, so the bar always covers where you are.
     function scrollRange(lo, hi, viewLo, viewLen) {
         var pad = 40 / zoom;
         var a = Math.min(lo - pad, viewLo);
@@ -3868,8 +3495,6 @@ Item {
         };
     }
 
-    // Sync the scroll bars with the current view. Called after every paint;
-    // a bar being dragged keeps the range captured when the drag started.
     function updateScrollBars() {
         var b = contentBounds();
         var viewW = width / zoom, viewH = height / zoom;
@@ -3895,7 +3520,6 @@ Item {
         }
     }
 
-    // Is canvas point (cx, cy) covered by a visible node drawn above z-index `z`?
     function coveredAbove(cx, cy, z) {
         for (var i = nodes.length - 1; i > z; i--) {
             var n = nodes[i];
@@ -3911,8 +3535,6 @@ Item {
         return false;
     }
 
-    // Nearest port under the cursor whose node isn't covered there by a node
-    // drawn on top of it.
     function findPortAt(sx, sy) {
         var hitRadius = portRadius * zoom * 2.5;
         var c = toCanvas(sx, sy);
@@ -3935,7 +3557,6 @@ Item {
         return bestDist <= hitRadius ? bestId : -1;
     }
 
-    // The port whose name is under the cursor (right-click target), or -1.
     function findPortLabelAt(sx, sy) {
         var c = toCanvas(sx, sy);
         var half = Theme.nodePortRow / 2;
@@ -3951,7 +3572,6 @@ Item {
         return -1;
     }
 
-    // Links attached to a port.
     function linksOfPort(portId) {
         var out = [];
         for (var i = 0; i < links.length; i++) {
@@ -3961,9 +3581,6 @@ Item {
         return out;
     }
 
-    // The wires drawn at `portId`. For a port a meter is snapped to: its own
-    // wires except the meter's link to it, plus the meter port's wires that
-    // are drawn there (so Disconnect never cuts the meter out of the port).
     function visibleLinksOfPort(portId) {
         var meterPort = snapRedirect[portId];
         if (meterPort === undefined)
@@ -4034,9 +3651,6 @@ Item {
         return -1;
     }
 
-    // Plugin footer buttons (On / UI / Params): canvas rects for node n.
-    // The three buttons share the card width (10 px margins, 6 px gaps),
-    // in proportion to their content so "Params" stays the widest.
     function refreshPresetInfo() {
         try {
             presetInfo = JSON.parse(controller.get_plugin_presets_all_json());
@@ -4045,8 +3659,6 @@ Item {
         }
     }
 
-    // The preset selector row of a plugin card, between the ports and the
-    // footer: a name button (opens the preset menu) and a Save button.
     function presetRects(n, nx, ny, nh) {
         var margin = 10;
         var gap = 6;
@@ -4156,7 +3768,6 @@ Item {
         return out;
     }
 
-    // Pin toggle in the header's right corner (canvas rect, 18 px hit box).
     function pinRect(n, nx, ny) {
         var s = 18;
         return {
@@ -4207,7 +3818,6 @@ Item {
         canvas.requestPaint();
     }
 
-    // Canvas rect of a plugin's "n more" / "show fewer" row, or null.
     function toggleRowRect(n, lay, nx, ny) {
         if (!lay.expandable)
             return null;
@@ -4219,8 +3829,6 @@ Item {
         };
     }
 
-    // Only the topmost node under the cursor can have its buttons hit.
-    // Returns { button: "onoff" | "ui" | "params" | "toggle", nodeId, ... }.
     function findButtonAt(sx, sy) {
         var topId = findNodeAt(sx, sy);
         if (topId < 0)
@@ -4307,13 +3915,10 @@ Item {
         return null;
     }
 
-    // ---- Canvas drawing helpers -------------------------------------------
-
     function fontSpec(weight, size, mono) {
         return weight + " " + size + "px \"" + (mono ? Theme.fontMono : Theme.fontSans) + "\"";
     }
 
-    // Elide `str` with an ellipsis to fit `maxW` in the current ctx.font.
     function elide(ctx, str, maxW) {
         if (!str)
             return "";
@@ -4362,8 +3967,6 @@ Item {
         ctx.closePath();
     }
 
-    // Small neutral tag (format "LV2", "default"): mono 9, strong outline.
-    // Draws right-aligned at `right`; returns its left edge.
     function drawTag(ctx, text, right, cy) {
         ctx.font = fontSpec(500, Theme.sizeNodeTag, true);
         var tw = ctx.measureText(text).width + 8;
@@ -4379,8 +3982,6 @@ Item {
         return right - tw;
     }
 
-    // The default target: accent chip with a dot, like "Rules active".
-    // Draws right-aligned at `right`; returns its left edge.
     function drawDefaultChip(ctx, right, cy) {
         ctx.font = fontSpec(500, Theme.sizeNodeTag, true);
         var label = "default";
@@ -4417,8 +4018,6 @@ Item {
         return searchText.length > 0 && (port.name || "").toLowerCase().indexOf(searchText.toLowerCase()) >= 0;
     }
 
-    // Node of the port a wire is being dragged from. Looked up once per
-    // drag (and per refresh) instead of once per drawn pin.
     property int dragSourcePortId: -1
     property int dragSourceNodeId: -1
     function connectFromNodeId() {
@@ -4429,7 +4028,6 @@ Item {
         return dragSourceNodeId;
     }
 
-    // Could the wire being dragged end on this port?
     function isValidDropTarget(port, nodeId) {
         if (connectFromPortId < 0 || port.id === connectFromPortId)
             return false;
@@ -4466,11 +4064,10 @@ Item {
             var visRight = (width - panX) / zoom;
             var visBottom = (height - panY) / zoom;
 
-            // ---- Dot grid (scene space; 1 screen px dots) -----------------
             var pitch = gridSize;
             while (pitch * zoom < 10)
                 pitch *= 2;
-            var dot = 1.5 / zoom;    // 1.5 screen px at any zoom
+            var dot = 1.5 / zoom;
             ctx.fillStyle = "" + Theme.gridDot;
             var gx0 = Math.floor(visLeft / pitch) * pitch;
             var gy0 = Math.floor(visTop / pitch) * pitch;
@@ -4485,7 +4082,6 @@ Item {
             var rowH = Theme.nodePortRow;
             var portsTop = hdr + Theme.nodePortsTop;
 
-            // ---- Pass 1: port positions (pins sit on the card's edge) -----
             for (var ni = 0; ni < nodes.length; ni++) {
                 var node = nodes[ni];
                 if (node.layoutKey && hiddenNodes[node.layoutKey])
@@ -4495,7 +4091,6 @@ Item {
                     continue;
                 var lay = nodeLayout(node);
                 var nw = getNodeWidth(node.id);
-                // Same label width as drawNode, for right-click targets.
                 var labelBoth = lay.inputs.length > 0 && lay.outputs.length > 0;
                 var labelWidth = labelBoth ? (nw - 2 * Theme.nodePadX - 8) / 2 : nw - 2 * Theme.nodePadX;
                 for (var pi = 0; pi < lay.inputs.length; pi++) {
@@ -4520,8 +4115,6 @@ Item {
                 }
             }
 
-            // ---- Snapped meters: the snapped-to port stands for the meter's
-            // port (wires drawn there), bars, wires that skip the meter ----
             var newDockFrames = {};
             var newDockIds = [];
             var newRedirect = {};
@@ -4535,7 +4128,6 @@ Item {
                 for (var dk = 0; dk < dchans.length; dk++) {
                     var dc = dchans[dk];
                     var anchorId = toSource ? dc.src : (dc.dests.length > 0 ? dc.dests[0] : -1);
-                    // The meter port the snapped-to port stands for.
                     var meterPort = toSource ? dc.outPort : dc.inPort;
                     var anchor = newPortPositions[anchorId];
                     if (!anchor || anchor.alias || meterPort < 0)
@@ -4547,15 +4139,11 @@ Item {
                         z: anchor.z,
                         alias: true
                     };
-                    // If wiring changed after the snap and the meter's other
-                    // side now has several wires, draw those at the
-                    // snapped-to port too, so none vanish.
                     var otherPort = toSource ? dc.inPort : dc.outPort;
                     if (otherPort >= 0 && (toSource ? dc.srcs.length : dc.dests.length) > 1)
                         newPortPositions[otherPort] = newPortPositions[meterPort];
                     if (newRedirect[anchorId] === undefined)
                         newRedirect[anchorId] = meterPort;
-                    // Other wires on the snapped-to port don't pass the meter.
                     for (var bl = 0; bl < links.length; bl++) {
                         var blk = links[bl];
                         if (toSource ? (blk.outputPortId === anchorId && blk.inputPortId !== dc.inPort) : (blk.inputPortId === anchorId && blk.outputPortId !== dc.outPort))
@@ -4575,7 +4163,6 @@ Item {
                 }
             }
 
-            // ---- Pass 2: wires, behind the nodes --------------------------
             ctx.lineCap = "round";
             wireLanes = computeWireLanes(newPortPositions);
             updateWireRoutes(newPortPositions);
@@ -4590,8 +4177,6 @@ Item {
                 var toPos = newPortPositions[link.inputPortId];
                 if (!fromPos || !toPos)
                     continue;
-                // A snapped meter's own wire into or out of the port it
-                // snapped to starts and ends there: nothing to draw.
                 if (isSnapInternal(fromPos, toPos))
                     continue;
                 var accented = !!selectedLinks[link.id] || !!selectedNodes[fromPos.nodeId] || !!selectedNodes[toPos.nodeId];
@@ -4600,7 +4185,6 @@ Item {
                 if (!mt || mt === "Unknown")
                     mt = portMediaTypes[link.inputPortId];
                 if (insertPreview && insertPreview.remove[link.id]) {
-                    // Will be split by the plugin being dropped: faded, dashed.
                     ctx.save();
                     ctx.globalAlpha = 0.3;
                     ctx.setLineDash([3, 5]);
@@ -4609,7 +4193,6 @@ Item {
                     continue;
                 }
                 ctx.globalAlpha = accented || hovered ? 1 : (link.active === false ? 0.35 : Theme.wireOpacity);
-                // Skips a meter snapped to one of its ports: dashed.
                 if (bypassLinks[link.id])
                     ctx.setLineDash([5, 4]);
                 var wireCol = accented ? Theme.accent : signalColor(mt);
@@ -4624,7 +4207,6 @@ Item {
             }
             ctx.globalAlpha = 1;
 
-            // ---- Block lines: red dashed, header to header, ⊘ midway ------
             var newBlockGeom = [];
             for (var bi = 0; bi < blockedPairs.length; bi++) {
                 var bp = blockedPairs[bi];
@@ -4652,7 +4234,6 @@ Item {
                 var bHot = bSel || hoveredBlockKey === bKey || (contextBlock && contextBlock.ruleId === bp.ruleId && contextBlock.source === bp.source && contextBlock.target === bp.target);
                 ctx.save();
                 if (bSel) {
-                    // Selected: a soft halo under the line, like a selected wire.
                     ctx.globalAlpha = 1;
                     ctx.setLineDash([]);
                     drawWire(ctx, bx1, by1, bx2, by2, Theme.tint(Theme.textDestructive, 0.28), 8, bWid);
@@ -4695,7 +4276,6 @@ Item {
             }
             blockGeom = newBlockGeom;
 
-            // ---- Pass 3: node cards ---------------------------------------
             var newMeterFrames = {};
             for (var ni2 = 0; ni2 < nodes.length; ni2++) {
                 var n2 = nodes[ni2];
@@ -4718,7 +4298,6 @@ Item {
                     };
             }
 
-            // ---- Snap preview: where the dragged meter's bars will go -----
             if (snapPreview) {
                 ctx.save();
                 ctx.fillStyle = "" + Theme.accent;
@@ -4733,7 +4312,6 @@ Item {
                 ctx.restore();
             }
 
-            // ---- Insert preview: ghost wires through the dragged plugin ----
             if (insertPreview) {
                 ctx.save();
                 ctx.setLineDash([6, 4]);
@@ -4749,7 +4327,6 @@ Item {
                         gmt = portMediaTypes[gIn];
                     ctx.globalAlpha = 0.85;
                     drawWire(ctx, gFrom.cx, gFrom.cy, gTo.cx, gTo.cy, signalColor(gmt), Theme.wireWidthActive);
-                    // Pin dots where the ghost wire would connect.
                     ctx.globalAlpha = 1;
                     ctx.fillStyle = "" + signalColor(gmt);
                     ctx.beginPath();
@@ -4761,7 +4338,6 @@ Item {
                 ctx.restore();
             }
 
-            // ---- Drag wire: dashed, signal colour (red when blocking) ----
             if (connectFromPortId >= 0) {
                 var dragFrom = newPortPositions[connectFromPortId] || portPositions[connectFromPortId];
                 if (dragFrom) {
@@ -4777,7 +4353,6 @@ Item {
                         drawWire(ctx, dragFrom.cx, dragFrom.cy, dragToC.x, dragToC.y, dragColor, Theme.wireWidthActive, "drag");
                     }
                     if (connectBlocking || connectTargetBlocked) {
-                        // A small ⊘ at the cursor end.
                         ctx.setLineDash([]);
                         ctx.strokeStyle = "" + Theme.textDestructive;
                         ctx.lineWidth = 1.5 / zoom;
@@ -4804,7 +4379,6 @@ Item {
                 ctx.stroke();
             }
 
-            // Snap guides while dragging with Shift.
             if (activeSnapLines.length > 0) {
                 ctx.save();
                 ctx.setLineDash([4 / zoom, 4 / zoom]);
@@ -4836,9 +4410,6 @@ Item {
         }
     }
 
-    // Live meter levels over the canvas (see isMeterNode): one item per
-    // meter node at the place the last paint drew it, so level changes
-    // never repaint the canvas.
     Item {
         id: meterLayer
         anchors.fill: parent
@@ -4873,7 +4444,6 @@ Item {
                         height: rect.h
                         clip: true
 
-                        // Green up to -12 dBFS, amber to -3, red above.
                         Rectangle {
                             width: bar.width * Math.min(bar.frac, graphView.meterHotFrac)
                             height: bar.height
@@ -4898,9 +4468,6 @@ Item {
         }
     }
 
-    // Levels of snapped meters: a thin bar under the label of the port each
-    // channel is snapped to (outputs: ending at the label's right edge;
-    // inputs: starting at its left edge).
     Item {
         id: dockBarLayer
         anchors.fill: parent
@@ -4920,7 +4487,6 @@ Item {
                 readonly property real barW: graphView.dockBarW
                 readonly property var rect: frame ? graphView.dockBarRect(frame.cx, frame.cy, frame.output) : null
                 visible: frame !== null
-                // Scene geometry, then scaled like the canvas.
                 x: rect ? graphView.panX + rect.x * graphView.zoom : 0
                 y: rect ? graphView.panY + rect.y * graphView.zoom : 0
                 width: graphView.dockBarW
@@ -4934,7 +4500,6 @@ Item {
                     radius: height / 2
                     color: Theme.meterTrack
                 }
-                // Fills left to right, like the bars on a meter card.
                 Item {
                     width: parent.width
                     height: parent.height
@@ -4967,7 +4532,6 @@ Item {
         onTriggered: graphView.suspendOrphanedSnaps()
     }
 
-    // ~20 updates a second while there are meters and the window is shown.
     Timer {
         interval: 50
         repeat: true
@@ -4981,7 +4545,6 @@ Item {
         }
     }
 
-    // One node card (design bible §6.5). Canvas coordinates, scene space.
     function drawNode(ctx, node, nx, ny) {
         var lay = nodeLayout(node);
         var nw = getNodeWidth(node.id);
@@ -5003,13 +4566,10 @@ Item {
         var portsTop = hdr + Theme.nodePortsTop;
 
         ctx.save();
-        // Search: non-matching nodes dim to 35 %. A meter about to snap
-        // onto another node fades.
         var baseAlpha = nodeMatchesSearch(node) ? 1 : 0.35;
         if (snapPreview && snapPreview.meterId === node.id)
             baseAlpha *= 0.45;
 
-        // Shadow (layered rects, cheap) and selection halo.
         ctx.fillStyle = "" + Theme.shadowNode;
         ctx.globalAlpha = baseAlpha * 0.35;
         for (var sh = 0; sh < 3; sh++) {
@@ -5023,7 +4583,6 @@ Item {
             ctx.lineWidth = 3;
             ctx.stroke();
         }
-        // A node that just appeared: an accent ring that grows and fades.
         var cue = nodeCues[node.id];
         if (cue) {
             var cueAge = Date.now() - cue.t;
@@ -5039,7 +4598,6 @@ Item {
             }
         }
 
-        // Subgraph: a second card edge behind, offset 4 px (a stack).
         if (isSubgraph) {
             roundRectPath(ctx, nx + 4, ny + 4, nw, nh, Theme.radiusCard);
             ctx.fillStyle = "" + Theme.bgSurface;
@@ -5049,8 +4607,6 @@ Item {
             ctx.stroke();
         }
 
-        // Body. The node under the cursor gets an accent tint and a softer
-        // accent border (selection is the full accent border and halo).
         var hovered = hoveredNodeId === node.id && !selected;
         roundRectPath(ctx, nx, ny, nw, nh, Theme.radiusCard);
         ctx.fillStyle = "" + Theme.bgSurface;
@@ -5065,7 +4621,6 @@ Item {
         ctx.lineWidth = 1;
         ctx.stroke();
         ctx.globalAlpha = baseAlpha;
-        // The node a dragged meter will snap onto: accent fill and ring.
         if (snapPreview && snapPreview.nodeId === node.id) {
             roundRectPath(ctx, nx, ny, nw, nh, Theme.radiusCard);
             ctx.fillStyle = "" + Theme.accentFaint;
@@ -5087,7 +4642,6 @@ Item {
             ctx.restore();
         }
 
-        // Header: category chip, title, tags; hairline below.
         var chip = Theme.nodeChip;
         var chipX = nx + 10;
         var chipY = ny + (hdr - chip) / 2;
@@ -5096,7 +4650,6 @@ Item {
         ctx.fill();
         drawGlyph(ctx, cat.glyph, chipX + (chip - Theme.nodeGlyph) / 2, chipY + (chip - Theme.nodeGlyph) / 2, Theme.nodeGlyph, cat.color);
 
-        // Pin toggle: solid when pinned, faint outline when not.
         var pinned = !!(node.layoutKey && pinnedNodes[node.layoutKey]);
         var pinHover = hoveredButton === node.id + ":pin";
         var pr = pinRect(node, nx, ny);
@@ -5151,7 +4704,6 @@ Item {
         ctx.fillStyle = "" + Theme.borderHairline;
         ctx.fillRect(nx + 1, ny + hdr, nw - 2, 1);
 
-        // Port rows.
         var both = lay.inputs.length > 0 && lay.outputs.length > 0;
         var labelW = both ? (nw - 2 * Theme.nodePadX - 8) / 2 : nw - 2 * Theme.nodePadX;
         ctx.font = fontSpec(400, Theme.sizeMono, true);
@@ -5162,8 +4714,6 @@ Item {
             var py = ny + portsTop + i * rowH + rowH / 2;
             ctx.fillStyle = "" + Theme.textSecondary;
             ctx.textAlign = "left";
-            // Meter audio rows: the channel number, then the bar's track
-            // (the level itself is drawn by meterLayer).
             var meterRow = isMeter && isAudioRow(pin);
             if (meterRow)
                 meterChannel++;
@@ -5188,7 +4738,6 @@ Item {
             drawPin(ctx, pout, node.id, nx + nw, pyo, selected);
         }
 
-        // Collapsed-ports row: "⌄ n more outputs" / "show fewer".
         var tr = toggleRowRect(node, lay, nx, ny);
         if (tr) {
             var hidden = lay.hiddenIn + lay.hiddenOut;
@@ -5215,7 +4764,6 @@ Item {
             ctx.fillText(label, lx + 12, cy);
         }
 
-        // Subgraph footer: one Open button; hairline above.
         if (isSubgraph) {
             ctx.fillStyle = "" + Theme.borderHairline;
             ctx.fillRect(nx + 1, ny + nh - Theme.nodeFooter, nw - 2, 1);
@@ -5235,7 +4783,6 @@ Item {
             ctx.fillText(openTxt, ox + 18, ob.y + ob.h / 2 + 0.5);
         }
 
-        // Plugin preset row: selected preset (menu) and Save.
         if (isPlugin && !isMeter) {
             var pinfo = presetInfo[node.id] || {
                 name: "",
@@ -5256,7 +4803,6 @@ Item {
             ctx.textAlign = "left";
             ctx.textBaseline = "middle";
             ctx.fillText(elide(ctx, label, prr.name.w - 12 - 18), prr.name.x + 8, prr.name.y + prr.name.h / 2 + 0.5);
-            // chevron
             var chx = prr.name.x + prr.name.w - 12;
             var chy = prr.name.y + prr.name.h / 2;
             ctx.beginPath();
@@ -5275,7 +4821,6 @@ Item {
             ctx.fillText("Save", prr.save.x + prr.save.w / 2, prr.save.y + prr.save.h / 2 + 0.5);
         }
 
-        // Plugin footer: On / UI / Params; hairline above.
         if (isPlugin && !isMeter) {
             ctx.fillStyle = "" + Theme.borderHairline;
             ctx.fillRect(nx + 1, ny + nh - Theme.nodeFooter, nw - 2, 1);
@@ -5297,7 +4842,6 @@ Item {
                 ctx.fillStyle = "" + col;
                 ctx.textBaseline = "middle";
                 if (bt.key === "onoff") {
-                    // Dot + label, centred as a group in the (wider) button.
                     var groupW = 6 + 5 + ctx.measureText(txt).width;
                     var gx = bt.x + (bt.w - groupW) / 2;
                     ctx.beginPath();
@@ -5320,9 +4864,6 @@ Item {
         ctx.restore();
     }
 
-    // A 10 px pin centred on the card edge: filled when connected, hollow
-    // ring when free; accent on the selected node; halos for hover, valid
-    // drop targets and search matches.
     function drawPin(ctx, port, nodeId, cx, cy, nodeSelected) {
         var connected = !!connectedPorts[port.id];
         var col = signalColor(port.mediaType);
@@ -5361,8 +4902,6 @@ Item {
 
     focus: true
 
-    // Escape belongs to the graph whenever it has something to cancel, even
-    // if a window-level Shortcut elsewhere also listens for it.
     Keys.onShortcutOverride: event => {
         if (event.key === Qt.Key_Escape && (placingNodeId >= 0 || connectFromPortId >= 0 || hasSelection() || currentSubgraph !== ""))
             event.accepted = true;
@@ -5373,7 +4912,6 @@ Item {
         var shift = !!(event.modifiers & Qt.ShiftModifier);
         var plain = !(event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier));
 
-        // Held keys that override the drag mode (see overrideState).
         if (event.key === Qt.Key_Shift) {
             shiftHeld = true;
             return;
@@ -5487,7 +5025,6 @@ Item {
             spacePanning = false;
             shiftHeld = !!(mouse.modifiers & Qt.ShiftModifier);
 
-            // In-hand placement: a click drops the node where it currently sits.
             if (placingNodeId >= 0) {
                 finishPlacing();
                 return;
@@ -5500,8 +5037,6 @@ Item {
             }
 
             if (mouse.button === Qt.RightButton) {
-                // Right-drag from a port draws a block wire; a right-click on
-                // a port without dragging opens the node menu on release.
                 var blockPort = findPortAt(mouse.x, mouse.y);
                 if (blockPort >= 0) {
                     connectFromPortId = blockPort;
@@ -5564,7 +5099,6 @@ Item {
             }
 
             if (mouse.button === Qt.LeftButton) {
-                // Space held: pan from anywhere, whatever is under the cursor.
                 if (spaceHeld) {
                     spacePanning = true;
                     updateCursor();
@@ -5636,8 +5170,6 @@ Item {
                         return;
                     }
 
-                    // A meter that is the only selected node drags on its
-                    // own, so it can be snapped onto a node by dropping it.
                     var loneMeter = nodeIsSelected && isMeterNode(findNodeData(nodeIdDrag)) && selectedNodeIds().length === 1;
                     if (nodeIsSelected && !loneMeter) {
                         groupDragging = true;
@@ -5676,7 +5208,6 @@ Item {
                     return;
                 }
 
-                // A wire: a link or a red block line, whichever is nearer.
                 var clickedWire = wireAt(mouse.x, mouse.y);
                 var clickedLinkId = clickedWire.link;
                 var ctrlHeldWire = !!(mouse.modifiers & Qt.ControlModifier);
@@ -5728,9 +5259,6 @@ Item {
                     return;
                 }
 
-                // Empty canvas: pan it (grab mode) or start a selection box
-                // (select mode, or Shift held in grab mode). With Shift or
-                // Ctrl the box adds to the current selection.
                 var boxShift = !!(mouse.modifiers & Qt.ShiftModifier);
                 if (dragMode === "grab" && !boxShift) {
                     grabPanning = true;
@@ -5755,7 +5283,6 @@ Item {
 
         onPositionChanged: mouse => {
             shiftHeld = !!(mouse.modifiers & Qt.ShiftModifier);
-            // In-hand placement: keep the node centred under the cursor.
             if (placingNodeId >= 0) {
                 var pc = toCanvas(mouse.x, mouse.y);
                 var pn = findNodeData(placingNodeId);
@@ -5782,8 +5309,6 @@ Item {
             }
 
             if (groupDragging && (mouse.buttons & Qt.LeftButton)) {
-                // Move from the start positions; grid or Shift-snap the
-                // reference node and offset the whole group by the same amount.
                 var cg = toCanvas(mouse.x, mouse.y);
                 var deltaX = cg.x - groupDragStartX;
                 var deltaY = cg.y - groupDragStartY;
@@ -5849,7 +5374,6 @@ Item {
                 updateInsertPreview(dragNodeId);
                 var draggedMeter = findNodeData(dragNodeId);
                 snapPreview = isMeterNode(draggedMeter) ? meterSnapCandidate(draggedMeter, mouse.x, mouse.y) : null;
-                // Snapping wins over dropping on a wire.
                 if (snapPreview)
                     insertPreview = null;
                 canvas.requestPaint();
@@ -5913,7 +5437,6 @@ Item {
             if (mouse.button === Qt.LeftButton) {
                 if (grabPanning) {
                     grabPanning = false;
-                    // A click (no drag) on empty canvas clears the selection.
                     if (!grabMoved)
                         clearSelection();
                     updateCursor();
@@ -5927,8 +5450,6 @@ Item {
                     var targetId = findPortAt(mouse.x, mouse.y);
                     if (targetId >= 0 && targetId !== connectFromPortId) {
                         var targetDir = getPortDirection(targetId);
-                        // A port a meter is snapped to stands for the meter's
-                        // port: the wire goes through the meter.
                         var fromPort = snapTargetPort(connectFromPortId);
                         var toPort = snapTargetPort(targetId);
                         var fromNodeId = getPortNodeId(fromPort);
@@ -5939,8 +5460,6 @@ Item {
                             var inP = connectFromDir === "Output" ? toPort : fromPort;
                             var origOut = connectFromDir === "Output" ? connectFromPortId : targetId;
                             var origIn = connectFromDir === "Output" ? targetId : connectFromPortId;
-                            // Re-connecting a pair whose wire skips a meter
-                            // snapped there: route it through the meter.
                             var skipping = (outP !== origOut || inP !== origIn) ? findLinkByPorts(origOut, origIn) : null;
                             if (why !== "") {
                                 showToast("Blocked by rule " + why + ". Remove the block to connect.");
@@ -5960,8 +5479,6 @@ Item {
 
                 if (groupDragging) {
                     groupDragging = false;
-                    // Resolve overlaps for each node in the group against
-                    // nodes outside the group (skip fellow group members)
                     for (var gid in selectedNodes) {
                         if (selectedNodes[gid]) {
                             var gNode = findNodeData(parseInt(gid));
@@ -5976,9 +5493,6 @@ Item {
                 }
 
                 if (dragNodeId >= 0 && snapPreview && snapPreview.meterId === dragNodeId) {
-                    // A meter dropped on a node it is wired to snaps onto it.
-                    // Its card goes back to where the drag started, which is
-                    // where it reappears when unsnapped.
                     var sp = snapPreview;
                     snapPreview = null;
                     insertPreview = null;
@@ -5991,8 +5505,6 @@ Item {
                     persistLayout();
                     canvas.requestPaint();
                 } else if (dragNodeId >= 0) {
-                    // Dropping a plugin on a wire inserts it right away; the
-                    // ghost wires shown while dragging are the confirmation.
                     var rewire = null;
                     var linkUnder = findLinkUnderNode(dragNodeId);
                     if (linkUnder >= 0) {
@@ -6003,7 +5515,6 @@ Item {
                         }
                     }
                     insertPreview = null;
-                    // Resolve overlap after dropping a single node
                     var droppedNode = findNodeData(dragNodeId);
                     if (droppedNode) {
                         resolveNodeOverlap(droppedNode);
@@ -6014,7 +5525,6 @@ Item {
                         movedFrom[dragNodeId] = dragStartPos;
                         moved = moveEntry("move", movedFrom);
                     }
-                    // The move and the rewiring undo together, as one step.
                     if (rewire && moved)
                         pushUndo({
                             kind: "group",
@@ -6052,7 +5562,6 @@ Item {
             }
         }
 
-        // The wheel zooms around the cursor.
         onWheel: wheel => {
             if (wheel.angleDelta.y === 0)
                 return;
@@ -6060,7 +5569,6 @@ Item {
             zoomAt(wheel.x, wheel.y, zoom * factor);
         }
 
-        // Touchpad / touchscreen pinch zooms around the fingers.
         PinchHandler {
             id: pinchZoom
             target: null
@@ -6072,10 +5580,6 @@ Item {
         }
     }
 
-    // Inside a subgraph: "Graph › Mic Chain" at the top-left; "Graph" (or
-    // Escape) goes back to the main graph.
-    // Drag mode switch at the canvas's top-left: what a left-drag on empty
-    // canvas does. The active mode is the accent-tinted cell; W toggles.
     component ModeCell: AbstractButton {
         id: cell
         property string iconName
@@ -6084,7 +5588,6 @@ Item {
         width: 28
         height: 28
         hoverEnabled: true
-        // Keep the keyboard on the canvas (W, Delete, Home, Esc).
         focusPolicy: Qt.NoFocus
         Accessible.name: tip
         background: Rectangle {
@@ -6119,7 +5622,6 @@ Item {
         border.width: 1
         border.color: Theme.borderStrong
 
-        // Presses on the pill itself never reach the canvas.
         MouseArea {
             anchors.fill: parent
             acceptedButtons: Qt.AllButtons
@@ -6147,9 +5649,6 @@ Item {
         }
     }
 
-    // Auto layout at the canvas's top-right (clear of the scroll bar): a
-    // plain click arranges everything that is not pinned, Shift+click (or
-    // Shift+L) the pinned nodes too.
     Rectangle {
         id: autoLayoutButton
         anchors.right: parent.right
@@ -6169,7 +5668,7 @@ Item {
             width: 28
             height: 28
             hoverEnabled: true
-            focusPolicy: Qt.NoFocus   // the canvas keeps the keyboard
+            focusPolicy: Qt.NoFocus
             Accessible.name: "Auto layout"
             onClicked: graphView.requestAutoLayout(graphView.shiftHeld)
             background: Rectangle {
@@ -6191,8 +5690,6 @@ Item {
         }
     }
 
-    // Shortcut help at the canvas's bottom-right (clear of the scroll bars):
-    // opens the list of every shortcut, same as ? and F1.
     Rectangle {
         id: helpButton
         anchors.right: parent.right
@@ -6210,7 +5707,7 @@ Item {
             id: helpCell
             anchors.fill: parent
             hoverEnabled: true
-            focusPolicy: Qt.NoFocus   // the canvas keeps the keyboard
+            focusPolicy: Qt.NoFocus
             Accessible.name: "Keyboard shortcuts"
             onClicked: graphView.showShortcuts()
             background: Rectangle {
@@ -6289,8 +5786,6 @@ Item {
         }
     }
 
-    // New nodes that appeared outside the view: a marker at the nearest
-    // edge, pointing at the node; click to go there.
     Repeater {
         model: graphView.edgeMarkers
         delegate: Rectangle {
@@ -6342,12 +5837,9 @@ Item {
         }
     }
 
-    // Temporary drag-mode override, at the bottom centre of the canvas: which
-    // key to hold, and — accent-tinted — that the override is on right now.
     Rectangle {
         id: overrideHint
         readonly property bool active: graphView.overrideState !== ""
-        // What holding the key does: the other mode's action.
         readonly property string action: graphView.overrideState !== "" ? graphView.overrideState : (graphView.dragMode === "grab" ? "select" : "pan")
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
@@ -6389,7 +5881,6 @@ Item {
                 on: overrideHint.active
                 text: overrideHint.active ? (overrideHint.action === "pan" ? "Panning \u2014 release" : "Selecting \u2014 release") : "Hold"
             }
-            // Key cap.
             Rectangle {
                 anchors.verticalCenter: parent.verticalCenter
                 height: 18
@@ -6414,7 +5905,6 @@ Item {
         }
     }
 
-    // Short notice at the bottom of the canvas (e.g. a refused connection).
     Rectangle {
         id: toast
         anchors.horizontalCenter: parent.horizontalCenter
@@ -6451,8 +5941,6 @@ Item {
         }
     }
 
-    // The canvas has no content box to sit beside, so its bars overlay the
-    // edges (design bible §5.3).
     ZbScrollBar {
         id: hScrollBar
         orientation: Qt.Horizontal
@@ -6461,7 +5949,6 @@ Item {
         anchors.bottom: parent.bottom
         visible: size < 1
         policy: ScrollBar.AlwaysOn
-        // Canvas-space range the bar spans (see updateScrollBars).
         property real rangeLo: 0
         property real rangeLen: 1
         onPositionChanged: {
@@ -6494,8 +5981,6 @@ Item {
             canvas.requestPaint()
     }
 
-    // Hover feedback: pin enlarges + tooltip, wire brightens, buttons and
-    // the collapse row highlight. (-1, -1) clears it.
     function updateHover(sx, sy) {
         var port = -1;
         var link = -1;
@@ -6530,8 +6015,6 @@ Item {
         hoveredNodeId = nodeUnder;
         hoverEmpty = empty;
         updateCursor();
-        // Full-name popup: only for a node whose title is cut short, and not
-        // while a pin or a node button has a tooltip of its own.
         if (nodeChanged || port >= 0 || btn !== "") {
             hideNameTip();
             if (nodeUnder >= 0 && port < 0 && btn === "" && nameTruncated[nodeUnder])
@@ -6580,10 +6063,6 @@ Item {
         }
     }
 
-    // Canvas cursor: a closed hand while panning (grab, Space or middle
-    // drag) and an open one wherever a left-drag would pan (Space held, or
-    // empty canvas in grab mode); a cross where Shift would start a selection
-    // box; a pointing hand over pins and node buttons.
     function updateCursor() {
         var shape = Qt.ArrowCursor;
         if (grabPanning || spacePanning || middlePanning)
@@ -6611,14 +6090,11 @@ Item {
         return "";
     }
 
-    // Full port name on pin hover.
     ZbTooltip {
         id: pinTip
         delay: 300
     }
 
-    // Full node name, when the card's title is cut short: shown above the
-    // card (below its header when there is no room above) after a short pause.
     ZbTooltip {
         id: nameTip
         delay: 0
@@ -6646,7 +6122,7 @@ Item {
         nameTip.width = Math.min(nameMetrics.advanceWidth + nameTip.leftPadding + nameTip.rightPadding + 2, Math.min(420, width - 16));
         placeNameTip(n, pos);
         nameTip.open();
-        Qt.callLater(placeNameTip, n, pos);   // the height settles once it wraps
+        Qt.callLater(placeNameTip, n, pos);
     }
     function placeNameTip(n, pos) {
         var s = toScreen(pos.x, pos.y);
@@ -7292,9 +6768,6 @@ Item {
         }
     }
 
-    // The link nearest to the cursor within linkHitPx screen pixels, so a
-    // wire highlights (and can be clicked) from close by, not only when the
-    // cursor is exactly on it. { id, dist } (canvas units) or null.
     readonly property real linkHitPx: 10
     function linkHit(sx, sy) {
         var c = toCanvas(sx, sy);
@@ -7347,19 +6820,14 @@ Item {
             var link = links[li];
             if (link.outputPortId === undefined)
                 continue;
-            // Skip links connected to the node itself to prevent self-loops
             if (link.outputNodeId === nodeId || link.inputNodeId === nodeId)
                 continue;
-            // Only an audio link can take a plugin.
             if (portMediaTypes[link.outputPortId] !== "Audio" || portMediaTypes[link.inputPortId] !== "Audio")
                 continue;
             var fromPos = portPositions[link.outputPortId];
             var toPos = portPositions[link.inputPortId];
             if (!fromPos || !toPos || isSnapInternal(fromPos, toPos))
                 continue;
-            // Nor a wire drawn at this node's ports: one of a meter snapped
-            // onto it (its end really is the meter, but splicing the node
-            // in there would loop it through its own meter).
             if (fromPos.nodeId === nodeId || toPos.nodeId === nodeId)
                 continue;
             var samples = wireSamples(fromPos.cx, fromPos.cy, toPos.cx, toPos.cy, link.id, 8);
@@ -7467,7 +6935,6 @@ Item {
         var ids = [];
         for (var linkId in selectedLinks) {
             var lid = parseInt(linkId);
-            // Only disconnect a link that is still the one that was selected.
             if (linkMatchesSig(findLinkData(lid), selectedLinks[linkId]))
                 ids.push(lid);
         }
@@ -7477,18 +6944,10 @@ Item {
         }
     }
 
-    // ---- New-node cue -----------------------------------------------------
-    // A node that appears while you are working pulses once (an accent ring,
-    // drawn by drawNode); when it appeared outside the view, a marker at the
-    // nearest edge points to it until it has been seen. Nothing is cued
-    // while the graph is still filling in: at start-up, after a session
-    // switch or when entering / leaving a subgraph (cueQuiet).
-    // nodeId -> { born: ms it appeared, t: ms its pulse (re)started }
     property var nodeCues: ({})
     property bool cueQuiet: true
     readonly property int cuePulseMs: 1600
     readonly property int cueMarkerMs: 12000
-    // [{ id, name, x, y, angle }] in screen space, for the edge markers.
     property var edgeMarkers: []
 
     function quietCues() {
@@ -7498,7 +6957,6 @@ Item {
         cueQuietTimer.restart();
     }
 
-    // Called by refreshData with the ids that appeared in this refresh.
     function noteAppeared(ids) {
         if (ids.length === 0)
             return;
@@ -7506,8 +6964,6 @@ Item {
             cueQuietTimer.restart();
             return;
         }
-        // A burst (a device with many nodes, a subgraph being ungrouped) is
-        // not news about any one node.
         if (ids.length > 4)
             return;
         var now = Date.now();
@@ -7528,7 +6984,6 @@ Item {
         }
     }
 
-    // Is any part of the node inside the view?
     function nodeOnScreen(node) {
         var p = nodePositions[node.id];
         if (!p)
@@ -7538,7 +6993,6 @@ Item {
         return b.x > 0 && a.x < width && b.y > 0 && a.y < height;
     }
 
-    // Drop finished cues and place a marker for each cued node out of view.
     function updateCues() {
         var now = Date.now();
         var markers = [];
@@ -7553,7 +7007,6 @@ Item {
             }
             var onScreen = nodeOnScreen(n);
             if (onScreen ? now - cue.t > cuePulseMs : now - cue.born > cueMarkerMs) {
-                // Seen (the pulse has played), or the marker has had its time.
                 delete nodeCues[id];
                 continue;
             }
@@ -7562,7 +7015,6 @@ Item {
                 pulsing = true;
                 continue;
             }
-            // Off screen: the pulse waits until the node comes into view.
             cue.t = now;
             var p = nodePositions[n.id];
             var c = toScreen(p.x + getNodeWidth(n.id) / 2, p.y + calculateNodeHeight(n) / 2);
@@ -7584,7 +7036,6 @@ Item {
             cueTimer.stop();
     }
 
-    // Bring a node to the middle of the view and pulse it again.
     function revealNode(nodeId) {
         var n = findNodeData(nodeId);
         var p = n ? nodePositions[nodeId] : null;
@@ -7609,7 +7060,6 @@ Item {
         onTriggered: graphView.updateCues()
     }
 
-    // The graph has stopped filling in: start cueing newcomers.
     Timer {
         id: cueQuietTimer
         interval: 2500
@@ -7617,12 +7067,6 @@ Item {
         onTriggered: graphView.cueQuiet = false
     }
 
-    // ---- Undo / redo ------------------------------------------------------
-    // Session-only history of node moves, wires made and removed, and nodes
-    // hidden. Entries name nodes by layout key and wires by their ports, and
-    // are checked against the live graph when applied, so a recycled id can
-    // never be moved or rewired by mistake. Cleared when the view changes
-    // (another session, into or out of a subgraph).
     property var undoStack: []
     property var redoStack: []
     readonly property int undoLimit: 50
@@ -7643,7 +7087,6 @@ Item {
         redoStack = [];
     }
 
-    // "node" / "3 nodes" (history labels), and "1 node" / "3 nodes".
     function plural(n, one, many) {
         return n === 1 ? one : n + " " + many;
     }
@@ -7659,15 +7102,12 @@ Item {
         return -1;
     }
 
-    // The user positioned this node: automatic placement leaves it alone.
     function markHandPlaced(nodeId) {
         delete autoPlaced[nodeId];
         delete placedKeyById[nodeId];
         delete awaitingLinkPlacement[nodeId];
     }
 
-    // Record a move of the nodes in `fromById` (nodeId -> {x, y} before) to
-    // where they are now. Nodes that did not move are left out.
     function recordMove(verb, fromById) {
         var entry = moveEntry(verb, fromById);
         if (entry)
@@ -7675,7 +7115,6 @@ Item {
         return entry;
     }
 
-    // The history entry recordMove would push, without pushing it.
     function moveEntry(verb, fromById) {
         var items = [];
         for (var id in fromById) {
@@ -7706,7 +7145,6 @@ Item {
         };
     }
 
-    // A record of a wire by its two ports, for wires that may not exist yet.
     function portLinkRecord(outPort, inPort) {
         return {
             o: outPort,
@@ -7716,9 +7154,6 @@ Item {
         };
     }
 
-    // The history entry for inserting plugin `nodeId` on wire `linkId`:
-    // the wires it removes and the ones it makes through the plugin. Taken
-    // before the insert, while the removed wires still exist.
     function insertRewireEntry(linkId, nodeId) {
         var plan = null;
         try {
@@ -7748,8 +7183,6 @@ Item {
         };
     }
 
-    // Make (or remove) the recorded wires that are not (or are) there.
-    // Returns how many changed.
     function applyLinkRecords(recs, make) {
         var done = 0;
         for (var li = 0; li < recs.length; li++) {
@@ -7777,7 +7210,6 @@ Item {
         };
     }
 
-    // Do the ports of a recorded wire still belong to the nodes they did?
     function linkRecordValid(rec) {
         var on = getPortNodeId(rec.o);
         var inn = getPortNodeId(rec.i);
@@ -7792,8 +7224,6 @@ Item {
         return null;
     }
 
-    // Connect two ports by hand, as one undoable step. The two nodes stay
-    // where they are: the user is wiring them in place.
     function connectPorts(outPort, inPort) {
         var on = getPortNodeId(outPort);
         var inn = getPortNodeId(inPort);
@@ -7814,8 +7244,6 @@ Item {
         });
     }
 
-    // Disconnect the links with these ids, as one undoable step. Returns
-    // how many there were.
     function disconnectLinks(ids) {
         var recs = [];
         for (var i = 0; i < ids.length; i++) {
@@ -7834,8 +7262,6 @@ Item {
         return recs.length;
     }
 
-    // Apply a history entry backwards (undoing) or forwards. Returns how
-    // many of its items could still be applied.
     function applyHistory(entry, undoing) {
         var done = 0;
         if (entry.kind === "move") {
@@ -7865,18 +7291,15 @@ Item {
             hiddenNodes = hiddenNodes;
             persistHidden();
         } else if (entry.kind === "snap") {
-            // side "" = an unsnap; undoing it snaps back to prevSide.
             var snapTo = undoing ? (entry.side ? "" : entry.prevSide) : entry.side;
             setMeterSnapped(entry.key, snapTo || "");
             done++;
         } else if (entry.kind === "group") {
-            // Parts were done in order, so they are undone in reverse.
             for (var pi = 0; pi < entry.parts.length; pi++) {
                 var part = entry.parts[undoing ? entry.parts.length - 1 - pi : pi];
                 done += applyHistory(part, undoing);
             }
         } else if (entry.kind === "rewire") {
-            // Take the wires down first, then put the others back.
             if (undoing) {
                 done += applyLinkRecords(entry.added, false);
                 done += applyLinkRecords(entry.removed, true);
@@ -7885,7 +7308,6 @@ Item {
                 done += applyLinkRecords(entry.added, true);
             }
         } else {
-            // "connect" / "disconnect": undoing one is doing the other.
             var make = (entry.kind === "disconnect") === undoing;
             done += applyLinkRecords(entry.links, make);
         }
@@ -7929,9 +7351,6 @@ Item {
         }
     }
 
-    // ---- Keyboard edits ---------------------------------------------------
-
-    // Ids of the selected nodes that are still the nodes that were selected.
     function selectedNodeIds() {
         var ids = [];
         for (var k in selectedNodes) {
@@ -7961,8 +7380,6 @@ Item {
         canvas.requestPaint();
     }
 
-    // Arrow keys: move the selected nodes one grid step (1 px without the
-    // grid, 10 with Shift). A run of nudges is one undo step.
     property var nudgeEntry: null
     function nudgeSelection(dx, dy, big) {
         var ids = selectedNodeIds();
@@ -7986,7 +7403,6 @@ Item {
         }
         var last = undoStack.length > 0 ? undoStack[undoStack.length - 1] : null;
         if (nudgeTimer.running && nudgeEntry !== null && last === nudgeEntry) {
-            // Same run: keep where the nodes started, update where they are.
             for (var ni = 0; ni < nudgeEntry.items.length; ni++) {
                 var it = nudgeEntry.items[ni];
                 var nid = nodeIdForKey(it.key);
@@ -8004,7 +7420,6 @@ Item {
         return true;
     }
 
-    // Ends a run of nudges and saves the layout once for the whole run.
     Timer {
         id: nudgeTimer
         interval: 700
@@ -8014,10 +7429,6 @@ Item {
         }
     }
 
-    // Delete: disconnect the selected wires and take the selected nodes off
-    // the canvas — plugins, subgraphs and virtual devices are removed (after
-    // a confirmation, that can't be undone); devices and app streams, which
-    // can't be removed, are hidden.
     property var deletePlan: null
     function deleteSelection() {
         var plan = {
@@ -8047,11 +7458,9 @@ Item {
         }
         for (var linkId in selectedLinks) {
             var l = findLinkData(parseInt(linkId));
-            // Wires of a node that is being removed go with it.
             if (linkMatchesSig(l, selectedLinks[linkId]) && !removed[l.outputNodeId] && !removed[l.inputNodeId])
                 plan.links.push(l.id);
         }
-        // Selected block lines: their rules (one rule can cover several lines).
         for (var bk in selectedBlocks) {
             var sb = selectedBlocks[bk];
             for (var bi2 = 0; bi2 < blockedPairs.length; bi2++) {
@@ -8129,8 +7538,6 @@ Item {
         for (var vi = 0; vi < plan.vdevs.length; vi++)
             controller.remove_virtual_device(plan.vdevs[vi].vdevId);
         if (plan.blocks.length > 0) {
-            // Removing a rule unblocks every pair it covers, not just the
-            // selected lines: say so when there are others.
             var others = 0;
             for (var oi = 0; oi < blockedPairs.length; oi++) {
                 for (var rj = 0; rj < plan.blocks.length; rj++) {
@@ -8150,14 +7557,10 @@ Item {
         canvas.requestPaint();
     }
 
-    // Block rule label ("A → B") forbidding a drag from `fromPort` (direction
-    // `fromDir`) to `toPort`, or "".
     function blockedReasonFor(fromPort, fromDir, toPort) {
         return fromDir === "Output" ? controller.blocked_reason(fromPort, toPort) : controller.blocked_reason(toPort, fromPort);
     }
 
-    // Block the node pairs of `linkIds` (each pair once: block_link removes
-    // every link between the pair).
     function blockLinks(linkIds) {
         var pairs = {};
         for (var i = 0; i < linkIds.length; i++) {
@@ -8184,8 +7587,6 @@ Item {
         if (ids.length > 0)
             blockLinks(ids);
     }
-
-    // ---- Subgraphs ------------------------------------------------------
 
     function hasSelection() {
         for (var k in selectedLinks)
@@ -8217,7 +7618,6 @@ Item {
         return null;
     }
 
-    // Group the selected plugins (or `nodeId` when it isn't selected).
     property var groupAnchor: null
     function groupIntoSubgraph(nodeId) {
         var ids = selectedPluginIds();
@@ -8278,7 +7678,6 @@ Item {
         vdevDialog.open();
     }
 
-    // Put the nodes of an inserted/duplicated subgraph where the result says.
     function applyInsertedLayout(resultJson) {
         try {
             var r = JSON.parse(resultJson);
@@ -8303,7 +7702,6 @@ Item {
         applyInsertedLayout(controller.duplicate_subgraph(node.subgraphId, at.x, at.y));
     }
 
-    // Insert a saved template at the pending add position (or the view centre).
     function insertTemplate(file) {
         var at = pendingPluginPosition || toCanvas(width / 2, height / 2);
         pendingPluginPosition = null;

@@ -1,5 +1,3 @@
-/* Independent test fixture: no SDK headers. Compile as a Linux shared
- * library to exercise Rust/C ABI boundaries and the complete host lifecycle. */
 #include <assert.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -102,7 +100,7 @@ static intptr_t dispatch(Effect *e, int32_t op, int32_t index, intptr_t value, v
     case 24:
         assert(!s->active && value == sizeof(s->values));
         memcpy(s->values, ptr, sizeof(s->values));
-        return 0; /* Valid plugins often return zero here. */
+        return 0;
     case 25: {
         Events *events = ptr;
         for (int i = 0; i < events->count; i++) {
@@ -121,7 +119,6 @@ static intptr_t dispatch(Effect *e, int32_t op, int32_t index, intptr_t value, v
     case 47: strcpy(ptr, "ZestBay tests"); return 1;
     case 51: return strcmp(ptr, "receiveVstMidiEvent") == 0;
     case 56:
-        /* flags is at byte offset 76 in VstParameterProperties. */
         if (index == 1) { *(int32_t *)((char *)ptr + 76) = 1; return 1; }
         return 0;
     case 70:
@@ -131,7 +128,6 @@ static intptr_t dispatch(Effect *e, int32_t op, int32_t index, intptr_t value, v
         return 0;
     case 71: assert(s->active); s->started = 1; break;
     case 72: s->started = 0; break;
-    /* Test-only messages simulate plugin-driven callbacks. */
     case 1000:
         s->values[index] = opt;
         s->host(e, 0, index, 0, NULL, opt);

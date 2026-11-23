@@ -1,11 +1,3 @@
-//! Thread roles and the RT suspend gate shared by the CLAP and VST3 hosts.
-//!
-//! ZestBay treats the PipeWire main-loop thread as the plugin "main thread":
-//! instantiation, parameters, state, GUIs, timers, fd callbacks and run loops
-//! all happen there.  The PipeWire data-loop thread that calls `process()` is
-//! the audio thread.  Both roles are tracked with thread-locals so that the
-//! checks are lock-free and safe to call from the RT thread.
-
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -15,7 +7,6 @@ thread_local! {
     static IS_AUDIO: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Mark the calling thread as the plugin main thread.
 pub fn set_main_thread() {
     IS_MAIN.with(|c| c.set(true));
 }
@@ -24,8 +15,6 @@ pub fn is_main_thread() -> bool {
     IS_MAIN.with(|c| c.get())
 }
 
-/// Mark the calling thread as an audio thread.  Cheap; called on every
-/// `process()` entry.
 #[inline]
 pub fn mark_audio_thread() {
     IS_AUDIO.with(|c| c.set(true));
@@ -35,9 +24,6 @@ pub fn is_audio_thread() -> bool {
     IS_AUDIO.with(|c| c.get())
 }
 
-/// Run `f` with the calling thread acting as the audio thread.  Only used
-/// while the real audio thread is provably not processing the plugin
-/// (see [`RtGate::suspend`]), e.g. for `stop_processing` during teardown.
 pub fn with_audio_thread<R>(f: impl FnOnce() -> R) -> R {
     let prev = IS_AUDIO.with(|c| c.replace(true));
     let r = f();
@@ -45,13 +31,6 @@ pub fn with_audio_thread<R>(f: impl FnOnce() -> R) -> R {
     r
 }
 
-/// Lock-free handshake that lets the main thread exclude the audio thread
-/// from a plugin's `process()` (Dekker-style, SeqCst on both sides).
-///
-/// The audio thread brackets its work with [`enter`](Self::enter) /
-/// [`leave`](Self::leave); when `enter` returns false it must not touch the
-/// plugin for that block.  The main thread calls [`suspend`](Self::suspend),
-/// does its work, then [`resume`](Self::resume).
 pub struct RtGate {
     in_process: AtomicBool,
     suspended: AtomicBool,
@@ -71,7 +50,6 @@ impl RtGate {
         }
     }
 
-    /// Audio thread: returns false if the plugin is suspended.
     #[inline]
     pub fn enter(&self) -> bool {
         self.in_process.store(true, Ordering::SeqCst);
@@ -82,14 +60,11 @@ impl RtGate {
         true
     }
 
-    /// Audio thread: end of a block started with a successful `enter`.
     #[inline]
     pub fn leave(&self) {
         self.in_process.store(false, Ordering::Release);
     }
 
-    /// Main thread: block new process calls and wait for a running one to
-    /// finish.  Returns false (and stays resumed) on timeout.
     pub fn suspend(&self, timeout: Duration) -> bool {
         self.suspended.store(true, Ordering::SeqCst);
         let start = Instant::now();
@@ -113,8 +88,6 @@ impl RtGate {
     }
 }
 
-/// Copy inputs to outputs (extra outputs are silenced).  Used for bypass and
-/// for blocks where the plugin cannot be processed.
 pub fn passthrough(inputs: &[&[f32]], outputs: &mut [&mut [f32]], n: usize) {
     for (i, output) in outputs.iter_mut().enumerate() {
         let m = output.len().min(n);

@@ -1,20 +1,9 @@
-//! Sessions: a folder holding one complete setup (plugins, links, rules,
-//! MIDI mappings, layout...). Settings, presets and the template library are
-//! shared by every session.
-//!
-//! Sessions live in `~/.config/zestbay/sessions/<name>/`. Which one opens is
-//! decided at startup (`--session <name>`, `--session_path <dir>`, otherwise
-//! the one remembered in `current_session`, otherwise "default"). Sessions
-//! can also be switched while running (see `AppController::begin_session_swap`).
-
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const DEFAULT_NAME: &str = "default";
 
-/// Files and folders that belong to a session. Everything else in the config
-/// folder (preferences, window, presets, templates...) is shared.
 const SESSION_ENTRIES: &[&str] = &[
     "plugins.json",
     "plugins.known_good.json",
@@ -35,10 +24,8 @@ const SESSION_ENTRIES: &[&str] = &[
     ".zestbay-restoring",
 ];
 
-/// What the command line asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Choice {
-    /// The session remembered from last time.
     Remembered,
     Name(String),
     Path(PathBuf),
@@ -46,14 +33,11 @@ pub enum Choice {
 
 struct Active {
     dir: PathBuf,
-    /// Session name; None when opened by path.
     name: Option<String>,
 }
 
 static ACTIVE: RwLock<Option<Active>> = RwLock::new(None);
 
-/// Set while one session is being taken down for another: nothing may be
-/// written, or the old session's leftovers would land in the new folder.
 static WRITES_SUSPENDED: AtomicBool = AtomicBool::new(false);
 
 pub fn suspend_writes(on: bool) {
@@ -64,7 +48,6 @@ pub fn writes_suspended() -> bool {
     WRITES_SUSPENDED.load(Ordering::SeqCst)
 }
 
-/// The shared config folder.
 pub fn root_dir() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("~/.config"))
@@ -75,7 +58,6 @@ pub fn sessions_dir() -> PathBuf {
     root_dir().join("sessions")
 }
 
-/// The open session's folder (the shared config folder until `init` ran).
 pub fn dir() -> PathBuf {
     ACTIVE
         .read()
@@ -84,7 +66,6 @@ pub fn dir() -> PathBuf {
         .unwrap_or_else(root_dir)
 }
 
-/// Name of the open session, or None when it was opened by path.
 pub fn current_name() -> Option<String> {
     ACTIVE
         .read()
@@ -92,15 +73,12 @@ pub fn current_name() -> Option<String> {
         .and_then(|a| a.as_ref().and_then(|a| a.name.clone()))
 }
 
-/// Whether `filename` (a name relative to the config folder, possibly with a
-/// suffix such as `.corrupt-…`) belongs to the session.
 pub fn is_session_file(filename: &str) -> bool {
     SESSION_ENTRIES
         .iter()
         .any(|e| filename == *e || filename.strip_prefix(e).is_some_and(|rest| rest.starts_with('.')))
 }
 
-/// Where a config file lives.
 pub fn config_path(filename: &str) -> PathBuf {
     if is_session_file(filename) {
         dir().join(filename)
@@ -109,7 +87,6 @@ pub fn config_path(filename: &str) -> PathBuf {
     }
 }
 
-/// A usable session name: one plain folder name, no hidden or path-like names.
 pub fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 100
@@ -119,7 +96,6 @@ pub fn valid_name(name: &str) -> bool {
         && !name.chars().any(char::is_control)
 }
 
-/// Names of the existing sessions, sorted.
 pub fn list() -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(sessions_dir())
         .into_iter()
@@ -133,7 +109,6 @@ pub fn list() -> Vec<String> {
     names
 }
 
-/// Create an empty session.
 pub fn create(name: &str) -> Result<(), String> {
     if !valid_name(name) {
         return Err("Use a plain name without slashes, and not starting with a dot.".into());
@@ -145,8 +120,6 @@ pub fn create(name: &str) -> Result<(), String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("Could not create the session: {e}"))
 }
 
-/// Delete a session and everything in it. The open session can't be
-/// deleted.
 pub fn delete(name: &str) -> Result<(), String> {
     if !valid_name(name) {
         return Err("That is not a session name.".into());
@@ -158,7 +131,6 @@ pub fn delete(name: &str) -> Result<(), String> {
     if !dir.is_dir() {
         return Err(format!("There is no session called \"{name}\"."));
     }
-    // A session opened by path may be this very folder.
     if dir.canonicalize().ok() == Some(self::dir()) {
         return Err("The open session can't be deleted. Switch to another one first.".into());
     }
@@ -171,7 +143,6 @@ fn remembered_path() -> PathBuf {
     root_dir().join("current_session")
 }
 
-/// The session to open when none is asked for.
 fn remembered() -> String {
     std::fs::read_to_string(remembered_path())
         .ok()
@@ -180,14 +151,11 @@ fn remembered() -> String {
         .unwrap_or_else(|| DEFAULT_NAME.to_string())
 }
 
-/// Make `name` the session that opens by default.
 pub fn remember(name: &str) -> std::io::Result<()> {
     std::fs::create_dir_all(root_dir())?;
     std::fs::write(remembered_path(), name)
 }
 
-/// Pick the session to use for this run. Call once, before anything reads or
-/// writes a config file.
 pub fn init(choice: Choice) -> Result<(), String> {
     let active = match choice {
         Choice::Path(path) => {
@@ -213,8 +181,6 @@ fn set_active(active: Active) {
     }
 }
 
-/// Open another existing session while running, and make it the one that
-/// opens next time.
 pub fn activate(name: &str) -> Result<(), String> {
     if !list().iter().any(|n| n == name) {
         return Err(format!("There is no session called \"{name}\"."));
@@ -248,9 +214,6 @@ fn open_named(name: &str) -> Result<Active, String> {
     })
 }
 
-/// Before sessions existed everything sat directly in the config folder.
-/// The first time the default session opens, copy that into it. The old
-/// files stay where they are.
 fn migrate_legacy(dest: &Path) {
     let root = root_dir();
     let have_any = SESSION_ENTRIES
@@ -300,12 +263,6 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Command line
-// ---------------------------------------------------------------------------
-
-/// `--session <name>` / `--session=<name>`, `--session_path <dir>` /
-/// `--session-path <dir>` (also with `=`).
 pub fn parse_args(args: &[String]) -> Result<Choice, String> {
     let mut choice = None;
     let mut i = 0;

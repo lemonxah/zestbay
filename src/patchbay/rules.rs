@@ -8,14 +8,10 @@ pub struct PortMapping {
     pub input_port_name: String,
 }
 
-/// What a rule does with the links it matches.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RuleAction {
-    /// Create the links (and, in exclusive mode, keep the source to them).
     #[default]
     Connect,
-    /// Never allow the links: they are removed whenever they appear, in any
-    /// mode, and win over connect rules and the default node.
     Block,
 }
 
@@ -64,8 +60,6 @@ impl AutoConnectRule {
         self.action == RuleAction::Block
     }
 
-    /// Whether the rule covers this port pair: every pair when it has no
-    /// explicit mappings.
     pub fn covers_ports(&self, output_port_name: &str, input_port_name: &str) -> bool {
         self.port_mappings.is_empty()
             || self
@@ -199,20 +193,17 @@ mod tests {
 
     #[test]
     fn test_pattern_matching() {
-        // Exact match (no globs)
         assert!(pattern_matches("Firefox", "Firefox"));
-        assert!(!pattern_matches("Firefox", "Firefox on YouTube")); // exact: no substring
-        assert!(!pattern_matches("Chromium", "Chromium Sink"));     // exact: no substring
-        assert!(!pattern_matches("Chromium Sink", "Chromium"));     // exact: no substring
+        assert!(!pattern_matches("Firefox", "Firefox on YouTube"));
+        assert!(!pattern_matches("Chromium", "Chromium Sink"));
+        assert!(!pattern_matches("Chromium Sink", "Chromium"));
 
-        // Wildcard
         assert!(pattern_matches("*", "anything"));
 
-        // Glob patterns
         assert!(pattern_matches("Fire*", "Firefox"));
         assert!(pattern_matches("*fox", "Firefox"));
-        assert!(pattern_matches("Firefox*", "Firefox on YouTube")); // glob for substring
-        assert!(pattern_matches("*Chromium*", "Chromium Sink"));    // glob for contains
+        assert!(pattern_matches("Firefox*", "Firefox on YouTube"));
+        assert!(pattern_matches("*Chromium*", "Chromium Sink"));
         assert!(!pattern_matches("Chrome", "Firefox"));
     }
 

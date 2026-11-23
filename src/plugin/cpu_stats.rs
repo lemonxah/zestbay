@@ -1,27 +1,15 @@
-//! Lock-free per-plugin CPU usage tracking for real-time process callbacks.
-//!
-//! The RT audio threads write timing data via atomics (no locks), and the
-//! UI thread reads snapshots periodically.
-
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use super::types::PluginInstanceId;
 
-/// Timing data for a single plugin, written from the RT thread.
 pub struct PluginTimingSlot {
-    /// Cumulative nanoseconds spent in `process()` on the RT thread.
     pub total_ns: AtomicU64,
-    /// Number of process() calls since last reset.
     pub call_count: AtomicU64,
-    /// Most recent single-call duration in nanoseconds.
     pub last_ns: AtomicU64,
-    /// The quantum (buffer size) seen on the last call.
     pub last_quantum: AtomicU64,
-    /// The sample rate seen on the last call.
     pub last_rate: AtomicU64,
-    /// Cumulative nanoseconds spent in the worker thread (async, off RT).
     pub worker_total_ns: AtomicU64,
 }
 
@@ -37,7 +25,6 @@ impl PluginTimingSlot {
         }
     }
 
-    /// Called from the RT thread after each process() call.
     #[inline]
     pub fn record(&self, elapsed_ns: u64, worker_ns: u64, quantum: u32, rate: u32) {
         self.total_ns.fetch_add(elapsed_ns, Ordering::Relaxed);
@@ -50,7 +37,6 @@ impl PluginTimingSlot {
         }
     }
 
-    /// Read and reset the accumulated stats (called from the UI thread).
     pub fn take_snapshot(&self) -> PluginCpuSnapshot {
         let total = self.total_ns.swap(0, Ordering::Relaxed);
         let calls = self.call_count.swap(0, Ordering::Relaxed);
@@ -62,8 +48,6 @@ impl PluginTimingSlot {
         let avg_ns = total.checked_div(calls).unwrap_or(0);
         let worker_avg_ns = worker_total.checked_div(calls).unwrap_or(0);
 
-        // DSP load: what fraction of the available buffer time was used
-        // Only RT thread time counts toward the deadline
         let budget_ns = if rate > 0 && quantum > 0 {
             (quantum as f64 / rate as f64) * 1_000_000_000.0
         } else {
@@ -93,21 +77,16 @@ impl PluginTimingSlot {
     }
 }
 
-/// A snapshot of one plugin's CPU usage for a measurement window.
 #[derive(Clone, Debug)]
 pub struct PluginCpuSnapshot {
     pub avg_ns: u64,
     pub last_ns: u64,
     pub calls: u64,
-    /// RT thread DSP load (% of buffer budget)
     pub dsp_percent: f64,
-    /// Worker thread average time per buffer (ns)
     pub worker_avg_ns: u64,
-    /// Worker thread load expressed as % of buffer budget (for context, not a deadline)
     pub worker_percent: f64,
 }
 
-/// Global registry of per-plugin timing slots.
 pub struct PluginCpuTracker {
     slots: Mutex<HashMap<PluginInstanceId, (String, Arc<PluginTimingSlot>)>>,
 }
@@ -119,26 +98,22 @@ impl PluginCpuTracker {
         }
     }
 
-    /// Register a plugin and return its timing slot for the RT thread to use.
     pub fn register(&self, id: PluginInstanceId, name: String) -> Arc<PluginTimingSlot> {
         let slot = Arc::new(PluginTimingSlot::new());
         self.slots.lock().unwrap().insert(id, (name, slot.clone()));
         slot
     }
 
-    /// Change the name a registered plugin is listed under.
     pub fn rename(&self, id: PluginInstanceId, name: &str) {
         if let Some(entry) = self.slots.lock().unwrap().get_mut(&id) {
             entry.0 = name.to_string();
         }
     }
 
-    /// Unregister a plugin when it's removed.
     pub fn unregister(&self, id: PluginInstanceId) {
         self.slots.lock().unwrap().remove(&id);
     }
 
-    /// Take snapshots of all plugins and return them sorted by DSP%.
     pub fn take_all_snapshots(&self) -> Vec<(PluginInstanceId, String, PluginCpuSnapshot)> {
         let slots = self.slots.lock().unwrap();
         let mut results: Vec<_> = slots
@@ -154,7 +129,6 @@ impl PluginCpuTracker {
     }
 }
 
-/// Global singleton so filter callbacks can access it without passing through PipeWire.
 static GLOBAL_TRACKER: OnceLock<PluginCpuTracker> = OnceLock::new();
 
 pub fn global_cpu_tracker() -> &'static PluginCpuTracker {

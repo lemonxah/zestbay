@@ -22,7 +22,7 @@
 
 ## What is ZestBay?
 
-ZestBay is a visual audio routing tool for PipeWire on Linux. It lets you see every audio node in your system (applications, hardware devices, virtual sinks), connect and disconnect ports with drag-and-drop, host LV2, LADSPA, VST2, VST3, and CLAP effects plugins inline, watch levels with built-in meters on any node or port, define patchbay rules that automatically restore your routing (or keep things apart) whenever devices or apps appear, group plugin chains into reusable subgraphs, and create virtual devices.
+ZestBay is a visual audio routing tool for PipeWire on Linux. It lets you see every audio node in your system (applications, hardware devices, virtual sinks), connect and disconnect ports with drag-and-drop, host LV2, LADSPA, VST2, VST3, and CLAP effects plugins inline, watch levels with built-in meters on any node or port, define patchbay rules that automatically restore your routing (or keep things apart) whenever devices or apps appear, group plugin chains into reusable subgraphs, and create virtual devices. Pick how wires are drawn, choose from five built-in colour palettes, or theme the whole app with your own CSS that reloads as you edit it.
 
 ## Screenshots
 
@@ -76,6 +76,7 @@ qpwgraph is a straightforward PipeWire graph editor. ZestBay goes further:
 - **Quick wiring** -- Drag a plugin onto a wire to insert it into that connection (Ctrl+Z takes it out again), remove a plugin and the wires on either side are joined back up, and set a default node so app streams without a rule are routed there.
 - **Auto-connect rules with learning and blocking** -- Manually connect two ports and ZestBay creates a patchbay rule; disconnect them and the rule updates. Block rules keep a source from ever reaching a target.
 - **Subgraphs and virtual devices** -- Group a plugin chain into one block, reuse it as a template, offer it to apps as a microphone or speaker, and create virtual sinks and sources without editing PipeWire config.
+- **Themes and wire styles** -- Five built-in palettes in dark and light, plus your own CSS themes that reload live, so ZestBay can follow pywal, matugen or any other generated colours. Draw wires curved, straight, stepped or as circuit traces that go around node cards and keep parallel wires in separate lanes. See [Themes](#themes) and [Wire styles](#wire-styles).
 - **Full session persistence** -- Plugin instances, their parameters and state, on/off, bypass, wiring, MIDI mappings, subgraphs, virtual devices, layout, pins, viewport, window geometry, hidden nodes and rules all survive restarts.
 - **System tray with start-minimized** -- Run ZestBay as a background service. It starts hidden, keeps your routing rules active, and shows the window when you click the tray icon.
 
@@ -96,7 +97,7 @@ Carla is a full-featured plugin host and JACK patchbay. The differences are abou
 - **Plugin presets, MIDI control and per-plugin CPU load** -- These only make sense once plugins are hosted: save and reuse a plugin's settings across instances (with an optional default for new ones), drive parameters from a hardware controller, and see what each plugin costs. See [Plugin Presets](#plugin-presets) and [MIDI Parameter Control](#midi-parameter-control).
 - **Subgraphs and virtual devices** -- Group a plugin chain into one reusable block, offer it to apps as a microphone or speaker, and create virtual sinks and sources from the UI.
 - **Auto-connect and block rules** -- Define patterns that automatically wire things up when nodes appear, or keep them apart. Other tools require manual reconnection every time.
-- **Qt6/QML** -- Native look and feel on KDE Plasma and other Qt-based desktops, with dark and light themes that follow the desktop.
+- **Qt6/QML** -- Native look and feel on KDE Plasma and other Qt-based desktops, with dark and light themes that follow the desktop, built-in palettes and [custom CSS themes](#custom-themes).
 
 ## Features
 
@@ -110,8 +111,8 @@ Carla is a full-featured plugin host and JACK patchbay. The differences are abou
 - **Node colours**: right-click a node → Colour to give it one of the palette's colours (a thin strip on the card's left edge and a faint header tint)
 - The node under the cursor is highlighted, and a node whose name is too long for its card shows the full name in a popup
 - **Search** nodes and ports (Ctrl+F); non-matching nodes dim
-- Status bar with node/link counts, a CPU sparkline and the rules state; dark and light themes, or follow the desktop
-- **Palettes** (Preferences › Appearance): Zest, Catppuccin, Gruvbox, Nord and Solarized, each with a dark and a light version picked by the theme, plus your own (see [Custom themes](#custom-themes))
+- Status bar with node/link counts, a CPU sparkline and the rules state
+- **Themes**: dark, light or follow the desktop, five built-in palettes and your own CSS (see [Themes](#themes))
 - **Hide unnamed nodes** (Preferences › Advanced, on by default) leaves out nodes with no name of their own, such as pavucontrol's level-meter streams
 
 **Moving around**
@@ -122,8 +123,7 @@ Carla is a full-featured plugin host and JACK patchbay. The differences are abou
 
 **Wiring**
 - Drag from a port to another port to connect. Wires highlight and can be clicked from a few pixels away, so you don't have to hit them exactly
-- **Wire styles** (Preferences › Graph): Curved, Straight, Stepped (right angles), or Circuit (right angles with rounded corners, where wires running side by side each get their own lane so bundles stay readable). Stepped and Circuit wires steer around node cards instead of running behind them
-- **Gradient wires** (Preferences › Graph, off by default): audio wires fade from the source node's colour to the destination's; MIDI and video wires keep their signal colours
+- **Wire styles**: Curved, Straight, Stepped or Circuit, with optional gradient colouring (see [Wire styles](#wire-styles))
 - Right-drag from one port to another to **block** the pair; blocked pairs are drawn as red dashed lines with a ⊘. Hover one to highlight it, click it to select it (Ctrl+click to add more) and press **Delete** to remove the rule that blocks it. A rule can cover several pairs; the toast says when removing it frees others too
 - Drag a plugin onto a wire to insert it into that connection; Ctrl+Z takes it out again and puts the original wire back. A node never offers to drop onto its own wires, including those of a meter snapped onto it
 - **Removing a plugin keeps the audio flowing**: when a plugin with as many audio inputs as outputs is removed, whatever fed its n-th input is wired to whatever its n-th output fed
@@ -148,6 +148,19 @@ Carla is a full-featured plugin host and JACK patchbay. The differences are abou
 
   The toolbar menus can re-space the whole graph with Auto layout.
 - **Wrap tall columns** (Preferences › Graph, off by default): Auto layout splits a column with more nodes than the limit into a grid of side-by-side columns, so a long stack of apps or devices takes less height
+
+### Wire styles
+
+**Preferences › Graph › Wire style** sets how every wire is drawn; changes apply straight away.
+
+| Style | How wires look |
+|-------|----------------|
+| Curved (default) | Smooth curves from port to port |
+| Straight | A direct line |
+| Stepped | Right angles; steers around node cards instead of running behind them |
+| Circuit | Right angles with rounded corners, like traces on a circuit board; steers around node cards, and wires running side by side each get their own lane so bundles stay readable |
+
+**Gradient wires** (Preferences › Graph, off by default) fades each audio wire from the source node's colour to the destination's. Set a node's colour from its right-click menu. MIDI and video wires keep their signal colours.
 
 ### Level Meters
 
@@ -254,7 +267,7 @@ Every plugin node has a preset row above the **On / UI / Params** buttons: a dro
 - CLAP, VST3 and VST2 presets hold parameter values only.
 - Presets also hold the plugin's [port names](#renaming-nodes-and-ports).
 
-Presets are kept per plugin, so a preset made for one plugin never shows up on another, and every instance of that plugin shares the same list. They are stored in `~/.config/zestbay/presets.json` (under `~/.var/app/io.github.lemonxah.ZestBay/config/zestbay/` for the Flatpak). To use your presets on another machine, copy that file.
+Presets are kept per plugin, so a preset made for one plugin never shows up on another, and every instance of that plugin shares the same list. They are stored in `~/.config/zestbay/presets.json`. To use your presets on another machine, copy that file.
 
 ### MIDI Parameter Control
 - Map any MIDI CC or note message to any plugin parameter across all plugin formats (LV2, LADSPA, VST2, VST3, CLAP)
@@ -369,16 +382,20 @@ oscsend localhost 9000 /zestbay/session/load s "live"
 
 **Good to know.** Messages are applied on ZestBay's UI timer (100 ms by default; Preferences › Timing, minimum 16 ms), and a parameter sent repeatedly within one tick only counts once, so a fast fader doesn't pile up. Parameter changes are saved like changes made in the UI. While a session switch is in progress other messages are ignored.
 
-### Custom themes
+### Themes
 
-Put `.css` files in ZestBay's themes folder and each one appears under **Preferences › Appearance › Palette**, named after the file. ZestBay checks the folder every second, so editing or regenerating a file restyles the app straight away. **Open themes folder** in Preferences opens it.
+Two settings in **Preferences › Appearance** decide how ZestBay looks:
 
-| Install | Themes folder |
-|---------|---------------|
-| Native | `~/.config/zestbay/themes/` |
-| Flatpak | `~/.var/app/io.github.lemonxah.ZestBay/config/zestbay/themes/` |
+- **Theme**: System (follows the desktop's colour scheme), Dark or Light.
+- **Palette**: the colours for the whole app. Zest (default), Catppuccin, Gruvbox, Nord and Solarized are built in, each with a dark and a light version picked by Theme. Your own themes are listed after them.
 
-Only CSS custom properties (`--name: value`) are read, and only colours: `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, `rgb()`/`rgba()` and `var(--other)`. Selectors and other properties are ignored. Anything a theme leaves out keeps the built-in colour.
+Both apply straight away, with no restart.
+
+#### Custom themes
+
+Put `.css` files in ZestBay's themes folder (`~/.config/zestbay/themes/`) and each one appears under **Preferences › Appearance › Palette**, named after the file. ZestBay checks the folder every second, so editing or regenerating a file restyles the running app straight away. **Open themes folder** in Preferences creates the folder if needed and opens it. Files over 256 KB are skipped.
+
+Only CSS custom properties (`--name: value`) are read, and only colours: `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, `rgb()`/`rgba()` and `var(--other)`. Selectors and other properties are ignored. Anything a theme leaves out keeps the Zest colour.
 
 ```css
 :root {
@@ -404,10 +421,50 @@ ZestBay's colour names:
 | Wires and pins | `--sig-audio` `--sig-midi` `--sig-video` |
 | Node kinds | `--cat-hardware` `--cat-virtual` `--cat-app` `--cat-plugin` `--cat-midi` `--cat-subgraph` |
 
-**Using your rice's colours.** A file doesn't need ZestBay's names. If it defines a pywal-style set (`--background`, `--foreground`, `--color0`…`--color15`) or a base16 set (`--base00`…`--base0F`), ZestBay builds the whole palette from it: surfaces and borders are shades between background and foreground, the accent is blue (`color4` / `base0D`), audio is cyan, MIDI magenta, and so on. Any ZestBay names in the same file override those choices.
+#### Using your desktop's generated colours
 
-- **pywal**: link the generated file, `ln -s ~/.cache/wal/colors.css ~/.config/zestbay/themes/wal.css`, then pick "wal". Every `wal` run restyles ZestBay. For the Flatpak, either let it read pywal's cache (`flatpak override --user --filesystem=~/.cache/wal:ro io.github.lemonxah.ZestBay`) and link into the Flatpak themes folder, or have pywal write a template straight into that folder.
-- **matugen, wallust, stylix and other template tools**: add a template that writes a `.css` file into the themes folder with either ZestBay's names or a base16 set.
+A file doesn't need ZestBay's names. If it defines a pywal-style set (`--background`, `--foreground`, `--color0`…`--color15`) or a base16 set (`--base00`…`--base0F`), ZestBay builds the whole palette from it: surfaces and borders are shades between background and foreground, the accent is blue (`color4` / `base0D`), audio is cyan, MIDI magenta, and so on. Any ZestBay names in the same file override those choices.
+
+- **pywal**: link the generated file, `ln -s ~/.cache/wal/colors.css ~/.config/zestbay/themes/wal.css`, then pick "wal". Every `wal` run restyles ZestBay.
+- **wallust, stylix and other template tools**: add a template that writes a `.css` file into the themes folder with ZestBay's names, a pywal-style set or a base16 set.
+- **matugen**: save this template as `~/.config/matugen/templates/zestbay.css`:
+
+  ```css
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --background: {{colors.surface.dark.hex}};
+      --foreground: {{colors.on_surface.dark.hex}};
+      --color1: {{colors.error.dark.hex}};
+      --color2: {{colors.secondary.dark.hex}};
+      --color3: {{colors.tertiary.dark.hex}};
+      --color4: {{colors.primary.dark.hex}};
+      --color5: {{colors.tertiary.dark.hex}};
+      --color6: {{colors.primary.dark.hex}};
+    }
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --background: {{colors.surface.light.hex}};
+      --foreground: {{colors.on_surface.light.hex}};
+      --color1: {{colors.error.light.hex}};
+      --color2: {{colors.secondary.light.hex}};
+      --color3: {{colors.tertiary.light.hex}};
+      --color4: {{colors.primary.light.hex}};
+      --color5: {{colors.tertiary.light.hex}};
+      --color6: {{colors.primary.light.hex}};
+    }
+  }
+  ```
+
+  and add it to `~/.config/matugen/config.toml`:
+
+  ```toml
+  [templates.zestbay]
+  input_path = '~/.config/matugen/templates/zestbay.css'
+  output_path = '~/.config/zestbay/themes/matugen.css'
+  ```
+
+  Run matugen once, pick "matugen" as the palette, and every later run restyles ZestBay while it is open.
 
 ### System Tray
 - Start minimized (background service mode) and close to tray
@@ -466,13 +523,14 @@ Press **?** or **F1** (or use the **?** button at the canvas's bottom-right, or 
 | Ctrl+Q | Quit |
 
 ### Persistence
-Everything is saved to `~/.config/zestbay/` (`~/.var/app/io.github.lemonxah.ZestBay/config/zestbay/` for the Flatpak) as JSON. Settings and libraries sit in that folder; each [session](#sessions) has its own folder under `sessions/<name>/` with everything that makes up a setup.
+Everything is saved to `~/.config/zestbay/` as JSON. Settings and libraries sit in that folder; each [session](#sessions) has its own folder under `sessions/<name>/` with everything that makes up a setup.
 
 **Shared by every session** (`~/.config/zestbay/`):
 
 | File | Contents |
 |------|----------|
-| `preferences.json` | All user settings, including OSC |
+| `preferences.json` | All user settings, including OSC, theme, palette and wire style |
+| `themes/` | Your [custom themes](#custom-themes), one `.css` file each |
 | `window.json` | Window position and size |
 | `presets.json`, `preset-files/` | Plugin presets (with port names) and the state files they hold |
 | `subgraph_templates/` | Saved subgraph templates |
@@ -544,12 +602,13 @@ each release.
   AUR package before, the `extra` package replaces it. The `pkg/zestbay/` and
   `pkg/zestbay-git/` PKGBUILDs in this repo are only for building a tagged
   release or the latest commit yourself.
-- **Flatpak**: `io.github.lemonxah.ZestBay` -- see [`pkg/flatpak/README.md`](pkg/flatpak/README.md) to build it locally or make a single-file bundle (`just flatpak`, `just flatpak-bundle`).
 - **Fedora**: each release has `zestbay-<version>-1.fc<NN>.x86_64.rpm` and `zestins-<version>-1.fc<NN>.x86_64.rpm`, built for the current Fedora release: `sudo dnf install ./zestbay-*.rpm ./zestins-*.rpm`.
 - **Zestins on Arch**: `zestins` on the AUR (e.g. `paru -S zestins`), or build `pkg/zestins/` (or `pkg/zestins-git/`) with `makepkg -si`.
 - **Zestins on any distro**: each release has `zestins-<version>-x86_64-linux.tar.gz` with a prebuilt `zestins.lv2` bundle; copy it to `~/.lv2/` or `/usr/lib/lv2/`.
 - **Fedora/RPM, Nix, and the Debian/PPA packaging**: in `pkg/rpm/`, `pkg/nix/` and `pkg/deb/` (plus `debian/` for the PPA). `pkg/deb/build-zestins-deb.sh` and `pkg/rpm/build-zestins-rpm.sh` (`just zestins-deb`, `just zestins-rpm`) build the Zestins packages; the PPA builds both from the one source package.
 - **From source**: see below; `just install` builds and installs to `/usr`.
+
+**Flatpak is not supported and never will be.** Use one of the packages above or build from source.
 
 ## Building from source
 
@@ -660,8 +719,7 @@ make -C zestins install    # into ~/.lv2; ZestBay finds them on its next plugin 
 Details and the list of plugin URIs are in [`zestins/README.md`](zestins/README.md). (The [level meters](#level-meters) are different: they are built into ZestBay itself and need no package.)
 
 ZestBay scans for LV2, LADSPA, VST2, VST3 and CLAP plugins when it starts; after adding
-plugins, press **Rescan** in Add plugin (or restart). Where plugins go depends on which version you run
-(**About** shows *Install: Native* or *Install: Flatpak*).
+plugins, press **Rescan** in Add plugin (or restart).
 
 For faster startup, saved plugins can restore without waiting for the full
 plugin scan. Discovery runs in the background, with progress in the status bar. CLAP, VST2 and
@@ -675,9 +733,9 @@ plugin** has a **Rescan** button, and opening Add plugin rescans in the
 background by itself when the last scan is more than 10 minutes old. Running
 plugins are not touched by a rescan.
 
-### Native version (distro package or built from source)
+### Plugin folders
 
-The native version sees every plugin installed on your system.
+ZestBay sees every plugin installed on your system.
 
 - **Plugins from your distro** (e.g. `pacman -S lsp-plugins x42-plugins`) go
   to the system folders and are found automatically.
@@ -720,11 +778,11 @@ chunks or program/parameter fallback). Audio processing supports both VST 2.4
 replacing callbacks and older accumulating callbacks.
 
 Windows VST2 plugins need Wine and yabridge. Add the Windows plugin folder to
-`yabridgectl`, run `yabridgectl sync`, then restart the native ZestBay build:
+`yabridgectl`, run `yabridgectl sync`, then restart ZestBay:
 its VST2 scanner finds the Linux wrappers in `~/.vst/yabridge`. Direct Windows
 DLL loading and loading a different CPU architecture are not supported.
-Yabridge compatibility varies by plugin and Wine version; its upstream
-[documentation](https://github.com/robbert-vdh/yabridge) excludes Flatpak hosts.
+[Yabridge](https://github.com/robbert-vdh/yabridge) compatibility varies by
+plugin and Wine version.
 
 VST2 currently receives short MIDI messages; plugin-generated MIDI output,
 SysEx, offline processing, and DAW tempo/transport synchronization are not
@@ -735,71 +793,6 @@ The backend declares the required C ABI locally and does not bundle Steinberg
 SDK headers. This implementation detail does not resolve SDK licensing or
 trademark obligations for distributors; see the
 [Steinberg VST2 licensing FAQ](https://steinbergmedia.github.io/vst3_dev_portal/pages/FAQ/Licensing.html#specific-vst-2).
-
-### Flatpak version
-
-The Flatpak runs in a sandbox: it can't see `/usr/lib/lv2` or your home
-folder, only plugins packaged for Flatpak and its own plugin folder.
-
-**Free plugins: install them from Flathub.** Most free Linux plugins are
-packaged as Flatpak extensions (LSP, x42, Calf, Dragonfly Reverb, Surge XT,
-Guitarix, ZamPlugins, sfizz, Cardinal and many more):
-
-```sh
-flatpak search LinuxAudio.Plugins
-flatpak install flathub org.freedesktop.LinuxAudio.Plugins.LSP//25.08
-```
-
-The `//25.08` branch must match the runtime ZestBay uses; plugins on another
-branch won't show up.
-
-**Paid and custom plugins: copy them into ZestBay's plugin folder.** Plugins
-that aren't on Flathub (Pianoteq, commercial plugins, your own builds) go in:
-
-```
-~/.var/app/io.github.lemonxah.ZestBay/data/lv2/
-~/.var/app/io.github.lemonxah.ZestBay/data/vst/
-~/.var/app/io.github.lemonxah.ZestBay/data/vst3/
-~/.var/app/io.github.lemonxah.ZestBay/data/clap/
-```
-
-ZestBay creates these folders on first start, and **Add plugin** shows the
-location with an **Open folder** button. Copy the bundles; don't symlink
-them, a link into `/usr` points outside the sandbox and won't load.
-
-Example, Pianoteq 9 (from the Modartt download, or from an existing
-native install):
-
-```sh
-cp -r "/usr/lib/lv2/Pianoteq 9.lv2"   ~/.var/app/io.github.lemonxah.ZestBay/data/lv2/
-cp -r "/usr/lib/vst3/Pianoteq 9.vst3" ~/.var/app/io.github.lemonxah.ZestBay/data/vst3/
-```
-
-Then restart ZestBay. Plugins keep their own settings and licences inside the
-Flatpak (`~/.var/app/io.github.lemonxah.ZestBay/`), separate from the native
-version, so a licensed plugin may ask to be activated once more: open its UI
-from ZestBay and activate it there (the Flatpak has network access for this).
-
-Plugins built against your distro's libraries may not load inside the
-Flatpak runtime; ZestBay tests each plugin in a separate process first and
-skips one that fails, so it can't crash the app. Use the Flathub package of
-that plugin, or the native version of ZestBay, instead.
-
-**Optional: let the Flatpak see more.** These are per-user overrides, not
-needed for the setups above:
-
-```sh
-# Your ~/.lv2, ~/.vst3 and ~/.clap folders
-flatpak override --user --filesystem=~/.lv2 --filesystem=~/.vst3 --filesystem=~/.clap io.github.lemonxah.ZestBay
-# The system plugin folders (/usr/lib/lv2 …), read-only
-flatpak override --user --filesystem=host-os:ro io.github.lemonxah.ZestBay
-# Undo
-flatpak override --user --reset io.github.lemonxah.ZestBay
-```
-
-The Flatpak also keeps its own ZestBay settings (rules, layout, plugins) in
-`~/.var/app/io.github.lemonxah.ZestBay/config/zestbay`, separate from the
-native version's `~/.config/zestbay`.
 
 ## Architecture
 
@@ -819,4 +812,12 @@ Found a bug or want a feature? Open an issue on [GitHub](https://github.com/lemo
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). The bundled IBM Plex fonts are under the [SIL Open Font License](fonts/OFL.txt).
+
+### Name and logo
+
+The license covers the code, not the ZestBay name, logo and app icon.
+
+- Distributions may use them for packages built from the released source, with patches limited to packaging, building and security fixes.
+- Modified versions and forks need their own name, logo and app ID, and may say they are based on ZestBay.
+- Flatpak builds may not be published under the ZestBay name, logo or app ID. They are unofficial, and issues reported from them are closed.

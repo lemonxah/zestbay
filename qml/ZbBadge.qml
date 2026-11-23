@@ -1,17 +1,11 @@
 import QtQuick
 
-// Mono badge. tone: "teal" | "blue" | "violet" | "orange" | "danger" | "neutral".
-// "danger" = text.destructive on a faint tint (e.g. "incompatible").
-// Rule endpoints: Source teal, Sink blue, Plugin violet, App Out orange.
-// Formats: LV2 blue, VST3 orange, CLAP teal. "neutral" = outline only
-// ("no UI", the format tag in node headers). `small` = 9 px node-header tag.
 Rectangle {
     id: root
     property string text
     property string tone: "neutral"
     property bool small: false
 
-    // Tone for a plugin format string ("LV2", "VST3", "CLAP").
     function formatTone(fmt) {
         return fmt === "CLAP" ? "teal" : (fmt === "VST3" || fmt === "VST2") ? "orange" : fmt === "LADSPA" ? "violet" : fmt === "LV2" ? "blue" : "neutral"
     }

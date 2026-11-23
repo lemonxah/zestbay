@@ -1,18 +1,3 @@
-//! Process-based plugin sandbox ("cage") for crash isolation.
-//!
-//! Plugins loaded via `dlopen` can segfault, which kills the entire process.
-//! `std::panic::catch_unwind` only catches Rust panics, not OS signals like
-//! SIGSEGV.  This module provides fork-based isolation: the dangerous work
-//! runs in a short-lived child process.  If the child segfaults, the parent
-//! observes a non-zero exit status and continues running.
-//!
-//! Catalog discovery uses [`exec_scan`] and instantiation safety checks use
-//! [`exec_probe_outcome`], both in fresh processes so they can run concurrently
-//! with Qt, PipeWire, and other scans. Lower-level fork helpers are also kept:
-//!
-//! - [`fork_scan`] — Run a closure in a forked child and return serialized
-//!   results via a pipe, for callers that can safely run work after fork.
-
 use std::io::{Read, Write};
 use std::process::{Child, Command, ExitStatus};
 use std::sync::{Arc, Mutex};
@@ -22,26 +7,19 @@ use serde::Deserialize;
 #[cfg(test)]
 use serde::Serialize;
 
-/// Outcome of an isolated operation.
 #[derive(Debug)]
 pub enum SandboxResult<T> {
-    /// The child completed successfully and returned data.
     Ok(T),
-    /// The child crashed (segfault, abort, killed by signal).
-    #[allow(dead_code)] // payload is for diagnostics (Debug output); callers do not read it
+    #[allow(dead_code)]
     Crashed {
         signal: Option<i32>,
         description: String,
     },
-    /// The child timed out and was killed.
     Timeout,
-    /// Process creation, pipe setup or waiting failed.
-    #[allow(dead_code)] // payload is for diagnostics (Debug output); callers do not read it
+    #[allow(dead_code)]
     ForkFailed(String),
 }
 
-/// Scan one library in a fresh process. Safe to call from worker threads:
-/// no plugin code runs between fork and exec in the multithreaded host.
 pub fn exec_scan(format: &str, path: &std::path::Path) -> SandboxResult<Vec<crate::plugin::PluginInfo>> {
     use std::os::fd::AsRawFd;
     let exe = match std::env::current_exe() {
@@ -68,8 +46,6 @@ pub fn exec_scan(format: &str, path: &std::path::Path) -> SandboxResult<Vec<crat
     decode_scan_result(result, &data)
 }
 
-/// Headless scanner entry point. Reserve a private descriptor for the JSON
-/// result so plugins that print to stdout cannot corrupt the protocol.
 pub fn run_scan_main(args: &[String]) -> ! {
     use std::os::fd::FromRawFd;
     if args.len() != 2 {
@@ -94,7 +70,6 @@ pub fn run_scan_main(args: &[String]) -> ! {
         _ => crate::exit_now(2),
     }
     let ok = serde_json::to_writer(&mut result, &plugins).is_ok() && result.flush().is_ok();
-    // _exit avoids plugin atexit handlers; the OS closes the result pipe.
     crate::exit_now(if ok { 0 } else { 1 });
 }
 
@@ -121,36 +96,11 @@ fn decode_scan_result<T: for<'de> Deserialize<'de>>(result: WaitResult, data: &[
 }
 
 #[cfg(test)]
-/// Run a closure in a forked child process and collect its serialized return
-/// value via a pipe.
-///
-/// The closure receives no arguments and must return a `T: Serialize`.
-/// The child serializes `T` to JSON, writes it to a pipe, and exits.
-/// The parent drains the pipe while waiting (so output larger than the pipe
-/// buffer cannot stall the child) and deserializes.
-///
-/// If the child segfaults or is killed by a signal, `SandboxResult::Crashed`
-/// is returned.  The parent process is unaffected.
-///
-/// # Timeout
-///
-/// If `timeout` is `Some(duration)`, the parent will kill the child after
-/// that duration and return `SandboxResult::Timeout`.
-///
-/// # Safety
-///
-/// This function calls `libc::fork()`.  After fork, the child must not use
-/// any async runtime, multi-threaded state, or lock-dependent code from the
-/// parent.  The closure should only do self-contained work (dlopen, C FFI
-/// calls, etc.) which is exactly what plugin scanning does.
 pub fn fork_scan<T, F>(closure: F, timeout: Option<Duration>) -> SandboxResult<T>
 where
     T: Serialize + for<'de> Deserialize<'de>,
     F: FnOnce() -> T,
 {
-    // Create a pipe for child → parent communication.  O_CLOEXEC keeps the
-    // fds from leaking into processes exec'd by other threads; the forked
-    // child still has its write end since fork does not exec.
     let mut pipe_fds = [0i32; 2];
     if unsafe { libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
         return SandboxResult::ForkFailed(format!(
@@ -164,7 +114,6 @@ where
 
     match pid {
         -1 => {
-            // Fork failed
             unsafe {
                 libc::close(read_fd);
                 libc::close(write_fd);
@@ -173,12 +122,8 @@ where
         }
 
         0 => {
-            // ===== CHILD PROCESS =====
-            // Close read end
             unsafe { libc::close(read_fd) };
 
-            // Reset signal handlers to default so segfaults terminate the child
-            // (in case the parent installed custom handlers)
             unsafe {
                 libc::signal(libc::SIGSEGV, libc::SIG_DFL);
                 libc::signal(libc::SIGABRT, libc::SIG_DFL);
@@ -186,10 +131,8 @@ where
                 libc::signal(libc::SIGFPE, libc::SIG_DFL);
             }
 
-            // Run the closure
             let result = closure();
 
-            // Serialize and write to pipe
             if let Ok(json) = serde_json::to_vec(&result) {
                 let mut file = unsafe { std::os::unix::io::FromRawFd::from_raw_fd(write_fd) };
                 let _: std::io::Result<()> = (|| {
@@ -198,19 +141,15 @@ where
                     file.flush()?;
                     Ok(())
                 })();
-                // Don't drop the File — we'll _exit immediately
                 std::mem::forget(file);
             }
 
             unsafe { libc::close(write_fd) };
 
-            // Use _exit to avoid running destructors / atexit handlers in the
-            // child, which could corrupt shared state (PipeWire, Qt, etc.)
             unsafe { libc::_exit(0) };
         }
 
         child_pid => {
-            // ===== PARENT PROCESS =====
             unsafe { libc::close(write_fd) };
 
             let deadline = timeout.map(|d| Instant::now() + d);
@@ -219,7 +158,6 @@ where
 
             match wait_result {
                 WaitResult::Exited(0) => {
-                    // Child exited successfully — deserialize the result
                     match serde_json::from_slice(&pipe_data) {
                         Ok(value) => SandboxResult::Ok(value),
                         Err(e) => SandboxResult::Crashed {
@@ -246,31 +184,21 @@ where
     }
 }
 
-/// Result of an [`exec_probe_outcome`] run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeOutcome {
-    /// The probe instantiated the plugin and exited cleanly.
     Ok,
-    /// The probe process was killed by a signal (segfault, abort, ...).
     Crashed { signal: i32 },
-    /// The probe process exited with a non-zero code (load failure, panic).
     Failed { code: Option<i32> },
-    /// The probe was killed from outside (OOM killer, `pkill`, logout).
-    /// Says nothing about the plugin; treated like a transient failure.
     Interrupted { signal: i32 },
-    /// The probe did not finish within the timeout and was killed.
     Timeout { secs: u64 },
-    /// The probe could not be run at all (fail-open: treated as safe).
     Unavailable(String),
 }
 
 impl ProbeOutcome {
-    /// Whether the plugin may be loaded in the host process.
     pub fn is_safe(&self) -> bool {
         matches!(self, ProbeOutcome::Ok | ProbeOutcome::Unavailable(_))
     }
 
-    /// Short human-readable reason, suitable for "Plugin 'X' {describe()}.".
     pub fn describe(&self) -> String {
         match self {
             ProbeOutcome::Ok => "passed the safety probe".to_string(),
@@ -294,18 +222,6 @@ impl ProbeOutcome {
     }
 }
 
-/// Probe a plugin by spawning a **clean** child process via `fork + exec`.
-///
-/// Unlike [`fork_probe`], this does *not* inherit the parent's in-memory
-/// state (PipeWire connections, lilv worlds, Qt, etc.), so plugins that rely
-/// on clean global state will not false-positive as crashed.
-///
-/// `format` must be one of `"lv2"`, `"clap"`, `"vst2"`, `"vst3"` or `"ladspa"`.
-/// `uri` is the plugin URI / id.
-/// `library_path` (CLAP/VST2 file or VST3 bundle) lets the probe load just that
-/// library instead of looking the plugin up by scanning; ignored for LV2.
-/// `sample_rate` is passed to the probe for instantiation.
-/// `block_length` is only used for LV2 probes.
 pub fn exec_probe_outcome(
     format: &str,
     uri: &str,
@@ -358,7 +274,6 @@ pub fn exec_probe_outcome(
     outcome
 }
 
-/// Signals a process raises against itself by faulting.
 fn is_fault_signal(signal: i32) -> bool {
     matches!(
         signal,
@@ -377,9 +292,6 @@ fn probe_outcome_from(result: ChildWait, timeout: Option<Duration>) -> ProbeOutc
     match result {
         ChildWait::Exited(status) if status.success() => ProbeOutcome::Ok,
         ChildWait::Exited(status) => match status.signal() {
-            // Only a fault raised by the plugin's own code is a crash.  A
-            // signal sent from outside (OOM killer, `pkill`, logout) says
-            // nothing about the plugin and must not get it blocked.
             Some(sig) if is_fault_signal(sig) => ProbeOutcome::Crashed { signal: sig },
             Some(sig) => ProbeOutcome::Interrupted { signal: sig },
             None => ProbeOutcome::Failed { code: status.code() },
@@ -391,7 +303,6 @@ fn probe_outcome_from(result: ChildWait, timeout: Option<Duration>) -> ProbeOutc
     }
 }
 
-/// How much probe stderr to keep for diagnostics (older output is dropped).
 const STDERR_CAP: usize = 256 * 1024;
 
 enum ChildWait {
@@ -400,9 +311,6 @@ enum ChildWait {
     Error(String),
 }
 
-/// Wait for `child` (optionally with a timeout, killing it on expiry) while a
-/// helper thread drains its stderr concurrently, so a chatty child can never
-/// block on a full pipe.  Returns the wait result and the captured stderr tail.
 fn wait_child_capturing_stderr(
     child: &mut Child,
     timeout: Option<Duration>,
@@ -420,7 +328,6 @@ fn wait_child_capturing_stderr(
                         let mut b = buf.lock().unwrap_or_else(|e| e.into_inner());
                         b.extend_from_slice(&chunk[..n]);
                         if b.len() > STDERR_CAP {
-                            // Keep the tail: the last lines are the interesting ones.
                             let excess = b.len() - STDERR_CAP;
                             b.drain(..excess);
                         }
@@ -455,28 +362,18 @@ fn wait_child_capturing_stderr(
         }
     };
 
-    // The reader finishes at EOF once the child is gone.  A grandchild that
-    // inherited stderr could keep it open, so don't wait for it indefinitely.
     let _ = done_rx.recv_timeout(Duration::from_millis(500));
     let out = std::mem::take(&mut *captured.lock().unwrap_or_else(|e| e.into_inner()));
     (result, out)
 }
 
-/// Entry point for `--probe-plugin` subprocess.
-///
-/// Call this from `main()` when `--probe-plugin` is detected.
-/// It will instantiate the plugin and exit.  Never returns on success
-/// (calls `std::process::exit`).
 pub fn run_probe_main(args: &[String]) -> ! {
-    // args: [format, uri, sample_rate, block_length, (library_path)]
     if args.len() < 4 {
         eprintln!(
             "probe: usage: --probe-plugin <format> <uri> <sample_rate> <block_length> [library_path]"
         );
         std::process::exit(2);
     }
-    // Don't outlive ZestBay: the parent enforces the probe timeout, so a
-    // hung plugin would otherwise keep this process around forever.
     unsafe {
         libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
         if libc::getppid() == 1 {
@@ -504,9 +401,6 @@ pub fn run_probe_main(args: &[String]) -> ! {
                     std::process::exit(1);
                 }
             };
-            // Only classify ports for the target plugin — avoid scanning every
-            // LV2 plugin on the system, which can corrupt memory if any other
-            // plugin's .so is buggy.
             let classification = match crate::lv2::scanner::classify_lv2_ports(&world, &lp) {
                 Some(c) => c,
                 None => {
@@ -605,7 +499,6 @@ pub fn run_probe_main(args: &[String]) -> ! {
                 crate::vst2::host::Vst2PluginInstance::new(&info.library_path, uri, &info, sample_rate, None)
             };
             let Some(inst) = inst else { crate::exit_now(1); };
-            // Exercise a real block as well as constructor/destructor code.
             let inputs = vec![vec![0.0; 64]; inst.audio_input_channels];
             let mut outputs = vec![vec![0.0; 64]; inst.audio_output_channels];
             let inputs: Vec<&[f32]> = inputs.iter().map(Vec::as_slice).collect();
@@ -623,7 +516,6 @@ pub fn run_probe_main(args: &[String]) -> ! {
                 crate::ladspa::host::LadspaPluginInstance::new(&info.library_path, uri, &info, sample_rate, None)
             };
             let Some(inst) = inst else { crate::exit_now(1); };
-            // Exercise a real block as well as constructor/destructor code.
             let inputs = vec![vec![0.0; 64]; inst.audio_input_channels];
             let mut outputs = vec![vec![0.0; 64]; inst.audio_output_channels];
             let inputs: Vec<&[f32]> = inputs.iter().map(Vec::as_slice).collect();
@@ -640,10 +532,6 @@ pub fn run_probe_main(args: &[String]) -> ! {
     std::process::exit(0);
 }
 
-/// Minimal `PluginInfo` for a CLAP/VST3 probe when the parent already knows
-/// the library path.  The hosts only read the library path, id, name and
-/// category from it; everything else comes from the plugin itself, so no
-/// scan is needed in the probe process.
 fn probe_plugin_info(
     uri: &str,
     library_path: &str,
@@ -668,10 +556,6 @@ fn probe_plugin_info(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
 enum WaitResult {
     Exited(i32),
     Signaled(i32),
@@ -689,7 +573,6 @@ fn decode_status(status: i32) -> WaitResult {
     }
 }
 
-/// Non-blocking reap.  `None` while the child is still running.
 fn try_reap(pid: i32) -> Option<WaitResult> {
     loop {
         let mut status = 0i32;
@@ -708,7 +591,6 @@ fn try_reap(pid: i32) -> Option<WaitResult> {
     }
 }
 
-/// Kill the child and reap it (blocking — SIGKILL cannot be ignored).
 fn kill_and_reap(pid: i32) {
     unsafe { libc::kill(pid, libc::SIGKILL) };
     loop {
@@ -721,8 +603,6 @@ fn kill_and_reap(pid: i32) {
     }
 }
 
-/// Read everything currently available from a non-blocking fd.
-/// Returns `true` on EOF.
 fn drain_nonblocking(fd: i32, out: &mut Vec<u8>) -> bool {
     let mut chunk = [0u8; 16384];
     loop {
@@ -742,11 +622,6 @@ fn drain_nonblocking(fd: i32, out: &mut Vec<u8>) -> bool {
     }
 }
 
-/// Collect the child's output from `read_fd` while waiting for it to exit.
-///
-/// The pipe is drained concurrently (poll with a deadline) so a child whose
-/// output exceeds the pipe buffer never blocks, and a hung child is killed at
-/// the deadline without the parent ever blocking on the pipe.
 fn collect_child_output(
     pid: i32,
     read_fd: i32,
@@ -765,7 +640,6 @@ fn collect_child_output(
         }
 
         if let Some(res) = try_reap(pid) {
-            // Child is gone: pick up whatever it wrote before exiting.
             if !eof {
                 drain_nonblocking(read_fd, &mut data);
             }
@@ -785,7 +659,6 @@ fn collect_child_output(
         };
 
         if eof {
-            // Writer closed; the child is exiting — just wait for it.
             std::thread::sleep(Duration::from_millis(wait_ms.clamp(1, 5) as u64));
         } else {
             let mut pfd = libc::pollfd {
@@ -825,7 +698,6 @@ mod tests {
 
     #[test]
     fn fork_scan_large_output_succeeds() {
-        // Far larger than the 64 KiB pipe buffer.
         let res = fork_scan(|| "x".repeat(1024 * 1024), Some(Duration::from_secs(20)));
         match res {
             SandboxResult::Ok(s) => assert_eq!(s.len(), 1024 * 1024),
@@ -905,7 +777,6 @@ mod tests {
         let (res, _) = wait_child_capturing_stderr(&mut child, Some(Duration::from_secs(10)));
         let outcome = probe_outcome_from(res, None);
         assert_eq!(outcome, ProbeOutcome::Interrupted { signal: libc::SIGKILL });
-        // Not loaded this session, but not blocked either.
         assert!(!outcome.is_safe());
         assert!(!matches!(outcome, ProbeOutcome::Crashed { .. }));
         assert!(is_fault_signal(libc::SIGSEGV) && is_fault_signal(libc::SIGABRT));

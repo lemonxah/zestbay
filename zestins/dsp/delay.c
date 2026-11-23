@@ -1,16 +1,12 @@
-// Zestins Delay: stereo echo up to 2 s.  The feedback path is lowpassed by
-// `tone`; ping-pong sends each echo to the other side.  The delay time is
-// smoothed and read with linear interpolation, so changing it glides.
-
 #include "dsp.h"
 
 typedef struct {
     void *port[DELAY_N];
     double rate;
     float *buf[2];
-    uint32_t size; // power of two
+    uint32_t size;
     uint32_t pos;
-    Smooth time; // samples
+    Smooth time;
     OnePole damp[2];
 } Delay;
 
@@ -47,7 +43,7 @@ static void activate(LV2_Handle h) {
     memset(dl->buf[1], 0, dl->size * sizeof(float));
     dl->pos = 0;
     smooth_init(&dl->time, ctl(dl->port[DELAY_TIME], 375) * 0.001f * (float)dl->rate, dl->rate);
-    dl->time.coef = time_coef(80.0f, dl->rate); // glide over ~80 ms
+    dl->time.coef = time_coef(80.0f, dl->rate);
     dl->damp[0].z = dl->damp[1].z = 0;
 }
 
@@ -86,7 +82,6 @@ static void run(LV2_Handle h, uint32_t n) {
         float fb_r = onepole_run(&dl->damp[1], wet_r) * feedback;
         float x_l = in_l[i], x_r = in_r[i];
         if (ping_pong) {
-            // Mono input enters on the left; echoes alternate sides.
             dl->buf[0][dl->pos] = 0.5f * (x_l + x_r) + fb_r;
             dl->buf[1][dl->pos] = fb_l;
         } else {

@@ -1,8 +1,3 @@
-//! CLAP plugin scanner.
-//!
-//! Scans standard directories for `.clap` bundles, dlopen's each one,
-//! and enumerates the plugins within via the CLAP plugin factory.
-
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::path::{Path, PathBuf};
@@ -11,8 +6,6 @@ use std::time::{Duration, Instant};
 
 use crate::plugin::types::*;
 
-/// Standard Linux directories where CLAP plugins are installed
-/// (`CLAP_PATH` and Flatpak locations are added by `plugin::paths`).
 const CLAP_SEARCH_DIRS: &[&str] = &[
     "~/.clap",
     "/usr/lib/clap",
@@ -21,12 +14,10 @@ const CLAP_SEARCH_DIRS: &[&str] = &[
     "/usr/local/lib64/clap",
 ];
 
-/// Results of the last full scan, keyed by URI (shared shape with VST3).
 pub(crate) struct ScanCache {
     inner: Mutex<Option<(HashMap<String, PluginInfo>, Instant)>>,
 }
 
-/// A cache miss triggers a full rescan at most this often.
 const MISS_RESCAN_COOLDOWN: Duration = Duration::from_secs(30);
 
 impl ScanCache {
@@ -46,8 +37,6 @@ impl ScanCache {
         lock.as_ref().and_then(|(map, _)| map.get(uri).cloned())
     }
 
-    /// Whether a miss may trigger a full rescan (never scanned, or the last
-    /// scan is older than the cooldown).
     pub(crate) fn miss_should_rescan(&self) -> bool {
         let lock = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         match lock.as_ref() {
@@ -56,7 +45,6 @@ impl ScanCache {
         }
     }
 
-    /// Cached lookup; on a miss rescans with `scan` (rate limited).
     pub(crate) fn find(&self, uri: &str, scan: impl FnOnce()) -> Option<PluginInfo> {
         if let Some(info) = self.get(uri) {
             return Some(info);
@@ -71,20 +59,16 @@ impl ScanCache {
 
 static CACHE: ScanCache = ScanCache::new();
 
-/// Lookup without starting discovery on the PipeWire thread.
 pub fn cached_plugin(uri: &str) -> Option<PluginInfo> {
     CACHE.get(uri)
 }
 
-/// Look up a single plugin by URI.  Served from the cache of the last
-/// `scan_plugins()`; a miss rescans at most once per cooldown period.
 pub fn find_plugin(uri: &str) -> Option<PluginInfo> {
     CACHE.find(uri, || {
         scan_plugins();
     })
 }
 
-/// Scan all standard directories and return a list of CLAP plugin infos.
 pub fn scan_plugins() -> Vec<PluginInfo> {
     scan_discovered(&discover_plugins(), &|| {})
 }
@@ -102,7 +86,7 @@ pub(crate) fn scan_discovered(paths: &[PathBuf], progress: &(impl Fn() + Sync)) 
 }
 
 fn expand_search_dirs() -> Vec<PathBuf> {
-    crate::plugin::paths::search_dirs("CLAP_PATH", CLAP_SEARCH_DIRS, "clap", "CLAP")
+    crate::plugin::paths::search_dirs("CLAP_PATH", CLAP_SEARCH_DIRS, "CLAP")
 }
 
 pub(crate) fn scan_clap_file(path: &Path, plugins: &mut Vec<PluginInfo>) {
@@ -118,7 +102,6 @@ pub(crate) fn scan_clap_file(path: &Path, plugins: &mut Vec<PluginInfo>) {
         Err(_) => return,
     };
 
-    // Safety: All CLAP interactions use raw C FFI via dlopen.
     unsafe {
         let lib = libc::dlopen(c_path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
         if lib.is_null() {
@@ -229,17 +212,13 @@ pub(crate) fn scan_clap_file(path: &Path, plugins: &mut Vec<PluginInfo>) {
             let features = parse_features(desc.features);
             let category = category_from_features(&features);
 
-            // Infer audio layout from descriptor features (no instantiation).
-            // Accurate port info is discovered at instantiation time in host.rs.
             let is_instrument = features.iter().any(|f| f == "instrument");
             let (audio_inputs, audio_outputs) = if is_instrument {
-                (0, 2) // Instruments: no audio input, stereo output
+                (0, 2)
             } else {
-                (2, 2) // Effects: stereo in/out (default assumption)
+                (2, 2)
             };
 
-            // GUI support is checked at instantiation time via get_extension.
-            // Most CLAP plugins ship with a GUI, so default to true.
             let has_ui = true;
 
             plugins.push(PluginInfo {
@@ -248,7 +227,7 @@ pub(crate) fn scan_clap_file(path: &Path, plugins: &mut Vec<PluginInfo>) {
                 format: PluginFormat::Clap,
                 category,
                 author: vendor,
-                ports: Vec::new(), // Populated at instantiation time
+                ports: Vec::new(),
                 audio_inputs,
                 audio_outputs,
                 control_inputs: 0,
@@ -264,7 +243,6 @@ pub(crate) fn scan_clap_file(path: &Path, plugins: &mut Vec<PluginInfo>) {
         if let Some(deinit) = entry.deinit {
             deinit();
         }
-        // Do NOT dlclose — plugin descriptor strings live inside the .so
     }
 }
 
@@ -344,8 +322,6 @@ mod tests {
         }
     }
 
-    // ---- ScanCache ----
-
     #[test]
     fn cache_hit_does_not_scan() {
         let cache = ScanCache::new();
@@ -364,15 +340,12 @@ mod tests {
         })
         .is_some());
         assert_eq!(scans, 1);
-        // A recent scan: a miss for an unknown URI does not rescan.
         assert!(cache.find("missing", || panic!("rate limited")).is_none());
     }
 
     fn cache_store_for_test(cache: &ScanCache, plugins: &[PluginInfo]) {
         cache.store(plugins);
     }
-
-    // ---- category_from_features ----
 
     #[test]
     fn category_reverb() {
@@ -457,13 +430,11 @@ mod tests {
 
     #[test]
     fn category_audio_effect_fallback() {
-        // "audio-effect" without specific category → Filter
         assert_eq!(category_from_features(&[s("audio-effect")]), PluginCategory::Filter);
     }
 
     #[test]
     fn category_instrument_broad_fallback() {
-        // "instrument" as a broad category feature (case-sensitive match)
         assert_eq!(category_from_features(&[s("instrument")]), PluginCategory::Instrument);
     }
 
