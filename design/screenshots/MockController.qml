@@ -3,6 +3,8 @@ import QtQuick
 QtObject {
     id: mock
     readonly property bool light: Qt.application.arguments.indexOf("light") >= 0
+    readonly property string palette: "zest"
+    readonly property string wireStyle: "bezier"
 
     property bool patchbay_enabled: true
     property bool patchbay_exclusive: true
@@ -207,7 +209,7 @@ QtObject {
         return JSON.stringify({ rule_settle_ms: 500, params_persist_ms: 1000, links_persist_ms: 2000, poll_interval_ms: 100,
                                 auto_learn_rules: true, start_minimized: false, close_to_tray: false, pw_tick_interval_ms: 10,
                                 pw_operation_cooldown_ms: 50, patchbay_exclusive: true, snap_gap_px: 10, snap_to_grid: true,
-                                grid_size_px: 24, theme: light ? "light" : "dark",
+                                grid_size_px: 24, theme: light ? "light" : "dark", palette: palette, wire_style: wireStyle,
                                 hide_unnamed_nodes: true, osc_enabled: true, osc_port: 9000, osc_listen_all: false })
     }
     function get_poll_interval_ms() { return 100 }

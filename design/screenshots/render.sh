@@ -12,6 +12,11 @@ ln -s "$ROOT/fonts" "$TMP/ZestBay/fonts"
 cp "$ROOT/design/screenshots/MockController.qml" "$TMP/ZestBay/AppController.qml"
 printf 'module ZestBay\nAppController 1.0 AppController.qml\n' > "$TMP/ZestBay/qmldir"
 
+look() {
+    sed -i -e "s/string palette: \".*\"/string palette: \"$1\"/" \
+        -e "s/string wireStyle: \".*\"/string wireStyle: \"$2\"/" "$TMP/ZestBay/AppController.qml"
+}
+
 shot() {
     local mode=$1 target=$2 name=$3 bg=$4 border=${5:-0}
     rm -f "$TMP/$name".*.png
@@ -47,3 +52,22 @@ shot dark  PluginBrowser add-plugin       "$DARK" 48
 shot dark  PluginParams  parameters       "$DARK" 48
 shot dark  CpuOverlay    cpu-usage        "$DARK" 48
 shot light Preferences   preferences      "$LIGHT" 48
+for palette in catppuccin gruvbox nord; do
+    look "$palette" circuit
+    shot dark main "theme-$palette" "$DARK"
+done
+look solarized circuit
+shot light main          theme-solarized  "$LIGHT"
+look zest circuit
+shot dark  main          wires-circuit    "$DARK"
+look zest bezier
+if [ -f "$OUT/theme-catppuccin.png" ] && [ -f "$OUT/theme-gruvbox.png" ] && [ -f "$OUT/theme-nord.png" ] && [ -f "$OUT/theme-solarized.png" ]; then
+    tile=(-crop 1240x900+640+200 +repage -resize 800x)
+    magick \( "$OUT/theme-catppuccin.png" "$OUT/theme-gruvbox.png" "${tile[@]}" +append \) \
+        \( "$OUT/theme-nord.png" "$OUT/theme-solarized.png" "${tile[@]}" +append \) -append +repage -strip "$OUT/themes.png"
+    rm "$OUT"/theme-{catppuccin,gruvbox,nord,solarized}.png
+fi
+if [ -f "$OUT/wires-circuit.png" ]; then
+    magick "$OUT/wires-circuit.png" -crop 2050x1200+620+190 +repage "$OUT/wires-crop.png"
+    rm "$OUT/wires-circuit.png"
+fi
