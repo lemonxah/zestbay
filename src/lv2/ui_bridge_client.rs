@@ -1,8 +1,14 @@
+mod pump;
+mod reader;
+
+use pump::port_event_pump;
+use reader::bridge_reader;
+
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -12,6 +18,8 @@ use crate::lv2::urid::UridMapper;
 use crate::pipewire::{PluginEvent, PwCommand, PwEvent};
 use crate::plugin::types::SharedPortUpdates;
 use crate::ui_bridge::protocol::{BridgeMessage, HostMessage};
+
+const QUEUE_CAPACITY: usize = 256;
 
 const PUMP_INTERVAL: Duration = Duration::from_millis(33);
 const QUIT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -34,7 +42,7 @@ fn encode_line(msg: &HostMessage) -> Option<Vec<u8>> {
 
 pub struct UiBridgeClient {
     child: Child,
-    stdin_tx: Option<Sender<Vec<u8>>>,
+    stdin_tx: Option<SyncSender<Vec<u8>>>,
     shared: Arc<BridgeShared>,
     pump_stop: Arc<AtomicBool>,
     pump_thread: Option<std::thread::JoinHandle<()>>,
@@ -42,10 +50,7 @@ pub struct UiBridgeClient {
 }
 
 impl UiBridgeClient {
-    pub fn spawn(
-        event_tx: Sender<PwEvent>,
-        cmd_tx: Sender<PwCommand>,
-    ) -> Result<Self, String> {
+    pub fn spawn(event_tx: Sender<PwEvent>, cmd_tx: Sender<PwCommand>) -> Result<Self, String> {
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
@@ -54,8 +59,12 @@ impl UiBridgeClient {
             exe_dir
                 .as_ref()
                 .map(|d| d.join("../lib/zestbay/zestbay-ui-bridge")),
-            Some(std::path::PathBuf::from("/usr/lib/zestbay/zestbay-ui-bridge")),
-            Some(std::path::PathBuf::from("/usr/local/lib/zestbay/zestbay-ui-bridge")),
+            Some(std::path::PathBuf::from(
+                "/usr/lib/zestbay/zestbay-ui-bridge",
+            )),
+            Some(std::path::PathBuf::from(
+                "/usr/local/lib/zestbay/zestbay-ui-bridge",
+            )),
         ];
 
         let bridge_path = candidates
@@ -85,7 +94,7 @@ impl UiBridgeClient {
             alive: AtomicBool::new(true),
         });
 
-        let (stdin_tx, stdin_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (stdin_tx, stdin_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(QUEUE_CAPACITY);
         std::thread::Builder::new()
             .name("ui-bridge-stdin".into())
             .spawn(move || {
@@ -109,9 +118,8 @@ impl UiBridgeClient {
                     Err(_) => Vec::new(),
                 };
                 for instance_id in orphaned {
-                    let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginUiClosed {
-                        instance_id,
-                    }));
+                    let _ =
+                        event_tx.send(PwEvent::Plugin(PluginEvent::PluginUiClosed { instance_id }));
                 }
                 log::info!("UI bridge stdout reader exited");
             })
@@ -138,9 +146,17 @@ impl UiBridgeClient {
         })
     }
 
-    fn send(&self, msg: &HostMessage) -> bool {
+    fn send(&mut self, msg: &HostMessage) -> bool {
         match (&self.stdin_tx, encode_line(msg)) {
-            (Some(tx), Some(line)) => tx.send(line).is_ok(),
+            (Some(tx), Some(line)) => match tx.try_send(line) {
+                Ok(()) => true,
+                Err(error) => {
+                    log::warn!("UI bridge transport unavailable: {error}");
+                    self.shared.alive.store(false, Ordering::Release);
+                    let _ = self.child.kill();
+                    false
+                }
+            },
             _ => false,
         }
     }
@@ -181,10 +197,7 @@ impl UiBridgeClient {
             return false;
         }
         if self.is_open(instance_id) {
-            log::info!(
-                "UI bridge: UI for instance {} is already open",
-                instance_id
-            );
+            log::info!("UI bridge: UI for instance {} is already open", instance_id);
             return true;
         }
 
@@ -285,210 +298,5 @@ impl UiBridgeClient {
 impl Drop for UiBridgeClient {
     fn drop(&mut self) {
         self.shutdown();
-    }
-}
-
-fn bridge_reader(
-    reader: impl BufRead,
-    shared: &BridgeShared,
-    event_tx: &Sender<PwEvent>,
-    cmd_tx: &Sender<PwCommand>,
-) {
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
-        if line.is_empty() {
-            continue;
-        }
-
-        let msg: BridgeMessage = match serde_json::from_str(&line) {
-            Ok(m) => m,
-            Err(e) => {
-                log::warn!("UI bridge: invalid message: {} — {:?}", line, e);
-                continue;
-            }
-        };
-
-        match msg {
-            BridgeMessage::Ready => {
-                log::info!("UI bridge process ready");
-            }
-            BridgeMessage::Opened { instance_id } => {
-                log::info!("UI bridge: UI opened for instance {}", instance_id);
-                let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginUiOpened {
-                    instance_id,
-                }));
-            }
-            BridgeMessage::OpenFailed { instance_id, error } => {
-                log::error!(
-                    "UI bridge: UI open failed for instance {}: {}",
-                    instance_id,
-                    error
-                );
-                if let Ok(mut map) = shared.instances.lock() {
-                    map.remove(&instance_id);
-                }
-                let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
-                    instance_id: Some(instance_id),
-                    message: format!("Plugin UI failed: {}", error),
-                    fatal: false,
-                }));
-            }
-            BridgeMessage::Closed { instance_id } => {
-                log::info!("UI bridge: UI closed for instance {}", instance_id);
-                if let Ok(mut map) = shared.instances.lock() {
-                    map.remove(&instance_id);
-                }
-                let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginUiClosed {
-                    instance_id,
-                }));
-            }
-            BridgeMessage::PortWrite {
-                instance_id,
-                port_index,
-                value,
-            } => {
-                let _ = cmd_tx.send(PwCommand::SetPluginParameter {
-                    instance_id,
-                    port_index,
-                    value,
-                });
-            }
-            BridgeMessage::AtomWrite {
-                instance_id,
-                port_index,
-                data_b64,
-            } => {
-                let data = match base64::engine::general_purpose::STANDARD.decode(&data_b64) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        log::warn!("UI bridge: bad atom payload: {}", e);
-                        continue;
-                    }
-                };
-                let map = match shared.instances.lock() {
-                    Ok(m) => m,
-                    Err(_) => continue,
-                };
-                if let Some(inst) = map.get(&instance_id)
-                    && let Some(atom_in) = inst
-                        .port_updates
-                        .atom_inputs
-                        .iter()
-                        .find(|a| a.port_index == port_index)
-                    && !atom_in.write(&data)
-                {
-                    log::warn!(
-                        "UI atom queue full for instance {} port {}; message dropped",
-                        instance_id,
-                        port_index
-                    );
-                }
-            }
-        }
-    }
-}
-
-fn collect_port_events(map: &mut HashMap<u64, BridgeInstance>) -> Vec<HostMessage> {
-    let mut out = Vec::new();
-    for (&instance_id, inst) in map.iter_mut() {
-        let slots = inst
-            .port_updates
-            .control_inputs
-            .iter()
-            .chain(inst.port_updates.control_outputs.iter());
-        for (i, slot) in slots.enumerate() {
-            let value = slot.value.load();
-            let Some(prev) = inst.prev.get_mut(i) else {
-                break;
-            };
-            if value.to_bits() != prev.to_bits() {
-                *prev = value;
-                out.push(HostMessage::PortEvent {
-                    instance_id,
-                    port_index: slot.port_index,
-                    value,
-                });
-            }
-        }
-    }
-    out
-}
-
-fn port_event_pump(shared: &BridgeShared, stop: &AtomicBool, tx: &Sender<Vec<u8>>) {
-    while !stop.load(Ordering::Acquire) && shared.alive.load(Ordering::Acquire) {
-        let events = match shared.instances.lock() {
-            Ok(mut map) => collect_port_events(&mut map),
-            Err(_) => break,
-        };
-        for msg in &events {
-            if let Some(line) = encode_line(msg)
-                && tx.send(line).is_err()
-            {
-                return;
-            }
-        }
-        std::thread::sleep(PUMP_INTERVAL);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::plugin::types::{AtomicF32, PortSlot, PortUpdates};
-
-    fn updates() -> SharedPortUpdates {
-        Arc::new(PortUpdates {
-            control_inputs: vec![PortSlot {
-                port_index: 3,
-                value: AtomicF32::new(0.5),
-            }],
-            control_outputs: vec![PortSlot {
-                port_index: 7,
-                value: AtomicF32::new(0.0),
-            }],
-            atom_outputs: Vec::new(),
-            atom_inputs: Vec::new(),
-        })
-    }
-
-    #[test]
-    fn pump_sends_only_changes() {
-        let pu = updates();
-        let mut map = HashMap::new();
-        map.insert(
-            42,
-            BridgeInstance {
-                port_updates: pu.clone(),
-                prev: vec![0.5, 0.0],
-            },
-        );
-        assert!(collect_port_events(&mut map).is_empty());
-
-        pu.control_outputs[0].value.store(0.25);
-        let events = collect_port_events(&mut map);
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            HostMessage::PortEvent {
-                instance_id,
-                port_index,
-                value,
-            } => {
-                assert_eq!(*instance_id, 42);
-                assert_eq!(*port_index, 7);
-                assert_eq!(*value, 0.25);
-            }
-            _ => panic!("expected PortEvent"),
-        }
-        assert!(collect_port_events(&mut map).is_empty());
-    }
-
-    #[test]
-    fn encoded_line_is_single_terminated_line() {
-        let line = encode_line(&HostMessage::Close { instance_id: 1 }).unwrap();
-        assert_eq!(line.last(), Some(&b'\n'));
-        assert_eq!(line.iter().filter(|&&b| b == b'\n').count(), 1);
     }
 }

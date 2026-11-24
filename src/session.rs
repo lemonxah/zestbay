@@ -74,9 +74,12 @@ pub fn current_name() -> Option<String> {
 }
 
 pub fn is_session_file(filename: &str) -> bool {
-    SESSION_ENTRIES
-        .iter()
-        .any(|e| filename == *e || filename.strip_prefix(e).is_some_and(|rest| rest.starts_with('.')))
+    SESSION_ENTRIES.iter().any(|e| {
+        filename == *e
+            || filename
+                .strip_prefix(e)
+                .is_some_and(|rest| rest.starts_with('.'))
+    })
 }
 
 pub fn config_path(filename: &str) -> PathBuf {
@@ -131,12 +134,22 @@ pub fn delete(name: &str) -> Result<(), String> {
     if !dir.is_dir() {
         return Err(format!("There is no session called \"{name}\"."));
     }
-    if dir.canonicalize().ok() == Some(self::dir()) {
-        return Err("The open session can't be deleted. Switch to another one first.".into());
-    }
-    std::fs::remove_dir_all(&dir).map_err(|e| format!("Could not delete the session: {e}"))?;
+    remove_session_directory(&dir, &self::dir())?;
     log::info!("Deleted session \"{name}\"");
     Ok(())
+}
+
+fn remove_session_directory(dir: &Path, active: &Path) -> Result<(), String> {
+    let target = dir
+        .canonicalize()
+        .map_err(|e| format!("Could not locate the session: {e}"))?;
+    let active = active
+        .canonicalize()
+        .map_err(|e| format!("Could not locate the open session: {e}"))?;
+    if active.starts_with(&target) {
+        return Err("The open session can't be deleted. Switch to another one first.".into());
+    }
+    std::fs::remove_dir_all(dir).map_err(|e| format!("Could not delete the session: {e}"))
 }
 
 fn remembered_path() -> PathBuf {
@@ -195,15 +208,27 @@ pub fn activate(name: &str) -> Result<(), String> {
 }
 
 fn open_named(name: &str) -> Result<Active, String> {
+    open_named_at(&root_dir(), name, migrate_legacy)
+}
+
+fn open_named_at(
+    root: &Path,
+    name: &str,
+    migrate: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<Active, String> {
     if !valid_name(name) {
         return Err(format!(
             "\"{name}\" is not a valid session name: use a plain name without slashes, not starting with a dot."
         ));
     }
-    let dir = sessions_dir().join(name);
+    let dir = root.join("sessions").join(name);
     if !dir.exists() {
         if name == DEFAULT_NAME {
-            migrate_legacy(&dir);
+            migrate(root, &dir).map_err(|e| {
+                format!(
+                    "Could not migrate the existing setup: {e}. Your original files are unchanged."
+                )
+            })?;
         }
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
@@ -214,20 +239,21 @@ fn open_named(name: &str) -> Result<Active, String> {
     })
 }
 
-fn migrate_legacy(dest: &Path) {
-    let root = root_dir();
+fn migrate_legacy(root: &Path, dest: &Path) -> std::io::Result<()> {
     let have_any = SESSION_ENTRIES
         .iter()
         .filter(|e| **e != ".zestbay-restoring")
         .any(|e| root.join(e).exists());
     if !have_any {
-        return;
+        return Ok(());
     }
-    let tmp = dest.with_extension("migrating");
-    let _ = std::fs::remove_dir_all(&tmp);
+    let tmp = dest.with_file_name(format!(".default.migrating-{}", uuid::Uuid::new_v4()));
     let copied = (|| -> std::io::Result<()> {
         std::fs::create_dir_all(&tmp)?;
-        for entry in SESSION_ENTRIES.iter().filter(|e| **e != ".zestbay-restoring") {
+        for entry in SESSION_ENTRIES
+            .iter()
+            .filter(|e| **e != ".zestbay-restoring")
+        {
             let src = root.join(entry);
             if src.is_dir() {
                 copy_dir(&src, &tmp.join(entry))?;
@@ -237,16 +263,15 @@ fn migrate_legacy(dest: &Path) {
         }
         std::fs::rename(&tmp, dest)
     })();
-    match copied {
-        Ok(()) => log::info!(
+    if copied.is_err() {
+        let _ = std::fs::remove_dir_all(&tmp);
+    } else {
+        log::info!(
             "Copied the existing setup into the \"{}\" session",
             DEFAULT_NAME
-        ),
-        Err(e) => {
-            log::error!("Could not copy the existing setup into a session: {e}");
-            let _ = std::fs::remove_dir_all(&tmp);
-        }
+        );
     }
+    copied
 }
 
 fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -310,6 +335,91 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
+    }
+
+    struct Directory(PathBuf);
+
+    impl Directory {
+        fn new() -> Self {
+            let path =
+                std::env::temp_dir().join(format!("zestbay-session-test-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn deletion_protects_active_directory_and_ancestors() {
+        let root = Directory::new();
+        let parent = root.0.join("studio");
+        let active = parent.join("live");
+        let sibling = root.0.join("studio-other");
+        std::fs::create_dir_all(&active).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(active.join("plugins.json"), "saved state").unwrap();
+        assert!(remove_session_directory(&active, &active).is_err());
+        assert!(remove_session_directory(&parent, &active).is_err());
+        assert!(remove_session_directory(&sibling, &active).is_ok());
+        assert_eq!(
+            std::fs::read_to_string(active.join("plugins.json")).unwrap(),
+            "saved state"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deletion_protects_active_directory_through_symlinks() {
+        let root = Directory::new();
+        let active = root.0.join("studio/live");
+        let alias = root.0.join("alias");
+        std::fs::create_dir_all(&active).unwrap();
+        std::os::unix::fs::symlink(root.0.join("studio"), &alias).unwrap();
+        assert!(remove_session_directory(&alias, &active).is_err());
+        assert!(active.exists());
+    }
+
+    #[test]
+    fn failed_migration_can_be_retried_without_an_empty_session() {
+        let root = Directory::new();
+        std::fs::write(root.0.join("plugins.json"), "legacy state").unwrap();
+        let result = open_named_at(&root.0, DEFAULT_NAME, |_, _| {
+            Err(std::io::Error::other("copy failed"))
+        });
+        assert!(result.is_err());
+        assert!(!root.0.join("sessions/default").exists());
+        let active = open_named_at(&root.0, DEFAULT_NAME, migrate_legacy).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(active.dir.join("plugins.json")).unwrap(),
+            "legacy state"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.0.join("plugins.json")).unwrap(),
+            "legacy state"
+        );
+    }
+
+    #[test]
+    fn migration_does_not_remove_a_session_named_default_migrating() {
+        let root = Directory::new();
+        let other = root.0.join("sessions/default.migrating");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("plugins.json"), "other session").unwrap();
+        std::fs::write(root.0.join("plugins.json"), "legacy state").unwrap();
+        open_named_at(&root.0, DEFAULT_NAME, migrate_legacy).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(other.join("plugins.json")).unwrap(),
+            "other session"
+        );
+        assert_eq!(
+            std::fs::read_dir(root.0.join("sessions")).unwrap().count(),
+            2
+        );
     }
 
     #[test]

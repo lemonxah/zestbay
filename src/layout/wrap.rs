@@ -79,11 +79,13 @@ mod tests {
     use super::super::sugiyama_layout;
     use std::collections::{HashMap, HashSet};
 
-    fn fan_in(sources: u32) -> (
+    type LayoutFixture = (
         Vec<(u32, String, &'static str, f64, f64)>,
         Vec<(u32, u32, usize, bool)>,
         Vec<(u32, u32, u32, u32, u32)>,
-    ) {
+    );
+
+    fn fan_in(sources: u32) -> LayoutFixture {
         let mut nodes = vec![(1000, "Speakers".to_string(), "Sink", 180.0, 80.0)];
         let mut ports = Vec::new();
         let mut links = Vec::new();

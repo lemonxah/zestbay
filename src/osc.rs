@@ -1,8 +1,11 @@
+mod queue;
+
+use queue::RequestQueue;
+
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -14,20 +17,35 @@ const ROOT: &str = "zestbay";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum OscAction {
-    Enable { plugin: String, enabled: bool },
-    Bypass { plugin: String, bypassed: bool },
-    Toggle { plugin: String },
+    Enable {
+        plugin: String,
+        enabled: bool,
+    },
+    Bypass {
+        plugin: String,
+        bypassed: bool,
+    },
+    Toggle {
+        plugin: String,
+    },
     Param {
         plugin: String,
         param: String,
         value: f32,
         normalized: bool,
     },
-    Preset { plugin: String, name: String },
+    Preset {
+        plugin: String,
+        name: String,
+    },
     ListPlugins,
-    ListParams { plugin: String },
+    ListParams {
+        plugin: String,
+    },
     ListSessions,
-    LoadSession { name: String },
+    LoadSession {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -81,19 +99,23 @@ pub fn parse(addr: &str, args: &[OscType]) -> Result<OscAction, String> {
             let plugin = plugin.to_string();
             match rest {
                 ["enable"] => {
-                    let on = args.first().and_then(number).map_or(true, |v| v > 0.5);
-                    Ok(OscAction::Enable { plugin, enabled: on })
+                    let on = args.first().and_then(number).is_none_or(|v| v > 0.5);
+                    Ok(OscAction::Enable {
+                        plugin,
+                        enabled: on,
+                    })
                 }
                 ["bypass"] => {
-                    let on = args.first().and_then(number).map_or(true, |v| v > 0.5);
-                    Ok(OscAction::Bypass { plugin, bypassed: on })
+                    let on = args.first().and_then(number).is_none_or(|v| v > 0.5);
+                    Ok(OscAction::Bypass {
+                        plugin,
+                        bypassed: on,
+                    })
                 }
-                ["toggle"] => {
-                    match args.first().and_then(number) {
-                        Some(v) if v <= 0.5 => Err("toggle release ignored".into()),
-                        _ => Ok(OscAction::Toggle { plugin }),
-                    }
-                }
+                ["toggle"] => match args.first().and_then(number) {
+                    Some(v) if v <= 0.5 => Err("toggle release ignored".into()),
+                    _ => Ok(OscAction::Toggle { plugin }),
+                },
                 ["preset"] => args
                     .first()
                     .and_then(string)
@@ -130,7 +152,7 @@ fn flatten(packet: OscPacket, out: &mut Vec<OscMessage>) {
 pub struct OscServer {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
-    rx: Receiver<OscRequest>,
+    queue: Arc<RequestQueue>,
     socket: UdpSocket,
 }
 
@@ -141,42 +163,25 @@ impl OscServer {
         socket.set_read_timeout(Some(Duration::from_millis(200)))?;
         let reader = socket.try_clone()?;
         let stop = Arc::new(AtomicBool::new(false));
-        let (tx, rx) = channel();
+        let queue = Arc::new(RequestQueue::default());
         let thread = {
             let stop = stop.clone();
+            let queue = queue.clone();
             std::thread::Builder::new()
                 .name("osc".into())
-                .spawn(move || serve(reader, tx, stop))?
+                .spawn(move || serve(reader, queue, stop))?
         };
         log::info!("OSC listening on {host}:{port}");
         Ok(Self {
             stop,
             thread: Some(thread),
-            rx,
+            queue,
             socket,
         })
     }
 
     pub fn drain(&self) -> Vec<OscRequest> {
-        let mut out: Vec<OscRequest> = Vec::new();
-        while let Ok(req) = self.rx.try_recv() {
-            if let OscAction::Param {
-                plugin,
-                param,
-                normalized,
-                ..
-            } = &req.action
-                && let Some(existing) = out.iter_mut().find(|r| {
-                    matches!(&r.action, OscAction::Param { plugin: p, param: q, normalized: n, .. }
-                        if p == plugin && q == param && n == normalized)
-                })
-            {
-                *existing = req;
-                continue;
-            }
-            out.push(req);
-        }
-        out
+        self.queue.drain()
     }
 
     pub fn reply(&self, to: SocketAddr, addr: &str, args: Vec<OscType>) {
@@ -199,7 +204,7 @@ impl Drop for OscServer {
     }
 }
 
-fn serve(socket: UdpSocket, tx: Sender<OscRequest>, stop: Arc<AtomicBool>) {
+fn serve(socket: UdpSocket, queue: Arc<RequestQueue>, stop: Arc<AtomicBool>) {
     let mut buf = vec![0u8; 65536];
     while !stop.load(Ordering::Relaxed) {
         let (n, from) = match socket.recv_from(&mut buf) {
@@ -223,9 +228,7 @@ fn serve(socket: UdpSocket, tx: Sender<OscRequest>, stop: Arc<AtomicBool>) {
         for m in messages {
             match parse(&m.addr, &m.args) {
                 Ok(action) => {
-                    if tx.send(OscRequest { action, from }).is_err() {
-                        return;
-                    }
+                    queue.push(OscRequest { action, from });
                 }
                 Err(why) => log::debug!("OSC: ignored {} from {from}: {why}", m.addr),
             }
@@ -244,7 +247,10 @@ mod tests {
     #[test]
     fn slug_folds_names() {
         assert_eq!(slug("Reverb 1"), "reverb_1");
-        assert_eq!(slug("  LSP -- Compressor (stereo) "), "lsp_compressor_stereo");
+        assert_eq!(
+            slug("  LSP -- Compressor (stereo) "),
+            "lsp_compressor_stereo"
+        );
         assert_eq!(slug("reverb_1"), "reverb_1");
     }
 
@@ -252,19 +258,31 @@ mod tests {
     fn enable_and_bypass() {
         assert_eq!(
             parse("/zestbay/plugin/reverb/enable", &f(1.0)),
-            Ok(OscAction::Enable { plugin: "reverb".into(), enabled: true })
+            Ok(OscAction::Enable {
+                plugin: "reverb".into(),
+                enabled: true
+            })
         );
         assert_eq!(
             parse("/zestbay/plugin/reverb/enable", &[OscType::Int(0)]),
-            Ok(OscAction::Enable { plugin: "reverb".into(), enabled: false })
+            Ok(OscAction::Enable {
+                plugin: "reverb".into(),
+                enabled: false
+            })
         );
         assert_eq!(
             parse("/zestbay/plugin/reverb/bypass", &[OscType::Bool(true)]),
-            Ok(OscAction::Bypass { plugin: "reverb".into(), bypassed: true })
+            Ok(OscAction::Bypass {
+                plugin: "reverb".into(),
+                bypassed: true
+            })
         );
         assert_eq!(
             parse("/zestbay/plugin/reverb/enable", &[]),
-            Ok(OscAction::Enable { plugin: "reverb".into(), enabled: true })
+            Ok(OscAction::Enable {
+                plugin: "reverb".into(),
+                enabled: true
+            })
         );
     }
 
@@ -272,11 +290,15 @@ mod tests {
     fn toggle_acts_on_press_only() {
         assert_eq!(
             parse("/zestbay/plugin/eq/toggle", &f(1.0)),
-            Ok(OscAction::Toggle { plugin: "eq".into() })
+            Ok(OscAction::Toggle {
+                plugin: "eq".into()
+            })
         );
         assert_eq!(
             parse("/zestbay/plugin/eq/toggle", &[]),
-            Ok(OscAction::Toggle { plugin: "eq".into() })
+            Ok(OscAction::Toggle {
+                plugin: "eq".into()
+            })
         );
         assert!(parse("/zestbay/plugin/eq/toggle", &f(0.0)).is_err());
     }
@@ -308,14 +330,22 @@ mod tests {
     #[test]
     fn presets_and_queries() {
         assert_eq!(
-            parse("/zestbay/plugin/comp/preset", &[OscType::String("Vocal".into())]),
-            Ok(OscAction::Preset { plugin: "comp".into(), name: "Vocal".into() })
+            parse(
+                "/zestbay/plugin/comp/preset",
+                &[OscType::String("Vocal".into())]
+            ),
+            Ok(OscAction::Preset {
+                plugin: "comp".into(),
+                name: "Vocal".into()
+            })
         );
         assert!(parse("/zestbay/plugin/comp/preset", &f(1.0)).is_err());
         assert_eq!(parse("/zestbay/plugins", &[]), Ok(OscAction::ListPlugins));
         assert_eq!(
             parse("/zestbay/plugin/comp/params", &[]),
-            Ok(OscAction::ListParams { plugin: "comp".into() })
+            Ok(OscAction::ListParams {
+                plugin: "comp".into()
+            })
         );
     }
 
@@ -324,7 +354,9 @@ mod tests {
         assert_eq!(parse("/zestbay/sessions", &[]), Ok(OscAction::ListSessions));
         assert_eq!(
             parse("/zestbay/session/load", &[OscType::String("live".into())]),
-            Ok(OscAction::LoadSession { name: "live".into() })
+            Ok(OscAction::LoadSession {
+                name: "live".into()
+            })
         );
         assert!(parse("/zestbay/session/load", &[]).is_err());
         assert!(parse("/zestbay/session/load", &f(1.0)).is_err());
@@ -358,6 +390,9 @@ mod tests {
         let got = server.drain();
         assert_eq!(got.len(), 2, "{got:?}");
         assert!(matches!(&got[0].action, OscAction::Param { value, .. } if *value == 2.0));
-        assert!(matches!(&got[1].action, OscAction::Enable { enabled: false, .. }));
+        assert!(matches!(
+            &got[1].action,
+            OscAction::Enable { enabled: false, .. }
+        ));
     }
 }

@@ -88,6 +88,8 @@ static void run(LV2_Handle h, uint32_t n) {
         LV2_ATOM_SEQUENCE_FOREACH(in, ev) {
             if (ev->body.type != s->midi_event || ev->body.size == 0)
                 continue;
+            if (!midi_message_valid((const uint8_t *)(ev + 1), ev->body.size))
+                continue;
             track(s, (const uint8_t *)(ev + 1), ev->body.size);
             if (out)
                 lv2_atom_sequence_append_event(out, capacity[s->active], ev);

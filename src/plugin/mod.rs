@@ -1,3 +1,4 @@
+pub mod filter;
 pub mod cpu_stats;
 pub mod manager;
 pub mod paths;

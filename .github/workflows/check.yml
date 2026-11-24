@@ -1,0 +1,54 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  application:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config cmake clang libclang-dev \
+            libpipewire-0.3-dev qt6-base-dev qt6-base-private-dev qt6-declarative-dev \
+            qt6-declarative-private-dev qt6-declarative-dev-tools liblilv-dev lv2-dev \
+            libsuil-dev libdbus-1-dev libx11-dev libgtk-3-dev qml6-module-qtquick \
+            qml6-module-qtquick-controls qml6-module-qtquick-layouts qml6-module-qtquick-window \
+            qml6-module-qtquick-templates qml6-module-qtqml-workerscript qml6-module-qttest
+      - name: Rust tests
+        run: cargo test --workspace --locked
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Graph interaction tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QT_QUICK_BACKEND: software
+        run: /usr/lib/qt6/bin/qmltestrunner -input tests/qml
+
+  midi-sanitizers:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config lv2-dev
+      - name: Malformed MIDI regression tests
+        run: >-
+          make -C zestins test BUILD=../target/zestins-sanitized
+          CFLAGS='-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all'
+          LDFLAGS='-fsanitize=address,undefined'

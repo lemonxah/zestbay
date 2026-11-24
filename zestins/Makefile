@@ -14,6 +14,12 @@ DSP_SRC  := zestins.c $(wildcard dsp/*.c)
 
 all: $(BUNDLE)/zestins.so $(BUNDLE)/zestins_ui.so $(BUNDLE)/manifest.ttl
 
+test: $(BUILD)/test-midi
+	$(BUILD)/test-midi
+
+$(BUILD)/test-midi: tests/midi.c dsp/midi_utility.c $(HEADERS) | $(BUNDLE)
+	$(CC) $(ZFLAGS) $(CFLAGS) $(LV2_CFLAGS) tests/midi.c -o $@ $(LDFLAGS) -lm
+
 $(BUNDLE):
 	mkdir -p $@
 
@@ -42,4 +48,4 @@ uninstall:
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all install uninstall clean
+.PHONY: all test install uninstall clean

@@ -101,7 +101,7 @@ static void note_off(Synth *s, uint8_t ch, uint8_t note) {
 }
 
 static void handle_midi(Synth *s, const uint8_t *m, uint32_t size) {
-    if (size < 2)
+    if (!midi_message_valid(m, size) || size < 2)
         return;
     uint8_t type = m[0] & 0xF0, ch = m[0] & 0x0F;
     switch (type) {

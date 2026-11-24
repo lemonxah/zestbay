@@ -69,3 +69,12 @@ zestins-deb image="ubuntu:24.04":
 [doc('Build the Zestins .rpm inside a Fedora container: pkg/rpm/rpmbuild/RPMS/')]
 zestins-rpm image="fedora:latest":
     pkg/rpm/build-zestins-rpm.sh --container {{image}}
+
+test-qml:
+    QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software /usr/lib/qt6/bin/qmltestrunner -input tests/qml
+
+test-dsp:
+    make -C zestins test BUILD=../target/zestins-sanitized CFLAGS='-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all' LDFLAGS='-fsanitize=address,undefined'
+
+check: test test-qml test-dsp
+    cargo clippy --workspace --all-targets --locked -- -D warnings

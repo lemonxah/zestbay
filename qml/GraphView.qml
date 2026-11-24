@@ -1,8 +1,54 @@
+import "graph/Placement.js" as Placement
+import "graph/Input.js" as Input
+import "graph/Data.js" as Data
+import "graph/HitTesting.js" as HitTesting
+import "graph/Nodes.js" as Nodes
+import "graph/Meters.js" as Meters
+import "graph/Viewport.js" as Viewport
+import "graph/Drawing.js" as Drawing
+import "graph/Wires.js" as Wires
+import "graph/Selection.js" as Selection
+import "graph/History.js" as History
+import "graph/Subgraphs.js" as Subgraphs
+import "graph/Paint.js" as Paint
 import QtQuick
 import QtQuick.Controls
 
 Item {
     id: graphView
+
+    readonly property var theme: Theme
+    readonly property var glyphs: Glyphs
+    readonly property var elements: ({
+        autoLayoutAllDialog: autoLayoutAllDialog,
+        blockContextMenu: graphMenus.elements.blockContextMenu,
+        canvas: canvas,
+        canvasContextMenu: graphMenus.elements.canvasContextMenu,
+        cueQuietTimer: cueQuietTimer,
+        cueTimer: cueTimer,
+        deleteSelectionDialog: graphMenus.elements.deleteSelectionDialog,
+        hScrollBar: graphTools.elements.hScrollBar,
+        linkContextMenu: graphMenus.elements.linkContextMenu,
+        mouseArea: mouseArea,
+        nameMetrics: nameMetrics,
+        nameTimer: nameTimer,
+        nameTip: nameTip,
+        nodeContextMenu: graphMenus.elements.nodeContextMenu,
+        nudgeTimer: nudgeTimer,
+        orphanTimer: orphanTimer,
+        pinTip: pinTip,
+        portContextMenu: graphMenus.elements.portContextMenu,
+        presetMenu: graphMenus.elements.presetMenu,
+        presetSaveDialog: graphMenus.elements.presetSaveDialog,
+        repaintTimer: repaintTimer,
+        subgraphDialog: graphMenus.elements.subgraphDialog,
+        toast: graphTools.elements.toast,
+        toastText: graphTools.elements.toastText,
+        toastTimer: graphTools.elements.toastTimer,
+        vScrollBar: graphTools.elements.vScrollBar,
+        vdevDialog: graphMenus.elements.vdevDialog,
+        viewportSaveTimer: viewportSaveTimer
+    })
 
     required property var controller
 
@@ -61,74 +107,11 @@ Item {
         applyDensity();
     }
     function applyDensity() {
-        densityMoved = 0;
-        if (!layoutLoaded)
-            return;
-        refreshData();
-        var before = {};
-        for (var i = 0; i < nodes.length; i++) {
-            if (nodePositions[nodes[i].id])
-                before[nodes[i].id] = {
-                    x: nodePositions[nodes[i].id].x,
-                    y: nodePositions[nodes[i].id].y
-                };
-        }
-        separateOverlaps();
-        var entry = recordMove("re-space", before);
-        if (entry) {
-            densityMoved = entry.items.length;
-            persistLayout();
-        }
-        canvas.requestPaint();
+        return Placement.applyDensity(graphView);
     }
 
     function separateOverlaps() {
-        var gap = nodeSpacing;
-        for (var pass = 0; pass < 40; pass++) {
-            var vis = [];
-            for (var i = 0; i < nodes.length; i++) {
-                var n = nodes[i];
-                if ((n.layoutKey && hiddenNodes[n.layoutKey]) || !nodePositions[n.id])
-                    continue;
-                vis.push({
-                    node: n,
-                    x: nodePositions[n.id].x,
-                    y: nodePositions[n.id].y,
-                    w: getNodeWidth(n.id),
-                    h: calculateNodeHeight(n)
-                });
-            }
-            vis.sort((a, b) => a.y - b.y || a.x - b.x);
-            var fixed = false;
-            for (var ai = 0; ai < vis.length && !fixed; ai++) {
-                for (var bi = ai + 1; bi < vis.length; bi++) {
-                    var a = vis[ai], b = vis[bi];
-                    if (!(a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y))
-                        continue;
-                    if (nodeIsPinned(b.node) && !nodeIsPinned(a.node)) {
-                        var up = b.y - a.h - gap;
-                        if (snapToGrid)
-                            up = Math.floor(up / gridSize) * gridSize;
-                        nodePositions[a.node.id] = {
-                            x: a.x,
-                            y: up
-                        };
-                    } else {
-                        var down = a.y + a.h + gap;
-                        if (snapToGrid)
-                            down = Math.ceil(down / gridSize) * gridSize;
-                        nodePositions[b.node.id] = {
-                            x: b.x,
-                            y: down
-                        };
-                    }
-                    fixed = true;
-                    break;
-                }
-            }
-            if (!fixed)
-                break;
-        }
+        return Placement.separateOverlaps(graphView);
     }
 
     property int connectFromPortId: -1
@@ -195,16 +178,11 @@ Item {
     property var dragStartPos: null
 
     function setDragMode(mode) {
-        if ((mode !== "grab" && mode !== "select") || mode === dragMode)
-            return;
-        dragMode = mode;
-        controller.set_preference("drag_mode", mode);
+        return Input.setDragMode(graphView, mode);
     }
 
     function toggleDragMode() {
-        if (grabPanning || spacePanning || selectDragging)
-            return;
-        setDragMode(dragMode === "grab" ? "select" : "grab");
+        return Input.toggleDragMode(graphView);
     }
 
     property int contextNodeId: -1
@@ -310,116 +288,35 @@ Item {
     }
 
     function reloadSessionData() {
-        viewportSaveTimer.stop();
-        viewportLoaded = false;
-        layoutLoaded = false;
-        hiddenLoaded = false;
-        pinnedLoaded = false;
-        nodeStylesLoaded = false;
-        savedLayout = {};
-        hiddenNodes = {};
-        snapSuspended = {};
-        snapUnanchoredSince = {};
-        snapSeenAnchored = {};
-        removedMeterKeys = {};
-        pendingMeterAttach = [];
-        pinnedNodes = {};
-        nodePositions = {};
-        placedKeyById = {};
-        placedBaseById = {};
-        appearedAt = {};
-        autoPlaced = {};
-        awaitingLinkPlacement = {};
-        selectedNodes = {};
-        selectedLinks = {};
-        selectedBlocks = {};
-        clearUndo();
-        quietCues();
-        defaultNodeKey = "";
-        currentSubgraph = "";
-        currentSubgraphName = "";
-        mainViewport = null;
-        zoom = 1.0;
-        panX = 0;
-        panY = 0;
-        refreshData();
+        return Data.reloadSessionData(graphView);
     }
 
     function refreshBlocked() {
-        try {
-            blockedPairs = JSON.parse(controller.get_blocked_pairs_json());
-        } catch (e) {
-            blockedPairs = [];
-        }
-        pruneSelectedBlocks();
-        canvas.requestPaint();
+        return HitTesting.refreshBlocked(graphView);
     }
 
     function blockKey(b) {
-        return b.ruleId + "|" + b.source + "|" + b.target;
+        return HitTesting.blockKey(graphView, b);
     }
 
     function pruneSelectedBlocks() {
-        var live = {};
-        for (var i = 0; i < blockedPairs.length; i++)
-            live[blockKey(blockedPairs[i])] = true;
-        var kept = {};
-        var dropped = false;
-        for (var k in selectedBlocks) {
-            if (live[k])
-                kept[k] = selectedBlocks[k];
-            else
-                dropped = true;
-        }
-        if (dropped)
-            selectedBlocks = kept;
-        if (hoveredBlockKey !== "" && !live[hoveredBlockKey])
-            hoveredBlockKey = "";
+        return HitTesting.pruneSelectedBlocks(graphView);
     }
 
     function blockHit(sx, sy) {
-        var c = toCanvas(sx, sy);
-        var threshold = linkHitPx / zoom;
-        var best = null;
-        var bestDist = threshold + 1;
-        for (var i = 0; i < blockGeom.length; i++) {
-            var g = blockGeom[i];
-            var dm = Math.sqrt((c.x - g.mx) * (c.x - g.mx) + (c.y - g.my) * (c.y - g.my));
-            var d = dm <= 10 / zoom ? 0 : distToWire(c.x, c.y, g.x1, g.y1, g.x2, g.y2, "b|" + blockKey(g));
-            if (d < bestDist) {
-                bestDist = d;
-                best = g;
-            }
-        }
-        return best && bestDist <= threshold ? {
-            g: best,
-            dist: bestDist
-        } : null;
+        return HitTesting.blockHit(graphView, sx, sy);
     }
 
     function findBlockAt(sx, sy) {
-        var h = blockHit(sx, sy);
-        return h ? h.g : null;
+        return HitTesting.findBlockAt(graphView, sx, sy);
     }
 
     function wireAt(sx, sy) {
-        var lh = linkHit(sx, sy);
-        var bh = blockHit(sx, sy);
-        if (bh && (!lh || bh.dist <= lh.dist))
-            return {
-                link: -1,
-                block: bh.g
-            };
-        return {
-            link: lh ? lh.id : -1,
-            block: null
-        };
+        return HitTesting.wireAt(graphView, sx, sy);
     }
 
     function showToast(message) {
-        toastText.text = message;
-        toast.opacity = 1;
-        toastTimer.restart();
+        return Data.showToast(graphView, message);
     }
 
     Connections {
@@ -431,60 +328,31 @@ Item {
     }
 
     function portSortCmp(a, b) {
-        var am = a.mediaType === "Midi" ? 0 : 1;
-        var bm = b.mediaType === "Midi" ? 0 : 1;
-        return am !== bm ? am - bm : naturalCmp(a.sortName || a.name, b.sortName || b.name);
+        return Data.portSortCmp(graphView, a, b);
     }
 
     function getSortedPorts(nodeId) {
-        return sortedPortsByNode[nodeId] || {
-            inputs: [],
-            outputs: []
-        };
+        return Data.getSortedPorts(graphView, nodeId);
     }
 
     function linkSig(link) {
-        return {
-            o: link.outputPortId,
-            i: link.inputPortId,
-            on: link.outputNodeId,
-            inn: link.inputNodeId
-        };
+        return Data.linkSig(graphView, link);
     }
 
     function linkMatchesSig(link, sig) {
-        return !!link && !!sig && link.outputPortId === sig.o && link.inputPortId === sig.i && link.outputNodeId === sig.on && link.inputNodeId === sig.inn;
+        return Data.linkMatchesSig(graphView, link, sig);
     }
 
     function nodeSig(node) {
-        return {
-            key: (node && node.layoutKey) || ""
-        };
+        return Data.nodeSig(graphView, node);
     }
 
     function findLinkData(linkId) {
-        for (var i = 0; i < links.length; i++) {
-            if (links[i].id === linkId)
-                return links[i];
-        }
-        return null;
+        return Data.findLinkData(graphView, linkId);
     }
 
     function naturalCmp(a, b) {
-        var ax = a.split(/(\d+)/), bx = b.split(/(\d+)/);
-        for (var i = 0; i < Math.min(ax.length, bx.length); i++) {
-            var an = parseInt(ax[i]), bn = parseInt(bx[i]);
-            if (!isNaN(an) && !isNaN(bn)) {
-                if (an !== bn)
-                    return an - bn;
-            } else {
-                if (ax[i] < bx[i])
-                    return -1;
-                if (ax[i] > bx[i])
-                    return 1;
-            }
-        }
-        return ax.length - bx.length;
+        return Data.naturalCmp(graphView, a, b);
     }
 
     property int deferSaveDepth: 0
@@ -492,739 +360,83 @@ Item {
     property var pendingPinnedJson: null
 
     function refreshData() {
-        deferSaveDepth++;
-        try {
-            refreshDataNow();
-        } finally {
-            deferSaveDepth--;
-            if (deferSaveDepth === 0) {
-                if (pendingLayoutJson !== null) {
-                    var layoutJson = pendingLayoutJson;
-                    pendingLayoutJson = null;
-                    controller.save_layout(layoutJson);
-                }
-                if (pendingPinnedJson !== null) {
-                    var pinnedJson = pendingPinnedJson;
-                    pendingPinnedJson = null;
-                    controller.save_pinned(pinnedJson);
-                }
-            }
-        }
+        return Data.refreshData(graphView);
     }
 
     function refreshDataNow() {
-        var sgView = controller.get_subgraph_view ? controller.get_subgraph_view() : "";
-        if (sgView !== currentSubgraph) {
-            if (sgView === "" && mainViewport) {
-                zoom = mainViewport.zoom;
-                panX = mainViewport.panX;
-                panY = mainViewport.panY;
-            }
-            currentSubgraph = sgView;
-            var sgInfo = sgView !== "" ? subgraphInfo(sgView) : null;
-            currentSubgraphName = sgInfo ? sgInfo.name : "";
-        }
-        if (!viewportLoaded) {
-            try {
-                var vp = JSON.parse(controller.get_viewport_json());
-                if (vp.panX !== undefined)
-                    panX = vp.panX;
-                if (vp.panY !== undefined)
-                    panY = vp.panY;
-                if (vp.zoom !== undefined)
-                    zoom = vp.zoom;
-            } catch (e) {}
-            viewportLoaded = true;
-        }
-
-        if (!layoutLoaded) {
-            try {
-                savedLayout = JSON.parse(controller.get_layout_json());
-            } catch (e) {
-                savedLayout = {};
-            }
-            layoutLoaded = true;
-            try {
-                var defNode = controller.get_default_node();
-                if (defNode)
-                    defaultNodeKey = defNode;
-            } catch (e) {}
-        }
-        if (!hiddenLoaded) {
-            try {
-                var hiddenArr = JSON.parse(controller.get_hidden_json());
-                var hSet = {};
-                for (var hi = 0; hi < hiddenArr.length; hi++) {
-                    hSet[hiddenArr[hi]] = true;
-                }
-                hiddenNodes = hSet;
-            } catch (e) {
-                hiddenNodes = {};
-            }
-            try {
-                var docked = JSON.parse(controller.get_docked_meters_json());
-                dockedMeters = docked && typeof docked === "object" && !Array.isArray(docked) ? docked : {};
-            } catch (e) {
-                dockedMeters = {};
-            }
-            for (var dockedKey in dockedMeters)
-                hiddenNodes[dockedKey] = true;
-            hiddenLoaded = true;
-        }
-        if (!pinnedLoaded) {
-            try {
-                var pinnedArr = JSON.parse(controller.get_pinned_json());
-                var pSet = {};
-                for (var pi = 0; pi < pinnedArr.length; pi++) {
-                    pSet[pinnedArr[pi]] = true;
-                }
-                pinnedNodes = pSet;
-            } catch (e) {
-                pinnedNodes = {};
-            }
-            pinnedLoaded = true;
-        }
-        if (!nodeStylesLoaded) {
-            try {
-                var st = JSON.parse(controller.get_node_styles_json());
-                nodeStyles = st && typeof st === "object" && !Array.isArray(st) ? st : {};
-            } catch (e) {
-                nodeStyles = {};
-            }
-            nodeStylesLoaded = true;
-        }
-
-        try {
-            var nodesJson = controller.get_nodes_json();
-            var linksJson = controller.get_links_json();
-            nodes = JSON.parse(nodesJson);
-            links = JSON.parse(linksJson);
-        } catch (e) {
-            nodes = [];
-            links = [];
-        }
-        updateMeterNodeIds();
-        refreshPresetInfo();
-        try {
-            blockedPairs = JSON.parse(controller.get_blocked_pairs_json());
-        } catch (e) {
-            blockedPairs = [];
-        }
-        pruneSelectedBlocks();
-
-        var newPorts = {};
-        for (var i = 0; i < nodes.length; i++) {
-            try {
-                newPorts[nodes[i].id] = JSON.parse(controller.get_ports_json(nodes[i].id));
-            } catch (e) {
-                newPorts[nodes[i].id] = [];
-            }
-        }
-        portsByNode = newPorts;
-        if (insertPreview && dragNodeId >= 0) {
-            insertPreview = null;
-            updateInsertPreview(dragNodeId);
-        }
-
-        var newConnected = {};
-        for (var ci = 0; ci < links.length; ci++) {
-            newConnected[links[ci].outputPortId] = true;
-            newConnected[links[ci].inputPortId] = true;
-        }
-        connectedPorts = newConnected;
-
-        var newSorted = {};
-        var newHeights = {};
-        var newLayouts = {};
-        for (var si = 0; si < nodes.length; si++) {
-            var sn = nodes[si];
-            var sp = newPorts[sn.id] || [];
-            var sorted = {
-                inputs: sp.filter(function (p) {
-                    return p.direction === "Input";
-                }).sort(function (a, b) {
-                    return portSortCmp(a, b);
-                }),
-                outputs: sp.filter(function (p) {
-                    return p.direction === "Output";
-                }).sort(function (a, b) {
-                    return portSortCmp(a, b);
-                })
-            };
-            newSorted[sn.id] = sorted;
-            var lay = computeNodeLayout(sn, sorted);
-            newLayouts[sn.id] = lay;
-            newHeights[sn.id] = lay.height;
-        }
-        sortedPortsByNode = newSorted;
-        nodeLayouts = newLayouts;
-        nodeHeights = newHeights;
-        updateSnapStates();
-        uniqueKeyById = buildUniqueLayoutKeys();
-        calculateNodeWidths();
-        widthsDirty = true;
-
-        var newPortMedia = {};
-        for (var nid in newPorts) {
-            var pp = newPorts[nid];
-            for (var pi2 = 0; pi2 < pp.length; pi2++) {
-                newPortMedia[pp[pi2].id] = pp[pi2].mediaType || "Unknown";
-            }
-        }
-        portMediaTypes = newPortMedia;
-        dragSourcePortId = -1;
-
-        var liveIds = {};
-        for (var lv = 0; lv < nodes.length; lv++)
-            liveIds[nodes[lv].id] = true;
-        for (var stale in nodePositions) {
-            if (!liveIds[stale])
-                delete nodePositions[stale];
-        }
-        for (var staleA in awaitingLinkPlacement) {
-            if (!liveIds[staleA])
-                delete awaitingLinkPlacement[staleA];
-        }
-        for (var staleP in autoPlaced) {
-            if (!liveIds[staleP])
-                delete autoPlaced[staleP];
-        }
-        for (var staleK in placedKeyById) {
-            if (!liveIds[staleK])
-                delete placedKeyById[staleK];
-        }
-        for (var staleB in placedBaseById) {
-            if (!liveIds[staleB])
-                delete placedBaseById[staleB];
-        }
-        for (var staleT in appearedAt) {
-            if (!liveIds[staleT])
-                delete appearedAt[staleT];
-        }
-
-        var liveNodeById = {};
-        for (var ln = 0; ln < nodes.length; ln++)
-            liveNodeById[nodes[ln].id] = nodes[ln];
-        var keptNodes = {};
-        var nodesPruned = false;
-        for (var selN in selectedNodes) {
-            var selNode = liveNodeById[selN];
-            if (selNode && selectedNodes[selN] && selectedNodes[selN].key === (selNode.layoutKey || "")) {
-                keptNodes[selN] = selectedNodes[selN];
-            } else {
-                nodesPruned = true;
-            }
-        }
-        if (nodesPruned)
-            selectedNodes = keptNodes;
-
-        var liveLinkById = {};
-        for (var lk = 0; lk < links.length; lk++)
-            liveLinkById[links[lk].id] = links[lk];
-        var keptLinks = {};
-        var linksPruned = false;
-        for (var selL in selectedLinks) {
-            if (linkMatchesSig(liveLinkById[selL], selectedLinks[selL])) {
-                keptLinks[selL] = selectedLinks[selL];
-            } else {
-                linksPruned = true;
-            }
-        }
-        if (linksPruned)
-            selectedLinks = keptLinks;
-
-        var bypassPruned = false;
-        for (var bpId in localBypassState) {
-            var bpNode = liveNodeById[bpId];
-            if (!bpNode || bpNode.pluginBypassed !== undefined) {
-                delete localBypassState[bpId];
-                bypassPruned = true;
-            }
-        }
-        if (bypassPruned)
-            localBypassState = localBypassState;
-        var enabledPruned = false;
-        for (var enId in localEnabledState) {
-            var enNode = liveNodeById[enId];
-            if (!enNode || enNode.pluginEnabled !== undefined) {
-                delete localEnabledState[enId];
-                enabledPruned = true;
-            }
-        }
-        if (enabledPruned)
-            localEnabledState = localEnabledState;
-
-        refreshSeq++;
-        var nowMs = Date.now();
-        var appeared = [];
-        for (var ni = 0; ni < nodes.length; ni++) {
-            var n = nodes[ni];
-            var key = uniqueKeyById[n.id] || "";
-            var baseKey = n.layoutKey || "";
-            if (n.id in nodePositions) {
-                var placedKey = placedKeyById[n.id];
-                if (placedKey !== undefined && placedKey !== key) {
-                    if (placedBaseById[n.id] !== baseKey && key && savedLayout[key]) {
-                        var resaved = savedLayout[key];
-                        nodePositions[n.id] = {
-                            x: resaved[0],
-                            y: resaved[1]
-                        };
-                        delete autoPlaced[n.id];
-                        delete awaitingLinkPlacement[n.id];
-                    } else {
-                        persistLayout();
-                    }
-                    placedKeyById[n.id] = key;
-                    placedBaseById[n.id] = baseKey;
-                }
-                continue;
-            }
-            placedKeyById[n.id] = key;
-            placedBaseById[n.id] = baseKey;
-            appearedAt[n.id] = {
-                t: nowMs,
-                seq: refreshSeq
-            };
-            appeared.push(n.id);
-
-            if (key && savedLayout[key]) {
-                var saved = savedLayout[key];
-                var restored = {
-                    x: saved[0],
-                    y: saved[1]
-                };
-                nodePositions[n.id] = restored;
-                if (!nodeIsPinned(n) && !(n.layoutKey && hiddenNodes[n.layoutKey]) && spotIsTaken(n, restored.x, restored.y)) {
-                    nodePositions[n.id] = findFreeSpot(n, restored.x, restored.y, 0, false);
-                    persistLayout();
-                }
-            } else if (n.type === "Plugin" && pendingPluginPosition && (pendingPluginName === "" || n.name === pendingPluginName)) {
-                var anchor = pendingPluginPosition;
-                pendingPluginPosition = null;
-                pendingPluginName = "";
-                nodePositions[n.id] = {
-                    x: anchor.x,
-                    y: anchor.y
-                };
-                var spot = findFreeSpot(n, anchor.x, anchor.y, 0, true);
-                if (spot) {
-                    nodePositions[n.id] = spot;
-                    persistLayout();
-                } else {
-                    startPlacing(n.id);
-                }
-            } else {
-                autoPlaced[n.id] = true;
-                if (!placeNearPeer(n)) {
-                    var pa = provisionalAnchor(n);
-                    nodePositions[n.id] = findFreeSpot(n, pa.x, pa.y, pa.dir, false);
-                    persistLayout();
-                    if (!nodeIsPinned(n)) {
-                        awaitingLinkPlacement[n.id] = true;
-                        awaitingLinkPlacement = awaitingLinkPlacement;
-                    }
-                }
-            }
-
-            if (n.type === "Plugin" && n.layoutKey && !pinnedNodes[n.layoutKey]) {
-                pinnedNodes[n.layoutKey] = true;
-                pinnedNodes = pinnedNodes;
-                persistPinned();
-            }
-        }
-
-        var stillAwaiting = {};
-        for (var aid in awaitingLinkPlacement) {
-            var anode = findNodeData(parseInt(aid));
-            if (!anode)
-                continue;
-            if (nodeIsPinned(anode) || !isFresh(anode.id) || nodeIdIsHidden(anode.id))
-                continue;
-            if (placeNearPeer(anode))
-                continue;
-            if (!nodeHasLinks(anode.id))
-                stillAwaiting[aid] = true;
-        }
-        awaitingLinkPlacement = stillAwaiting;
-
-        for (var bid in autoPlaced) {
-            if (awaitingLinkPlacement[bid])
-                continue;
-            var bnode = findNodeData(parseInt(bid));
-            if (!bnode || nodeIsPinned(bnode) || nodeIdIsHidden(bnode.id))
-                continue;
-            if (!isFresh(bnode.id)) {
-                delete autoPlaced[bid];
-                continue;
-            }
-            if (nodeHasBackwardLink(parseInt(bid))) {
-                delete autoPlaced[bid];
-                placeNearPeer(bnode);
-            }
-        }
-
-        noteAppeared(appeared);
-        processPendingMeterAttach();
-
-        if (!initialViewChecked && nodes.length > 0 && width > 0 && height > 0) {
-            initialViewChecked = true;
-            var b = contentBounds();
-            if (b && (b.right * zoom + panX < 0 || b.left * zoom + panX > width || b.bottom * zoom + panY < 0 || b.top * zoom + panY > height))
-                fitToView();
-        }
-
-        if (fitAfterRefresh && nodes.length > 0 && width > 0 && height > 0) {
-            fitAfterRefresh = false;
-            Qt.callLater(fitToView);
-        }
-
-        canvas.requestPaint();
-        repaintTimer.restart();
+        return Data.refreshDataNow(graphView);
     }
 
     function nodeIdIsHidden(nodeId) {
-        var n = findNodeData(nodeId);
-        return !!(n && n.layoutKey && hiddenNodes[n.layoutKey]);
+        return Placement.nodeIdIsHidden(graphView, nodeId);
     }
 
     function nodeHasBackwardLink(nodeId) {
-        for (var li = 0; li < links.length; li++) {
-            var l = links[li];
-            if (l.outputNodeId !== nodeId && l.inputNodeId !== nodeId)
-                continue;
-            if (l.outputNodeId === l.inputNodeId)
-                continue;
-            if (nodeIdIsHidden(l.outputNodeId) || nodeIdIsHidden(l.inputNodeId))
-                continue;
-            var fromPos = nodePositions[l.outputNodeId];
-            var toPos = nodePositions[l.inputNodeId];
-            if (!fromPos || !toPos)
-                continue;
-            var outX = fromPos.x + (getNodeWidth(l.outputNodeId) || minNodeWidth);
-            if (toPos.x < outX - 20)
-                return true;
-        }
-        return false;
+        return Placement.nodeHasBackwardLink(graphView, nodeId);
     }
 
     function nodeIsPinned(node) {
-        return !!(node && node.layoutKey && pinnedNodes[node.layoutKey]);
+        return Placement.nodeIsPinned(graphView, node);
     }
 
     function isFresh(nodeId) {
-        var a = appearedAt[nodeId];
-        return !!a && Date.now() - a.t <= settleWindowMs;
+        return Placement.isFresh(graphView, nodeId);
     }
 
     function nodeHasLinks(nodeId) {
-        for (var li = 0; li < links.length; li++) {
-            var l = links[li];
-            if (l.outputNodeId === nodeId && !nodeIdIsHidden(l.inputNodeId))
-                return true;
-            if (l.inputNodeId === nodeId && !nodeIdIsHidden(l.outputNodeId))
-                return true;
-        }
-        return false;
+        return Placement.nodeHasLinks(graphView, nodeId);
     }
 
     function placementMobility(node) {
-        if (node.type === "StreamOutput" || node.type === "StreamInput")
-            return 2;
-        if (node.type === "Source" || node.type === "Sink" || node.type === "Duplex" || node.type === "Plugin" || node.type === "Subgraph")
-            return 0;
-        return 1;
+        return Placement.placementMobility(graphView, node);
     }
 
     function peerAnchors(node, peer) {
-        if (!awaitingLinkPlacement[peer.id] || !isFresh(peer.id))
-            return true;
-        var mn = placementMobility(node), mp = placementMobility(peer);
-        if (mn !== mp)
-            return mn > mp;
-        var an = appearedAt[node.id], ap = appearedAt[peer.id];
-        var sn = an ? an.seq : 0, sp = ap ? ap.seq : 0;
-        if (sn !== sp)
-            return sn > sp;
-        return node.id > peer.id;
+        return Placement.peerAnchors(graphView, node, peer);
     }
 
     function placementPeer(node) {
-        var nodeId = node.id;
-        for (var li = 0; li < links.length; li++) {
-            var link = links[li];
-            var peerId = -1;
-            var nodeFeedsPeer = false;
-            if (link.outputNodeId === nodeId && link.inputNodeId !== nodeId) {
-                peerId = link.inputNodeId;
-                nodeFeedsPeer = true;
-            } else if (link.inputNodeId === nodeId && link.outputNodeId !== nodeId) {
-                peerId = link.outputNodeId;
-            }
-            if (peerId < 0 || !nodePositions[peerId])
-                continue;
-            var peerNode = findNodeData(peerId);
-            if (!peerNode || (peerNode.layoutKey && hiddenNodes[peerNode.layoutKey]))
-                continue;
-            if (!peerAnchors(node, peerNode))
-                continue;
-            return {
-                peer: peerNode,
-                nodeFeedsPeer: nodeFeedsPeer
-            };
-        }
-        return null;
+        return Placement.placementPeer(graphView, node);
     }
 
     function placeNearPeer(node) {
-        if (nodeIsPinned(node))
-            return false;
-        var pp = placementPeer(node);
-        if (!pp)
-            return false;
-        var anchor = adjacentAnchor(node, pp.peer, pp.nodeFeedsPeer);
-        nodePositions[node.id] = findFreeSpot(node, anchor.x, anchor.y, anchor.dir, false);
-        delete awaitingLinkPlacement[node.id];
-        persistLayout();
-        return true;
+        return Placement.placeNearPeer(graphView, node);
     }
 
     function adjacentAnchor(node, peer, nodeFeedsPeer) {
-        var peerPos = nodePositions[peer.id];
-        var w = getNodeWidth(node.id);
-        var peerW = getNodeWidth(peer.id);
-        var x = nodeFeedsPeer ? (peerPos.x - w - placeColumnGap) : (peerPos.x + peerW + placeColumnGap);
-        if (snapToGrid)
-            x = nodeFeedsPeer ? Math.floor(x / gridSize) * gridSize : Math.ceil(x / gridSize) * gridSize;
-        return {
-            x: x,
-            y: peerPos.y,
-            dir: nodeFeedsPeer ? -1 : 1
-        };
+        return Placement.adjacentAnchor(graphView, node, peer, nodeFeedsPeer);
     }
 
     function findNodeByLayoutKey(key) {
-        if (!key)
-            return null;
-        for (var i = 0; i < nodes.length; i++) {
-            if (nodes[i].layoutKey === key)
-                return nodes[i];
-        }
-        return null;
+        return Placement.findNodeByLayoutKey(graphView, key);
     }
 
     function flowRank(type) {
-        if (type === "Source")
-            return 0;
-        if (type === "StreamOutput")
-            return 1;
-        if (type === "StreamInput")
-            return 3;
-        if (type === "Sink" || type === "Duplex")
-            return 4;
-        return 2;
+        return Placement.flowRank(graphView, type);
     }
 
     function provisionalAnchor(node) {
-        var defNode = findNodeByLayoutKey(defaultNodeKey);
-        if (defNode && defNode.id !== node.id && nodePositions[defNode.id] && !(defNode.layoutKey && hiddenNodes[defNode.layoutKey])) {
-            var nodeFeedsDefault = flowRank(node.type) <= flowRank(defNode.type);
-            return adjacentAnchor(node, defNode, nodeFeedsDefault);
-        }
-        return kindAnchor(node);
+        return Placement.provisionalAnchor(graphView, node);
     }
 
     function resolveNodeOverlap(node, skipIds) {
-        var pos = nodePositions[node.id];
-        if (!pos || nodeIdIsHidden(node.id))
-            return;
-        var h = calculateNodeHeight(node);
-        var w = getNodeWidth(node.id) || minNodeWidth;
-        var maxAttempts = 50;
-        var spacing = snapGap;
-        for (var attempt = 0; attempt < maxAttempts; attempt++) {
-            var overlaps = false;
-            for (var oi = 0; oi < nodes.length; oi++) {
-                var other = nodes[oi];
-                if (other.id === node.id)
-                    continue;
-                if (skipIds && skipIds[other.id])
-                    continue;
-                if (other.layoutKey && hiddenNodes[other.layoutKey])
-                    continue;
-                var opos = nodePositions[other.id];
-                if (!opos)
-                    continue;
-                var oh = calculateNodeHeight(other);
-                var ow = getNodeWidth(other.id) || minNodeWidth;
-
-                if (pos.x < opos.x + ow && pos.x + w > opos.x && pos.y < opos.y + oh && pos.y + h > opos.y) {
-                    var overlapTop = opos.y + oh - pos.y;
-                    var overlapBot = pos.y + h - opos.y;
-                    var minH = Math.min(h, oh);
-                    if (overlapTop < minH * 0.7) {
-                        pos = {
-                            x: pos.x,
-                            y: opos.y - h - spacing
-                        };
-                        if (snapToGrid)
-                            pos.y = Math.floor(pos.y / gridSize) * gridSize;
-                    } else {
-                        pos = {
-                            x: pos.x,
-                            y: opos.y + oh + spacing
-                        };
-                        if (snapToGrid)
-                            pos.y = Math.ceil(pos.y / gridSize) * gridSize;
-                    }
-                    nodePositions[node.id] = pos;
-                    overlaps = true;
-                    break;
-                }
-            }
-            if (!overlaps)
-                break;
-        }
+        return Placement.resolveNodeOverlap(graphView, node, skipIds);
     }
 
     function gridPos(p) {
-        if (!snapToGrid || !p)
-            return p;
-        return {
-            x: Math.round(p.x / gridSize) * gridSize,
-            y: Math.round(p.y / gridSize) * gridSize
-        };
+        return Placement.gridPos(graphView, p);
     }
 
     function alignAllToGrid() {
-        var moved = false;
-        for (var i = 0; i < nodes.length; i++) {
-            var n = nodes[i];
-            if (n.layoutKey && hiddenNodes[n.layoutKey])
-                continue;
-            var p = nodePositions[n.id];
-            if (!p)
-                continue;
-            var g = gridPos(p);
-            if (g.x !== p.x || g.y !== p.y) {
-                nodePositions[n.id] = g;
-                moved = true;
-            }
-        }
-        if (!moved)
-            return;
-        for (var j = 0; j < nodes.length; j++) {
-            if (nodePositions[nodes[j].id])
-                resolveNodeOverlap(nodes[j]);
-        }
-        persistLayout();
-        canvas.requestPaint();
+        return Placement.alignAllToGrid(graphView);
     }
 
     function computeSnap(nodeId, rawX, rawY, skipIds) {
-        var w = getNodeWidth(nodeId) || minNodeWidth;
-        var node = findNodeData(nodeId);
-        var h = node ? calculateNodeHeight(node) : 80;
-        var gap = snapGap;
-        var best = {
-            x: null,
-            dx: snapThreshold + 1,
-            gx: 0,
-            y: null,
-            dy: snapThreshold + 1,
-            gy: 0
-        };
-
-        function tryX(value, guide) {
-            var d = Math.abs(rawX - value);
-            if (d < best.dx) {
-                best.dx = d;
-                best.x = value;
-                best.gx = guide;
-            }
-        }
-        function tryY(value, guide) {
-            var d = Math.abs(rawY - value);
-            if (d < best.dy) {
-                best.dy = d;
-                best.y = value;
-                best.gy = guide;
-            }
-        }
-
-        var visL = -panX / zoom;
-        var visT = -panY / zoom;
-        var visR = (width - panX) / zoom;
-        var visB = (height - panY) / zoom;
-
-        for (var i = 0; i < nodes.length; i++) {
-            var other = nodes[i];
-            if (other.id === nodeId)
-                continue;
-            if (skipIds && skipIds[other.id])
-                continue;
-            if (other.layoutKey && hiddenNodes[other.layoutKey])
-                continue;
-            var opos = nodePositions[other.id];
-            if (!opos)
-                continue;
-            var ow = getNodeWidth(other.id) || minNodeWidth;
-            var oh = calculateNodeHeight(other);
-            if (opos.x + ow < visL || opos.x > visR || opos.y + oh < visT || opos.y > visB)
-                continue;
-            tryX(opos.x, opos.x);
-            tryX(opos.x + ow + gap, opos.x + ow);
-            tryX(opos.x - gap - w, opos.x);
-
-            tryY(opos.y, opos.y);
-            tryY(opos.y + oh - h, opos.y + oh);
-            tryY(opos.y + oh + gap, opos.y + oh);
-            tryY(opos.y - gap - h, opos.y);
-        }
-
-        var lines = [];
-        var snappedX = rawX;
-        var snappedY = rawY;
-        if (best.x !== null && best.dx <= snapThreshold) {
-            snappedX = best.x;
-            lines.push({
-                axis: "x",
-                pos: best.gx
-            });
-        }
-        if (best.y !== null && best.dy <= snapThreshold) {
-            snappedY = best.y;
-            lines.push({
-                axis: "y",
-                pos: best.gy
-            });
-        }
-        return {
-            x: snappedX,
-            y: snappedY,
-            lines: lines
-        };
+        return Placement.computeSnap(graphView, nodeId, rawX, rawY, skipIds);
     }
 
     function persistLayout() {
-        var layoutObj = {};
-        for (var existingKey in savedLayout) {
-            layoutObj[existingKey] = savedLayout[existingKey];
-        }
-        for (var ni = 0; ni < nodes.length; ni++) {
-            var n = nodes[ni];
-            var key = uniqueKeyById[n.id] || "";
-            var pos = nodePositions[n.id];
-            if (key && pos) {
-                layoutObj[key] = [pos.x, pos.y];
-            }
-        }
-        savedLayout = layoutObj;
-        var json = JSON.stringify(layoutObj);
-        if (deferSaveDepth > 0)
-            pendingLayoutJson = json;
-        else
-            controller.save_layout(json);
+        return Placement.persistLayout(graphView);
     }
 
     Timer {
@@ -1262,1064 +474,73 @@ Item {
     readonly property bool contextIsMeter: contextNode !== null && isMeterNode(contextNode)
     readonly property bool contextCanBeDefault: contextNode !== null && (contextNode.type === "Sink" || contextNode.type === "Duplex" || contextNode.type === "Plugin")
 
-    ZbMenu {
-        id: nodeContextMenu
-
-        ZbMenuItem {
-            text: "Open subgraph"
-            visible: contextIsSubgraph
-            height: visible ? implicitHeight : 0
-            onTriggered: enterSubgraph(contextNode.subgraphId)
-        }
-        ZbMenuItem {
-            text: "Edit subgraph\u2026"
-            visible: contextIsSubgraph
-            height: visible ? implicitHeight : 0
-            onTriggered: openSubgraphEditor(contextNode.subgraphId)
-        }
-        ZbMenuItem {
-            text: "Duplicate"
-            visible: contextIsSubgraph
-            height: visible ? implicitHeight : 0
-            onTriggered: duplicateSubgraph(contextNode)
-        }
-        ZbMenuItem {
-            text: "Save as template\u2026"
-            visible: contextIsSubgraph
-            height: visible ? implicitHeight : 0
-            onTriggered: {
-                templateSubgraphId = contextNode.subgraphId;
-                templateNameField.text = contextNode.name;
-                templateNameDialog.open();
-            }
-        }
-        ZbMenuSeparator {
-            visible: contextIsSubgraph
-            height: visible ? implicitHeight : 0
-        }
-
-        ZbMenuItem {
-            readonly property int snapped: contextNode ? metersSnappedOn(contextNode.id).length : 0
-            text: snapped > 1 ? "Unsnap " + snapped + " meters" : "Unsnap meter"
-            visible: snapped > 0
-            height: visible ? implicitHeight : 0
-            onTriggered: unsnapMetersOn(contextNode.id)
-        }
-
-        ZbMenuItem {
-            readonly property int snapped: contextNode ? metersSnappedOn(contextNode.id).length : 0
-            text: snapped > 1 ? "Remove " + snapped + " snapped meters" : "Remove snapped meter"
-            destructive: true
-            visible: snapped > 0
-            height: visible ? implicitHeight : 0
-            onTriggered: removeMetersOn(contextNode.id)
-        }
-
-        ZbMenuItem {
-            readonly property int count: contextNode ? audioPortsOf(contextNode.id, false).length : 0
-            text: "Meter inputs" + (count > 0 ? " (" + count + ")" : "")
-            visible: canMeterPorts(contextNode, false)
-            height: visible ? implicitHeight : 0
-            onTriggered: addMetersTo(contextNode, false)
-        }
-
-        ZbMenuItem {
-            readonly property int count: contextNode ? audioPortsOf(contextNode.id, true).length : 0
-            text: "Meter outputs" + (count > 0 ? " (" + count + ")" : "")
-            visible: canMeterPorts(contextNode, true)
-            height: visible ? implicitHeight : 0
-            onTriggered: addMetersTo(contextNode, true)
-        }
-
-        ZbMenuItem {
-            text: "Hide"
-            onTriggered: {
-                if (contextNode && contextNode.layoutKey) {
-                    hiddenNodes[contextNode.layoutKey] = true;
-                    hiddenNodes = hiddenNodes;
-                    persistHidden();
-                    pushUndo({
-                        kind: "hide",
-                        label: "hide 1 node",
-                        keys: [contextNode.layoutKey]
-                    });
-                    canvas.requestPaint();
-                }
-            }
-        }
-
-        ZbMenuItem {
-            text: contextNode && contextNode.layoutKey && pinnedNodes[contextNode.layoutKey] ? "Unpin" : "Pin"
-            onTriggered: togglePinned(contextNode)
-        }
-
-        ZbMenuItem {
-            text: "Connected ports only"
-            checkable: true
-            checked: !!contextNode && !!nodeStyles && isConnectedOnly(contextNode)
-            visible: !!contextNode && !!contextNode.layoutKey && !contextIsMeter
-            height: visible ? implicitHeight : 0
-            onToggled: setNodeStyle(contextNode, "connectedOnly", !isConnectedOnly(contextNode))
-        }
-
-        ZbMenu {
-            id: nodeColorMenu
-            title: "Colour"
-            enabled: !!contextNode && !!contextNode.layoutKey
-            readonly property string current: contextNode && nodeStyles ? ((nodeStyle(contextNode) || {}).color || "") : ""
-            ZbMenuItem {
-                text: "Default"
-                selected: nodeColorMenu.current === ""
-                onTriggered: setNodeStyle(contextNode, "color", "")
-            }
-            ZbMenuSeparator {}
-            ZbMenuItem {
-                text: "Teal"
-                swatch: Theme.catHardware
-                selected: nodeColorMenu.current === "catHardware"
-                onTriggered: setNodeStyle(contextNode, "color", "catHardware")
-            }
-            ZbMenuItem {
-                text: "Blue"
-                swatch: Theme.catVirtual
-                selected: nodeColorMenu.current === "catVirtual"
-                onTriggered: setNodeStyle(contextNode, "color", "catVirtual")
-            }
-            ZbMenuItem {
-                text: "Green"
-                swatch: Theme.catSubgraph
-                selected: nodeColorMenu.current === "catSubgraph"
-                onTriggered: setNodeStyle(contextNode, "color", "catSubgraph")
-            }
-            ZbMenuItem {
-                text: "Accent"
-                swatch: Theme.accent
-                selected: nodeColorMenu.current === "accent"
-                onTriggered: setNodeStyle(contextNode, "color", "accent")
-            }
-            ZbMenuItem {
-                text: "Orange"
-                swatch: Theme.catApp
-                selected: nodeColorMenu.current === "catApp"
-                onTriggered: setNodeStyle(contextNode, "color", "catApp")
-            }
-            ZbMenuItem {
-                text: "Purple"
-                swatch: Theme.catPlugin
-                selected: nodeColorMenu.current === "catPlugin"
-                onTriggered: setNodeStyle(contextNode, "color", "catPlugin")
-            }
-            ZbMenuItem {
-                text: "Pink"
-                swatch: Theme.catMidi
-                selected: nodeColorMenu.current === "catMidi"
-                onTriggered: setNodeStyle(contextNode, "color", "catMidi")
-            }
-            ZbMenuItem {
-                text: "Red"
-                swatch: Theme.textDestructive
-                selected: nodeColorMenu.current === "textDestructive"
-                onTriggered: setNodeStyle(contextNode, "color", "textDestructive")
-            }
-        }
-
-        ZbMenuSeparator {
-            visible: contextCanBeDefault
-            height: visible ? implicitHeight : 0
-        }
-
-        ZbMenuItem {
-            text: contextNode && contextNode.layoutKey === defaultNodeKey && defaultNodeKey !== "" ? "Clear default" : "Set as default"
-            visible: contextCanBeDefault
-            height: visible ? implicitHeight : 0
-            onTriggered: {
-                if (contextNode) {
-                    var key = contextNode.layoutKey || "";
-                    if (key === defaultNodeKey && defaultNodeKey !== "") {
-                        defaultNodeKey = "";
-                        controller.set_default_node("");
-                    } else if (key !== "") {
-                        defaultNodeKey = key;
-                        controller.set_default_node(key);
-                    }
-                    canvas.requestPaint();
-                }
-            }
-        }
-
-        ZbMenuSeparator {
-            visible: contextIsPlugin
-            height: visible ? implicitHeight : 0
-        }
-
-        ZbMenuItem {
-            text: "Group into subgraph\u2026"
-            visible: contextIsPlugin && currentSubgraph === ""
-            height: visible ? implicitHeight : 0
-            onTriggered: groupIntoSubgraph(contextNodeId)
-        }
-
-        ZbMenuItem {
-            text: "Rename\u2026"
-            visible: contextIsPlugin
-            height: visible ? implicitHeight : 0
-            onTriggered: {
-                renameField.text = contextNode ? contextNode.name : "";
-                renameDialog.open();
-            }
-        }
-
-        ZbMenuItem {
-            text: "Snap to source port"
-            visible: contextIsMeter
-            enabled: contextIsMeter && canSnapMeter(contextNode, "source")
-            height: visible ? implicitHeight : 0
-            onTriggered: snapMeter(contextNode, "source")
-        }
-
-        ZbMenuItem {
-            text: "Snap to destination port"
-            visible: contextIsMeter
-            enabled: contextIsMeter && canSnapMeter(contextNode, "dest")
-            height: visible ? implicitHeight : 0
-            onTriggered: snapMeter(contextNode, "dest")
-        }
-
-        ZbMenuItem {
-            readonly property string snappedSide: contextIsMeter && contextNode.layoutKey ? (dockedMeters[contextNode.layoutKey] || "") : ""
-            text: "Unsnap meter"
-            visible: snappedSide !== ""
-            height: visible ? implicitHeight : 0
-            onTriggered: {
-                var key = contextNode.layoutKey;
-                var prev = snappedSide;
-                setMeterSnapped(key, "");
-                pushUndo({
-                    kind: "snap",
-                    label: "unsnap meter",
-                    key: key,
-                    side: "",
-                    prevSide: prev
-                });
-            }
-        }
-
-        ZbMenuItem {
-            text: "Open UI\u2026"
-            visible: contextIsPlugin && !contextIsMeter
-            enabled: contextIsPlugin && contextNode.pluginHasUi !== false
-            height: visible ? implicitHeight : 0
-            onTriggered: {
-                if (contextNodeId >= 0)
-                    controller.open_plugin_ui(contextNodeId);
-            }
-        }
-
-        ZbMenuSeparator {
-            visible: contextIsPlugin
-            height: visible ? implicitHeight : 0
-        }
-
-        ZbMenuItem {
-            text: contextIsMeter ? "Remove meter" : "Remove plugin"
-            destructive: true
-            visible: contextIsPlugin
-            height: visible ? implicitHeight : 0
-            onTriggered: {
-                if (contextNodeId >= 0) {
-                    forgetMeterWhenGone(contextNode);
-                    controller.remove_plugin(contextNodeId);
-                }
-            }
-        }
-
-        ZbMenuSeparator {
-            visible: contextIsSubgraph || contextIsVdev
-            height: visible ? implicitHeight : 0
-        }
-        ZbMenuItem {
-            text: "Ungroup"
-            visible: contextIsSubgraph
-            height: visible ? implicitHeight : 0
-            onTriggered: controller.ungroup_subgraph(contextNode.subgraphId)
-        }
-        ZbMenuItem {
-            text: "Delete subgraph"
-            destructive: true
-            visible: contextIsSubgraph
-            height: visible ? implicitHeight : 0
-            onTriggered: {
-                deleteSubgraphDialog.subgraphId = contextNode.subgraphId;
-                deleteSubgraphDialog.subgraphName = contextNode.name;
-                deleteSubgraphDialog.open();
-            }
-        }
-        ZbMenuItem {
-            text: "Edit virtual device\u2026"
-            visible: contextIsVdev
-            height: visible ? implicitHeight : 0
-            onTriggered: openVdevEditor(contextNode.vdevId)
-        }
-        ZbMenuItem {
-            text: "Remove virtual device"
-            destructive: true
-            visible: contextIsVdev
-            height: visible ? implicitHeight : 0
-            onTriggered: controller.remove_virtual_device(contextNode.vdevId)
-        }
-    }
-
-    ZbMenu {
-        id: blockContextMenu
-        onClosed: {
-            contextBlock = null;
-            canvas.requestPaint();
-        }
-
-        ZbMenuItem {
-            text: contextBlock ? "Blocked: " + contextBlock.label : ""
-            enabled: false
-        }
-
-        ZbMenuSeparator {}
-
-        ZbMenuItem {
-            text: "Remove block"
-            onTriggered: {
-                if (contextBlock)
-                    controller.remove_rule(contextBlock.ruleId);
-            }
-        }
-    }
-
-    ZbMenu {
-        id: linkContextMenu
-
-        ZbMenuItem {
-            text: contextLinkIds.length > 1 ? "Disconnect " + contextLinkIds.length + " links" : "Disconnect"
-            shortcutHint: "Del"
-            onTriggered: {
-                disconnectLinks(contextLinkIds);
-                selectedLinks = {};
-                canvas.requestPaint();
-            }
-        }
-
-        ZbMenuItem {
-            text: contextLinkIds.length > 1 ? "Block " + contextLinkIds.length + " connections" : "Block this connection"
-            destructive: true
-            onTriggered: blockLinks(contextLinkIds)
-        }
-    }
-
-    ZbMenu {
-        id: portContextMenu
-
-        ZbMenuItem {
-            text: "Rename port\u2026"
-            visible: contextIsPlugin
-            height: visible ? implicitHeight : 0
-            onTriggered: {
-                renamePortField.text = portName(contextPortId);
-                renamePortDialog.portId = contextPortId;
-                renamePortDialog.open();
-            }
-        }
-
-        ZbMenuItem {
-            readonly property var attached: contextPortId >= 0 ? visibleLinksOfPort(contextPortId) : []
-            text: attached.length > 1 ? "Disconnect " + attached.length + " links" : "Disconnect"
-            enabled: attached.length > 0
-            onTriggered: {
-                disconnectLinks(attached);
-                canvas.requestPaint();
-            }
-        }
-    }
-
-    ZbMenu {
-        id: canvasContextMenu
-
-        ZbMenuItem {
-            text: graphView.canUndo ? "Undo " + graphView.undoStack[graphView.undoStack.length - 1].label : "Undo"
-            shortcutHint: "Ctrl+Z"
-            enabled: graphView.canUndo
-            onTriggered: undo()
-        }
-
-        ZbMenuItem {
-            text: graphView.canRedo ? "Redo " + graphView.redoStack[graphView.redoStack.length - 1].label : "Redo"
-            shortcutHint: "Ctrl+Shift+Z"
-            enabled: graphView.canRedo
-            onTriggered: redo()
-        }
-
-        ZbMenuSeparator {}
-
-        ZbMenuItem {
-            text: "Select all"
-            shortcutHint: "Ctrl+A"
-            onTriggered: selectAll()
-        }
-
-        ZbMenuItem {
-            text: "Delete selected links"
-            enabled: {
-                for (var k in selectedLinks)
-                    return true;
-                return false;
-            }
-            onTriggered: deleteSelectedLinks()
-        }
-
-        ZbMenuItem {
-            text: "Block selected links"
-            destructive: true
-            enabled: {
-                for (var k in selectedLinks)
-                    return true;
-                return false;
-            }
-            onTriggered: blockSelectedLinks()
-        }
-
-        ZbMenuSeparator {}
-
-        ZbMenuItem {
-            text: "Add plugin\u2026"
-            onTriggered: {
-                if (contextCanvasPos) {
-                    pendingPluginPosition = {
-                        x: contextCanvasPos.x,
-                        y: contextCanvasPos.y
-                    };
-                    pendingPluginName = "";
-                }
-                graphView.openPluginBrowser();
-            }
-        }
-
-        ZbMenu {
-            title: "Add meter"
-            ZbMenuItem {
-                text: "1 channel (mono)"
-                onTriggered: graphView.addMeter(1)
-            }
-            ZbMenuItem {
-                text: "2 channels (stereo)"
-                onTriggered: graphView.addMeter(2)
-            }
-            ZbMenuItem {
-                text: "3 channels"
-                onTriggered: graphView.addMeter(3)
-            }
-            ZbMenuItem {
-                text: "4 channels"
-                onTriggered: graphView.addMeter(4)
-            }
-            ZbMenuItem {
-                text: "5 channels"
-                onTriggered: graphView.addMeter(5)
-            }
-            ZbMenuItem {
-                text: "6 channels"
-                onTriggered: graphView.addMeter(6)
-            }
-            ZbMenuItem {
-                text: "8 channels (7.1)"
-                onTriggered: graphView.addMeter(8)
-            }
-        }
-
-        ZbMenuItem {
-            readonly property int snapped: graphView.snappedMeterCount()
-            text: snapped > 1 ? "Unsnap all " + snapped + " meters" : "Unsnap meter"
-            visible: snapped > 0
-            height: visible ? implicitHeight : 0
-            onTriggered: graphView.unsnapAllMeters()
-        }
-
-        ZbMenuItem {
-            text: "Group into subgraph\u2026"
-            visible: currentSubgraph === ""
-            height: visible ? implicitHeight : 0
-            enabled: selectedPluginIds().length > 0
-            onTriggered: groupIntoSubgraph(-1)
-        }
-
-        ZbMenuItem {
-            text: "Add virtual device\u2026"
-            visible: currentSubgraph === ""
-            height: visible ? implicitHeight : 0
-            onTriggered: openVdevEditor("")
-        }
-
-        ZbMenuSeparator {}
-
-        ZbMenuItem {
-            text: "Unhide all"
-            enabled: {
-                for (var k in hiddenNodes)
-                    return true;
-                return false;
-            }
-            onTriggered: {
-                snapSuspended = {};
-                snapUnanchoredSince = {};
-                hiddenNodes = {};
-                persistHidden();
-                canvas.requestPaint();
-            }
-        }
-
-        ZbMenuItem {
-            text: "Fit to view"
-            shortcutHint: "Home"
-            onTriggered: fitToView()
-        }
-
-        ZbMenuItem {
-            text: "Reset zoom"
-            onTriggered: zoomAt(width / 2, height / 2, 1.0)
-        }
-
-        ZbMenuItem {
-            text: "Auto layout"
-            shortcutHint: "L"
-            onTriggered: requestAutoLayout(false)
-        }
-
-        ZbMenuItem {
-            text: "Auto layout, including pinned"
-            shortcutHint: "Shift+L"
-            onTriggered: requestAutoLayout(true)
-        }
-    }
-
-    SubgraphDialog {
-        id: subgraphDialog
-        onSubmitted: cfg => {
-            if (mode === "create") {
-                var newId = controller.create_subgraph(JSON.stringify(nodeIds), JSON.stringify(cfg));
-                if (newId && groupAnchor) {
-                    savedLayout["Subgraph:" + newId] = [groupAnchor.x, groupAnchor.y];
-                    controller.save_layout(JSON.stringify(savedLayout));
-                }
-                clearSelection();
-            } else {
-                controller.update_subgraph(subgraphId, JSON.stringify(cfg));
-            }
-        }
-    }
-
-    VirtualDeviceDialog {
-        id: vdevDialog
-        onSubmitted: (name, kind, channels) => {
-            if (vdevId === "")
-                controller.add_virtual_device(name, kind, channels);
-            else
-                controller.update_virtual_device(vdevId, name, channels);
-        }
-    }
-
-    ZbMenu {
-        id: presetMenu
-
-        Instantiator {
-            model: graphView.presetMenuNames
-            delegate: ZbMenuItem {
-                required property var modelData
-                text: (modelData === graphView.presetMenuDefault ? "\u2605 " : "") + modelData
-                selected: modelData === graphView.presetMenuSelected
-                onTriggered: {
-                    controller.apply_plugin_preset(graphView.presetMenuNodeId, modelData);
-                    graphView.presetChanged();
-                }
-            }
-            onObjectAdded: (index, object) => presetMenu.insertItem(index, object)
-            onObjectRemoved: (index, object) => presetMenu.removeItem(object)
-        }
-
-        ZbMenuItem {
-            text: "No presets saved yet"
-            enabled: false
-            visible: graphView.presetMenuNames.length === 0
-            height: visible ? implicitHeight : 0
-        }
-
-        ZbMenuSeparator {}
-
-        ZbMenuItem {
-            text: "New preset (reset to defaults)"
-            onTriggered: {
-                controller.start_new_plugin_preset(graphView.presetMenuNodeId);
-                graphView.presetChanged();
-            }
-        }
-
-        ZbMenuSeparator {}
-
-        ZbMenuItem {
-            text: "Changed: " + (graphView.presetMenuChanges.length > 0 ? graphView.presetMenuChanges[0].split(": ")[0] : "") + (graphView.presetMenuChanges.length > 1 ? "  (+" + (graphView.presetMenuChanges.length - 1) + " more)" : "")
-            enabled: false
-            visible: graphView.presetMenuChanges.length > 0
-            height: visible ? implicitHeight : 0
-        }
-
-        ZbMenuItem {
-            text: "Set \u201c" + graphView.presetMenuSelected + "\u201d as default"
-            enabled: graphView.presetMenuSelected !== "" && graphView.presetMenuSelected !== graphView.presetMenuDefault
-            onTriggered: {
-                controller.set_default_plugin_preset(graphView.presetMenuNodeId, graphView.presetMenuSelected);
-                graphView.presetChanged();
-            }
-        }
-
-        ZbMenuItem {
-            text: "Clear default"
-            enabled: graphView.presetMenuDefault !== ""
-            onTriggered: {
-                controller.set_default_plugin_preset(graphView.presetMenuNodeId, "");
-                graphView.presetChanged();
-            }
-        }
-
-        ZbMenuItem {
-            text: "Delete \u201c" + graphView.presetMenuSelected + "\u201d"
-            destructive: true
-            enabled: graphView.presetMenuSelected !== ""
-            onTriggered: {
-                controller.delete_plugin_preset(graphView.presetMenuNodeId, graphView.presetMenuSelected);
-                graphView.presetChanged();
-            }
-        }
-    }
-
-    ZbDialog {
-        id: presetSaveDialog
-        property string selectedName: ""
-        readonly property string trimmed: presetNameField.text.trim()
-        readonly property bool exists: graphView.presetSaveNames.indexOf(trimmed) >= 0
-        title: "Save preset"
-        primaryText: exists ? "Replace preset" : "Save as new preset"
-        secondaryText: "Cancel"
-        width: 380
-        primaryEnabled: trimmed.length > 0
-
-        Column {
-            width: parent ? parent.width : 320
-            spacing: 8
-            ZbTextField {
-                id: presetNameField
-                width: parent.width
-                placeholderText: "New preset name"
-                onAccepted: if (presetSaveDialog.primaryEnabled)
-                    presetSaveDialog.accept()
-            }
-            Text {
-                width: parent.width
-                wrapMode: Text.WordWrap
-                font.family: Theme.fontSans
-                font.pixelSize: Theme.sizeCaption
-                color: Theme.textMuted
-                text: presetSaveDialog.exists ? "A preset with this name exists; saving replaces its values with the current settings." : "Saves the current parameter values as a new preset for this plugin."
-            }
-            ZbButton {
-                visible: presetSaveDialog.selectedName !== ""
-                text: "Update \u201c" + presetSaveDialog.selectedName + "\u201d with the current settings"
-                onClicked: {
-                    controller.save_plugin_preset(graphView.presetSaveNodeId, presetSaveDialog.selectedName);
-                    graphView.presetChanged();
-                    presetSaveDialog.close();
-                }
-            }
-        }
-        onAboutToShow: presetNameField.text = ""
-        onOpened: presetNameField.forceActiveFocus()
-        onAccepted: {
-            controller.save_plugin_preset(graphView.presetSaveNodeId, trimmed);
-            graphView.presetChanged();
-        }
-    }
-
     property string templateSubgraphId: ""
-    ZbDialog {
-        id: templateNameDialog
-        title: "Save as template"
-        primaryText: "Save template"
-        secondaryText: "Cancel"
-        width: 380
-        primaryEnabled: templateNameField.text.trim().length > 0
-
-        Column {
-            width: parent ? parent.width : 320
-            spacing: 8
-            ZbTextField {
-                id: templateNameField
-                width: parent.width
-                placeholderText: "Template name"
-                onAccepted: if (templateNameDialog.primaryEnabled)
-                    templateNameDialog.accept()
-            }
-            Text {
-                width: parent.width
-                wrapMode: Text.WordWrap
-                font.family: Theme.fontSans
-                font.pixelSize: Theme.sizeCaption
-                color: Theme.textMuted
-                text: "Saves the plugins with their settings and wiring. Insert it again from Add plugin \u203a Subgraphs."
-            }
-        }
-        onOpened: {
-            templateNameField.forceActiveFocus();
-            templateNameField.selectAll();
-        }
-        onAccepted: controller.save_subgraph_template(templateSubgraphId, templateNameField.text.trim())
-    }
-
-    ZbDialog {
-        id: deleteSubgraphDialog
-        property string subgraphId: ""
-        property string subgraphName: ""
-        title: "Delete subgraph?"
-        primaryText: "Delete"
-        secondaryText: "Cancel"
-        width: 400
-        Text {
-            width: parent ? parent.width : 340
-            wrapMode: Text.WordWrap
-            font.family: Theme.fontSans
-            font.pixelSize: Theme.sizeBody
-            color: Theme.textPrimary
-            text: "\u201c" + deleteSubgraphDialog.subgraphName + "\u201d and the plugins inside it will be removed. To keep the plugins, use Ungroup instead."
-        }
-        onAccepted: controller.delete_subgraph(subgraphId)
-    }
-
-    ZbDialog {
-        id: deleteSelectionDialog
-        title: "Delete selection?"
-        primaryText: "Delete"
-        secondaryText: "Cancel"
-        width: 420
-        focus: true
-        onOpened: deleteLines.forceActiveFocus()
-        Column {
-            id: deleteLines
-            width: parent ? parent.width : 360
-            spacing: 6
-            Keys.onReturnPressed: deleteSelectionDialog.accept()
-            Keys.onEnterPressed: deleteSelectionDialog.accept()
-            Repeater {
-                model: deleteSelectionDialog.visible ? graphView.deletePlanLines() : []
-                Text {
-                    required property string modelData
-                    width: parent.width
-                    wrapMode: Text.WordWrap
-                    font.family: Theme.fontSans
-                    font.pixelSize: Theme.sizeBody
-                    color: Theme.textPrimary
-                    text: "\u2022  " + modelData
-                }
-            }
-            Text {
-                width: parent.width
-                topPadding: 6
-                wrapMode: Text.WordWrap
-                font.family: Theme.fontSans
-                font.pixelSize: Theme.sizeBody
-                color: Theme.textMuted
-                text: "Removing can\u2019t be undone."
-            }
-        }
-        onAccepted: graphView.performDelete()
-        onRejected: graphView.deletePlan = null
-    }
-
-    ZbDialog {
-        id: renameDialog
-        title: "Rename plugin"
-        primaryText: "Rename"
-        secondaryText: "Cancel"
-        width: 360
-
-        ZbTextField {
-            id: renameField
-            width: parent ? parent.width : 300
-            placeholderText: "New name"
-            onAccepted: renameDialog.accept()
-        }
-
-        onOpened: {
-            renameField.forceActiveFocus();
-            renameField.selectAll();
-        }
-        onAccepted: {
-            var newName = renameField.text.trim();
-            if (newName.length > 0 && contextNodeId >= 0) {
-                controller.rename_plugin(contextNodeId, newName);
-            }
-        }
-    }
-
-    ZbDialog {
-        id: renamePortDialog
-        property int portId: -1
-        title: "Rename port"
-        primaryText: "Rename"
-        secondaryText: "Cancel"
-        width: 360
-
-        ZbTextField {
-            id: renamePortField
-            width: parent ? parent.width : 300
-            placeholderText: "Port name (empty restores the original)"
-            onAccepted: renamePortDialog.accept()
-        }
-
-        onOpened: {
-            renamePortField.forceActiveFocus();
-            renamePortField.selectAll();
-        }
-        onAccepted: {
-            if (portId >= 0) {
-                controller.rename_port(portId, renamePortField.text.trim());
-                graphView.presetChanged();
-            }
-        }
-    }
-
     property var insertPreview: null
 
+    GraphMenus {
+        id: graphMenus
+        graph: graphView
+    }
+
     function updateInsertPreview(nodeId) {
-        var linkId = -1;
-        var node = nodeId >= 0 ? findNodeData(nodeId) : null;
-        if (node && node.type === "Plugin")
-            linkId = findLinkUnderNode(nodeId);
-        if (linkId < 0) {
-            insertPreview = null;
-            return;
-        }
-        if (insertPreview && insertPreview.linkId === linkId && insertPreview.nodeId === nodeId)
-            return;
-        var plan = null;
-        try {
-            var json = controller.insert_on_link_preview_json(linkId, nodeId);
-            plan = json ? JSON.parse(json) : null;
-        } catch (e) {
-            plan = null;
-        }
-        if (!plan) {
-            insertPreview = null;
-            return;
-        }
-        var remove = {};
-        for (var i = 0; i < plan.remove.length; i++)
-            remove[plan.remove[i]] = true;
-        insertPreview = {
-            linkId: linkId,
-            nodeId: nodeId,
-            remove: remove,
-            add: plan.add
-        };
+        return HitTesting.updateInsertPreview(graphView, nodeId);
     }
 
     function persistHidden() {
-        var arr = [];
-        for (var k in hiddenNodes) {
-            if (hiddenNodes[k])
-                arr.push(k);
-        }
-        for (var sk in snapSuspended) {
-            if (dockedMeters[sk] && !hiddenNodes[sk])
-                arr.push(sk);
-        }
-        controller.save_hidden(JSON.stringify(arr));
-        var pruned = false;
-        for (var dk in dockedMeters) {
-            if (!hiddenNodes[dk] && !snapSuspended[dk]) {
-                delete dockedMeters[dk];
-                delete snapUnanchoredSince[dk];
-                pruned = true;
-            }
-        }
-        if (pruned) {
-            dockedMeters = dockedMeters;
-            persistDocked();
-        }
+        return Nodes.persistHidden(graphView);
     }
 
     function nodeStyle(node) {
-        return node && node.layoutKey ? (nodeStyles[node.layoutKey] || null) : null;
+        return Nodes.nodeStyle(graphView, node);
     }
 
     function setNodeStyle(node, field, value) {
-        if (!node || !node.layoutKey)
-            return;
-        var key = node.layoutKey;
-        var entry = nodeStyles[key] || {};
-        if (value === undefined || value === null || value === false || value === "")
-            delete entry[field];
-        else
-            entry[field] = value;
-        if (Object.keys(entry).length > 0)
-            nodeStyles[key] = entry;
-        else
-            delete nodeStyles[key];
-        nodeStyles = nodeStyles;
-        controller.save_node_styles(JSON.stringify(nodeStyles));
-        var lay = computeNodeLayout(node, getSortedPorts(node.id));
-        nodeLayouts[node.id] = lay;
-        nodeHeights[node.id] = lay.height;
-        canvas.requestPaint();
+        return Nodes.setNodeStyle(graphView, node, field, value);
     }
 
     readonly property var nodeColorTokens: ["catHardware", "catVirtual", "catSubgraph", "accent", "catApp", "catPlugin", "catMidi", "textDestructive"]
 
     function customNodeColor(node) {
-        var st = nodeStyle(node);
-        return st && st.color && nodeColorTokens.indexOf(st.color) >= 0 ? Theme[st.color] : null;
+        return Nodes.customNodeColor(graphView, node);
     }
 
     function nodeColor(node) {
-        return customNodeColor(node) || nodeCategory(node).color;
+        return Nodes.nodeColor(graphView, node);
     }
 
     function isConnectedOnly(node) {
-        var st = nodeStyle(node);
-        return !!(st && st.connectedOnly);
+        return Nodes.isConnectedOnly(graphView, node);
     }
 
     function persistPinned() {
-        var arr = [];
-        for (var k in pinnedNodes) {
-            if (pinnedNodes[k])
-                arr.push(k);
-        }
-        var json = JSON.stringify(arr);
-        if (deferSaveDepth > 0)
-            pendingPinnedJson = json;
-        else
-            controller.save_pinned(json);
+        return Nodes.persistPinned(graphView);
     }
 
     function buildUniqueLayoutKeys() {
-        var sorted = [];
-        for (var i = 0; i < nodes.length; i++) {
-            var n = nodes[i];
-            var key = n.layoutKey || "";
-            if (key)
-                sorted.push({
-                    id: n.id,
-                    key: key
-                });
-        }
-        sorted.sort(function (a, b) {
-            return a.id - b.id;
-        });
-        var counts = {};
-        var result = {};
-        for (var j = 0; j < sorted.length; j++) {
-            var base = sorted[j].key;
-            var c = counts[base] || 0;
-            result[sorted[j].id] = c === 0 ? base : base + "#" + c;
-            counts[base] = c + 1;
-        }
-        return result;
+        return Placement.buildUniqueLayoutKeys(graphView);
     }
 
     function collectNodeSizes() {
-        var sizesObj = {};
-        for (var ni = 0; ni < nodes.length; ni++) {
-            var n = nodes[ni];
-            if (n.layoutKey && hiddenNodes[n.layoutKey])
-                continue;
-            sizesObj[n.id] = [getNodeWidth(n.id) || minNodeWidth, calculateNodeHeight(n)];
-        }
-        return sizesObj;
+        return Placement.collectNodeSizes(graphView);
     }
 
     function collectPinnedPositions() {
-        var pinned = {};
-        for (var ni = 0; ni < nodes.length; ni++) {
-            var n = nodes[ni];
-            if (n.layoutKey && hiddenNodes[n.layoutKey])
-                continue;
-            if (nodeIsPinned(n) && nodePositions[n.id]) {
-                var pos = nodePositions[n.id];
-                pinned[n.id] = [pos.x, pos.y];
-            }
-        }
-        return pinned;
+        return Placement.collectPinnedPositions(graphView);
     }
 
     function visibleNodeCount() {
-        var c = 0;
-        for (var i = 0; i < nodes.length; i++) {
-            if (!(nodes[i].layoutKey && hiddenNodes[nodes[i].layoutKey]))
-                c++;
-        }
-        return c;
+        return Placement.visibleNodeCount(graphView);
     }
     function pinnedVisibleCount() {
-        var c = 0;
-        for (var i = 0; i < nodes.length; i++) {
-            var n = nodes[i];
-            if (!(n.layoutKey && hiddenNodes[n.layoutKey]) && nodeIsPinned(n))
-                c++;
-        }
-        return c;
+        return Placement.pinnedVisibleCount(graphView);
     }
 
     function requestAutoLayout(includePinned) {
-        var total = visibleNodeCount();
-        if (total === 0) {
-            showToast("Auto layout: there are no nodes to arrange");
-            return;
-        }
-        if (!includePinned && pinnedVisibleCount() === total) {
-            autoLayoutAllDialog.open();
-            return;
-        }
-        runAutoLayout(includePinned);
+        return Placement.requestAutoLayout(graphView, includePinned);
     }
 
     function runAutoLayout(includePinned) {
-        includePinned = !!includePinned;
-        var kept = includePinned ? 0 : pinnedVisibleCount();
-        var sizesJson = JSON.stringify(collectNodeSizes());
-        var pinnedJson = includePinned ? "{}" : JSON.stringify(collectPinnedPositions());
-        var resultJson = controller.auto_layout(sizesJson, pinnedJson, snapToGrid ? gridSize : 0);
-        try {
-            var positions = JSON.parse(resultJson);
-            var before = {};
-            for (var ni = 0; ni < nodes.length; ni++) {
-                var n = nodes[ni];
-                var pos = positions[n.id];
-                if (pos && pos.length >= 2) {
-                    if (nodePositions[n.id])
-                        before[n.id] = nodePositions[n.id];
-                    nodePositions[n.id] = {
-                        x: pos[0],
-                        y: pos[1]
-                    };
-                    markHandPlaced(n.id);
-                }
-            }
-            var laidOut = recordMove("auto layout of", before);
-            if (laidOut)
-                laidOut.label = includePinned ? "auto layout (all)" : "auto layout";
-            var moved = laidOut ? laidOut.items.length : 0;
-            var msg = moved > 0 ? "Auto layout: moved " + counted(moved, "node", "nodes") : "Auto layout: nothing needed to move";
-            if (kept > 0)
-                msg += "; " + counted(kept, "pinned node", "pinned nodes") + " stayed (Shift+L lays out pinned nodes too)";
-            showToast(msg + ".");
-            canvas.requestPaint();
-            persistLayout();
-        } catch (e) {
-            console.log("Auto layout failed:", e);
-            showToast("Auto layout failed");
-        }
+        return Placement.runAutoLayout(graphView, includePinned);
     }
 
     ZbDialog {
@@ -2340,280 +561,67 @@ Item {
     }
 
     function placementObstacles(exceptId) {
-        var obstacles = [];
-        for (var oi = 0; oi < nodes.length; oi++) {
-            var other = nodes[oi];
-            if (other.id === exceptId)
-                continue;
-            if (other.layoutKey && hiddenNodes[other.layoutKey])
-                continue;
-            var opos = nodePositions[other.id];
-            if (!opos)
-                continue;
-            obstacles.push({
-                x: opos.x,
-                y: opos.y,
-                w: getNodeWidth(other.id),
-                h: calculateNodeHeight(other)
-            });
-        }
-        return obstacles;
+        return Placement.placementObstacles(graphView, exceptId);
     }
 
     function spotIsFree(x, y, w, h, obstacles, gap) {
-        var eps = 1e-6;
-        for (var oi = 0; oi < obstacles.length; oi++) {
-            var o = obstacles[oi];
-            if (x < o.x + o.w + gap - eps && x + w + gap - eps > o.x && y < o.y + o.h + gap - eps && y + h + gap - eps > o.y)
-                return false;
-        }
-        return true;
+        return Placement.spotIsFree(graphView, x, y, w, h, obstacles, gap);
     }
 
     function spotIsTaken(node, x, y) {
-        var w = getNodeWidth(node.id);
-        var h = calculateNodeHeight(node);
-        var obstacles = placementObstacles(node.id);
-        for (var oi = 0; oi < obstacles.length; oi++) {
-            var o = obstacles[oi];
-            var ox = Math.min(x + w, o.x + o.w) - Math.max(x, o.x);
-            var oy = Math.min(y + h, o.y + o.h) - Math.max(y, o.y);
-            if (ox > Math.min(w, o.w) / 3 && oy > Math.min(h, o.h) / 3)
-                return true;
-        }
-        return false;
+        return Placement.spotIsTaken(graphView, node, x, y);
     }
 
     function columnSlot(x, anchorY, w, h, obstacles, gap) {
-        if (spotIsFree(x, anchorY, w, h, obstacles, gap))
-            return anchorY;
-        var best = null;
-        var bestD = Infinity;
-        for (var oi = 0; oi < obstacles.length; oi++) {
-            var o = obstacles[oi];
-            if (!(x < o.x + o.w + gap && x + w + gap > o.x))
-                continue;
-            var below = o.y + o.h + gap;
-            var above = o.y - h - gap;
-            if (snapToGrid) {
-                below = Math.ceil(below / gridSize) * gridSize;
-                above = Math.floor(above / gridSize) * gridSize;
-            }
-            var cands = [below, above];
-            for (var ci = 0; ci < 2; ci++) {
-                var d = Math.abs(cands[ci] - anchorY);
-                if (d < bestD && spotIsFree(x, cands[ci], w, h, obstacles, gap)) {
-                    bestD = d;
-                    best = cands[ci];
-                }
-            }
-        }
-        return best !== null ? best : anchorY;
+        return Placement.columnSlot(graphView, x, anchorY, w, h, obstacles, gap);
     }
 
     function findFreeSpot(node, anchorX, anchorY, dir, bounded) {
-        var w = getNodeWidth(node.id);
-        var h = calculateNodeHeight(node);
-        var gap = nodeSpacing;
-        var a = gridPos({
-            x: anchorX,
-            y: anchorY
-        });
-        var colStep = w + placeColumnGap;
-        if (snapToGrid)
-            colStep = Math.ceil(colStep / gridSize) * gridSize;
-        var obstacles = placementObstacles(node.id);
-        var cols = dir !== 0 ? [0, dir, 2 * dir, 3 * dir] : [0, 1, -1, 2, -2];
-        var best = null;
-        var bestCost = Infinity;
-        for (var ci = 0; ci < cols.length; ci++) {
-            var k = cols[ci];
-            var x = a.x + k * colStep;
-            var y = columnSlot(x, a.y, w, h, obstacles, gap);
-            var dy = Math.abs(y - a.y);
-            if (bounded && (Math.abs(k) > 1 || dy > 2 * (h + gap)))
-                continue;
-            var cost = dy + Math.abs(k) * colStep * 1.5;
-            if (cost < bestCost) {
-                bestCost = cost;
-                best = {
-                    x: x,
-                    y: y
-                };
-            }
-        }
-        return best;
+        return Placement.findFreeSpot(graphView, node, anchorX, anchorY, dir, bounded);
     }
 
     function kindAnchor(node) {
-        var w = getNodeWidth(node.id);
-        var rank = flowRank(node.type);
-        if (width <= 0 || height <= 0) {
-            var b = contentBounds();
-            return {
-                x: b ? b.left + (b.right - b.left - w) * rank / 4 : 48,
-                y: b ? b.top : 72,
-                dir: 0
-            };
-        }
-        var visL = -panX / zoom, visT = -panY / zoom;
-        var visR = (width - panX) / zoom, visB = (height - panY) / zoom;
-        var cx = (visL + visR) / 2, cy = (visT + visB) / 2;
-        var best = null;
-        var bestD = Infinity;
-        for (var i = 0; i < nodes.length; i++) {
-            var o = nodes[i];
-            if (o.id === node.id || flowRank(o.type) !== rank)
-                continue;
-            if (o.layoutKey && hiddenNodes[o.layoutKey])
-                continue;
-            var p = nodePositions[o.id];
-            if (!p)
-                continue;
-            var ow = getNodeWidth(o.id), oh = calculateNodeHeight(o);
-            if (p.x + ow < visL || p.x > visR || p.y + oh < visT || p.y > visB)
-                continue;
-            var d = Math.abs(p.x + ow / 2 - cx) + Math.abs(p.y + oh / 2 - cy);
-            if (d < bestD) {
-                bestD = d;
-                best = p;
-            }
-        }
-        if (best)
-            return {
-                x: best.x,
-                y: best.y,
-                dir: 0
-            };
-        var margin = 48 / zoom;
-        var span = Math.max(0, visR - visL - w - 2 * margin);
-        return {
-            x: visL + margin + span * rank / 4,
-            y: visT + 72 / zoom,
-            dir: 0
-        };
+        return Placement.kindAnchor(graphView, node);
     }
 
     function startPlacing(nodeId) {
-        placingNodeId = nodeId;
-        activeSnapLines = [];
-        canvas.requestPaint();
+        return Placement.startPlacing(graphView, nodeId);
     }
 
     function finishPlacing() {
-        if (placingNodeId < 0)
-            return;
-        if (nodePositions[placingNodeId])
-            nodePositions[placingNodeId] = gridPos(nodePositions[placingNodeId]);
-        delete autoPlaced[placingNodeId];
-        delete placedKeyById[placingNodeId];
-        placingNodeId = -1;
-        persistLayout();
-        canvas.requestPaint();
+        return Placement.finishPlacing(graphView);
     }
 
     function isNodeBypassed(node) {
-        if (node.id in localBypassState)
-            return localBypassState[node.id];
-        return node.pluginBypassed === true;
+        return Nodes.isNodeBypassed(graphView, node);
     }
 
     function isNodeEnabled(node) {
-        if (node.id in localEnabledState)
-            return localEnabledState[node.id];
-        return node.pluginEnabled !== false;
+        return Nodes.isNodeEnabled(graphView, node);
     }
 
     function findNodeData(nodeId) {
-        for (var i = 0; i < nodes.length; i++) {
-            if (nodes[i].id === nodeId)
-                return nodes[i];
-        }
-        return null;
+        return Nodes.findNodeData(graphView, nodeId);
     }
 
     function getNodeColumn(type) {
-        if (!type)
-            return "stream";
-        if (type === "Source")
-            return "source";
-        if (type === "Sink" || type === "Duplex")
-            return "sink";
-        return "stream";
+        return Nodes.getNodeColumn(graphView, type);
     }
 
     function nodeCategory(node) {
-        var type = node.type;
-        if (node.mediaType === "Midi" || (node.layoutKey || "").indexOf("MidiBridge:") === 0)
-            return {
-                color: Theme.catMidi,
-                glyph: "din"
-            };
-        if (type === "Plugin")
-            return {
-                color: Theme.catPlugin,
-                glyph: "plug"
-            };
-        if (type === "Subgraph")
-            return {
-                color: Theme.catSubgraph,
-                glyph: "subgraph"
-            };
-        if (type === "SubgraphInput" || type === "SubgraphOutput")
-            return {
-                color: Theme.catSubgraph,
-                glyph: "arrow"
-            };
-        if (type === "StreamOutput" || type === "StreamInput")
-            return {
-                color: Theme.catApp,
-                glyph: "wave"
-            };
-        if (node.mediaType === "Video")
-            return {
-                color: Theme.catHardware,
-                glyph: "camera"
-            };
-        if (node.isVirtual)
-            return {
-                color: Theme.catVirtual,
-                glyph: type === "Source" ? "mic" : "speaker"
-            };
-        if (type === "Source")
-            return {
-                color: Theme.catHardware,
-                glyph: "mic"
-            };
-        if (type === "Sink" || type === "Duplex")
-            return {
-                color: Theme.catHardware,
-                glyph: "headphones"
-            };
-        return {
-            color: Theme.catHardware,
-            glyph: "speaker"
-        };
+        return Nodes.nodeCategory(graphView, node);
     }
 
     function signalColor(mediaType) {
-        if (mediaType === "Midi")
-            return Theme.sigMidi;
-        if (mediaType === "Video")
-            return Theme.sigVideo;
-        return Theme.sigAudio;
+        return Nodes.signalColor(graphView, mediaType);
     }
 
     function visiblePortCount(ports) {
-        var last = -1;
-        for (var i = 0; i < ports.length; i++) {
-            if (connectedPorts[ports[i].id])
-                last = i;
-        }
-        return Math.min(ports.length, Math.max(last + 1, 3));
+        return Nodes.visiblePortCount(graphView, ports);
     }
 
     function isMeterNode(n) {
-        return !!n && n.type === "Plugin" && (n.meterChannels || 0) > 0;
+        return Nodes.isMeterNode(graphView, n);
     }
 
     property var meterNodeIds: []
@@ -2625,49 +633,23 @@ Item {
     readonly property real meterClipFrac: (-3 - meterFloorDb) / -meterFloorDb
 
     function levelFraction(level) {
-        if (!(level > 0))
-            return 0;
-        var db = 20 * Math.log(level) / Math.LN10;
-        return Math.max(0, Math.min(1, (db - meterFloorDb) / -meterFloorDb));
+        return Meters.levelFraction(graphView, level);
     }
 
     function isAudioRow(port) {
-        return port.mediaType !== "Midi" && port.mediaType !== "Video";
+        return Meters.isAudioRow(graphView, port);
     }
 
     function meterRows(node) {
-        var ins = nodeLayout(node).inputs;
-        var rows = [];
-        for (var i = 0; i < ins.length; i++) {
-            if (isAudioRow(ins[i]))
-                rows.push(i);
-        }
-        return rows;
+        return Meters.meterRows(graphView, node);
     }
 
     function meterBarRect(nw, row) {
-        var rowH = Theme.nodePortRow;
-        var h = Math.max(4, Math.round(rowH * 0.32));
-        var x0 = Theme.nodePadX + 14;
-        var x1 = nw - Theme.nodePadX;
-        return {
-            x: x0,
-            y: Theme.nodeHeader + Theme.nodePortsTop + row * rowH + (rowH - h) / 2,
-            w: x1 - x0,
-            h: h
-        };
+        return Meters.meterBarRect(graphView, nw, row);
     }
 
     function updateMeterNodeIds() {
-        var ids = [];
-        for (var i = 0; i < nodes.length; i++) {
-            if (isMeterNode(nodes[i]))
-                ids.push(nodes[i].id);
-        }
-        if (ids.join(",") !== meterNodeIds.join(","))
-            meterNodeIds = ids;
-        if (ids.length === 0)
-            meterLevels = {};
+        return Meters.updateMeterNodeIds(graphView);
     }
 
     property var dockedMeters: ({})
@@ -2676,7 +658,7 @@ Item {
     property var snapRedirect: ({})
 
     function isSnapInternal(fromPos, toPos) {
-        return (fromPos.alias || toPos.alias) && fromPos.cx === toPos.cx && fromPos.cy === toPos.cy;
+        return Meters.isSnapInternal(graphView, fromPos, toPos);
     }
 
     property var snapSeenAnchored: ({})
@@ -2687,1844 +669,350 @@ Item {
     readonly property int snapFirstGraceMs: 30000
 
     function snapAnchorCount(meter, side) {
-        var chans = meterChannelPorts(meter);
-        var n = 0;
-        for (var k = 0; k < chans.length; k++) {
-            if ((side === "source" ? chans[k].src : (chans[k].dests.length > 0 ? chans[k].dests[0] : -1)) >= 0)
-                n++;
-        }
-        return n;
+        return Meters.snapAnchorCount(graphView, meter, side);
     }
 
     function updateSnapStates() {
-        var now = Date.now();
-        var hiddenChanged = false;
-        var forgot = false;
-        for (var rk in removedMeterKeys) {
-            if (!findNodeByLayoutKey(rk)) {
-                delete dockedMeters[rk];
-                delete hiddenNodes[rk];
-                delete snapSuspended[rk];
-                delete snapUnanchoredSince[rk];
-                delete snapSeenAnchored[rk];
-                delete removedMeterKeys[rk];
-                forgot = true;
-            } else if (now - removedMeterKeys[rk] > 15000) {
-                delete removedMeterKeys[rk];
-            }
-        }
-        var waiting = false;
-        for (var k in dockedMeters) {
-            var meter = findNodeByLayoutKey(k);
-            if (!meter || !isMeterNode(meter)) {
-                delete snapUnanchoredSince[k];
-                continue;
-            }
-            if (snapAnchorCount(meter, dockedMeters[k]) > 0) {
-                delete snapUnanchoredSince[k];
-                snapSeenAnchored[k] = true;
-                if (snapSuspended[k] || !hiddenNodes[k]) {
-                    delete snapSuspended[k];
-                    hiddenNodes[k] = true;
-                    delete selectedNodes[meter.id];
-                    hiddenChanged = true;
-                }
-            } else if (!snapSuspended[k]) {
-                if (snapUnanchoredSince[k] === undefined)
-                    snapUnanchoredSince[k] = now;
-                waiting = true;
-            }
-        }
-        if (forgot) {
-            dockedMeters = dockedMeters;
-            hiddenChanged = true;
-            persistDocked();
-            persistHidden();
-        }
-        if (hiddenChanged)
-            hiddenNodes = hiddenNodes;
-        if (waiting && !orphanTimer.running)
-            orphanTimer.start();
+        return Meters.updateSnapStates(graphView);
     }
 
     function suspendOrphanedSnaps() {
-        var now = Date.now();
-        var shown = 0;
-        var waiting = false;
-        for (var k in snapUnanchoredSince) {
-            if (!dockedMeters[k] || snapSuspended[k]) {
-                delete snapUnanchoredSince[k];
-                continue;
-            }
-            var grace = snapSeenAnchored[k] ? snapGraceMs : snapFirstGraceMs;
-            if (now - snapUnanchoredSince[k] < grace) {
-                waiting = true;
-                continue;
-            }
-            delete snapUnanchoredSince[k];
-            snapSuspended[k] = true;
-            delete hiddenNodes[k];
-            shown++;
-        }
-        if (shown > 0) {
-            hiddenNodes = hiddenNodes;
-            showToast(shown > 1 ? shown + " snapped meters shown as cards until the ports they sit on are back" : "Snapped meter shown as a card until the port it sits on is back");
-            canvas.requestPaint();
-        }
-        if (waiting)
-            orphanTimer.start();
+        return Meters.suspendOrphanedSnaps(graphView);
     }
 
     function forgetMeterWhenGone(node) {
-        if (!isMeterNode(node) || !node.layoutKey)
-            return;
-        removedMeterKeys[node.layoutKey] = Date.now();
+        return Meters.forgetMeterWhenGone(graphView, node);
     }
 
     function forgetStaleMeterKeys(name) {
-        var changed = false;
-        for (var k in dockedMeters) {
-            if (k.substring(k.indexOf(":") + 1) === name && !findNodeByLayoutKey(k)) {
-                delete dockedMeters[k];
-                delete hiddenNodes[k];
-                delete snapSuspended[k];
-                delete snapUnanchoredSince[k];
-                delete snapSeenAnchored[k];
-                changed = true;
-            }
-        }
-        if (changed) {
-            dockedMeters = dockedMeters;
-            hiddenNodes = hiddenNodes;
-            persistDocked();
-            persistHidden();
-        }
+        return Meters.forgetStaleMeterKeys(graphView, name);
     }
 
     function snappedMeterCount() {
-        var n = 0;
-        for (var k in dockedMeters)
-            n++;
-        return n;
+        return Meters.snappedMeterCount(graphView);
     }
 
     function unsnapAllMeters() {
-        var parts = [];
-        for (var k in dockedMeters) {
-            parts.push({
-                kind: "snap",
-                label: "unsnap meter",
-                key: k,
-                side: "",
-                prevSide: dockedMeters[k]
-            });
-        }
-        for (var i = 0; i < parts.length; i++)
-            setMeterSnapped(parts[i].key, "");
-        if (parts.length > 0)
-            pushUndo({
-                kind: "group",
-                label: parts.length > 1 ? "unsnap " + parts.length + " meters" : "unsnap meter",
-                parts: parts
-            });
+        return Meters.unsnapAllMeters(graphView);
     }
 
     property var snapPreview: null
 
     function meterSnapCandidate(meter, sx, sy) {
-        if (!isMeterNode(meter))
-            return null;
-        var c = toCanvas(sx, sy);
-        var targetId = -1;
-        for (var i = nodes.length - 1; i >= 0; i--) {
-            var n = nodes[i];
-            if (n.id === meter.id || (n.layoutKey && hiddenNodes[n.layoutKey]))
-                continue;
-            var pos = nodePositions[n.id];
-            if (pos && c.x >= pos.x && c.x <= pos.x + getNodeWidth(n.id) && c.y >= pos.y && c.y <= pos.y + calculateNodeHeight(n)) {
-                targetId = n.id;
-                break;
-            }
-        }
-        if (targetId < 0)
-            return null;
-        var chans = meterChannelPorts(meter);
-        var sides = ["source", "dest"];
-        for (var si = 0; si < sides.length; si++) {
-            var side = sides[si];
-            if (!canSnapMeter(meter, side))
-                continue;
-            var ports = [];
-            var ok = true;
-            for (var k = 0; k < chans.length; k++) {
-                var a = side === "source" ? chans[k].src : (chans[k].dests.length > 0 ? chans[k].dests[0] : -1);
-                if (a < 0)
-                    continue;
-                if (getPortNodeId(a) !== targetId) {
-                    ok = false;
-                    break;
-                }
-                ports.push(a);
-            }
-            if (ok && ports.length > 0)
-                return {
-                    meterId: meter.id,
-                    nodeId: targetId,
-                    side: side,
-                    ports: ports
-                };
-        }
-        return null;
+        return Meters.meterSnapCandidate(graphView, meter, sx, sy);
     }
 
     readonly property real dockBarW: 64
     readonly property real dockBarH: 3
     function dockBarRect(cx, cy, output) {
-        return {
-            x: output ? cx - Theme.nodePadX - dockBarW : cx + Theme.nodePadX,
-            y: cy + Theme.nodePortRow / 2 - dockBarH - 2,
-            w: dockBarW,
-            h: dockBarH
-        };
+        return Meters.dockBarRect(graphView, cx, cy, output);
     }
 
     function connectReplacing(outPort, inPort, oldLink) {
-        var parts = [];
-        if (!findLinkByPorts(outPort, inPort)) {
-            var on = getPortNodeId(outPort);
-            var inn = getPortNodeId(inPort);
-            markHandPlaced(on);
-            markHandPlaced(inn);
-            controller.connect_ports(outPort, inPort);
-            parts.push({
-                kind: "connect",
-                label: "connect",
-                links: [
-                    {
-                        o: outPort,
-                        i: inPort,
-                        onKey: uniqueKeyById[on] || "",
-                        innKey: uniqueKeyById[inn] || ""
-                    }
-                ]
-            });
-        }
-        var rec = linkRecord(oldLink);
-        controller.disconnect_link(oldLink.id);
-        parts.push({
-            kind: "disconnect",
-            label: "disconnect",
-            links: [rec]
-        });
-        pushUndo({
-            kind: "group",
-            label: "route through meter",
-            parts: parts
-        });
+        return Meters.connectReplacing(graphView, outPort, inPort, oldLink);
     }
 
     property var pendingMeterAttach: []
 
     function audioPortsOf(nodeId, outputs) {
-        var sp = getSortedPorts(nodeId);
-        var ports = (outputs ? sp.outputs : sp.inputs).filter(isAudioRow);
-        var ids = [];
-        for (var i = 0; i < ports.length; i++)
-            ids.push(ports[i].id);
-        return ids;
+        return Meters.audioPortsOf(graphView, nodeId, outputs);
     }
 
     function meterChunks(n) {
-        var out = [];
-        while (n > 0) {
-            var c = n >= 8 ? 8 : Math.min(n, 6);
-            out.push(c);
-            n -= c;
-        }
-        return out;
+        return Meters.meterChunks(graphView, n);
     }
 
     function canMeterPorts(node, outputs) {
-        return !!node && !isMeterNode(node) && node.type !== "Subgraph" && node.type !== "SubgraphInput" && node.type !== "SubgraphOutput" && audioPortsOf(node.id, outputs).length > 0;
+        return Meters.canMeterPorts(graphView, node, outputs);
     }
 
     function addMetersTo(node, outputs) {
-        if (!canMeterPorts(node, outputs))
-            return;
-        var ports = audioPortsOf(node.id, outputs);
-        var chunks = meterChunks(ports.length);
-        var start = 0;
-        var jobs = pendingMeterAttach.slice();
-        for (var i = 0; i < chunks.length; i++) {
-            var name = controller.add_meter(chunks[i]);
-            if (name) {
-                forgetStaleMeterKeys(name);
-                jobs.push({
-                    name: name,
-                    hostId: node.id,
-                    side: outputs ? "source" : "dest",
-                    hostPorts: ports.slice(start, start + chunks[i]),
-                    t: Date.now(),
-                    hidden: false
-                });
-            }
-            start += chunks[i];
-        }
-        pendingMeterAttach = jobs;
+        return Meters.addMetersTo(graphView, node, outputs);
     }
 
     function processPendingMeterAttach() {
-        if (pendingMeterAttach.length === 0)
-            return;
-        var keep = [];
-        var changed = false;
-        for (var i = 0; i < pendingMeterAttach.length; i++) {
-            var job = pendingMeterAttach[i];
-            var meter = null;
-            for (var ni = 0; ni < nodes.length; ni++) {
-                if (isMeterNode(nodes[ni]) && nodes[ni].name === job.name) {
-                    meter = nodes[ni];
-                    break;
-                }
-            }
-            var host = findNodeData(job.hostId);
-            if (!host || (!meter && Date.now() - job.t > 15000)) {
-                showToast("Could not meter " + (host ? host.name : "the node") + ": the meter did not start");
-                continue;
-            }
-            if (!meter || !meter.layoutKey) {
-                keep.push(job);
-                continue;
-            }
-            if (!job.hidden) {
-                job.hidden = true;
-                hiddenNodes[meter.layoutKey] = true;
-                dockedMeters[meter.layoutKey] = job.side;
-                var a = adjacentAnchor(meter, host, job.side === "dest");
-                nodePositions[meter.id] = findFreeSpot(meter, a.x, a.y, a.dir, false);
-                markHandPlaced(meter.id);
-                delete autoPlaced[meter.id];
-                renameMeter(meter, snapMeterName(host.id, job.side, job.hostPorts));
-                job.name = meter.name;
-                changed = true;
-            }
-            var ins = audioPortsOf(meter.id, false);
-            var outs = audioPortsOf(meter.id, true);
-            if (ins.length < job.hostPorts.length || outs.length < job.hostPorts.length) {
-                if (Date.now() - job.t > 15000)
-                    showToast("Could not wire the meter on " + host.name + ": its ports did not appear");
-                else
-                    keep.push(job);
-                continue;
-            }
-            var drop = [];
-            for (var k = 0; k < job.hostPorts.length; k++) {
-                var hp = job.hostPorts[k];
-                var olds = [];
-                for (var li = 0; li < links.length; li++) {
-                    var l = links[li];
-                    if (job.side === "source" ? l.outputPortId === hp : l.inputPortId === hp)
-                        olds.push(l);
-                }
-                if (job.side === "source") {
-                    controller.connect_ports(hp, ins[k]);
-                    for (var o = 0; o < olds.length; o++)
-                        controller.connect_ports(outs[k], olds[o].inputPortId);
-                } else {
-                    controller.connect_ports(outs[k], hp);
-                    for (var o2 = 0; o2 < olds.length; o2++)
-                        controller.connect_ports(olds[o2].outputPortId, ins[k]);
-                }
-                drop = drop.concat(olds);
-            }
-            for (var d = 0; d < drop.length; d++)
-                controller.disconnect_link(drop[d].id);
-        }
-        pendingMeterAttach = keep;
-        if (changed) {
-            hiddenNodes = hiddenNodes;
-            dockedMeters = dockedMeters;
-            persistHidden();
-            persistDocked();
-            persistLayout();
-            canvas.requestPaint();
-        }
+        return Meters.processPendingMeterAttach(graphView);
     }
 
     function removeMetersOn(nodeId) {
-        var keys = metersSnappedOn(nodeId);
-        for (var i = 0; i < keys.length; i++) {
-            var m = findNodeByLayoutKey(keys[i]);
-            if (m) {
-                forgetMeterWhenGone(m);
-                controller.remove_plugin(m.id);
-            }
-        }
+        return Meters.removeMetersOn(graphView, nodeId);
     }
 
     function snapTargetPort(portId) {
-        var r = snapRedirect[portId];
-        return r !== undefined ? r : portId;
+        return Meters.snapTargetPort(graphView, portId);
     }
 
     function persistDocked() {
-        controller.save_docked_meters(JSON.stringify(dockedMeters));
+        return Meters.persistDocked(graphView);
     }
 
     function isDockedMeter(n) {
-        return isMeterNode(n) && !!n.layoutKey && !!dockedMeters[n.layoutKey];
+        return Meters.isDockedMeter(graphView, n);
     }
 
     function meterChannelPorts(node) {
-        var sp = getSortedPorts(node.id);
-        var ins = sp.inputs.filter(isAudioRow);
-        var outs = sp.outputs.filter(isAudioRow);
-        var chans = [];
-        for (var k = 0; k < Math.max(ins.length, outs.length); k++) {
-            var c = {
-                inPort: ins[k] ? ins[k].id : -1,
-                outPort: outs[k] ? outs[k].id : -1,
-                src: -1,
-                srcs: [],
-                dests: []
-            };
-            for (var i = 0; i < links.length; i++) {
-                var l = links[i];
-                if (c.inPort >= 0 && l.inputPortId === c.inPort)
-                    c.srcs.push(l.outputPortId);
-                if (c.outPort >= 0 && l.outputPortId === c.outPort)
-                    c.dests.push(l.inputPortId);
-            }
-            c.src = c.srcs.length > 0 ? c.srcs[0] : -1;
-            chans.push(c);
-        }
-        return chans;
+        return Meters.meterChannelPorts(graphView, node);
     }
 
     function canSnapMeter(node, side) {
-        if (!isMeterNode(node) || !node.layoutKey)
-            return false;
-        var chans = meterChannelPorts(node);
-        var any = false;
-        for (var k = 0; k < chans.length; k++) {
-            var c = chans[k];
-            if (side === "source") {
-                if (c.srcs.length > 1 || (c.dests.length > 0 && c.srcs.length === 0))
-                    return false;
-                if (c.srcs.length === 1)
-                    any = true;
-            } else {
-                if (c.dests.length > 1 || (c.srcs.length > 0 && c.dests.length === 0))
-                    return false;
-                if (c.dests.length === 1)
-                    any = true;
-            }
-        }
-        return any;
+        return Meters.canSnapMeter(graphView, node, side);
     }
 
     property var meterKeyAlias: ({})
 
     function resolveMeterKey(key) {
-        var seen = 0;
-        while (meterKeyAlias[key] !== undefined && seen++ < 32)
-            key = meterKeyAlias[key];
-        return key;
+        return Meters.resolveMeterKey(graphView, key);
     }
 
     function isAutoMeterName(name) {
-        return /^Meter \(\d ch\)( #\d+)?$/.test(name) || / (in|out)( \d+(-\d+)?)? meter( #\d+)?$/.test(name);
+        return Meters.isAutoMeterName(graphView, name);
     }
 
     function snapMeterName(hostId, side, anchorPorts) {
-        var host = findNodeData(hostId);
-        if (!host)
-            return "";
-        var all = audioPortsOf(hostId, side === "source");
-        var idx = [];
-        for (var i = 0; i < anchorPorts.length; i++) {
-            var at = all.indexOf(anchorPorts[i]);
-            if (at >= 0)
-                idx.push(at + 1);
-        }
-        idx.sort(function (a, b) {
-            return a - b;
-        });
-        var range = "";
-        if (idx.length > 0 && idx.length < all.length)
-            range = " " + (idx.length === 1 ? idx[0] : idx[0] + "-" + idx[idx.length - 1]);
-        return host.name + " " + (side === "source" ? "out" : "in") + range + " meter";
+        return Meters.snapMeterName(graphView, hostId, side, anchorPorts);
     }
 
     function snapMeterNameFromLinks(meter, side) {
-        var chans = meterChannelPorts(meter);
-        var anchors = [];
-        var hostId = -1;
-        for (var k = 0; k < chans.length; k++) {
-            var a = side === "source" ? chans[k].src : (chans[k].dests.length > 0 ? chans[k].dests[0] : -1);
-            if (a < 0)
-                continue;
-            var nid = getPortNodeId(a);
-            if (hostId < 0)
-                hostId = nid;
-            if (nid === hostId)
-                anchors.push(a);
-        }
-        return hostId >= 0 ? snapMeterName(hostId, side, anchors) : "";
+        return Meters.snapMeterNameFromLinks(graphView, meter, side);
     }
 
     function renameMeter(meter, base) {
-        if (!meter || !isAutoMeterName(meter.name))
-            return;
-        if (base === "" && meter.layoutKey && dockedMeters[meter.layoutKey])
-            return;
-        var oldKey = meter.layoutKey;
-        var name = controller.rename_meter(meter.id, base);
-        if (!name || !oldKey || name === meter.name)
-            return;
-        var newKey = oldKey.substring(0, oldKey.indexOf(":") + 1) + name;
-        var maps = [hiddenNodes, dockedMeters, pinnedNodes, snapSeenAnchored, snapSuspended, snapUnanchoredSince, removedMeterKeys];
-        for (var i = 0; i < maps.length; i++) {
-            if (maps[i][oldKey] !== undefined) {
-                maps[i][newKey] = maps[i][oldKey];
-                delete maps[i][oldKey];
-            }
-        }
-        meterKeyAlias[oldKey] = newKey;
-        delete meterKeyAlias[newKey];
-        meter.name = name;
-        meter.layoutKey = newKey;
-        hiddenNodes = hiddenNodes;
-        dockedMeters = dockedMeters;
-        pinnedNodes = pinnedNodes;
-        persistDocked();
-        persistHidden();
-        persistPinned();
+        return Meters.renameMeter(graphView, meter, base);
     }
 
     function setMeterSnapped(key, side) {
-        key = resolveMeterKey(key);
-        delete snapSuspended[key];
-        delete snapUnanchoredSince[key];
-        if (side) {
-            dockedMeters[key] = side;
-            hiddenNodes[key] = true;
-        } else {
-            delete dockedMeters[key];
-            delete hiddenNodes[key];
-        }
-        dockedMeters = dockedMeters;
-        hiddenNodes = hiddenNodes;
-        persistDocked();
-        persistHidden();
-        var meter = findNodeByLayoutKey(key);
-        if (meter)
-            renameMeter(meter, side ? snapMeterNameFromLinks(meter, side) : "");
-        canvas.requestPaint();
+        return Meters.setMeterSnapped(graphView, key, side);
     }
 
     function snapMeter(node, side) {
-        if (!canSnapMeter(node, side))
-            return;
-        delete selectedNodes[node.id];
-        setMeterSnapped(node.layoutKey, side);
-        pushUndo({
-            kind: "snap",
-            label: "snap meter",
-            key: node.layoutKey,
-            side: side
-        });
+        return Meters.snapMeter(graphView, node, side);
     }
 
     function metersSnappedOn(nodeId) {
-        var keys = [];
-        for (var id in dockBarFrames) {
-            var f = dockBarFrames[id];
-            if (f.nodeId === nodeId && keys.indexOf(f.meterKey) < 0)
-                keys.push(f.meterKey);
-        }
-        return keys;
+        return Meters.metersSnappedOn(graphView, nodeId);
     }
 
     function unsnapMetersOn(nodeId) {
-        var keys = metersSnappedOn(nodeId);
-        var parts = [];
-        for (var i = 0; i < keys.length; i++) {
-            parts.push({
-                kind: "snap",
-                label: "unsnap meter",
-                key: keys[i],
-                side: "",
-                prevSide: dockedMeters[keys[i]]
-            });
-            setMeterSnapped(keys[i], "");
-        }
-        if (parts.length > 0)
-            pushUndo({
-                kind: "group",
-                label: parts.length > 1 ? "unsnap " + parts.length + " meters" : "unsnap meter",
-                parts: parts
-            });
+        return Meters.unsnapMetersOn(graphView, nodeId);
     }
 
     function addMeter(channels) {
-        if (contextCanvasPos)
-            pendingPluginPosition = {
-                x: contextCanvasPos.x,
-                y: contextCanvasPos.y
-            };
-        var name = controller.add_meter(channels);
-        if (name) {
-            forgetStaleMeterKeys(name);
-            pendingPluginName = name;
-        } else {
-            pendingPluginPosition = null;
-            pendingPluginName = "";
-        }
+        return Meters.addMeter(graphView, channels);
     }
 
     function computeNodeLayout(node, sorted) {
-        var ins = sorted.inputs;
-        var outs = sorted.outputs;
-        var hiddenIn = 0;
-        var hiddenOut = 0;
-        var meter = isMeterNode(node);
-        if (!meter && isConnectedOnly(node)) {
-            ins = ins.filter(function (p) {
-                return !!connectedPorts[p.id];
-            });
-            outs = outs.filter(function (p) {
-                return !!connectedPorts[p.id];
-            });
-        } else if (node.type === "Plugin" && !meter) {
-            hiddenIn = ins.length - visiblePortCount(ins);
-            hiddenOut = outs.length - visiblePortCount(outs);
-            if (hiddenIn < collapseMinHidden)
-                hiddenIn = 0;
-            if (hiddenOut < collapseMinHidden)
-                hiddenOut = 0;
-        }
-        var expandable = hiddenIn + hiddenOut > 0;
-        var expanded = expandable && !!(node.layoutKey && expandedNodes[node.layoutKey]);
-        var visIn = expandable && !expanded ? ins.slice(0, ins.length - hiddenIn) : ins;
-        var visOut = expandable && !expanded ? outs.slice(0, outs.length - hiddenOut) : outs;
-        var rows = Math.max(visIn.length, visOut.length, 1);
-        var h = Theme.nodeHeader + Theme.nodePortsTop + Theme.nodePortRow * (rows + (expandable ? 1 : 0)) + Theme.nodePortsBottom + 2;
-        if ((node.type === "Plugin" && !meter) || node.type === "Subgraph")
-            h += Theme.nodeFooter;
-        if (node.type === "Plugin" && !meter)
-            h += Theme.nodePresetRow;
-        return {
-            inputs: visIn,
-            outputs: visOut,
-            rows: rows,
-            expandable: expandable,
-            expanded: expanded,
-            hiddenIn: hiddenIn,
-            hiddenOut: hiddenOut,
-            height: h
-        };
+        return Nodes.computeNodeLayout(graphView, node, sorted);
     }
 
     function nodeLayout(node) {
-        return nodeLayouts[node.id] || computeNodeLayout(node, getSortedPorts(node.id));
+        return Nodes.nodeLayout(graphView, node);
     }
 
     function calculateNodeHeight(node) {
-        var cached = nodeHeights[node.id];
-        if (cached !== undefined)
-            return cached;
-        return nodeLayout(node).height;
+        return Nodes.calculateNodeHeight(graphView, node);
     }
 
     function calculateNodeWidths() {
-        var newWidths = {};
-        for (var ni = 0; ni < nodes.length; ni++) {
-            var node = nodes[ni];
-            newWidths[node.id] = node.type === "Plugin" || node.type === "Subgraph" ? Theme.nodeWidthPlugin : Theme.nodeWidth;
-        }
-        nodeWidths = newWidths;
+        return Nodes.calculateNodeWidths(graphView);
     }
 
     function getNodeWidth(nodeId) {
-        return nodeWidths[nodeId] || minNodeWidth;
+        return Nodes.getNodeWidth(graphView, nodeId);
     }
 
     function toggleExpanded(node) {
-        if (!node.layoutKey)
-            return;
-        if (expandedNodes[node.layoutKey])
-            delete expandedNodes[node.layoutKey];
-        else
-            expandedNodes[node.layoutKey] = true;
-        expandedNodes = expandedNodes;
-        var lay = computeNodeLayout(node, getSortedPorts(node.id));
-        nodeLayouts[node.id] = lay;
-        nodeHeights[node.id] = lay.height;
-        canvas.requestPaint();
+        return Nodes.toggleExpanded(graphView, node);
     }
 
     function toCanvas(sx, sy) {
-        return {
-            x: (sx - panX) / zoom,
-            y: (sy - panY) / zoom
-        };
+        return Viewport.toCanvas(graphView, sx, sy);
     }
 
     function toScreen(cx, cy) {
-        return {
-            x: cx * zoom + panX,
-            y: cy * zoom + panY
-        };
+        return Viewport.toScreen(graphView, cx, cy);
     }
 
     function contentBounds() {
-        var b = null;
-        for (var i = 0; i < nodes.length; i++) {
-            var node = nodes[i];
-            if (node.layoutKey && hiddenNodes[node.layoutKey])
-                continue;
-            var pos = nodePositions[node.id];
-            if (!pos)
-                continue;
-            var r = pos.x + getNodeWidth(node.id);
-            var btm = pos.y + calculateNodeHeight(node);
-            if (!b) {
-                b = {
-                    left: pos.x,
-                    top: pos.y,
-                    right: r,
-                    bottom: btm
-                };
-            } else {
-                b.left = Math.min(b.left, pos.x);
-                b.top = Math.min(b.top, pos.y);
-                b.right = Math.max(b.right, r);
-                b.bottom = Math.max(b.bottom, btm);
-            }
-        }
-        return b;
+        return Viewport.contentBounds(graphView);
     }
 
     function clampPan() {
-        var b = contentBounds();
-        if (!b || width <= 0 || height <= 0)
-            return;
-        var keepX = Math.min(minVisibleContent, (b.right - b.left) * zoom, width);
-        var keepY = Math.min(minVisibleContent, (b.bottom - b.top) * zoom, height);
-        var l = b.left * zoom + panX, r = b.right * zoom + panX;
-        var t = b.top * zoom + panY, btm = b.bottom * zoom + panY;
-        if (r < keepX)
-            panX += keepX - r;
-        else if (l > width - keepX)
-            panX -= l - (width - keepX);
-        if (btm < keepY)
-            panY += keepY - btm;
-        else if (t > height - keepY)
-            panY -= t - (height - keepY);
+        return Viewport.clampPan(graphView);
     }
 
     function zoomAt(sx, sy, newZoom) {
-        hideNameTip();
-        newZoom = Math.max(minZoom, Math.min(maxZoom, newZoom));
-        var c = toCanvas(sx, sy);
-        panX += c.x * (zoom - newZoom);
-        panY += c.y * (zoom - newZoom);
-        zoom = newZoom;
-        clampPan();
-        canvas.requestPaint();
+        return Viewport.zoomAt(graphView, sx, sy, newZoom);
     }
 
     function fitToView() {
-        fitBounds(contentBounds());
+        return Viewport.fitToView(graphView);
     }
 
     function frameSelection() {
-        var b = null;
-        for (var k in selectedNodes) {
-            var node = findNodeData(parseInt(k));
-            var pos = node ? nodePositions[node.id] : null;
-            if (!pos || (node.layoutKey && hiddenNodes[node.layoutKey]))
-                continue;
-            var r = pos.x + getNodeWidth(node.id);
-            var btm = pos.y + calculateNodeHeight(node);
-            if (!b)
-                b = {
-                    left: pos.x,
-                    top: pos.y,
-                    right: r,
-                    bottom: btm
-                };
-            else {
-                b.left = Math.min(b.left, pos.x);
-                b.top = Math.min(b.top, pos.y);
-                b.right = Math.max(b.right, r);
-                b.bottom = Math.max(b.bottom, btm);
-            }
-        }
-        fitBounds(b || contentBounds());
+        return Viewport.frameSelection(graphView);
     }
 
     function fitBounds(b) {
-        if (!b || width <= 0 || height <= 0) {
-            zoom = 1.0;
-            panX = 0;
-            panY = 0;
-            canvas.requestPaint();
-            return;
-        }
-        var margin = 40;
-        var top = 58, bottom = 52;
-        var bw = Math.max(b.right - b.left, 1);
-        var bh = Math.max(b.bottom - b.top, 1);
-        var availH = Math.max(height - top - bottom, 1);
-        var z = Math.min((width - 2 * margin) / bw, availH / bh, 1.0);
-        zoom = Math.max(minZoom, z);
-        panX = width / 2 - (b.left + bw / 2) * zoom;
-        panY = top + availH / 2 - (b.top + bh / 2) * zoom;
-        canvas.requestPaint();
+        return Viewport.fitBounds(graphView, b);
     }
 
     function scrollRange(lo, hi, viewLo, viewLen) {
-        var pad = 40 / zoom;
-        var a = Math.min(lo - pad, viewLo);
-        var e = Math.max(hi + pad, viewLo + viewLen);
-        return {
-            lo: a,
-            len: e - a
-        };
+        return Viewport.scrollRange(graphView, lo, hi, viewLo, viewLen);
     }
 
     function updateScrollBars() {
-        var b = contentBounds();
-        var viewW = width / zoom, viewH = height / zoom;
-        var viewL = -panX / zoom, viewT = -panY / zoom;
-        if (!b) {
-            hScrollBar.size = 1;
-            vScrollBar.size = 1;
-            return;
-        }
-        if (!hScrollBar.pressed) {
-            var hr = scrollRange(b.left, b.right, viewL, viewW);
-            hScrollBar.rangeLo = hr.lo;
-            hScrollBar.rangeLen = hr.len;
-            hScrollBar.size = Math.min(1, viewW / hr.len);
-            hScrollBar.position = (viewL - hr.lo) / hr.len;
-        }
-        if (!vScrollBar.pressed) {
-            var vr = scrollRange(b.top, b.bottom, viewT, viewH);
-            vScrollBar.rangeLo = vr.lo;
-            vScrollBar.rangeLen = vr.len;
-            vScrollBar.size = Math.min(1, viewH / vr.len);
-            vScrollBar.position = (viewT - vr.lo) / vr.len;
-        }
+        return Viewport.updateScrollBars(graphView);
     }
 
     function coveredAbove(cx, cy, z) {
-        for (var i = nodes.length - 1; i > z; i--) {
-            var n = nodes[i];
-            if (n.layoutKey && hiddenNodes[n.layoutKey])
-                continue;
-            var pos = nodePositions[n.id];
-            if (!pos)
-                continue;
-            if (cx >= pos.x && cx <= pos.x + getNodeWidth(n.id) && cy >= pos.y && cy <= pos.y + calculateNodeHeight(n)) {
-                return true;
-            }
-        }
-        return false;
+        return HitTesting.coveredAbove(graphView, cx, cy, z);
     }
 
     function findPortAt(sx, sy) {
-        var hitRadius = portRadius * zoom * 2.5;
-        var c = toCanvas(sx, sy);
-        var bestId = -1;
-        var bestDist = hitRadius + 1;
-        for (var pid in portPositions) {
-            var pp = portPositions[pid];
-            if (pp.alias)
-                continue;
-            var screenX = pp.cx * zoom + panX;
-            var screenY = pp.cy * zoom + panY;
-            var dx = sx - screenX;
-            var dy = sy - screenY;
-            var dist = Math.sqrt(dx * dx + dy * dy);
-            if (dist < bestDist && !coveredAbove(c.x, c.y, pp.z !== undefined ? pp.z : -1)) {
-                bestDist = dist;
-                bestId = parseInt(pid);
-            }
-        }
-        return bestDist <= hitRadius ? bestId : -1;
+        return HitTesting.findPortAt(graphView, sx, sy);
     }
 
     function findPortLabelAt(sx, sy) {
-        var c = toCanvas(sx, sy);
-        var half = Theme.nodePortRow / 2;
-        for (var pid in portPositions) {
-            var pp = portPositions[pid];
-            if (pp.labelX0 === undefined)
-                continue;
-            if (c.y < pp.cy - half || c.y > pp.cy + half || c.x < pp.labelX0 || c.x > pp.labelX1)
-                continue;
-            if (!coveredAbove(c.x, c.y, pp.z !== undefined ? pp.z : -1))
-                return parseInt(pid);
-        }
-        return -1;
+        return HitTesting.findPortLabelAt(graphView, sx, sy);
     }
 
     function linksOfPort(portId) {
-        var out = [];
-        for (var i = 0; i < links.length; i++) {
-            if (links[i].outputPortId === portId || links[i].inputPortId === portId)
-                out.push(links[i].id);
-        }
-        return out;
+        return HitTesting.linksOfPort(graphView, portId);
     }
 
     function visibleLinksOfPort(portId) {
-        var meterPort = snapRedirect[portId];
-        if (meterPort === undefined)
-            return linksOfPort(portId);
-        var meterNode = getPortNodeId(meterPort);
-        var out = [];
-        var own = linksOfPort(portId);
-        for (var i = 0; i < own.length; i++) {
-            var l = findLinkData(own[i]);
-            if (l && l.outputNodeId !== meterNode && l.inputNodeId !== meterNode)
-                out.push(own[i]);
-        }
-        var viaMeter = linksOfPort(meterPort);
-        for (var j = 0; j < viaMeter.length; j++) {
-            var m = findLinkData(viaMeter[j]);
-            if (m && m.outputPortId !== portId && m.inputPortId !== portId && out.indexOf(viaMeter[j]) < 0)
-                out.push(viaMeter[j]);
-        }
-        return out;
+        return HitTesting.visibleLinksOfPort(graphView, portId);
     }
 
     function openPortMenu(portId) {
-        var nodeId = getPortNodeId(portId);
-        if (nodeId < 0)
-            return;
-        contextNodeId = nodeId;
-        contextNode = findNodeData(nodeId);
-        contextPortId = portId;
-        portContextMenu.popup();
+        return HitTesting.openPortMenu(graphView, portId);
     }
 
     function getPortDirection(portId) {
-        for (var nid in portsByNode) {
-            var ports = portsByNode[nid];
-            for (var i = 0; i < ports.length; i++) {
-                if (ports[i].id === portId)
-                    return ports[i].direction;
-            }
-        }
-        return "";
+        return HitTesting.getPortDirection(graphView, portId);
     }
 
     function getPortNodeId(portId) {
-        for (var nid in portsByNode) {
-            var ports = portsByNode[nid];
-            for (var i = 0; i < ports.length; i++) {
-                if (ports[i].id === portId)
-                    return parseInt(nid);
-            }
-        }
-        return -1;
+        return HitTesting.getPortNodeId(graphView, portId);
     }
 
     function findNodeAt(sx, sy) {
-        var c = toCanvas(sx, sy);
-        for (var i = nodes.length - 1; i >= 0; i--) {
-            var n = nodes[i];
-            if (n.layoutKey && hiddenNodes[n.layoutKey])
-                continue;
-            var pos = nodePositions[n.id];
-            if (!pos)
-                continue;
-            var h = calculateNodeHeight(n);
-            if (c.x >= pos.x && c.x <= pos.x + getNodeWidth(n.id) && c.y >= pos.y && c.y <= pos.y + h) {
-                return n.id;
-            }
-        }
-        return -1;
+        return HitTesting.findNodeAt(graphView, sx, sy);
     }
 
     function refreshPresetInfo() {
-        try {
-            presetInfo = JSON.parse(controller.get_plugin_presets_all_json());
-        } catch (e) {
-            presetInfo = {};
-        }
+        return HitTesting.refreshPresetInfo(graphView);
     }
 
     function presetRects(n, nx, ny, nh) {
-        var margin = 10;
-        var gap = 6;
-        var saveW = 44;
-        var h = Theme.nodeFooterBtn;
-        var w = getNodeWidth(n.id);
-        var y = ny + nh - Theme.nodeFooter - Theme.nodePresetRow + (Theme.nodePresetRow - h) / 2;
-        return {
-            name: {
-                x: nx + margin,
-                y: y,
-                w: w - 2 * margin - gap - saveW,
-                h: h
-            },
-            save: {
-                x: nx + w - margin - saveW,
-                y: y,
-                w: saveW,
-                h: h
-            }
-        };
+        return HitTesting.presetRects(graphView, n, nx, ny, nh);
     }
 
     function inRect(c, r) {
-        return c.x >= r.x && c.x <= r.x + r.w && c.y >= r.y && c.y <= r.y + r.h;
+        return HitTesting.inRect(graphView, c, r);
     }
 
     function openPresetMenu(nodeId) {
-        var info = {};
-        try {
-            info = JSON.parse(controller.get_plugin_presets_json(nodeId));
-        } catch (e) {}
-        presetMenuNodeId = nodeId;
-        presetMenuNames = info.presets || [];
-        presetMenuSelected = info.selected || "";
-        presetMenuDefault = info["default"] || "";
-        presetMenuChanges = info.changes || [];
-        var pos = nodePositions[nodeId];
-        var n = findNodeData(nodeId);
-        if (!pos || !n)
-            return;
-        var r = presetRects(n, pos.x, pos.y, calculateNodeHeight(n)).name;
-        var sp = toScreen(r.x, r.y + r.h);
-        presetMenu.popup(sp.x, sp.y + 2);
+        return HitTesting.openPresetMenu(graphView, nodeId);
     }
 
     function openPresetSave(nodeId) {
-        var info = {};
-        try {
-            info = JSON.parse(controller.get_plugin_presets_json(nodeId));
-        } catch (e) {}
-        presetSaveNodeId = nodeId;
-        presetSaveNames = info.presets || [];
-        presetSaveDialog.selectedName = info.selected || "";
-        presetSaveDialog.open();
+        return HitTesting.openPresetSave(graphView, nodeId);
     }
 
     function presetChanged() {
-        refreshPresetInfo();
-        canvas.requestPaint();
+        return HitTesting.presetChanged(graphView);
     }
 
     function footerButtons(n, nx, ny, nh) {
-        var y = ny + nh - Theme.nodeFooter + (Theme.nodeFooter - Theme.nodeFooterBtn) / 2;
-        var base = n.type === "Subgraph" ? [
-            {
-                key: "open",
-                w: 1
-            }
-        ] : [
-            {
-                key: "onoff",
-                w: 40
-            },
-            {
-                key: "bypass",
-                w: 50
-            },
-            {
-                key: "ui",
-                w: 28
-            },
-            {
-                key: "params",
-                w: 52
-            }
-        ];
-        var margin = 10;
-        var gap = 6;
-        var avail = getNodeWidth(n.id) - 2 * margin - gap * (base.length - 1);
-        var total = 0;
-        for (var t = 0; t < base.length; t++)
-            total += base[t].w;
-        var x = nx + margin;
-        var out = [];
-        for (var i = 0; i < base.length; i++) {
-            var w = i === base.length - 1 ? nx + getNodeWidth(n.id) - margin - x : Math.round(avail * base[i].w / total);
-            out.push({
-                key: base[i].key,
-                x: x,
-                y: y,
-                w: w,
-                h: Theme.nodeFooterBtn
-            });
-            x += w + gap;
-        }
-        return out;
+        return HitTesting.footerButtons(graphView, n, nx, ny, nh);
     }
 
     function pinRect(n, nx, ny) {
-        var s = 18;
-        return {
-            x: nx + getNodeWidth(n.id) - 8 - s,
-            y: ny + (Theme.nodeHeader - s) / 2,
-            w: s,
-            h: s
-        };
+        return HitTesting.pinRect(graphView, n, nx, ny);
     }
 
     function portsRect(n, nx, ny) {
-        var r = pinRect(n, nx, ny);
-        return {
-            x: r.x - r.w,
-            y: r.y,
-            w: r.w,
-            h: r.h
-        };
+        return HitTesting.portsRect(graphView, n, nx, ny);
     }
 
     function hasUnconnectedPorts(node) {
-        var sorted = getSortedPorts(node.id);
-        var all = sorted.inputs.concat(sorted.outputs);
-        for (var i = 0; i < all.length; i++) {
-            if (!connectedPorts[all[i].id])
-                return true;
-        }
-        return false;
+        return HitTesting.hasUnconnectedPorts(graphView, node);
     }
 
     function showPortsButton(node) {
-        if (!node || !node.layoutKey || isMeterNode(node))
-            return false;
-        if (isConnectedOnly(node))
-            return true;
-        return hoveredNodeId === node.id && hasUnconnectedPorts(node);
+        return HitTesting.showPortsButton(graphView, node);
     }
 
     function togglePinned(node) {
-        if (!node || !node.layoutKey)
-            return;
-        if (pinnedNodes[node.layoutKey])
-            delete pinnedNodes[node.layoutKey];
-        else
-            pinnedNodes[node.layoutKey] = true;
-        pinnedNodes = pinnedNodes;
-        persistPinned();
-        canvas.requestPaint();
+        return HitTesting.togglePinned(graphView, node);
     }
 
     function toggleRowRect(n, lay, nx, ny) {
-        if (!lay.expandable)
-            return null;
-        return {
-            x: nx,
-            y: ny + Theme.nodeHeader + Theme.nodePortsTop + lay.rows * Theme.nodePortRow,
-            w: getNodeWidth(n.id),
-            h: Theme.nodePortRow
-        };
+        return HitTesting.toggleRowRect(graphView, n, lay, nx, ny);
     }
 
     function findButtonAt(sx, sy) {
-        var topId = findNodeAt(sx, sy);
-        if (topId < 0)
-            return null;
-        var n = findNodeData(topId);
-        if (!n)
-            return null;
-        var pos = nodePositions[n.id];
-        if (!pos)
-            return null;
-        var c = toCanvas(sx, sy);
-        var pb = pinRect(n, pos.x, pos.y);
-        if (c.x >= pb.x && c.x <= pb.x + pb.w && c.y >= pb.y && c.y <= pb.y + pb.h)
-            return {
-                button: "pin",
-                nodeId: n.id
-            };
-        if (showPortsButton(n)) {
-            var fb = portsRect(n, pos.x, pos.y);
-            if (c.x >= fb.x && c.x <= fb.x + fb.w && c.y >= fb.y && c.y <= fb.y + fb.h)
-                return {
-                    button: "ports",
-                    nodeId: n.id
-                };
-        }
-        var lay = nodeLayout(n);
-        var tr = toggleRowRect(n, lay, pos.x, pos.y);
-        if (tr && c.x >= tr.x && c.x <= tr.x + tr.w && c.y >= tr.y && c.y <= tr.y + tr.h)
-            return {
-                button: "toggle",
-                nodeId: n.id
-            };
-        if (n.type !== "Plugin" && n.type !== "Subgraph")
-            return null;
-        if (isMeterNode(n))
-            return null;
-        if (n.type === "Plugin") {
-            var pr = presetRects(n, pos.x, pos.y, calculateNodeHeight(n));
-            if (inRect(c, pr.name))
-                return {
-                    button: "preset",
-                    nodeId: n.id
-                };
-            if (inRect(c, pr.save))
-                return {
-                    button: "presetsave",
-                    nodeId: n.id
-                };
-        }
-        var btns = footerButtons(n, pos.x, pos.y, calculateNodeHeight(n));
-        for (var i = 0; i < btns.length; i++) {
-            var b = btns[i];
-            if (c.x >= b.x && c.x <= b.x + b.w && c.y >= b.y && c.y <= b.y + b.h) {
-                if (b.key === "open")
-                    return {
-                        button: "open",
-                        nodeId: n.id,
-                        subgraphId: n.subgraphId
-                    };
-                if (b.key === "onoff")
-                    return {
-                        button: "onoff",
-                        nodeId: n.id,
-                        enabled: isNodeEnabled(n)
-                    };
-                if (b.key === "bypass")
-                    return {
-                        button: "bypass",
-                        nodeId: n.id,
-                        bypassed: isNodeBypassed(n)
-                    };
-                if (b.key === "ui")
-                    return {
-                        button: "ui",
-                        nodeId: n.id,
-                        hasUi: n.pluginHasUi !== false
-                    };
-                return {
-                    button: "params",
-                    nodeId: n.id
-                };
-            }
-        }
-        return null;
+        return HitTesting.findButtonAt(graphView, sx, sy);
     }
 
     function fontSpec(weight, size, mono) {
-        return weight + " " + size + "px \"" + (mono ? Theme.fontMono : Theme.fontSans) + "\"";
+        return Drawing.fontSpec(graphView, weight, size, mono);
     }
 
     function elide(ctx, str, maxW) {
-        if (!str)
-            return "";
-        if (ctx.measureText(str).width <= maxW)
-            return str;
-        var lo = 0;
-        var hi = str.length;
-        while (lo < hi) {
-            var mid = Math.ceil((lo + hi) / 2);
-            if (ctx.measureText(str.substring(0, mid) + "\u2026").width <= maxW)
-                lo = mid;
-            else
-                hi = mid - 1;
-        }
-        return str.substring(0, lo) + "\u2026";
+        return Drawing.elide(graphView, ctx, str, maxW);
     }
 
     function drawGlyph(ctx, name, x, y, size, color) {
-        var g = Glyphs.icons[name];
-        if (!g)
-            return;
-        ctx.save();
-        ctx.translate(x, y);
-        ctx.scale(size / g.vb, size / g.vb);
-        ctx.strokeStyle = "" + color;
-        ctx.lineWidth = g.sw;
-        ctx.lineCap = "round";
-        ctx.lineJoin = "round";
-        ctx.beginPath();
-        ctx.path = g.d;
-        ctx.stroke();
-        ctx.restore();
+        return Drawing.drawGlyph(graphView, ctx, name, x, y, size, color);
     }
 
     function roundRectPath(ctx, x, y, w, h, r) {
-        ctx.beginPath();
-        ctx.moveTo(x + r, y);
-        ctx.lineTo(x + w - r, y);
-        ctx.arcTo(x + w, y, x + w, y + r, r);
-        ctx.lineTo(x + w, y + h - r);
-        ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
-        ctx.lineTo(x + r, y + h);
-        ctx.arcTo(x, y + h, x, y + h - r, r);
-        ctx.lineTo(x, y + r);
-        ctx.arcTo(x, y, x + r, y, r);
-        ctx.closePath();
+        return Drawing.roundRectPath(graphView, ctx, x, y, w, h, r);
     }
 
     function drawTag(ctx, text, right, cy) {
-        ctx.font = fontSpec(500, Theme.sizeNodeTag, true);
-        var tw = ctx.measureText(text).width + 8;
-        var th = 14;
-        roundRectPath(ctx, right - tw, cy - th / 2, tw, th, Theme.radiusTag);
-        ctx.strokeStyle = "" + Theme.borderStrong;
-        ctx.lineWidth = 1;
-        ctx.stroke();
-        ctx.fillStyle = "" + Theme.textMuted;
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText(text, right - tw / 2, cy + 0.5);
-        return right - tw;
+        return Drawing.drawTag(graphView, ctx, text, right, cy);
     }
 
     function drawDefaultChip(ctx, right, cy) {
-        ctx.font = fontSpec(500, Theme.sizeNodeTag, true);
-        var label = "default";
-        var tw = ctx.measureText(label).width + 8 + 9;
-        var th = 16;
-        roundRectPath(ctx, right - tw, cy - th / 2, tw, th, Theme.radiusTag);
-        ctx.fillStyle = "" + Theme.accentFaint;
-        ctx.fill();
-        ctx.beginPath();
-        ctx.arc(right - tw + 7, cy, 2.5, 0, Math.PI * 2);
-        ctx.fillStyle = "" + Theme.accent;
-        ctx.fill();
-        ctx.textAlign = "left";
-        ctx.textBaseline = "middle";
-        ctx.fillText(label, right - tw + 12, cy + 0.5);
-        return right - tw;
+        return Drawing.drawDefaultChip(graphView, ctx, right, cy);
     }
 
     function nodeMatchesSearch(node) {
-        if (searchText.length === 0)
-            return true;
-        var q = searchText.toLowerCase();
-        if ((node.name || "").toLowerCase().indexOf(q) >= 0)
-            return true;
-        var ports = portsByNode[node.id] || [];
-        for (var i = 0; i < ports.length; i++) {
-            if ((ports[i].name || "").toLowerCase().indexOf(q) >= 0)
-                return true;
-        }
-        return false;
+        return Nodes.nodeMatchesSearch(graphView, node);
     }
 
     function portMatchesSearch(port) {
-        return searchText.length > 0 && (port.name || "").toLowerCase().indexOf(searchText.toLowerCase()) >= 0;
+        return Nodes.portMatchesSearch(graphView, port);
     }
 
     property int dragSourcePortId: -1
     property int dragSourceNodeId: -1
     function connectFromNodeId() {
-        if (dragSourcePortId !== connectFromPortId) {
-            dragSourceNodeId = getPortNodeId(connectFromPortId);
-            dragSourcePortId = connectFromPortId;
-        }
-        return dragSourceNodeId;
+        return Nodes.connectFromNodeId(graphView);
     }
 
     function isValidDropTarget(port, nodeId) {
-        if (connectFromPortId < 0 || port.id === connectFromPortId)
-            return false;
-        if (port.direction === connectFromDir)
-            return false;
-        if (connectFromNodeId() === nodeId)
-            return false;
-        var fromMt = portMediaTypes[connectFromPortId];
-        return !fromMt || fromMt === "Unknown" || !port.mediaType || port.mediaType === fromMt;
+        return Nodes.isValidDropTarget(graphView, port, nodeId);
     }
 
     Canvas {
         id: canvas
         anchors.fill: parent
 
-        onPaint: {
-            var ctx = getContext("2d");
-            ctx.reset();
-
-            if (widthsDirty) {
-                calculateNodeWidths();
-                widthsDirty = false;
-            }
-
-            ctx.fillStyle = "" + Theme.bgCanvas;
-            ctx.fillRect(0, 0, width, height);
-
-            ctx.save();
-            ctx.translate(panX, panY);
-            ctx.scale(zoom, zoom);
-
-            var visLeft = -panX / zoom;
-            var visTop = -panY / zoom;
-            var visRight = (width - panX) / zoom;
-            var visBottom = (height - panY) / zoom;
-
-            var pitch = gridSize;
-            while (pitch * zoom < 10)
-                pitch *= 2;
-            var dot = 1.5 / zoom;
-            ctx.fillStyle = "" + Theme.gridDot;
-            var gx0 = Math.floor(visLeft / pitch) * pitch;
-            var gy0 = Math.floor(visTop / pitch) * pitch;
-            for (var gx = gx0; gx <= visRight; gx += pitch) {
-                for (var gy = gy0; gy <= visBottom; gy += pitch) {
-                    ctx.fillRect(gx, gy, dot, dot);
-                }
-            }
-
-            var newPortPositions = {};
-            var hdr = Theme.nodeHeader;
-            var rowH = Theme.nodePortRow;
-            var portsTop = hdr + Theme.nodePortsTop;
-
-            for (var ni = 0; ni < nodes.length; ni++) {
-                var node = nodes[ni];
-                if (node.layoutKey && hiddenNodes[node.layoutKey])
-                    continue;
-                var pos = nodePositions[node.id];
-                if (!pos)
-                    continue;
-                var lay = nodeLayout(node);
-                var nw = getNodeWidth(node.id);
-                var labelBoth = lay.inputs.length > 0 && lay.outputs.length > 0;
-                var labelWidth = labelBoth ? (nw - 2 * Theme.nodePadX - 8) / 2 : nw - 2 * Theme.nodePadX;
-                for (var pi = 0; pi < lay.inputs.length; pi++) {
-                    newPortPositions[lay.inputs[pi].id] = {
-                        cx: pos.x,
-                        cy: pos.y + portsTop + pi * rowH + rowH / 2,
-                        nodeId: node.id,
-                        z: ni,
-                        labelX0: pos.x + Theme.nodePadX,
-                        labelX1: pos.x + Theme.nodePadX + labelWidth
-                    };
-                }
-                for (var po = 0; po < lay.outputs.length; po++) {
-                    newPortPositions[lay.outputs[po].id] = {
-                        cx: pos.x + nw,
-                        cy: pos.y + portsTop + po * rowH + rowH / 2,
-                        nodeId: node.id,
-                        z: ni,
-                        labelX0: pos.x + nw - Theme.nodePadX - labelWidth,
-                        labelX1: pos.x + nw - Theme.nodePadX
-                    };
-                }
-            }
-
-            var newDockFrames = {};
-            var newDockIds = [];
-            var newRedirect = {};
-            var bypassLinks = {};
-            for (var dmi = 0; dmi < nodes.length; dmi++) {
-                var dm = nodes[dmi];
-                if (!isDockedMeter(dm))
-                    continue;
-                var toSource = dockedMeters[dm.layoutKey] === "source";
-                var dchans = meterChannelPorts(dm);
-                for (var dk = 0; dk < dchans.length; dk++) {
-                    var dc = dchans[dk];
-                    var anchorId = toSource ? dc.src : (dc.dests.length > 0 ? dc.dests[0] : -1);
-                    var meterPort = toSource ? dc.outPort : dc.inPort;
-                    var anchor = newPortPositions[anchorId];
-                    if (!anchor || anchor.alias || meterPort < 0)
-                        continue;
-                    newPortPositions[meterPort] = {
-                        cx: anchor.cx,
-                        cy: anchor.cy,
-                        nodeId: anchor.nodeId,
-                        z: anchor.z,
-                        alias: true
-                    };
-                    var otherPort = toSource ? dc.inPort : dc.outPort;
-                    if (otherPort >= 0 && (toSource ? dc.srcs.length : dc.dests.length) > 1)
-                        newPortPositions[otherPort] = newPortPositions[meterPort];
-                    if (newRedirect[anchorId] === undefined)
-                        newRedirect[anchorId] = meterPort;
-                    for (var bl = 0; bl < links.length; bl++) {
-                        var blk = links[bl];
-                        if (toSource ? (blk.outputPortId === anchorId && blk.inputPortId !== dc.inPort) : (blk.inputPortId === anchorId && blk.outputPortId !== dc.outPort))
-                            bypassLinks[blk.id] = true;
-                    }
-                    var dkey = dm.id + ":" + dk;
-                    newDockIds.push(dkey);
-                    newDockFrames[dkey] = {
-                        meterId: dm.id,
-                        meterKey: dm.layoutKey,
-                        channel: dk,
-                        nodeId: anchor.nodeId,
-                        output: toSource,
-                        cx: anchor.cx,
-                        cy: anchor.cy
-                    };
-                }
-            }
-
-            ctx.lineCap = "round";
-            wireLanes = computeWireLanes(newPortPositions);
-            updateWireRoutes(newPortPositions);
-            var wireNodeColors = {};
-            if (gradientWires) {
-                for (var wn = 0; wn < nodes.length; wn++)
-                    wireNodeColors[nodes[wn].id] = nodeColor(nodes[wn]);
-            }
-            for (var li = 0; li < links.length; li++) {
-                var link = links[li];
-                var fromPos = newPortPositions[link.outputPortId];
-                var toPos = newPortPositions[link.inputPortId];
-                if (!fromPos || !toPos)
-                    continue;
-                if (isSnapInternal(fromPos, toPos))
-                    continue;
-                var accented = !!selectedLinks[link.id] || !!selectedNodes[fromPos.nodeId] || !!selectedNodes[toPos.nodeId];
-                var hovered = link.id === hoveredLinkId;
-                var mt = portMediaTypes[link.outputPortId];
-                if (!mt || mt === "Unknown")
-                    mt = portMediaTypes[link.inputPortId];
-                if (insertPreview && insertPreview.remove[link.id]) {
-                    ctx.save();
-                    ctx.globalAlpha = 0.3;
-                    ctx.setLineDash([3, 5]);
-                    drawWire(ctx, fromPos.cx, fromPos.cy, toPos.cx, toPos.cy, signalColor(mt), Theme.wireWidth, link.id);
-                    ctx.restore();
-                    continue;
-                }
-                ctx.globalAlpha = accented || hovered ? 1 : (link.active === false ? 0.35 : Theme.wireOpacity);
-                if (bypassLinks[link.id])
-                    ctx.setLineDash([5, 4]);
-                var wireCol = accented ? Theme.accent : signalColor(mt);
-                if (gradientWires && !accented && mt === "Audio" && wireNodeColors[fromPos.nodeId] && wireNodeColors[toPos.nodeId]) {
-                    wireCol = ctx.createLinearGradient(fromPos.cx, fromPos.cy, toPos.cx, toPos.cy);
-                    wireCol.addColorStop(0, "" + wireNodeColors[fromPos.nodeId]);
-                    wireCol.addColorStop(1, "" + wireNodeColors[toPos.nodeId]);
-                }
-                drawWire(ctx, fromPos.cx, fromPos.cy, toPos.cx, toPos.cy, wireCol, accented || hovered ? Theme.wireWidthActive : Theme.wireWidth, link.id);
-                if (bypassLinks[link.id])
-                    ctx.setLineDash([]);
-            }
-            ctx.globalAlpha = 1;
-
-            var newBlockGeom = [];
-            for (var bi = 0; bi < blockedPairs.length; bi++) {
-                var bp = blockedPairs[bi];
-                var bsPos = nodePositions[bp.source];
-                var btPos = nodePositions[bp.target];
-                if (!bsPos || !btPos)
-                    continue;
-                var bsNode = findNodeData(bp.source);
-                var btNode = findNodeData(bp.target);
-                if (!bsNode || !btNode)
-                    continue;
-                if ((bsNode.layoutKey && hiddenNodes[bsNode.layoutKey]) || (btNode.layoutKey && hiddenNodes[btNode.layoutKey]))
-                    continue;
-                var bx1 = bsPos.x + (getNodeWidth(bp.source) || minNodeWidth);
-                var by1 = bsPos.y + 17;
-                var bx2 = btPos.x;
-                var by2 = btPos.y + 17;
-                var bWid = "b|" + blockKey(bp);
-                routeExtraWire(bWid, bx1, by1, bx2, by2);
-                var bMid = wireMidpoint(bx1, by1, bx2, by2, bWid);
-                var bmx = bMid.x;
-                var bmy = bMid.y;
-                var bKey = blockKey(bp);
-                var bSel = !!selectedBlocks[bKey];
-                var bHot = bSel || hoveredBlockKey === bKey || (contextBlock && contextBlock.ruleId === bp.ruleId && contextBlock.source === bp.source && contextBlock.target === bp.target);
-                ctx.save();
-                if (bSel) {
-                    ctx.globalAlpha = 1;
-                    ctx.setLineDash([]);
-                    drawWire(ctx, bx1, by1, bx2, by2, Theme.tint(Theme.textDestructive, 0.28), 8, bWid);
-                }
-                ctx.globalAlpha = bHot ? 1 : 0.8;
-                ctx.setLineDash([6, 4]);
-                drawWire(ctx, bx1, by1, bx2, by2, Theme.textDestructive, bHot ? Theme.wireWidthActive + (bSel ? 0.5 : 0) : Theme.wireWidth, bWid);
-                ctx.setLineDash([]);
-                ctx.globalAlpha = 1;
-                var bR = bHot ? 8.5 : 7;
-                ctx.beginPath();
-                ctx.arc(bmx, bmy, bR, 0, Math.PI * 2);
-                ctx.fillStyle = "" + Theme.bgCanvas;
-                ctx.fill();
-                if (bHot) {
-                    ctx.fillStyle = "" + Theme.tint(Theme.textDestructive, bSel ? 0.35 : 0.18);
-                    ctx.fill();
-                }
-                ctx.strokeStyle = "" + Theme.textDestructive;
-                ctx.lineWidth = bHot ? 2 : 1.5;
-                ctx.stroke();
-                var bK = bHot ? 5.2 : 4.5;
-                ctx.beginPath();
-                ctx.moveTo(bmx - bK, bmy + bK);
-                ctx.lineTo(bmx + bK, bmy - bK);
-                ctx.stroke();
-                ctx.restore();
-                newBlockGeom.push({
-                    x1: bx1,
-                    y1: by1,
-                    x2: bx2,
-                    y2: by2,
-                    mx: bmx,
-                    my: bmy,
-                    ruleId: bp.ruleId,
-                    label: bp.label,
-                    source: bp.source,
-                    target: bp.target
-                });
-            }
-            blockGeom = newBlockGeom;
-
-            var newMeterFrames = {};
-            for (var ni2 = 0; ni2 < nodes.length; ni2++) {
-                var n2 = nodes[ni2];
-                if (n2.layoutKey && hiddenNodes[n2.layoutKey])
-                    continue;
-                var p2 = nodePositions[n2.id];
-                if (!p2)
-                    continue;
-                drawNode(ctx, n2, p2.x, p2.y);
-                if (isMeterNode(n2))
-                    newMeterFrames[n2.id] = {
-                        sx: panX + p2.x * zoom,
-                        sy: panY + p2.y * zoom,
-                        w: getNodeWidth(n2.id),
-                        h: calculateNodeHeight(n2),
-                        zoom: zoom,
-                        alpha: (nodeMatchesSearch(n2) ? 1 : 0.35) * (snapPreview && snapPreview.meterId === n2.id ? 0.45 : 1),
-                        channels: n2.meterChannels,
-                        rows: meterRows(n2)
-                    };
-            }
-
-            if (snapPreview) {
-                ctx.save();
-                ctx.fillStyle = "" + Theme.accent;
-                for (var spi = 0; spi < snapPreview.ports.length; spi++) {
-                    var spp = newPortPositions[snapPreview.ports[spi]];
-                    if (!spp)
-                        continue;
-                    var spr = dockBarRect(spp.cx, spp.cy, snapPreview.side === "source");
-                    roundRectPath(ctx, spr.x, spr.y, spr.w, spr.h, spr.h / 2);
-                    ctx.fill();
-                }
-                ctx.restore();
-            }
-
-            if (insertPreview) {
-                ctx.save();
-                ctx.setLineDash([6, 4]);
-                for (var gi = 0; gi < insertPreview.add.length; gi++) {
-                    var gOut = insertPreview.add[gi][0];
-                    var gIn = insertPreview.add[gi][1];
-                    var gFrom = newPortPositions[gOut];
-                    var gTo = newPortPositions[gIn];
-                    if (!gFrom || !gTo)
-                        continue;
-                    var gmt = portMediaTypes[gOut];
-                    if (!gmt || gmt === "Unknown")
-                        gmt = portMediaTypes[gIn];
-                    ctx.globalAlpha = 0.85;
-                    drawWire(ctx, gFrom.cx, gFrom.cy, gTo.cx, gTo.cy, signalColor(gmt), Theme.wireWidthActive);
-                    ctx.globalAlpha = 1;
-                    ctx.fillStyle = "" + signalColor(gmt);
-                    ctx.beginPath();
-                    ctx.arc(gFrom.cx, gFrom.cy, 3, 0, Math.PI * 2);
-                    ctx.moveTo(gTo.cx + 3, gTo.cy);
-                    ctx.arc(gTo.cx, gTo.cy, 3, 0, Math.PI * 2);
-                    ctx.fill();
-                }
-                ctx.restore();
-            }
-
-            if (connectFromPortId >= 0) {
-                var dragFrom = newPortPositions[connectFromPortId] || portPositions[connectFromPortId];
-                if (dragFrom) {
-                    var dragToC = graphView.toCanvas(connectMouseX, connectMouseY);
-                    var dragColor = connectBlocking || connectTargetBlocked ? Theme.textDestructive : signalColor(portMediaTypes[connectFromPortId]);
-                    ctx.save();
-                    ctx.setLineDash([4, 4]);
-                    if (connectFromDir === "Input") {
-                        routeExtraWire("drag", dragToC.x, dragToC.y, dragFrom.cx, dragFrom.cy);
-                        drawWire(ctx, dragToC.x, dragToC.y, dragFrom.cx, dragFrom.cy, dragColor, Theme.wireWidthActive, "drag");
-                    } else {
-                        routeExtraWire("drag", dragFrom.cx, dragFrom.cy, dragToC.x, dragToC.y);
-                        drawWire(ctx, dragFrom.cx, dragFrom.cy, dragToC.x, dragToC.y, dragColor, Theme.wireWidthActive, "drag");
-                    }
-                    if (connectBlocking || connectTargetBlocked) {
-                        ctx.setLineDash([]);
-                        ctx.strokeStyle = "" + Theme.textDestructive;
-                        ctx.lineWidth = 1.5 / zoom;
-                        var br = 6 / zoom;
-                        ctx.beginPath();
-                        ctx.arc(dragToC.x, dragToC.y, br, 0, Math.PI * 2);
-                        ctx.moveTo(dragToC.x - br * 0.7, dragToC.y + br * 0.7);
-                        ctx.lineTo(dragToC.x + br * 0.7, dragToC.y - br * 0.7);
-                        ctx.stroke();
-                    }
-                    ctx.restore();
-                }
-            }
-
-            if (selectDragging) {
-                var sc1 = graphView.toCanvas(selectStartX, selectStartY);
-                var sc2 = graphView.toCanvas(selectEndX, selectEndY);
-                ctx.beginPath();
-                ctx.rect(Math.min(sc1.x, sc2.x), Math.min(sc1.y, sc2.y), Math.abs(sc2.x - sc1.x), Math.abs(sc2.y - sc1.y));
-                ctx.fillStyle = "" + Theme.accentFaint;
-                ctx.fill();
-                ctx.strokeStyle = "" + Theme.accent;
-                ctx.lineWidth = 1 / zoom;
-                ctx.stroke();
-            }
-
-            if (activeSnapLines.length > 0) {
-                ctx.save();
-                ctx.setLineDash([4 / zoom, 4 / zoom]);
-                ctx.strokeStyle = "" + Theme.textMuted;
-                ctx.lineWidth = 1 / zoom;
-                for (var si = 0; si < activeSnapLines.length; si++) {
-                    var sl = activeSnapLines[si];
-                    ctx.beginPath();
-                    if (sl.axis === "x") {
-                        ctx.moveTo(sl.pos, visTop);
-                        ctx.lineTo(sl.pos, visBottom);
-                    } else {
-                        ctx.moveTo(visLeft, sl.pos);
-                        ctx.lineTo(visRight, sl.pos);
-                    }
-                    ctx.stroke();
-                }
-                ctx.restore();
-            }
-
-            ctx.restore();
-            portPositions = newPortPositions;
-            meterFrames = newMeterFrames;
-            dockBarFrames = newDockFrames;
-            snapRedirect = newRedirect;
-            if (newDockIds.join(",") !== dockBarIds.join(","))
-                dockBarIds = newDockIds;
-            updateScrollBars();
-        }
+        onPaint: Paint.paint(graphView)
     }
 
-    Item {
-        id: meterLayer
-        anchors.fill: parent
-        clip: true
-
-        Repeater {
-            model: graphView.meterNodeIds
-            delegate: Item {
-                id: meterCard
-                required property var modelData
-                readonly property var frame: graphView.meterFrames[modelData] || null
-                readonly property var levels: graphView.meterLevels[modelData] || []
-                visible: frame !== null
-                x: frame ? frame.sx : 0
-                y: frame ? frame.sy : 0
-                width: frame ? frame.w : 0
-                height: frame ? frame.h : 0
-                scale: frame ? frame.zoom : 1
-                transformOrigin: Item.TopLeft
-                opacity: frame ? frame.alpha : 1
-
-                Repeater {
-                    model: meterCard.frame ? meterCard.frame.channels : 0
-                    delegate: Item {
-                        id: bar
-                        required property int index
-                        readonly property var rect: graphView.meterBarRect(meterCard.width, meterCard.frame.rows[index] !== undefined ? meterCard.frame.rows[index] : index)
-                        readonly property real frac: graphView.levelFraction(meterCard.levels[index] || 0)
-                        x: rect.x
-                        y: rect.y
-                        width: rect.w
-                        height: rect.h
-                        clip: true
-
-                        Rectangle {
-                            width: bar.width * Math.min(bar.frac, graphView.meterHotFrac)
-                            height: bar.height
-                            radius: bar.height / 2
-                            color: Theme.meterLow
-                        }
-                        Rectangle {
-                            x: bar.width * graphView.meterHotFrac
-                            width: bar.width * Math.max(0, Math.min(bar.frac, graphView.meterClipFrac) - graphView.meterHotFrac)
-                            height: bar.height
-                            color: Theme.meterHot
-                        }
-                        Rectangle {
-                            x: bar.width * graphView.meterClipFrac
-                            width: bar.width * Math.max(0, bar.frac - graphView.meterClipFrac)
-                            height: bar.height
-                            color: Theme.meterClip
-                        }
-                    }
-                }
-            }
-        }
+    GraphMeters {
+        id: graphMeters
+        graph: graphView
     }
 
-    Item {
-        id: dockBarLayer
-        anchors.fill: parent
-        clip: true
 
-        Repeater {
-            model: graphView.dockBarIds
-            delegate: Item {
-                id: dockBar
-                required property var modelData
-                readonly property var frame: graphView.dockBarFrames[modelData] || null
-                readonly property real level: {
-                    var lv = frame ? graphView.meterLevels[frame.meterId] : null;
-                    return lv && frame ? (lv[frame.channel] || 0) : 0;
-                }
-                readonly property real frac: graphView.levelFraction(level)
-                readonly property real barW: graphView.dockBarW
-                readonly property var rect: frame ? graphView.dockBarRect(frame.cx, frame.cy, frame.output) : null
-                visible: frame !== null
-                x: rect ? graphView.panX + rect.x * graphView.zoom : 0
-                y: rect ? graphView.panY + rect.y * graphView.zoom : 0
-                width: graphView.dockBarW
-                height: graphView.dockBarH
-                scale: graphView.zoom
-                transformOrigin: Item.TopLeft
-                clip: true
 
-                Rectangle {
-                    anchors.fill: parent
-                    radius: height / 2
-                    color: Theme.meterTrack
-                }
-                Item {
-                    width: parent.width
-                    height: parent.height
-                    Rectangle {
-                        width: dockBar.barW * Math.min(dockBar.frac, graphView.meterHotFrac)
-                        height: parent.height
-                        radius: height / 2
-                        color: Theme.meterLow
-                    }
-                    Rectangle {
-                        x: dockBar.barW * graphView.meterHotFrac
-                        width: dockBar.barW * Math.max(0, Math.min(dockBar.frac, graphView.meterClipFrac) - graphView.meterHotFrac)
-                        height: parent.height
-                        color: Theme.meterHot
-                    }
-                    Rectangle {
-                        x: dockBar.barW * graphView.meterClipFrac
-                        width: dockBar.barW * Math.max(0, dockBar.frac - graphView.meterClipFrac)
-                        height: parent.height
-                        color: Theme.meterClip
-                    }
-                }
-            }
-        }
-    }
+
 
     Timer {
         id: orphanTimer
@@ -4546,454 +1034,20 @@ Item {
     }
 
     function drawNode(ctx, node, nx, ny) {
-        var lay = nodeLayout(node);
-        var nw = getNodeWidth(node.id);
-        var nh = calculateNodeHeight(node);
-        var isPlugin = node.type === "Plugin";
-        var isMeter = isMeterNode(node);
-        var isSubgraph = node.type === "Subgraph";
-        var selected = !!selectedNodes[node.id];
-        var isDefault = defaultNodeKey !== "" && node.layoutKey === defaultNodeKey;
-        var cat = nodeCategory(node);
-        var custom = customNodeColor(node);
-        if (custom)
-            cat = {
-                color: custom,
-                glyph: cat.glyph
-            };
-        var hdr = Theme.nodeHeader;
-        var rowH = Theme.nodePortRow;
-        var portsTop = hdr + Theme.nodePortsTop;
-
-        ctx.save();
-        var baseAlpha = nodeMatchesSearch(node) ? 1 : 0.35;
-        if (snapPreview && snapPreview.meterId === node.id)
-            baseAlpha *= 0.45;
-
-        ctx.fillStyle = "" + Theme.shadowNode;
-        ctx.globalAlpha = baseAlpha * 0.35;
-        for (var sh = 0; sh < 3; sh++) {
-            roundRectPath(ctx, nx - sh * 2, ny - sh * 2 + Theme.shadowNodeY * 0.5, nw + sh * 4, nh + sh * 4, Theme.radiusCard + sh * 2);
-            ctx.fill();
-        }
-        ctx.globalAlpha = baseAlpha;
-        if (selected) {
-            roundRectPath(ctx, nx - 2.5, ny - 2.5, nw + 5, nh + 5, Theme.radiusCard + 2.5);
-            ctx.strokeStyle = "" + Theme.accentRing;
-            ctx.lineWidth = 3;
-            ctx.stroke();
-        }
-        var cue = nodeCues[node.id];
-        if (cue) {
-            var cueAge = Date.now() - cue.t;
-            if (cueAge >= 0 && cueAge < cuePulseMs) {
-                var ck = cueAge / cuePulseMs;
-                var grow = 3 + 13 * ck;
-                ctx.globalAlpha = baseAlpha * (1 - ck);
-                roundRectPath(ctx, nx - grow, ny - grow, nw + 2 * grow, nh + 2 * grow, Theme.radiusCard + grow);
-                ctx.strokeStyle = "" + Theme.accent;
-                ctx.lineWidth = 2;
-                ctx.stroke();
-                ctx.globalAlpha = baseAlpha;
-            }
-        }
-
-        if (isSubgraph) {
-            roundRectPath(ctx, nx + 4, ny + 4, nw, nh, Theme.radiusCard);
-            ctx.fillStyle = "" + Theme.bgSurface;
-            ctx.fill();
-            ctx.strokeStyle = "" + Theme.borderStrong;
-            ctx.lineWidth = 1;
-            ctx.stroke();
-        }
-
-        var hovered = hoveredNodeId === node.id && !selected;
-        roundRectPath(ctx, nx, ny, nw, nh, Theme.radiusCard);
-        ctx.fillStyle = "" + Theme.bgSurface;
-        ctx.fill();
-        if (hovered) {
-            ctx.fillStyle = "" + Theme.accentFaint;
-            ctx.fill();
-        }
-        ctx.strokeStyle = "" + (selected || hovered ? Theme.accent : Theme.borderStrong);
-        if (hovered)
-            ctx.globalAlpha = baseAlpha * 0.7;
-        ctx.lineWidth = 1;
-        ctx.stroke();
-        ctx.globalAlpha = baseAlpha;
-        if (snapPreview && snapPreview.nodeId === node.id) {
-            roundRectPath(ctx, nx, ny, nw, nh, Theme.radiusCard);
-            ctx.fillStyle = "" + Theme.accentFaint;
-            ctx.fill();
-            roundRectPath(ctx, nx - 3, ny - 3, nw + 6, nh + 6, Theme.radiusCard + 3);
-            ctx.strokeStyle = "" + Theme.accent;
-            ctx.lineWidth = 2;
-            ctx.stroke();
-        }
-
-        if (custom) {
-            ctx.save();
-            roundRectPath(ctx, nx, ny, nw, nh, Theme.radiusCard);
-            ctx.clip();
-            ctx.fillStyle = "" + Theme.tint(custom, Theme.chipAlpha * 0.6);
-            ctx.fillRect(nx, ny, nw, hdr);
-            ctx.fillStyle = "" + custom;
-            ctx.fillRect(nx, ny, 3, nh);
-            ctx.restore();
-        }
-
-        var chip = Theme.nodeChip;
-        var chipX = nx + 10;
-        var chipY = ny + (hdr - chip) / 2;
-        roundRectPath(ctx, chipX, chipY, chip, chip, Theme.radiusChip);
-        ctx.fillStyle = "" + Theme.tint(cat.color, Theme.chipAlpha);
-        ctx.fill();
-        drawGlyph(ctx, cat.glyph, chipX + (chip - Theme.nodeGlyph) / 2, chipY + (chip - Theme.nodeGlyph) / 2, Theme.nodeGlyph, cat.color);
-
-        var pinned = !!(node.layoutKey && pinnedNodes[node.layoutKey]);
-        var pinHover = hoveredButton === node.id + ":pin";
-        var pr = pinRect(node, nx, ny);
-        var pinCol = pinned || pinHover ? Theme.textIcon : Theme.textDisabled;
-        ctx.save();
-        if (!pinned && !pinHover)
-            ctx.globalAlpha = baseAlpha * 0.6;
-        if (pinned) {
-            ctx.save();
-            ctx.translate(pr.x + 3, pr.y + 3);
-            ctx.beginPath();
-            ctx.path = Glyphs.icons["pinFill"].d;
-            ctx.fillStyle = "" + pinCol;
-            ctx.fill();
-            ctx.restore();
-        }
-        drawGlyph(ctx, "pin", pr.x + 3, pr.y + 3, 12, pinCol);
-        ctx.restore();
-
-        var tagRight = pr.x - 4;
-        if (showPortsButton(node)) {
-            var fr = portsRect(node, nx, ny);
-            var filtering = isConnectedOnly(node);
-            var filterHover = hoveredButton === node.id + ":ports";
-            ctx.save();
-            if (!filtering && !filterHover)
-                ctx.globalAlpha = baseAlpha * 0.6;
-            drawGlyph(ctx, "portsFilter", fr.x + 3, fr.y + 3, 12, filtering ? Theme.accent : (filterHover ? Theme.textIcon : Theme.textDisabled));
-            ctx.restore();
-            tagRight = fr.x - 2;
-        }
-        if (isPlugin && node.pluginFormat && !isMeter)
-            tagRight = drawTag(ctx, node.pluginFormat, tagRight, ny + hdr / 2) - 6;
-        if (isSubgraph) {
-            var present = (node.memberCount || 0) - (node.missing || 0);
-            tagRight = drawTag(ctx, node.missing > 0 ? present + "/" + node.memberCount : "" + (node.memberCount || 0), tagRight, ny + hdr / 2) - 6;
-            if (node.asSink || node.asSource)
-                tagRight = drawTag(ctx, "DEV", tagRight, ny + hdr / 2) - 6;
-        }
-        if (isDefault)
-            tagRight = drawDefaultChip(ctx, tagRight, ny + hdr / 2) - 6;
-
-        ctx.font = fontSpec(600, Theme.sizeNodeTitle, false);
-        ctx.fillStyle = "" + Theme.textPrimary;
-        ctx.textAlign = "left";
-        ctx.textBaseline = "middle";
-        var titleX = chipX + chip + 8;
-        var shownTitle = elide(ctx, node.name, tagRight - titleX - 2);
-        nameTruncated[node.id] = shownTitle !== node.name;
-        ctx.fillText(shownTitle, titleX, ny + hdr / 2 + 0.5);
-
-        ctx.fillStyle = "" + Theme.borderHairline;
-        ctx.fillRect(nx + 1, ny + hdr, nw - 2, 1);
-
-        var both = lay.inputs.length > 0 && lay.outputs.length > 0;
-        var labelW = both ? (nw - 2 * Theme.nodePadX - 8) / 2 : nw - 2 * Theme.nodePadX;
-        ctx.font = fontSpec(400, Theme.sizeMono, true);
-        ctx.textBaseline = "middle";
-        var meterChannel = 0;
-        for (var i = 0; i < lay.inputs.length; i++) {
-            var pin = lay.inputs[i];
-            var py = ny + portsTop + i * rowH + rowH / 2;
-            ctx.fillStyle = "" + Theme.textSecondary;
-            ctx.textAlign = "left";
-            var meterRow = isMeter && isAudioRow(pin);
-            if (meterRow)
-                meterChannel++;
-            ctx.fillText(meterRow ? "" + meterChannel : elide(ctx, pin.name, labelW), nx + Theme.nodePadX, py);
-            if (meterRow) {
-                var mb = meterBarRect(nw, i);
-                roundRectPath(ctx, nx + mb.x, ny + mb.y, mb.w, mb.h, mb.h / 2);
-                ctx.fillStyle = "" + Theme.meterTrack;
-                ctx.fill();
-            }
-            drawPin(ctx, pin, node.id, nx, py, selected);
-        }
-        for (var o = 0; o < lay.outputs.length; o++) {
-            var pout = lay.outputs[o];
-            var pyo = ny + portsTop + o * rowH + rowH / 2;
-            if (!isMeter) {
-                ctx.font = fontSpec(400, Theme.sizeMono, true);
-                ctx.fillStyle = "" + Theme.textSecondary;
-                ctx.textAlign = "right";
-                ctx.fillText(elide(ctx, pout.name, labelW), nx + nw - Theme.nodePadX, pyo);
-            }
-            drawPin(ctx, pout, node.id, nx + nw, pyo, selected);
-        }
-
-        var tr = toggleRowRect(node, lay, nx, ny);
-        if (tr) {
-            var hidden = lay.hiddenIn + lay.hiddenOut;
-            var what = lay.hiddenIn > 0 && lay.hiddenOut > 0 ? "ports" : lay.hiddenOut > 0 ? (hidden === 1 ? "output" : "outputs") : (hidden === 1 ? "input" : "inputs");
-            var label = lay.expanded ? "show fewer" : hidden + " more " + what;
-            var hoverT = hoveredButton === node.id + ":toggle";
-            ctx.font = fontSpec(400, Theme.sizeBadge, true);
-            var lw = ctx.measureText(label).width + 12;
-            var lx = lay.hiddenIn > 0 && lay.hiddenOut === 0 ? nx + Theme.nodePadX : lay.hiddenOut > 0 && lay.hiddenIn === 0 ? nx + nw - Theme.nodePadX - lw : nx + (nw - lw) / 2;
-            var cy = tr.y + tr.h / 2;
-            ctx.save();
-            if (lay.expanded) {
-                ctx.translate(lx + 4, cy);
-                ctx.rotate(Math.PI);
-                drawGlyph(ctx, "chevronDown", -4, -4, 8, hoverT ? Theme.textPrimary : Theme.textMuted);
-            } else {
-                drawGlyph(ctx, "chevronDown", lx, cy - 4, 8, hoverT ? Theme.textPrimary : Theme.textMuted);
-            }
-            ctx.restore();
-            ctx.font = fontSpec(400, Theme.sizeBadge, true);
-            ctx.fillStyle = "" + (hoverT ? Theme.textPrimary : Theme.textMuted);
-            ctx.textAlign = "left";
-            ctx.textBaseline = "middle";
-            ctx.fillText(label, lx + 12, cy);
-        }
-
-        if (isSubgraph) {
-            ctx.fillStyle = "" + Theme.borderHairline;
-            ctx.fillRect(nx + 1, ny + nh - Theme.nodeFooter, nw - 2, 1);
-            var ob = footerButtons(node, nx, ny, nh)[0];
-            var hoverO = hoveredButton === node.id + ":open";
-            roundRectPath(ctx, ob.x, ob.y, ob.w, ob.h, Theme.radiusSmall);
-            ctx.fillStyle = "" + (hoverO ? Theme.borderStrong : Theme.bgSubtle);
-            ctx.fill();
-            ctx.font = fontSpec(500, 11, false);
-            var openTxt = "Open subgraph";
-            var openW = 12 + 6 + ctx.measureText(openTxt).width;
-            var ox = ob.x + (ob.w - openW) / 2;
-            drawGlyph(ctx, "enter", ox, ob.y + (ob.h - 12) / 2, 12, Theme.textIcon);
-            ctx.fillStyle = "" + Theme.textIcon;
-            ctx.textAlign = "left";
-            ctx.textBaseline = "middle";
-            ctx.fillText(openTxt, ox + 18, ob.y + ob.h / 2 + 0.5);
-        }
-
-        if (isPlugin && !isMeter) {
-            var pinfo = presetInfo[node.id] || {
-                name: "",
-                isDefault: false,
-                modified: false,
-                count: 0
-            };
-            var prr = presetRects(node, nx, ny, nh);
-            var hoverName = hoveredButton === node.id + ":preset";
-            var hoverSave = hoveredButton === node.id + ":presetsave";
-            roundRectPath(ctx, prr.name.x, prr.name.y, prr.name.w, prr.name.h, Theme.radiusSmall);
-            ctx.fillStyle = "" + (hoverName ? Theme.borderStrong : Theme.bgSubtle);
-            ctx.fill();
-            var hasName = pinfo.name !== "";
-            var label = hasName ? (pinfo.isDefault ? "\u2605 " : "") + pinfo.name + (pinfo.modified ? " *" : "") : (pinfo.count > 0 ? "Preset\u2026" : "No presets");
-            ctx.font = fontSpec(500, 11, false);
-            ctx.fillStyle = "" + (hasName ? Theme.textPrimary : Theme.textMuted);
-            ctx.textAlign = "left";
-            ctx.textBaseline = "middle";
-            ctx.fillText(elide(ctx, label, prr.name.w - 12 - 18), prr.name.x + 8, prr.name.y + prr.name.h / 2 + 0.5);
-            var chx = prr.name.x + prr.name.w - 12;
-            var chy = prr.name.y + prr.name.h / 2;
-            ctx.beginPath();
-            ctx.moveTo(chx - 3.5, chy - 1.5);
-            ctx.lineTo(chx, chy + 2);
-            ctx.lineTo(chx + 3.5, chy - 1.5);
-            ctx.strokeStyle = "" + Theme.textIcon;
-            ctx.lineWidth = 1.5;
-            ctx.stroke();
-            roundRectPath(ctx, prr.save.x, prr.save.y, prr.save.w, prr.save.h, Theme.radiusSmall);
-            ctx.fillStyle = "" + (hoverSave ? Theme.borderStrong : Theme.bgSubtle);
-            ctx.fill();
-            ctx.font = fontSpec(500, 11, false);
-            ctx.fillStyle = "" + Theme.textIcon;
-            ctx.textAlign = "center";
-            ctx.fillText("Save", prr.save.x + prr.save.w / 2, prr.save.y + prr.save.h / 2 + 0.5);
-        }
-
-        if (isPlugin && !isMeter) {
-            ctx.fillStyle = "" + Theme.borderHairline;
-            ctx.fillRect(nx + 1, ny + nh - Theme.nodeFooter, nw - 2, 1);
-            var bypassed = isNodeBypassed(node);
-            var enabled = isNodeEnabled(node);
-            var hasUi = node.pluginHasUi !== false;
-            var btns = footerButtons(node, nx, ny, nh);
-            for (var b = 0; b < btns.length; b++) {
-                var bt = btns[b];
-                var hoverB = hoveredButton === node.id + ":" + bt.key;
-                var on = bt.key === "onoff" && enabled;
-                var byp = bt.key === "bypass" && bypassed;
-                roundRectPath(ctx, bt.x, bt.y, bt.w, bt.h, Theme.radiusSmall);
-                ctx.fillStyle = "" + (on ? Theme.accentFaint : byp ? Theme.bypassFaint : (hoverB ? Theme.borderStrong : Theme.bgSubtle));
-                ctx.fill();
-                var txt = bt.key === "onoff" ? (enabled ? "On" : "Off") : bt.key === "bypass" ? "Bypass" : bt.key === "ui" ? "UI" : "Params";
-                var col = on ? Theme.accent : byp ? Theme.bypass : bt.key === "ui" && !hasUi ? Theme.textDisabled : bt.key === "onoff" || bt.key === "bypass" ? Theme.textMuted : Theme.textIcon;
-                ctx.font = fontSpec(on || byp ? 600 : 500, 11, false);
-                ctx.fillStyle = "" + col;
-                ctx.textBaseline = "middle";
-                if (bt.key === "onoff") {
-                    var groupW = 6 + 5 + ctx.measureText(txt).width;
-                    var gx = bt.x + (bt.w - groupW) / 2;
-                    ctx.beginPath();
-                    ctx.arc(gx + 3, bt.y + bt.h / 2, 3, 0, Math.PI * 2);
-                    if (on) {
-                        ctx.fill();
-                    } else {
-                        ctx.strokeStyle = "" + col;
-                        ctx.lineWidth = 1.25;
-                        ctx.stroke();
-                    }
-                    ctx.textAlign = "left";
-                    ctx.fillText(txt, gx + 11, bt.y + bt.h / 2 + 0.5);
-                } else {
-                    ctx.textAlign = "center";
-                    ctx.fillText(txt, bt.x + bt.w / 2, bt.y + bt.h / 2 + 0.5);
-                }
-            }
-        }
-        ctx.restore();
+        return Drawing.drawNode(graphView, ctx, node, nx, ny);
     }
 
     function drawPin(ctx, port, nodeId, cx, cy, nodeSelected) {
-        var connected = !!connectedPorts[port.id];
-        var col = signalColor(port.mediaType);
-        if (nodeSelected && connected)
-            col = Theme.accent;
-        var r = port.id === hoveredPortId ? Theme.nodePinHover / 2 : Theme.nodePin / 2;
-
-        if (connectFromPortId >= 0 && isValidDropTarget(port, nodeId)) {
-            ctx.beginPath();
-            ctx.arc(cx, cy, r + 4, 0, Math.PI * 2);
-            ctx.fillStyle = "" + Theme.accentRing;
-            ctx.fill();
-        }
-        ctx.beginPath();
-        ctx.arc(cx, cy, r, 0, Math.PI * 2);
-        if (connected) {
-            ctx.fillStyle = "" + col;
-            ctx.fill();
-        } else {
-            ctx.fillStyle = "" + Theme.bgSurface;
-            ctx.fill();
-            ctx.beginPath();
-            ctx.arc(cx, cy, r - 1, 0, Math.PI * 2);
-            ctx.strokeStyle = "" + col;
-            ctx.lineWidth = 2;
-            ctx.stroke();
-        }
-        if (portMatchesSearch(port)) {
-            ctx.beginPath();
-            ctx.arc(cx, cy, r + 3, 0, Math.PI * 2);
-            ctx.strokeStyle = "" + Theme.accent;
-            ctx.lineWidth = 2;
-            ctx.stroke();
-        }
+        return Drawing.drawPin(graphView, ctx, port, nodeId, cx, cy, nodeSelected);
     }
 
     focus: true
 
-    Keys.onShortcutOverride: event => {
-        if (event.key === Qt.Key_Escape && (placingNodeId >= 0 || connectFromPortId >= 0 || hasSelection() || currentSubgraph !== ""))
-            event.accepted = true;
-    }
+    Keys.onShortcutOverride: event => Input.keyShortcutOverride(graphView, event)
 
-    Keys.onPressed: event => {
-        var ctrl = !!(event.modifiers & Qt.ControlModifier);
-        var shift = !!(event.modifiers & Qt.ShiftModifier);
-        var plain = !(event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier));
+    Keys.onPressed: event => Input.keyPressed(graphView, event)
 
-        if (event.key === Qt.Key_Shift) {
-            shiftHeld = true;
-            return;
-        }
-        if (event.key === Qt.Key_Space && plain) {
-            if (!event.isAutoRepeat)
-                spaceHeld = true;
-            event.accepted = true;
-            return;
-        }
-
-        if (event.key === Qt.Key_Delete || event.key === Qt.Key_Backspace) {
-            deleteSelection();
-            event.accepted = true;
-        } else if (event.key === Qt.Key_Home) {
-            fitToView();
-            event.accepted = true;
-        } else if (event.key === Qt.Key_W && plain && !event.isAutoRepeat) {
-            toggleDragMode();
-            event.accepted = true;
-        } else if (event.key === Qt.Key_F && plain && !event.isAutoRepeat) {
-            frameSelection();
-            event.accepted = true;
-        } else if ((event.key === Qt.Key_Question || (event.key === Qt.Key_Slash && shift)) && !ctrl) {
-            showShortcuts();
-            event.accepted = true;
-        } else if (event.key === Qt.Key_L && !event.isAutoRepeat && !(event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))) {
-            requestAutoLayout(shift);
-            event.accepted = true;
-        } else if (ctrl && event.key === Qt.Key_A) {
-            selectAll();
-            event.accepted = true;
-        } else if (ctrl && event.key === Qt.Key_Z) {
-            if (shift)
-                redo();
-            else
-                undo();
-            event.accepted = true;
-        } else if (ctrl && event.key === Qt.Key_Y) {
-            redo();
-            event.accepted = true;
-        } else if (ctrl && (event.key === Qt.Key_Plus || event.key === Qt.Key_Equal)) {
-            zoomAt(width / 2, height / 2, zoom * 1.1);
-            event.accepted = true;
-        } else if (ctrl && event.key === Qt.Key_Minus) {
-            zoomAt(width / 2, height / 2, zoom / 1.1);
-            event.accepted = true;
-        } else if (ctrl && event.key === Qt.Key_0) {
-            zoomAt(width / 2, height / 2, 1.0);
-            event.accepted = true;
-        } else if (!ctrl && (event.key === Qt.Key_Left || event.key === Qt.Key_Right || event.key === Qt.Key_Up || event.key === Qt.Key_Down)) {
-            var ndx = event.key === Qt.Key_Left ? -1 : event.key === Qt.Key_Right ? 1 : 0;
-            var ndy = event.key === Qt.Key_Up ? -1 : event.key === Qt.Key_Down ? 1 : 0;
-            if (nudgeSelection(ndx, ndy, shift))
-                event.accepted = true;
-        } else if (event.key === Qt.Key_Escape) {
-            if (placingNodeId >= 0) {
-                finishPlacing();
-            } else if (connectFromPortId >= 0) {
-                connectFromPortId = -1;
-                connectFromDir = "";
-                connectBlocking = false;
-                connectHoverPortId = -1;
-                connectTargetBlocked = false;
-                canvas.requestPaint();
-            } else if (hasSelection()) {
-                clearSelection();
-            } else if (currentSubgraph !== "") {
-                exitSubgraph();
-            }
-            event.accepted = true;
-        }
-    }
-
-    Keys.onReleased: event => {
-        if (event.key === Qt.Key_Shift) {
-            shiftHeld = false;
-        } else if (event.key === Qt.Key_Space && !event.isAutoRepeat) {
-            spaceHeld = false;
-            event.accepted = true;
-        }
-    }
+    Keys.onReleased: event => Input.keyReleased(graphView, event)
 
     MouseArea {
         id: mouseArea
@@ -5001,573 +1055,22 @@ Item {
         acceptedButtons: Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
         hoverEnabled: true
 
-        onDoubleClicked: mouse => {
-            if (mouse.button !== Qt.LeftButton)
-                return;
-            var dn = findNodeData(findNodeAt(mouse.x, mouse.y));
-            if (dn && dn.type === "Subgraph")
-                enterSubgraph(dn.subgraphId);
-        }
+        onDoubleClicked: mouse => Input.pointerDoubleClicked(graphView, mouse)
 
         property real lastX: 0
         property real lastY: 0
         property real pressX: 0
         property real pressY: 0
 
-        onPressed: mouse => {
-            graphView.forceActiveFocus();
-            lastX = mouse.x;
-            lastY = mouse.y;
-            pressX = mouse.x;
-            pressY = mouse.y;
-            hideNameTip();
-            grabPanning = false;
-            spacePanning = false;
-            shiftHeld = !!(mouse.modifiers & Qt.ShiftModifier);
+        onPressed: mouse => Input.pointerPressed(graphView, mouse)
 
-            if (placingNodeId >= 0) {
-                finishPlacing();
-                return;
-            }
-
-            if (mouse.button === Qt.MiddleButton) {
-                middlePanning = true;
-                updateCursor();
-                return;
-            }
-
-            if (mouse.button === Qt.RightButton) {
-                var blockPort = findPortAt(mouse.x, mouse.y);
-                if (blockPort >= 0) {
-                    connectFromPortId = blockPort;
-                    connectFromDir = getPortDirection(blockPort);
-                    connectBlocking = true;
-                    connectPressX = mouse.x;
-                    connectPressY = mouse.y;
-                    connectMouseX = mouse.x;
-                    connectMouseY = mouse.y;
-                    return;
-                }
-                var labelPort = findPortLabelAt(mouse.x, mouse.y);
-                if (labelPort >= 0) {
-                    openPortMenu(labelPort);
-                    return;
-                }
-                var nodeId = findNodeAt(mouse.x, mouse.y);
-                var menuLinkId = nodeId < 0 ? findLinkAt(mouse.x, mouse.y) : -1;
-                if (menuLinkId >= 0) {
-                    var menuLink = findLinkData(menuLinkId);
-                    if (selectedLinks[menuLinkId]) {
-                        var ids = [];
-                        for (var sk in selectedLinks) {
-                            var sid = parseInt(sk);
-                            if (linkMatchesSig(findLinkData(sid), selectedLinks[sk]))
-                                ids.push(sid);
-                        }
-                        contextLinkIds = ids;
-                    } else {
-                        var one = {};
-                        if (menuLink)
-                            one[menuLinkId] = linkSig(menuLink);
-                        selectedLinks = one;
-                        selectedNodes = {};
-                        selectedBlocks = {};
-                        contextLinkIds = [menuLinkId];
-                        canvas.requestPaint();
-                    }
-                    linkContextMenu.popup();
-                } else if (nodeId < 0 && findBlockAt(mouse.x, mouse.y)) {
-                    contextBlock = findBlockAt(mouse.x, mouse.y);
-                    canvas.requestPaint();
-                    blockContextMenu.popup();
-                } else if (nodeId >= 0) {
-                    contextNodeId = nodeId;
-                    contextNode = findNodeData(nodeId);
-                    contextPortId = -1;
-                    nodeContextMenu.popup();
-                } else {
-                    contextNodeId = -1;
-                    contextNode = null;
-                    var cPos = toCanvas(mouse.x, mouse.y);
-                    contextCanvasPos = {
-                        x: cPos.x,
-                        y: cPos.y
-                    };
-                    canvasContextMenu.popup();
-                }
-                return;
-            }
-
-            if (mouse.button === Qt.LeftButton) {
-                if (spaceHeld) {
-                    spacePanning = true;
-                    updateCursor();
-                    return;
-                }
-
-                var btnHit = findButtonAt(mouse.x, mouse.y);
-                if (btnHit) {
-                    if (btnHit.button === "toggle") {
-                        var tn = findNodeData(btnHit.nodeId);
-                        if (tn)
-                            toggleExpanded(tn);
-                    } else if (btnHit.button === "pin") {
-                        togglePinned(findNodeData(btnHit.nodeId));
-                    } else if (btnHit.button === "ports") {
-                        var fn = findNodeData(btnHit.nodeId);
-                        setNodeStyle(fn, "connectedOnly", !isConnectedOnly(fn));
-                    } else if (btnHit.button === "onoff") {
-                        var newEnabled = !btnHit.enabled;
-                        localEnabledState[btnHit.nodeId] = newEnabled;
-                        localEnabledState = localEnabledState;
-                        controller.set_plugin_enabled(btnHit.nodeId, newEnabled);
-                        canvas.requestPaint();
-                    } else if (btnHit.button === "bypass") {
-                        var newBypassed = !btnHit.bypassed;
-                        localBypassState[btnHit.nodeId] = newBypassed;
-                        localBypassState = localBypassState;
-                        controller.set_plugin_bypass(btnHit.nodeId, newBypassed);
-                        canvas.requestPaint();
-                    } else if (btnHit.button === "ui" && btnHit.hasUi) {
-                        controller.open_plugin_ui(btnHit.nodeId);
-                    } else if (btnHit.button === "params") {
-                        graphView.openPluginParams(btnHit.nodeId);
-                    } else if (btnHit.button === "preset") {
-                        openPresetMenu(btnHit.nodeId);
-                    } else if (btnHit.button === "presetsave") {
-                        openPresetSave(btnHit.nodeId);
-                    } else if (btnHit.button === "open") {
-                        enterSubgraph(btnHit.subgraphId);
-                    }
-                    return;
-                }
-
-                var portId = findPortAt(mouse.x, mouse.y);
-                if (portId >= 0) {
-                    connectFromPortId = portId;
-                    connectFromDir = getPortDirection(portId);
-                    connectMouseX = mouse.x;
-                    connectMouseY = mouse.y;
-                    return;
-                }
-
-                var nodeIdDrag = findNodeAt(mouse.x, mouse.y);
-                if (nodeIdDrag >= 0) {
-                    var ctrlHeld = (mouse.modifiers & Qt.ControlModifier);
-                    var nodeIsSelected = !!selectedNodes[nodeIdDrag];
-
-                    if (ctrlHeld) {
-                        var newSel = Object.assign({}, selectedNodes);
-                        if (nodeIsSelected) {
-                            delete newSel[nodeIdDrag];
-                        } else {
-                            newSel[nodeIdDrag] = nodeSig(findNodeData(nodeIdDrag));
-                        }
-                        selectedNodes = newSel;
-                        selectedLinks = {};
-                        selectedBlocks = {};
-                        canvas.requestPaint();
-                        return;
-                    }
-
-                    var loneMeter = nodeIsSelected && isMeterNode(findNodeData(nodeIdDrag)) && selectedNodeIds().length === 1;
-                    if (nodeIsSelected && !loneMeter) {
-                        groupDragging = true;
-                        for (var agid in selectedNodes) {
-                            if (selectedNodes[agid])
-                                markHandPlaced(agid);
-                        }
-                        var cg = toCanvas(mouse.x, mouse.y);
-                        groupDragStartX = cg.x;
-                        groupDragStartY = cg.y;
-                        var starts = {};
-                        for (var gsid in selectedNodes) {
-                            if (selectedNodes[gsid] && nodePositions[gsid])
-                                starts[gsid] = {
-                                    x: nodePositions[gsid].x,
-                                    y: nodePositions[gsid].y
-                                };
-                        }
-                        groupDragStart = starts;
-                    } else {
-                        selectedNodes = {};
-                        selectedLinks = {};
-                        selectedBlocks = {};
-                        dragNodeId = nodeIdDrag;
-                        markHandPlaced(nodeIdDrag);
-                        var c = toCanvas(mouse.x, mouse.y);
-                        var pos = nodePositions[nodeIdDrag];
-                        dragOffsetX = c.x - pos.x;
-                        dragOffsetY = c.y - pos.y;
-                        dragStartPos = {
-                            x: pos.x,
-                            y: pos.y
-                        };
-                    }
-                    canvas.requestPaint();
-                    return;
-                }
-
-                var clickedWire = wireAt(mouse.x, mouse.y);
-                var clickedLinkId = clickedWire.link;
-                var ctrlHeldWire = !!(mouse.modifiers & Qt.ControlModifier);
-                if (clickedWire.block) {
-                    var cb = clickedWire.block;
-                    var cbKey = blockKey(cb);
-                    var cbSig = {
-                        ruleId: cb.ruleId,
-                        source: cb.source,
-                        target: cb.target
-                    };
-                    if (ctrlHeldWire) {
-                        var newSelBlocks = Object.assign({}, selectedBlocks);
-                        if (newSelBlocks[cbKey])
-                            delete newSelBlocks[cbKey];
-                        else
-                            newSelBlocks[cbKey] = cbSig;
-                        selectedBlocks = newSelBlocks;
-                        selectedNodes = {};
-                    } else {
-                        var freshBlocks = {};
-                        freshBlocks[cbKey] = cbSig;
-                        selectedBlocks = freshBlocks;
-                        selectedLinks = {};
-                        selectedNodes = {};
-                    }
-                    canvas.requestPaint();
-                    return;
-                }
-                if (clickedLinkId >= 0) {
-                    var clickedLink = findLinkData(clickedLinkId);
-                    if (ctrlHeldWire) {
-                        var newSelLinks = Object.assign({}, selectedLinks);
-                        if (newSelLinks[clickedLinkId]) {
-                            delete newSelLinks[clickedLinkId];
-                        } else if (clickedLink) {
-                            newSelLinks[clickedLinkId] = linkSig(clickedLink);
-                        }
-                        selectedLinks = newSelLinks;
-                    } else {
-                        var freshSel = {};
-                        if (clickedLink)
-                            freshSel[clickedLinkId] = linkSig(clickedLink);
-                        selectedLinks = freshSel;
-                        selectedNodes = {};
-                        selectedBlocks = {};
-                    }
-                    canvas.requestPaint();
-                    return;
-                }
-
-                var boxShift = !!(mouse.modifiers & Qt.ShiftModifier);
-                if (dragMode === "grab" && !boxShift) {
-                    grabPanning = true;
-                    grabMoved = false;
-                    updateCursor();
-                    return;
-                }
-                selectAdditive = boxShift || !!(mouse.modifiers & Qt.ControlModifier);
-                if (selectAdditive) {
-                    selectBaseNodes = Object.assign({}, selectedNodes);
-                    selectBaseLinks = Object.assign({}, selectedLinks);
-                } else {
-                    clearSelection();
-                }
-                selectDragging = true;
-                selectStartX = mouse.x;
-                selectStartY = mouse.y;
-                selectEndX = mouse.x;
-                selectEndY = mouse.y;
-            }
-        }
-
-        onPositionChanged: mouse => {
-            shiftHeld = !!(mouse.modifiers & Qt.ShiftModifier);
-            if (placingNodeId >= 0) {
-                var pc = toCanvas(mouse.x, mouse.y);
-                var pn = findNodeData(placingNodeId);
-                var pw = (getNodeWidth(placingNodeId) || minNodeWidth);
-                var ph = pn ? calculateNodeHeight(pn) : 80;
-                nodePositions[placingNodeId] = {
-                    x: pc.x - pw / 2,
-                    y: pc.y - ph / 2
-                };
-                canvas.requestPaint();
-                return;
-            }
-
-            if ((mouse.buttons & Qt.MiddleButton) || ((grabPanning || spacePanning) && (mouse.buttons & Qt.LeftButton))) {
-                if (grabPanning && !grabMoved && (Math.abs(mouse.x - pressX) > 4 || Math.abs(mouse.y - pressY) > 4))
-                    grabMoved = true;
-                panX += mouse.x - lastX;
-                panY += mouse.y - lastY;
-                clampPan();
-                lastX = mouse.x;
-                lastY = mouse.y;
-                canvas.requestPaint();
-                return;
-            }
-
-            if (groupDragging && (mouse.buttons & Qt.LeftButton)) {
-                var cg = toCanvas(mouse.x, mouse.y);
-                var deltaX = cg.x - groupDragStartX;
-                var deltaY = cg.y - groupDragStartY;
-                var refId = -1;
-                for (var rid in groupDragStart) {
-                    refId = parseInt(rid);
-                    break;
-                }
-                var adjX = 0;
-                var adjY = 0;
-                activeSnapLines = [];
-                if (refId >= 0) {
-                    var rawGX = groupDragStart[refId].x + deltaX;
-                    var rawGY = groupDragStart[refId].y + deltaY;
-                    if (snapToGrid) {
-                        var gp = gridPos({
-                            x: rawGX,
-                            y: rawGY
-                        });
-                        adjX = gp.x - rawGX;
-                        adjY = gp.y - rawGY;
-                    } else if (mouse.modifiers & Qt.ShiftModifier) {
-                        var gsnap = computeSnap(refId, rawGX, rawGY, selectedNodes);
-                        adjX = gsnap.x - rawGX;
-                        adjY = gsnap.y - rawGY;
-                        activeSnapLines = gsnap.lines;
-                    }
-                }
-                for (var nid in groupDragStart) {
-                    nodePositions[nid] = {
-                        x: groupDragStart[nid].x + deltaX + adjX,
-                        y: groupDragStart[nid].y + deltaY + adjY
-                    };
-                }
-                canvas.requestPaint();
-                return;
-            }
-
-            if (dragNodeId >= 0 && (mouse.buttons & Qt.LeftButton)) {
-                var c = toCanvas(mouse.x, mouse.y);
-                var rawX = c.x - dragOffsetX;
-                var rawY = c.y - dragOffsetY;
-                if (snapToGrid) {
-                    nodePositions[dragNodeId] = gridPos({
-                        x: rawX,
-                        y: rawY
-                    });
-                    activeSnapLines = [];
-                } else if (mouse.modifiers & Qt.ShiftModifier) {
-                    var snap = computeSnap(dragNodeId, rawX, rawY, null);
-                    nodePositions[dragNodeId] = {
-                        x: snap.x,
-                        y: snap.y
-                    };
-                    activeSnapLines = snap.lines;
-                } else {
-                    nodePositions[dragNodeId] = {
-                        x: rawX,
-                        y: rawY
-                    };
-                    activeSnapLines = [];
-                }
-                updateInsertPreview(dragNodeId);
-                var draggedMeter = findNodeData(dragNodeId);
-                snapPreview = isMeterNode(draggedMeter) ? meterSnapCandidate(draggedMeter, mouse.x, mouse.y) : null;
-                if (snapPreview)
-                    insertPreview = null;
-                canvas.requestPaint();
-                return;
-            }
-
-            if (connectFromPortId >= 0) {
-                connectMouseX = mouse.x;
-                connectMouseY = mouse.y;
-                if (!connectBlocking) {
-                    var hoverPort = findPortAt(mouse.x, mouse.y);
-                    if (hoverPort !== connectHoverPortId) {
-                        connectHoverPortId = hoverPort;
-                        connectTargetBlocked = hoverPort >= 0 && getPortDirection(hoverPort) !== connectFromDir && blockedReasonFor(connectFromPortId, connectFromDir, hoverPort) !== "";
-                    }
-                }
-                canvas.requestPaint();
-                return;
-            }
-
-            if (selectDragging) {
-                selectEndX = mouse.x;
-                selectEndY = mouse.y;
-                canvas.requestPaint();
-                return;
-            }
-
-            if (mouse.buttons === Qt.NoButton)
-                updateHover(mouse.x, mouse.y);
-        }
+        onPositionChanged: mouse => Input.pointerPositionChanged(graphView, mouse)
 
         onExited: updateHover(-1, -1)
 
-        onReleased: mouse => {
-            activeSnapLines = [];
-            if (mouse.button === Qt.MiddleButton) {
-                middlePanning = false;
-                updateCursor();
-            }
-            if (mouse.button === Qt.RightButton && connectBlocking) {
-                var moved = Math.abs(mouse.x - connectPressX) > 4 || Math.abs(mouse.y - connectPressY) > 4;
-                var blockFrom = connectFromPortId;
-                var blockDir = connectFromDir;
-                connectFromPortId = -1;
-                connectFromDir = "";
-                connectBlocking = false;
-                canvas.requestPaint();
-                if (!moved) {
-                    openPortMenu(blockFrom);
-                    return;
-                }
-                var blockTo = findPortAt(mouse.x, mouse.y);
-                if (blockTo >= 0 && blockTo !== blockFrom && getPortDirection(blockTo) !== blockDir && getPortNodeId(blockTo) !== getPortNodeId(blockFrom)) {
-                    if (blockDir === "Output")
-                        controller.block_ports(blockFrom, blockTo);
-                    else
-                        controller.block_ports(blockTo, blockFrom);
-                }
-                return;
-            }
-            if (mouse.button === Qt.LeftButton) {
-                if (grabPanning) {
-                    grabPanning = false;
-                    if (!grabMoved)
-                        clearSelection();
-                    updateCursor();
-                }
-                if (spacePanning) {
-                    spacePanning = false;
-                    updateCursor();
-                }
+        onReleased: mouse => Input.pointerReleased(graphView, mouse)
 
-                if (connectFromPortId >= 0) {
-                    var targetId = findPortAt(mouse.x, mouse.y);
-                    if (targetId >= 0 && targetId !== connectFromPortId) {
-                        var targetDir = getPortDirection(targetId);
-                        var fromPort = snapTargetPort(connectFromPortId);
-                        var toPort = snapTargetPort(targetId);
-                        var fromNodeId = getPortNodeId(fromPort);
-                        var toNodeId = getPortNodeId(toPort);
-                        if (targetDir !== connectFromDir && fromNodeId !== toNodeId && fromPort !== toPort) {
-                            var why = blockedReasonFor(fromPort, connectFromDir, toPort);
-                            var outP = connectFromDir === "Output" ? fromPort : toPort;
-                            var inP = connectFromDir === "Output" ? toPort : fromPort;
-                            var origOut = connectFromDir === "Output" ? connectFromPortId : targetId;
-                            var origIn = connectFromDir === "Output" ? targetId : connectFromPortId;
-                            var skipping = (outP !== origOut || inP !== origIn) ? findLinkByPorts(origOut, origIn) : null;
-                            if (why !== "") {
-                                showToast("Blocked by rule " + why + ". Remove the block to connect.");
-                            } else if (skipping) {
-                                connectReplacing(outP, inP, skipping);
-                            } else {
-                                connectPorts(outP, inP);
-                            }
-                        }
-                    }
-                    connectFromPortId = -1;
-                    connectFromDir = "";
-                    connectHoverPortId = -1;
-                    connectTargetBlocked = false;
-                    canvas.requestPaint();
-                }
-
-                if (groupDragging) {
-                    groupDragging = false;
-                    for (var gid in selectedNodes) {
-                        if (selectedNodes[gid]) {
-                            var gNode = findNodeData(parseInt(gid));
-                            if (gNode) {
-                                resolveNodeOverlap(gNode, selectedNodes);
-                            }
-                        }
-                    }
-                    recordMove("move", groupDragStart);
-                    persistLayout();
-                    canvas.requestPaint();
-                }
-
-                if (dragNodeId >= 0 && snapPreview && snapPreview.meterId === dragNodeId) {
-                    var sp = snapPreview;
-                    snapPreview = null;
-                    insertPreview = null;
-                    if (dragStartPos)
-                        nodePositions[dragNodeId] = {
-                            x: dragStartPos.x,
-                            y: dragStartPos.y
-                        };
-                    snapMeter(findNodeData(dragNodeId), sp.side);
-                    persistLayout();
-                    canvas.requestPaint();
-                } else if (dragNodeId >= 0) {
-                    var rewire = null;
-                    var linkUnder = findLinkUnderNode(dragNodeId);
-                    if (linkUnder >= 0) {
-                        var draggedNode = findNodeData(dragNodeId);
-                        if (draggedNode && draggedNode.type === "Plugin") {
-                            rewire = insertRewireEntry(linkUnder, dragNodeId);
-                            controller.insert_node_on_link(linkUnder, dragNodeId);
-                        }
-                    }
-                    insertPreview = null;
-                    var droppedNode = findNodeData(dragNodeId);
-                    if (droppedNode) {
-                        resolveNodeOverlap(droppedNode);
-                    }
-                    var moved = null;
-                    if (dragStartPos) {
-                        var movedFrom = {};
-                        movedFrom[dragNodeId] = dragStartPos;
-                        moved = moveEntry("move", movedFrom);
-                    }
-                    if (rewire && moved)
-                        pushUndo({
-                            kind: "group",
-                            label: "insert node",
-                            parts: [moved, rewire]
-                        });
-                    else if (rewire)
-                        pushUndo(rewire);
-                    else if (moved)
-                        pushUndo(moved);
-                    persistLayout();
-                    canvas.requestPaint();
-                }
-                dragNodeId = -1;
-                dragStartPos = null;
-                snapPreview = null;
-
-                if (selectDragging) {
-                    selectDragging = false;
-                    var dx = Math.abs(selectEndX - selectStartX);
-                    var dy = Math.abs(selectEndY - selectStartY);
-                    if (dx > 5 || dy > 5) {
-                        var boxLinks = findLinksInRect(selectStartX, selectStartY, selectEndX, selectEndY);
-                        var boxNodes = findNodesInRect(selectStartX, selectStartY, selectEndX, selectEndY);
-                        if (selectAdditive) {
-                            boxLinks = Object.assign({}, selectBaseLinks, boxLinks);
-                            boxNodes = Object.assign({}, selectBaseNodes, boxNodes);
-                        }
-                        selectedLinks = boxLinks;
-                        selectedNodes = boxNodes;
-                    }
-                    selectAdditive = false;
-                    canvas.requestPaint();
-                }
-            }
-        }
-
-        onWheel: wheel => {
-            if (wheel.angleDelta.y === 0)
-                return;
-            var factor = wheel.angleDelta.y > 0 ? 1.1 : 0.9;
-            zoomAt(wheel.x, wheel.y, zoom * factor);
-        }
+        onWheel: wheel => Input.pointerWheel(graphView, wheel)
 
         PinchHandler {
             id: pinchZoom
@@ -5580,514 +1083,21 @@ Item {
         }
     }
 
-    component ModeCell: AbstractButton {
-        id: cell
-        property string iconName
-        property string tip
-        property bool active: false
-        width: 28
-        height: 28
-        hoverEnabled: true
-        focusPolicy: Qt.NoFocus
-        Accessible.name: tip
-        background: Rectangle {
-            radius: Theme.radiusSmall
-            color: cell.active ? Theme.accentFaint : cell.hovered || cell.down ? Theme.bgHover : "transparent"
-            border.width: cell.active ? 1 : 0
-            border.color: Theme.accentRing
-        }
-        contentItem: Item {
-            ZbIcon {
-                anchors.centerIn: parent
-                name: cell.iconName
-                size: 18
-                color: cell.active ? Theme.accent : cell.hovered ? Theme.textIcon : Theme.textMuted
-            }
-        }
-        ZbTooltip {
-            visible: cell.hovered
-            text: cell.tip
-        }
-    }
-
-    Rectangle {
-        id: modeSwitch
-        anchors.left: parent.left
-        anchors.top: parent.top
-        anchors.margins: 12
-        height: 34
-        width: modeRow.implicitWidth + 6
-        radius: Theme.radiusControl
-        color: Theme.bgPanel
-        border.width: 1
-        border.color: Theme.borderStrong
-
-        MouseArea {
-            anchors.fill: parent
-            acceptedButtons: Qt.AllButtons
-            hoverEnabled: true
-            cursorShape: Qt.ArrowCursor
-            onEntered: graphView.updateHover(-1, -1)
-        }
-
-        Row {
-            id: modeRow
-            anchors.centerIn: parent
-            spacing: 2
-            ModeCell {
-                iconName: "grab"
-                tip: "Grab: drag the canvas to move around (W)"
-                active: graphView.dragMode === "grab"
-                onClicked: graphView.setDragMode("grab")
-            }
-            ModeCell {
-                iconName: "select"
-                tip: "Select: drag a box around nodes and wires (W)"
-                active: graphView.dragMode === "select"
-                onClicked: graphView.setDragMode("select")
-            }
-        }
-    }
-
-    Rectangle {
-        id: autoLayoutButton
-        anchors.right: parent.right
-        anchors.top: parent.top
-        anchors.rightMargin: 12 + (vScrollBar.visible ? vScrollBar.width : 0)
-        anchors.topMargin: 12
-        height: 34
-        width: 34
-        radius: Theme.radiusControl
-        color: Theme.bgPanel
-        border.width: 1
-        border.color: Theme.borderStrong
-
-        AbstractButton {
-            id: autoLayoutCell
-            anchors.centerIn: parent
-            width: 28
-            height: 28
-            hoverEnabled: true
-            focusPolicy: Qt.NoFocus
-            Accessible.name: "Auto layout"
-            onClicked: graphView.requestAutoLayout(graphView.shiftHeld)
-            background: Rectangle {
-                radius: Theme.radiusSmall
-                color: autoLayoutCell.down ? Theme.borderStrong : autoLayoutCell.hovered ? Theme.bgHover : "transparent"
-            }
-            contentItem: Item {
-                ZbIcon {
-                    anchors.centerIn: parent
-                    name: "autoLayout"
-                    size: 18
-                    color: autoLayoutCell.hovered ? Theme.textPrimary : Theme.textIcon
-                }
-            }
-            ZbTooltip {
-                visible: autoLayoutCell.hovered
-                text: "Auto layout (L). Pinned nodes stay put; Shift+click (Shift+L) lays them out too."
-            }
-        }
-    }
-
-    Rectangle {
-        id: helpButton
-        anchors.right: parent.right
-        anchors.bottom: parent.bottom
-        anchors.rightMargin: 12 + (vScrollBar.visible ? vScrollBar.width : 0)
-        anchors.bottomMargin: 12 + (hScrollBar.visible ? hScrollBar.height : 0)
-        width: 28
-        height: 28
-        radius: width / 2
-        color: Theme.bgPanel
-        border.width: 1
-        border.color: Theme.borderStrong
-
-        AbstractButton {
-            id: helpCell
-            anchors.fill: parent
-            hoverEnabled: true
-            focusPolicy: Qt.NoFocus
-            Accessible.name: "Keyboard shortcuts"
-            onClicked: graphView.showShortcuts()
-            background: Rectangle {
-                radius: width / 2
-                color: helpCell.down ? Theme.borderStrong : helpCell.hovered ? Theme.bgHover : "transparent"
-            }
-            contentItem: Text {
-                text: "?"
-                horizontalAlignment: Text.AlignHCenter
-                verticalAlignment: Text.AlignVCenter
-                font.family: Theme.fontMono
-                font.pixelSize: 13
-                font.weight: Font.Medium
-                color: helpCell.hovered ? Theme.textPrimary : Theme.textMuted
-            }
-            ZbTooltip {
-                visible: helpCell.hovered
-                text: "Keyboard shortcuts (? or F1)"
-            }
-        }
-    }
-
-    Rectangle {
-        id: breadcrumb
-        visible: currentSubgraph !== ""
-        anchors.left: modeSwitch.right
-        anchors.leftMargin: 8
-        anchors.top: parent.top
-        anchors.topMargin: 12
-        height: 34
-        width: crumbRow.implicitWidth + 12
-        radius: Theme.radiusControl
-        color: Theme.bgPanel
-        border.width: 1
-        border.color: Theme.borderStrong
-
-        Row {
-            id: crumbRow
-            anchors.verticalCenter: parent.verticalCenter
-            anchors.left: parent.left
-            anchors.leftMargin: 4
-            spacing: 4
-            ZbButton {
-                id: crumbHome
-                kind: "subtle"
-                compact: true
-                text: "Graph"
-                anchors.verticalCenter: parent.verticalCenter
-                onClicked: exitSubgraph()
-                ZbTooltip {
-                    visible: crumbHome.hovered
-                    text: "Back to the main graph (Esc)"
-                }
-            }
-            ZbIcon {
-                name: "chevronRight"
-                size: 10
-                color: Theme.textMuted
-                anchors.verticalCenter: parent.verticalCenter
-            }
-            ZbIcon {
-                name: "subgraph"
-                size: 14
-                color: Theme.catSubgraph
-                anchors.verticalCenter: parent.verticalCenter
-            }
-            Text {
-                text: currentSubgraphName
-                anchors.verticalCenter: parent.verticalCenter
-                rightPadding: 6
-                font.family: Theme.fontSans
-                font.pixelSize: Theme.sizeBody
-                font.weight: Font.DemiBold
-                color: Theme.textPrimary
-            }
-        }
-    }
-
-    Repeater {
-        model: graphView.edgeMarkers
-        delegate: Rectangle {
-            id: marker
-            required property var modelData
-            x: Math.max(8, Math.min(graphView.width - width - 8, modelData.x - width / 2))
-            y: Math.max(8, Math.min(graphView.height - height - 8, modelData.y - height / 2))
-            width: markerRow.implicitWidth + 20
-            height: 26
-            radius: height / 2
-            color: Theme.bgPanel
-            border.width: 1
-            border.color: Theme.accentRing
-
-            Rectangle {
-                anchors.fill: parent
-                radius: parent.radius
-                color: markerMouse.containsMouse ? Theme.accentRing : Theme.accentFaint
-            }
-            Row {
-                id: markerRow
-                anchors.centerIn: parent
-                spacing: 6
-                ZbIcon {
-                    name: "arrow"
-                    size: 12
-                    color: Theme.accent
-                    rotation: marker.modelData.angle
-                    anchors.verticalCenter: parent.verticalCenter
-                }
-                Text {
-                    text: "New: " + marker.modelData.name
-                    width: Math.min(implicitWidth, 180)
-                    elide: Text.ElideRight
-                    anchors.verticalCenter: parent.verticalCenter
-                    font.family: Theme.fontSans
-                    font.pixelSize: 11
-                    font.weight: Font.Medium
-                    color: Theme.textPrimary
-                }
-            }
-            MouseArea {
-                id: markerMouse
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: graphView.revealNode(marker.modelData.id)
-            }
-        }
-    }
-
-    Rectangle {
-        id: overrideHint
-        readonly property bool active: graphView.overrideState !== ""
-        readonly property string action: graphView.overrideState !== "" ? graphView.overrideState : (graphView.dragMode === "grab" ? "select" : "pan")
-        anchors.horizontalCenter: parent.horizontalCenter
-        anchors.bottom: parent.bottom
-        anchors.bottomMargin: 18
-        height: 28
-        width: hintRow.implicitWidth + 22
-        radius: Theme.radiusControl
-        color: Theme.bgPanel
-        border.width: 1
-        border.color: active ? Theme.accentRing : Theme.borderStrong
-
-        Rectangle {
-            anchors.fill: parent
-            radius: parent.radius
-            color: Theme.accentFaint
-            visible: overrideHint.active
-        }
-
-        component HintText: Text {
-            property bool on: false
-            anchors.verticalCenter: parent.verticalCenter
-            font.family: Theme.fontSans
-            font.pixelSize: 11
-            font.weight: on ? Font.DemiBold : Font.Normal
-            color: on ? Theme.accent : Theme.textMuted
-        }
-
-        Row {
-            id: hintRow
-            anchors.centerIn: parent
-            spacing: 6
-            ZbIcon {
-                name: overrideHint.action === "pan" ? "grab" : "select"
-                size: 14
-                color: overrideHint.active ? Theme.accent : Theme.textMuted
-                anchors.verticalCenter: parent.verticalCenter
-            }
-            HintText {
-                on: overrideHint.active
-                text: overrideHint.active ? (overrideHint.action === "pan" ? "Panning \u2014 release" : "Selecting \u2014 release") : "Hold"
-            }
-            Rectangle {
-                anchors.verticalCenter: parent.verticalCenter
-                height: 18
-                width: keyText.implicitWidth + 12
-                radius: Theme.radiusTag
-                color: "transparent"
-                border.width: 1
-                border.color: overrideHint.active ? Theme.accent : Theme.borderStrong
-                Text {
-                    id: keyText
-                    anchors.centerIn: parent
-                    text: overrideHint.action === "pan" ? "Space" : "Shift"
-                    font.family: Theme.fontMono
-                    font.pixelSize: 10
-                    color: overrideHint.active ? Theme.accent : Theme.textIcon
-                }
-            }
-            HintText {
-                on: overrideHint.active
-                text: overrideHint.active ? (graphView.dragMode === "grab" ? "to go back to Grab" : "to go back to Select") : (overrideHint.action === "pan" ? "to pan" : "and drag to select")
-            }
-        }
-    }
-
-    Rectangle {
-        id: toast
-        anchors.horizontalCenter: parent.horizontalCenter
-        anchors.bottom: overrideHint.top
-        anchors.bottomMargin: 10
-        width: Math.min(toastText.implicitWidth + 32, parent.width - 32)
-        height: toastText.implicitHeight + 16
-        radius: Theme.radiusControl
-        color: Theme.bgTooltip
-        border.width: 1
-        border.color: Theme.borderStrong
-        opacity: 0
-        visible: opacity > 0
-        Behavior on opacity {
-            NumberAnimation {
-                duration: 150
-            }
-        }
-
-        Text {
-            id: toastText
-            anchors.centerIn: parent
-            width: Math.min(implicitWidth, toast.parent.width - 64)
-            font.family: Theme.fontSans
-            font.pixelSize: Theme.sizeBody
-            color: Theme.textPrimary
-            wrapMode: Text.WordWrap
-        }
-
-        Timer {
-            id: toastTimer
-            interval: 3500
-            onTriggered: toast.opacity = 0
-        }
-    }
-
-    ZbScrollBar {
-        id: hScrollBar
-        orientation: Qt.Horizontal
-        anchors.left: parent.left
-        anchors.right: vScrollBar.visible ? vScrollBar.left : parent.right
-        anchors.bottom: parent.bottom
-        visible: size < 1
-        policy: ScrollBar.AlwaysOn
-        property real rangeLo: 0
-        property real rangeLen: 1
-        onPositionChanged: {
-            if (!pressed)
-                return;
-            panX = -(rangeLo + position * rangeLen) * zoom;
-            canvas.requestPaint();
-        }
-        onPressedChanged: if (!pressed)
-            canvas.requestPaint()
-    }
-
-    ZbScrollBar {
-        id: vScrollBar
-        orientation: Qt.Vertical
-        anchors.top: parent.top
-        anchors.right: parent.right
-        anchors.bottom: hScrollBar.visible ? hScrollBar.top : parent.bottom
-        visible: size < 1
-        policy: ScrollBar.AlwaysOn
-        property real rangeLo: 0
-        property real rangeLen: 1
-        onPositionChanged: {
-            if (!pressed)
-                return;
-            panY = -(rangeLo + position * rangeLen) * zoom;
-            canvas.requestPaint();
-        }
-        onPressedChanged: if (!pressed)
-            canvas.requestPaint()
+    GraphTools {
+        id: graphTools
+        graph: graphView
     }
 
     function updateHover(sx, sy) {
-        var port = -1;
-        var link = -1;
-        var btn = "";
-        var empty = false;
-        var blockUnder = null;
-        var nodeUnder = -1;
-        if (sx >= 0 && connectFromPortId < 0 && dragNodeId < 0 && !groupDragging) {
-            port = findPortAt(sx, sy);
-            nodeUnder = findNodeAt(sx, sy);
-            if (nodeUnder < 0 && port >= 0 && portPositions[port])
-                nodeUnder = portPositions[port].nodeId;
-            if (port < 0) {
-                var hit = findButtonAt(sx, sy);
-                if (hit) {
-                    btn = hit.nodeId + ":" + hit.button;
-                } else if (nodeUnder < 0) {
-                    var wire = wireAt(sx, sy);
-                    link = wire.link;
-                    blockUnder = wire.block;
-                    empty = link < 0 && !blockUnder;
-                }
-            }
-        }
-        var blockKeyUnder = blockUnder ? blockKey(blockUnder) : "";
-        var nodeChanged = nodeUnder !== hoveredNodeId;
-        var changed = nodeChanged || blockKeyUnder !== hoveredBlockKey || port !== hoveredPortId || link !== hoveredLinkId || btn !== hoveredButton;
-        hoveredBlockKey = blockKeyUnder;
-        hoveredPortId = port;
-        hoveredLinkId = link;
-        hoveredButton = btn;
-        hoveredNodeId = nodeUnder;
-        hoverEmpty = empty;
-        updateCursor();
-        if (nodeChanged || port >= 0 || btn !== "") {
-            hideNameTip();
-            if (nodeUnder >= 0 && port < 0 && btn === "" && nameTruncated[nodeUnder])
-                nameTimer.restart();
-        }
-        if (changed) {
-            if (port >= 0 && portPositions[port]) {
-                var pp = portPositions[port];
-                var sp = toScreen(pp.cx, pp.cy);
-                pinTip.text = portName(port);
-                pinTip.x = sp.x + 10;
-                pinTip.y = sp.y + 10;
-                pinTip.open();
-            } else if (btn.indexOf(":pin") > 0) {
-                var pn = findNodeData(parseInt(btn));
-                var pnPos = pn ? nodePositions[pn.id] : null;
-                if (pnPos) {
-                    var pinned = !!(pn.layoutKey && pinnedNodes[pn.layoutKey]);
-                    var r = pinRect(pn, pnPos.x, pnPos.y);
-                    var tp = toScreen(r.x + r.w, r.y + r.h);
-                    pinTip.text = pinned ? "Pinned \u2014 click to unpin" : "Pin (keep this position)";
-                    pinTip.x = tp.x;
-                    pinTip.y = tp.y + 4;
-                    pinTip.open();
-                }
-            } else if (btn.indexOf(":ports") > 0) {
-                var fnode = findNodeData(parseInt(btn));
-                var fPos = fnode ? nodePositions[fnode.id] : null;
-                if (fPos) {
-                    var fr = portsRect(fnode, fPos.x, fPos.y);
-                    var ftp = toScreen(fr.x + fr.w, fr.y + fr.h);
-                    pinTip.text = isConnectedOnly(fnode) ? "Showing connected ports only — click to show all" : "Show connected ports only";
-                    pinTip.x = ftp.x;
-                    pinTip.y = ftp.y + 4;
-                    pinTip.open();
-                }
-            } else if (blockUnder) {
-                pinTip.text = "Do not connect: " + blockUnder.label + ". Click to select; Delete removes the rule.";
-                pinTip.x = sx + 12;
-                pinTip.y = sy + 16;
-                pinTip.open();
-            } else {
-                pinTip.close();
-            }
-            canvas.requestPaint();
-        }
+        return Input.updateHover(graphView, sx, sy);
     }
 
     function updateCursor() {
-        var shape = Qt.ArrowCursor;
-        if (grabPanning || spacePanning || middlePanning)
-            shape = Qt.ClosedHandCursor;
-        else if (spaceHeld)
-            shape = Qt.OpenHandCursor;
-        else if (hoveredButton !== "" || hoveredPortId >= 0)
-            shape = Qt.PointingHandCursor;
-        else if (overrideState === "select" && hoverEmpty)
-            shape = Qt.CrossCursor;
-        else if (dragMode === "grab" && hoverEmpty && placingNodeId < 0)
-            shape = Qt.OpenHandCursor;
-        if (mouseArea.cursorShape !== shape)
-            mouseArea.cursorShape = shape;
+        return Input.updateCursor(graphView);
     }
 
     function portName(portId) {
-        for (var nid in portsByNode) {
-            var ports = portsByNode[nid];
-            for (var i = 0; i < ports.length; i++) {
-                if (ports[i].id === portId)
-                    return ports[i].name;
-            }
-        }
-        return "";
+        return Input.portName(graphView, portId);
     }
 
     ZbTooltip {
@@ -6110,838 +1120,154 @@ Item {
         onTriggered: graphView.showNameTip()
     }
     function hideNameTip() {
-        nameTimer.stop();
-        nameTip.close();
+        return Input.hideNameTip(graphView);
     }
     function showNameTip() {
-        var n = hoveredNodeId >= 0 ? findNodeData(hoveredNodeId) : null;
-        var pos = n ? nodePositions[n.id] : null;
-        if (!n || !pos || !nameTruncated[n.id] || hoveredPortId >= 0 || hoveredButton !== "" || dragNodeId >= 0 || groupDragging || grabPanning || spacePanning || middlePanning)
-            return;
-        nameTip.text = n.name;
-        nameTip.width = Math.min(nameMetrics.advanceWidth + nameTip.leftPadding + nameTip.rightPadding + 2, Math.min(420, width - 16));
-        placeNameTip(n, pos);
-        nameTip.open();
-        Qt.callLater(placeNameTip, n, pos);
+        return Input.showNameTip(graphView);
     }
     function placeNameTip(n, pos) {
-        var s = toScreen(pos.x, pos.y);
-        nameTip.x = Math.max(8, Math.min(width - nameTip.width - 8, s.x));
-        var above = s.y - nameTip.height - 6;
-        nameTip.y = above >= 8 ? above : s.y + Theme.nodeHeader * zoom + 4;
+        return Input.placeNameTip(graphView, n, pos);
     }
 
     function bezierCtrl(x1, x2) {
-        return Math.max(32, Math.min(200, Math.abs(x2 - x1) / 2));
+        return Wires.bezierCtrl(graphView, x1, x2);
     }
 
     function isOrthoWire() {
-        return wireStyle === "stepped" || wireStyle === "circuit";
+        return Wires.isOrthoWire(graphView);
     }
 
     function wireLane(wid) {
-        if (wireStyle !== "circuit" || wid === undefined || wid === null)
-            return 0;
-        return wireLanes[wid] || 0;
+        return Wires.wireLane(graphView, wid);
     }
 
     function orthoPoints(x1, y1, x2, y2, lane) {
-        var stub = wireStub;
-        if (x2 - x1 >= 2 * stub) {
-            if (Math.abs(y2 - y1) < 0.5)
-                return [[x1, y1], [x2, y2]];
-            var mid = Math.max(x1 + stub, Math.min(x2 - stub, (x1 + x2) / 2 + lane));
-            return [[x1, y1], [mid, y1], [mid, y2], [x2, y2]];
-        }
-        var ym = Math.abs(y2 - y1) < 4 * stub ? Math.max(y1, y2) + 3 * stub + lane : (y1 + y2) / 2 + lane;
-        var a = x1 + stub;
-        var b = x2 - stub;
-        return [[x1, y1], [a, y1], [a, ym], [b, ym], [b, y2], [x2, y2]];
+        return Wires.orthoPoints(graphView, x1, y1, x2, y2, lane);
     }
 
     function wirePathPoints(x1, y1, x2, y2, wid) {
-        var r = wid !== undefined && wid !== null ? wireRoutes[wid] : null;
-        if (r && r.x1 === x1 && r.y1 === y1 && r.x2 === x2 && r.y2 === y2)
-            return r.pts;
-        return orthoPoints(x1, y1, x2, y2, wireLane(wid));
+        return Wires.wirePathPoints(graphView, x1, y1, x2, y2, wid);
     }
 
     function wireObstacles() {
-        var out = [];
-        var m = wireClearance;
-        for (var i = 0; i < nodes.length; i++) {
-            var n = nodes[i];
-            if (n.layoutKey && hiddenNodes[n.layoutKey])
-                continue;
-            var p = nodePositions[n.id];
-            if (!p)
-                continue;
-            var extra = n.type === "Subgraph" ? 4 : 0;
-            out.push({
-                l: p.x - m,
-                t: p.y - m,
-                r: p.x + getNodeWidth(n.id) + extra + m,
-                b: p.y + calculateNodeHeight(n) + extra + m
-            });
-        }
-        return out;
+        return Wires.wireObstacles(graphView);
     }
 
     function segmentBlocked(ax, ay, bx, by, obs, shrink) {
-        var l = Math.min(ax, bx), r = Math.max(ax, bx), t = Math.min(ay, by), b = Math.max(ay, by);
-        var e = 0.5 + (shrink || 0);
-        for (var i = 0; i < obs.length; i++) {
-            var o = obs[i];
-            if (r > o.l + e && l < o.r - e && b > o.t + e && t < o.b - e)
-                return true;
-        }
-        return false;
+        return Wires.segmentBlocked(graphView, ax, ay, bx, by, obs, shrink);
     }
 
     function pathBlocked(pts, x1, y1, x2, y2, obs) {
-        var n = pts.length;
-        for (var i = 1; i < n; i++) {
-            var ax = i === 1 ? Math.max(pts[0][0], x1 + wireStub) : pts[i - 1][0];
-            var bx = i === n - 1 ? Math.min(pts[n - 1][0], x2 - wireStub) : pts[i][0];
-            if (segmentBlocked(ax, pts[i - 1][1], bx, pts[i][1], obs, 0))
-                return true;
-        }
-        return false;
+        return Wires.pathBlocked(graphView, pts, x1, y1, x2, y2, obs);
     }
 
     function uniqueSorted(vals) {
-        vals.sort(function (p, q) {
-            return p - q;
-        });
-        var out = [];
-        for (var i = 0; i < vals.length; i++) {
-            if (out.length === 0 || vals[i] - out[out.length - 1] > 0.5)
-                out.push(vals[i]);
-        }
-        var withMids = [];
-        for (var k = 0; k < out.length; k++) {
-            if (k > 0 && out[k] - out[k - 1] > 2 * wireLaneGap)
-                withMids.push((out[k] + out[k - 1]) / 2);
-            withMids.push(out[k]);
-        }
-        return withMids;
+        return Wires.uniqueSorted(graphView, vals);
     }
 
     function nearestIndex(arr, v) {
-        var best = 0;
-        for (var i = 1; i < arr.length; i++) {
-            if (Math.abs(arr[i] - v) < Math.abs(arr[best] - v))
-                best = i;
-        }
-        return best;
+        return Wires.nearestIndex(graphView, arr, v);
     }
 
     function gridRoute(sx, sy, ex, ey, obs) {
-        var xs = [sx, ex];
-        var ys = [sy, ey];
-        var minX = Math.min(sx, ex), maxX = Math.max(sx, ex), minY = Math.min(sy, ey), maxY = Math.max(sy, ey);
-        for (var oi = 0; oi < obs.length; oi++) {
-            var o = obs[oi];
-            xs.push(o.l, o.r);
-            ys.push(o.t, o.b);
-            minX = Math.min(minX, o.l);
-            maxX = Math.max(maxX, o.r);
-            minY = Math.min(minY, o.t);
-            maxY = Math.max(maxY, o.b);
-        }
-        xs.push(minX - 3 * wireLaneGap, maxX + 3 * wireLaneGap);
-        ys.push(minY - 3 * wireLaneGap, maxY + 3 * wireLaneGap);
-        xs = uniqueSorted(xs);
-        ys = uniqueSorted(ys);
-        var nx = xs.length, ny = ys.length;
-        var e = 0.5;
-        function inside(x, y) {
-            for (var q = 0; q < obs.length; q++) {
-                var r = obs[q];
-                if (x > r.l + e && x < r.r - e && y > r.t + e && y < r.b - e)
-                    return true;
-            }
-            return false;
-        }
-        var si = nearestIndex(xs, sx), sj = nearestIndex(ys, sy);
-        var gi = nearestIndex(xs, ex), gj = nearestIndex(ys, ey);
-        if (inside(xs[si], ys[sj]) || inside(xs[gi], ys[gj]))
-            return null;
-        if (si === gi && sj === gj)
-            return [[sx, sy], [ex, ey]];
-        var cells = nx * ny;
-        var blockedPt = new Uint8Array(cells);
-        var hOk = new Uint8Array(cells);
-        var vOk = new Uint8Array(cells);
-        for (var j = 0; j < ny; j++) {
-            for (var i = 0; i < nx; i++) {
-                var id = j * nx + i;
-                blockedPt[id] = inside(xs[i], ys[j]) ? 1 : 0;
-                if (i + 1 < nx)
-                    hOk[id] = inside((xs[i] + xs[i + 1]) / 2, ys[j]) ? 0 : 1;
-                if (j + 1 < ny)
-                    vOk[id] = inside(xs[i], (ys[j] + ys[j + 1]) / 2) ? 0 : 1;
-            }
-        }
-        var dist = new Float64Array(cells * 4).fill(Infinity);
-        var prev = new Int32Array(cells * 4).fill(-1);
-        var heap = [];
-        function push(item) {
-            heap.push(item);
-            var c = heap.length - 1;
-            while (c > 0) {
-                var pnt = (c - 1) >> 1;
-                if (heap[pnt][0] <= item[0])
-                    break;
-                heap[c] = heap[pnt];
-                c = pnt;
-            }
-            heap[c] = item;
-        }
-        function pop() {
-            var top = heap[0];
-            var last = heap.pop();
-            if (heap.length > 0) {
-                var c = 0;
-                for (;;) {
-                    var l = 2 * c + 1, r = l + 1, m = c;
-                    if (l < heap.length && heap[l][0] < (m === c ? last[0] : heap[m][0]))
-                        m = l;
-                    if (r < heap.length && heap[r][0] < (m === c ? last[0] : heap[m][0]))
-                        m = r;
-                    if (m === c)
-                        break;
-                    heap[c] = heap[m];
-                    c = m;
-                }
-                heap[c] = last;
-            }
-            return top;
-        }
-        function h(i, j) {
-            return Math.abs(xs[i] - ex) + Math.abs(ys[j] - ey);
-        }
-        var bend = wireBendCost;
-        var start = (sj * nx + si) * 4;
-        dist[start] = 0;
-        push([h(si, sj), 0, start, 0]);
-        var found = -1;
-        while (heap.length > 0) {
-            var it = pop();
-            if (it[3] === 1) {
-                found = it[2];
-                break;
-            }
-            var st = it[2];
-            if (it[1] > dist[st])
-                continue;
-            var cell = st >> 2, d = st & 3;
-            var cj = Math.floor(cell / nx), ci = cell - cj * nx;
-            for (var nd = 0; nd < 4; nd++) {
-                if (nd === ((d + 2) & 3))
-                    continue;
-                var ni = ci, nj = cj, ok = false, len = 0;
-                if (nd === 0 && ci + 1 < nx && hOk[cell]) {
-                    ni = ci + 1;
-                    ok = true;
-                    len = xs[ni] - xs[ci];
-                } else if (nd === 2 && ci > 0 && hOk[cell - 1]) {
-                    ni = ci - 1;
-                    ok = true;
-                    len = xs[ci] - xs[ni];
-                } else if (nd === 1 && cj + 1 < ny && vOk[cell]) {
-                    nj = cj + 1;
-                    ok = true;
-                    len = ys[nj] - ys[cj];
-                } else if (nd === 3 && cj > 0 && vOk[cell - nx]) {
-                    nj = cj - 1;
-                    ok = true;
-                    len = ys[cj] - ys[nj];
-                }
-                if (!ok)
-                    continue;
-                var ncell = nj * nx + ni;
-                if (blockedPt[ncell])
-                    continue;
-                var ng = it[1] + len + (nd !== d ? bend : 0);
-                var nst = ncell * 4 + nd;
-                if (ng < dist[nst]) {
-                    dist[nst] = ng;
-                    prev[nst] = st;
-                    if (ni === gi && nj === gj)
-                        push([ng + (nd !== 0 ? bend : 0), ng, nst, 1]);
-                    else
-                        push([ng + h(ni, nj), ng, nst, 0]);
-                }
-            }
-        }
-        if (found < 0)
-            return null;
-        var path = [];
-        for (var cur = found; cur >= 0; cur = prev[cur]) {
-            var cc = cur >> 2;
-            var pj = Math.floor(cc / nx);
-            path.push([xs[cc - pj * nx], ys[pj]]);
-        }
-        path.reverse();
-        path[0] = [sx, sy];
-        path[path.length - 1] = [ex, ey];
-        return path;
+        return Wires.gridRoute(graphView, sx, sy, ex, ey, obs);
     }
 
     function simplifyOrtho(pts) {
-        var out = [];
-        for (var i = 0; i < pts.length; i++) {
-            var p = pts[i];
-            if (out.length > 0 && Math.abs(out[out.length - 1][0] - p[0]) < 0.01 && Math.abs(out[out.length - 1][1] - p[1]) < 0.01)
-                continue;
-            if (out.length >= 2) {
-                var a = out[out.length - 2], b = out[out.length - 1];
-                if ((Math.abs(a[0] - b[0]) < 0.01 && Math.abs(b[0] - p[0]) < 0.01) || (Math.abs(a[1] - b[1]) < 0.01 && Math.abs(b[1] - p[1]) < 0.01)) {
-                    out[out.length - 1] = p;
-                    continue;
-                }
-            }
-            out.push(p);
-        }
-        return out;
+        return Wires.simplifyOrtho(graphView, pts);
     }
 
     function routeOrtho(x1, y1, x2, y2, obs) {
-        var sx = x1 + wireStub, ex = x2 - wireStub;
-        var pad = 160;
-        var bx0 = Math.min(sx, ex) - pad, bx1 = Math.max(sx, ex) + pad;
-        var by0 = Math.min(y1, y2) - pad, by1 = Math.max(y1, y2) + pad;
-        var local = [];
-        for (var i = 0; i < obs.length; i++) {
-            var o = obs[i];
-            if (o.r > bx0 && o.l < bx1 && o.b > by0 && o.t < by1)
-                local.push(o);
-        }
-        var mid = gridRoute(sx, y1, ex, y2, local);
-        var full = mid ? simplifyOrtho([[x1, y1]].concat(mid, [[x2, y2]])) : null;
-        if ((!full || pathBlocked(full, x1, y1, x2, y2, obs)) && local.length < obs.length) {
-            mid = gridRoute(sx, y1, ex, y2, obs);
-            full = mid ? simplifyOrtho([[x1, y1]].concat(mid, [[x2, y2]])) : null;
-        }
-        return full;
+        return Wires.routeOrtho(graphView, x1, y1, x2, y2, obs);
     }
 
     function planOrtho(x1, y1, x2, y2, lane, obs, prev) {
-        var simple = orthoPoints(x1, y1, x2, y2, lane);
-        if (!pathBlocked(simple, x1, y1, x2, y2, obs))
-            return {
-                x1: x1,
-                y1: y1,
-                x2: x2,
-                y2: y2,
-                pts: simple,
-                routed: false
-            };
-        var base = null;
-        if (prev && prev.routed && prev.x1 === x1 && prev.y1 === y1 && prev.x2 === x2 && prev.y2 === y2 && !pathBlocked(prev.base, x1, y1, x2, y2, obs))
-            base = prev.base;
-        else
-            base = routeOrtho(x1, y1, x2, y2, obs);
-        if (!base)
-            return null;
-        return {
-            x1: x1,
-            y1: y1,
-            x2: x2,
-            y2: y2,
-            base: base,
-            pts: base.map(function (p) {
-                return [p[0], p[1]];
-            }),
-            routed: true
-        };
+        return Wires.planOrtho(graphView, x1, y1, x2, y2, lane, obs, prev);
     }
 
     function nudgeRoutes(routes, obs) {
-        var groups = {};
-        for (var r = 0; r < routes.length; r++) {
-            var pts = routes[r].pts;
-            for (var k = 1; k + 1 <= pts.length - 2; k++) {
-                var a = pts[k], b = pts[k + 1];
-                var vertical = Math.abs(a[0] - b[0]) < 0.01;
-                var key = (vertical ? "v" : "h") + Math.round(vertical ? a[0] : a[1]);
-                var lo = vertical ? Math.min(a[1], b[1]) : Math.min(a[0], b[0]);
-                var hi = vertical ? Math.max(a[1], b[1]) : Math.max(a[0], b[0]);
-                (groups[key] = groups[key] || []).push({
-                    pts: pts,
-                    k: k,
-                    vertical: vertical,
-                    lo: lo,
-                    hi: hi
-                });
-            }
-        }
-        for (var g in groups) {
-            var segs = groups[g];
-            if (segs.length < 2)
-                continue;
-            segs.sort(function (p, q) {
-                return p.lo - q.lo;
-            });
-            var i = 0;
-            while (i < segs.length) {
-                var reach = segs[i].hi;
-                var j = i + 1;
-                while (j < segs.length && segs[j].lo <= reach + 1) {
-                    reach = Math.max(reach, segs[j].hi);
-                    j++;
-                }
-                var count = j - i;
-                for (var c = 0; count > 1 && c < count; c++)
-                    shiftSegment(segs[i + c], (c - (count - 1) / 2) * wireLaneGap, obs);
-                i = j;
-            }
-        }
+        return Wires.nudgeRoutes(graphView, routes, obs);
     }
 
     function shiftSegment(seg, offset, obs) {
-        if (offset === 0)
-            return;
-        var pts = seg.pts, k = seg.k, axis = seg.vertical ? 0 : 1;
-        var n = pts.length;
-        var saved = [pts[k][axis], pts[k + 1][axis]];
-        pts[k][axis] += offset;
-        pts[k + 1][axis] += offset;
-        var bad = pts[1][0] < pts[0][0] + wireStub / 2 || pts[n - 2][0] > pts[n - 1][0] - wireStub / 2;
-        for (var s = Math.max(1, k); !bad && s <= Math.min(n - 1, k + 2); s++) {
-            var ax = s === 1 ? pts[0][0] + wireStub : pts[s - 1][0];
-            var bx = s === n - 1 ? pts[n - 1][0] - wireStub : pts[s][0];
-            if (segmentBlocked(ax, pts[s - 1][1], bx, pts[s][1], obs, wireClearance - 2))
-                bad = true;
-        }
-        if (bad) {
-            pts[k][axis] = saved[0];
-            pts[k + 1][axis] = saved[1];
-        }
+        return Wires.shiftSegment(graphView, seg, offset, obs);
     }
 
     function updateWireRoutes(positions) {
-        if (!isOrthoWire()) {
-            wireRoutes = {};
-            return;
-        }
-        var obs = wireObstacles();
-        var prev = wireRoutes;
-        var next = {};
-        for (var key in prev) {
-            if (typeof key === "string" && (key.indexOf("b|") === 0 || key === "drag"))
-                next[key] = prev[key];
-        }
-        var routed = [];
-        for (var li = 0; li < links.length; li++) {
-            var link = links[li];
-            var a = positions[link.outputPortId];
-            var b = positions[link.inputPortId];
-            if (!a || !b || isSnapInternal(a, b))
-                continue;
-            var r = planOrtho(a.cx, a.cy, b.cx, b.cy, wireLane(link.id), obs, prev[link.id]);
-            if (!r)
-                continue;
-            next[link.id] = r;
-            if (r.routed)
-                routed.push(r);
-        }
-        if (wireStyle === "circuit")
-            nudgeRoutes(routed, obs);
-        wireObstacleCache = obs;
-        wireRoutes = next;
+        return Wires.updateWireRoutes(graphView, positions);
     }
 
     function routeExtraWire(wid, x1, y1, x2, y2) {
-        if (!isOrthoWire())
-            return;
-        var r = planOrtho(x1, y1, x2, y2, 0, wireObstacleCache, wireRoutes[wid]);
-        if (r)
-            wireRoutes[wid] = r;
-        else
-            delete wireRoutes[wid];
+        return Wires.routeExtraWire(graphView, wid, x1, y1, x2, y2);
     }
 
     function wirePolyline(x1, y1, x2, y2, wid) {
-        if (wireStyle === "straight")
-            return [[x1, y1], [x2, y2]];
-        if (isOrthoWire())
-            return wirePathPoints(x1, y1, x2, y2, wid);
-        var c = bezierCtrl(x1, x2);
-        var cx1 = x1 + c;
-        var cx2 = x2 - c;
-        var pts = [[x1, y1]];
-        var steps = 30;
-        for (var i = 1; i <= steps; i++) {
-            var t = i / steps;
-            var u = 1 - t;
-            pts.push([u * u * u * x1 + 3 * u * u * t * cx1 + 3 * u * t * t * cx2 + t * t * t * x2, u * u * u * y1 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y2]);
-        }
-        return pts;
+        return Wires.wirePolyline(graphView, x1, y1, x2, y2, wid);
     }
 
     function wireSamples(x1, y1, x2, y2, wid, step) {
-        var pts = wirePolyline(x1, y1, x2, y2, wid);
-        var out = [pts[0]];
-        for (var i = 1; i < pts.length; i++) {
-            var ax = pts[i - 1][0], ay = pts[i - 1][1];
-            var dx = pts[i][0] - ax, dy = pts[i][1] - ay;
-            var n = Math.max(1, Math.ceil(Math.sqrt(dx * dx + dy * dy) / step));
-            for (var k = 1; k <= n; k++)
-                out.push([ax + dx * k / n, ay + dy * k / n]);
-        }
-        return out;
+        return Wires.wireSamples(graphView, x1, y1, x2, y2, wid, step);
     }
 
     function wireBounds(x1, y1, x2, y2, wid) {
-        if (!isOrthoWire() && wireStyle !== "straight") {
-            var c = bezierCtrl(x1, x2);
-            return {
-                x0: Math.min(x1, x2 - c),
-                x1: Math.max(x1 + c, x2),
-                y0: Math.min(y1, y2),
-                y1: Math.max(y1, y2)
-            };
-        }
-        var pts = wirePolyline(x1, y1, x2, y2, wid);
-        var b = {
-            x0: Infinity,
-            x1: -Infinity,
-            y0: Infinity,
-            y1: -Infinity
-        };
-        for (var i = 0; i < pts.length; i++) {
-            b.x0 = Math.min(b.x0, pts[i][0]);
-            b.x1 = Math.max(b.x1, pts[i][0]);
-            b.y0 = Math.min(b.y0, pts[i][1]);
-            b.y1 = Math.max(b.y1, pts[i][1]);
-        }
-        return b;
+        return Wires.wireBounds(graphView, x1, y1, x2, y2, wid);
     }
 
     function wireMidpoint(x1, y1, x2, y2, wid) {
-        if (!isOrthoWire())
-            return {
-                x: (x1 + x2) / 2,
-                y: (y1 + y2) / 2
-            };
-        var pts = wirePathPoints(x1, y1, x2, y2, wid);
-        var total = 0;
-        for (var i = 1; i < pts.length; i++)
-            total += Math.abs(pts[i][0] - pts[i - 1][0]) + Math.abs(pts[i][1] - pts[i - 1][1]);
-        var left = total / 2;
-        for (var k = 1; k < pts.length; k++) {
-            var len = Math.abs(pts[k][0] - pts[k - 1][0]) + Math.abs(pts[k][1] - pts[k - 1][1]);
-            if (len >= left && len > 0) {
-                var f = left / len;
-                return {
-                    x: pts[k - 1][0] + (pts[k][0] - pts[k - 1][0]) * f,
-                    y: pts[k - 1][1] + (pts[k][1] - pts[k - 1][1]) * f
-                };
-            }
-            left -= len;
-        }
-        return {
-            x: (x1 + x2) / 2,
-            y: (y1 + y2) / 2
-        };
+        return Wires.wireMidpoint(graphView, x1, y1, x2, y2, wid);
     }
 
     function traceWire(ctx, x1, y1, x2, y2, wid) {
-        ctx.beginPath();
-        ctx.moveTo(x1, y1);
-        if (wireStyle === "straight") {
-            ctx.lineTo(x2, y2);
-            return;
-        }
-        if (isOrthoWire()) {
-            var pts = wirePathPoints(x1, y1, x2, y2, wid);
-            var radius = wireStyle === "circuit" ? wireCorner : 0;
-            for (var i = 1; i < pts.length - 1; i++) {
-                var p = pts[i - 1], q = pts[i], n = pts[i + 1];
-                var r = Math.min(radius, Math.hypot(q[0] - p[0], q[1] - p[1]) / 2, Math.hypot(n[0] - q[0], n[1] - q[1]) / 2);
-                if (r > 0.5)
-                    ctx.arcTo(q[0], q[1], n[0], n[1], r);
-                else
-                    ctx.lineTo(q[0], q[1]);
-            }
-            ctx.lineTo(x2, y2);
-            return;
-        }
-        var c = bezierCtrl(x1, x2);
-        ctx.bezierCurveTo(x1 + c, y1, x2 - c, y2, x2, y2);
+        return Wires.traceWire(graphView, ctx, x1, y1, x2, y2, wid);
     }
 
     function strokeStyleOf(color) {
-        return color && color.addColorStop !== undefined ? color : "" + color;
+        return Wires.strokeStyleOf(graphView, color);
     }
 
     function drawWire(ctx, x1, y1, x2, y2, color, lineWidth, wid) {
-        ctx.strokeStyle = strokeStyleOf(color);
-        ctx.lineWidth = lineWidth;
-        ctx.lineCap = "round";
-        ctx.lineJoin = "round";
-        traceWire(ctx, x1, y1, x2, y2, wid);
-        ctx.stroke();
+        return Wires.drawWire(graphView, ctx, x1, y1, x2, y2, color, lineWidth, wid);
     }
 
     function computeWireLanes(positions) {
-        var lanes = {};
-        if (wireStyle !== "circuit")
-            return lanes;
-        var entities = {};
-        var list = [];
-        for (var li = 0; li < links.length; li++) {
-            var link = links[li];
-            var a = positions[link.outputPortId];
-            var b = positions[link.inputPortId];
-            if (!a || !b || isSnapInternal(a, b))
-                continue;
-            if (b.cx - a.cx < 2 * wireStub || Math.abs(b.cy - a.cy) < 0.5)
-                continue;
-            var mid = (a.cx + b.cx) / 2;
-            var key = link.outputPortId + "|" + Math.round(mid);
-            var e = entities[key];
-            if (!e) {
-                e = {
-                    mid: mid,
-                    y1: a.cy,
-                    lo: a.cy,
-                    hi: a.cy,
-                    sumDy: 0,
-                    room: Infinity,
-                    links: []
-                };
-                entities[key] = e;
-                list.push(e);
-            }
-            e.lo = Math.min(e.lo, b.cy);
-            e.hi = Math.max(e.hi, b.cy);
-            e.sumDy += b.cy - a.cy;
-            e.room = Math.min(e.room, b.cx - a.cx - 2 * wireStub);
-            e.links.push(link.id);
-        }
-        list.sort(function (p, q) {
-            return p.mid - q.mid || p.lo - q.lo;
-        });
-        var i = 0;
-        while (i < list.length) {
-            var j = i + 1;
-            while (j < list.length && list[j].mid - list[j - 1].mid <= wireLaneGap * 1.5)
-                j++;
-            assignLaneGroup(list.slice(i, j), lanes);
-            i = j;
-        }
-        return lanes;
+        return Wires.computeWireLanes(graphView, positions);
     }
 
     function assignLaneGroup(group, lanes) {
-        group.sort(function (p, q) {
-            return p.lo - q.lo;
-        });
-        var k = 0;
-        while (k < group.length) {
-            var reach = group[k].hi;
-            var m = k + 1;
-            while (m < group.length && group[m].lo <= reach + wireLaneGap) {
-                reach = Math.max(reach, group[m].hi);
-                m++;
-            }
-            var comp = group.slice(k, m);
-            comp.sort(function (p, q) {
-                var pd = p.sumDy >= 0, qd = q.sumDy >= 0;
-                if (pd !== qd)
-                    return pd ? -1 : 1;
-                return pd ? q.y1 - p.y1 : p.y1 - q.y1;
-            });
-            var room = Infinity;
-            for (var r = 0; r < comp.length; r++)
-                room = Math.min(room, comp[r].room);
-            var gap = comp.length > 1 ? Math.min(wireLaneGap, room / (comp.length - 1)) : 0;
-            for (var c = 0; c < comp.length; c++) {
-                var offset = (c - (comp.length - 1) / 2) * gap;
-                for (var l = 0; l < comp[c].links.length; l++)
-                    lanes[comp[c].links[l]] = offset;
-            }
-            k = m;
-        }
+        return Wires.assignLaneGroup(graphView, group, lanes);
     }
 
     readonly property real linkHitPx: 10
     function linkHit(sx, sy) {
-        var c = toCanvas(sx, sy);
-        var threshold = linkHitPx / zoom;
-        var bestId = -1;
-        var bestDist = threshold + 1;
-
-        for (var li = 0; li < links.length; li++) {
-            var link = links[li];
-            var fromPos = portPositions[link.outputPortId];
-            var toPos = portPositions[link.inputPortId];
-            if (!fromPos || !toPos || isSnapInternal(fromPos, toPos))
-                continue;
-            var wb = wireBounds(fromPos.cx, fromPos.cy, toPos.cx, toPos.cy, link.id);
-            if (c.x < wb.x0 - threshold || c.x > wb.x1 + threshold || c.y < wb.y0 - threshold || c.y > wb.y1 + threshold)
-                continue;
-            var dist = distToWire(c.x, c.y, fromPos.cx, fromPos.cy, toPos.cx, toPos.cy, link.id);
-            if (dist < bestDist) {
-                bestDist = dist;
-                bestId = link.id;
-            }
-        }
-        return bestId >= 0 && bestDist <= threshold ? {
-            id: bestId,
-            dist: bestDist
-        } : null;
+        return HitTesting.linkHit(graphView, sx, sy);
     }
 
     function findLinkAt(sx, sy) {
-        var h = linkHit(sx, sy);
-        return h ? h.id : -1;
+        return HitTesting.findLinkAt(graphView, sx, sy);
     }
 
     function findLinkUnderNode(nodeId) {
-        var pos = nodePositions[nodeId];
-        if (!pos)
-            return -1;
-        var node = findNodeData(nodeId);
-        if (!node)
-            return -1;
-        var nw = getNodeWidth(nodeId);
-        var nh = calculateNodeHeight(node);
-        var nx = pos.x;
-        var ny = pos.y;
-
-        var bestId = -1;
-        var bestDist = Infinity;
-
-        for (var li = 0; li < links.length; li++) {
-            var link = links[li];
-            if (link.outputPortId === undefined)
-                continue;
-            if (link.outputNodeId === nodeId || link.inputNodeId === nodeId)
-                continue;
-            if (portMediaTypes[link.outputPortId] !== "Audio" || portMediaTypes[link.inputPortId] !== "Audio")
-                continue;
-            var fromPos = portPositions[link.outputPortId];
-            var toPos = portPositions[link.inputPortId];
-            if (!fromPos || !toPos || isSnapInternal(fromPos, toPos))
-                continue;
-            if (fromPos.nodeId === nodeId || toPos.nodeId === nodeId)
-                continue;
-            var samples = wireSamples(fromPos.cx, fromPos.cy, toPos.cx, toPos.cy, link.id, 8);
-            for (var i = 0; i < samples.length; i++) {
-                var bx = samples[i][0];
-                var by = samples[i][1];
-                if (bx >= nx && bx <= nx + nw && by >= ny && by <= ny + nh) {
-                    var cx = nx + nw / 2;
-                    var cy = ny + nh / 2;
-                    var dx = bx - cx;
-                    var dy = by - cy;
-                    var d = dx * dx + dy * dy;
-                    if (d < bestDist) {
-                        bestDist = d;
-                        bestId = link.id;
-                    }
-                    break;
-                }
-            }
-        }
-        return bestId;
+        return HitTesting.findLinkUnderNode(graphView, nodeId);
     }
 
     function distToWire(px, py, x1, y1, x2, y2, wid) {
-        var pts = wirePolyline(x1, y1, x2, y2, wid);
-        var minSq = Infinity;
-        for (var i = 1; i < pts.length; i++) {
-            var ax = pts[i - 1][0], ay = pts[i - 1][1];
-            var sx = pts[i][0] - ax, sy = pts[i][1] - ay;
-            var len = sx * sx + sy * sy;
-            var k = len > 0 ? Math.max(0, Math.min(1, ((px - ax) * sx + (py - ay) * sy) / len)) : 0;
-            var dx = px - (ax + k * sx);
-            var dy = py - (ay + k * sy);
-            minSq = Math.min(minSq, dx * dx + dy * dy);
-        }
-        return Math.sqrt(minSq);
+        return HitTesting.distToWire(graphView, px, py, x1, y1, x2, y2, wid);
     }
 
     function wireIntersectsRect(x1, y1, x2, y2, wid, rx, ry, rw, rh) {
-        var samples = wireSamples(x1, y1, x2, y2, wid, 6);
-        for (var i = 0; i < samples.length; i++) {
-            var px = samples[i][0];
-            var py = samples[i][1];
-            if (px >= rx && px <= rx + rw && py >= ry && py <= ry + rh)
-                return true;
-        }
-        return false;
+        return HitTesting.wireIntersectsRect(graphView, x1, y1, x2, y2, wid, rx, ry, rw, rh);
     }
 
     function findLinksInRect(sx1, sy1, sx2, sy2) {
-        var minSx = Math.min(sx1, sx2);
-        var minSy = Math.min(sy1, sy2);
-        var maxSx = Math.max(sx1, sx2);
-        var maxSy = Math.max(sy1, sy2);
-        var c1 = toCanvas(minSx, minSy);
-        var c2 = toCanvas(maxSx, maxSy);
-        var rx = c1.x;
-        var ry = c1.y;
-        var rw = c2.x - c1.x;
-        var rh = c2.y - c1.y;
-
-        var result = {};
-        for (var li = 0; li < links.length; li++) {
-            var link = links[li];
-            var fromPos = portPositions[link.outputPortId];
-            var toPos = portPositions[link.inputPortId];
-            if (fromPos && toPos && !isSnapInternal(fromPos, toPos)) {
-                if (wireIntersectsRect(fromPos.cx, fromPos.cy, toPos.cx, toPos.cy, link.id, rx, ry, rw, rh)) {
-                    result[link.id] = linkSig(link);
-                }
-            }
-        }
-        return result;
+        return HitTesting.findLinksInRect(graphView, sx1, sy1, sx2, sy2);
     }
 
     function findNodesInRect(sx1, sy1, sx2, sy2) {
-        var c1 = toCanvas(Math.min(sx1, sx2), Math.min(sy1, sy2));
-        var c2 = toCanvas(Math.max(sx1, sx2), Math.max(sy1, sy2));
-        var rx = c1.x;
-        var ry = c1.y;
-        var rr = c2.x;
-        var rb = c2.y;
-
-        var result = {};
-        for (var i = 0; i < nodes.length; i++) {
-            var n = nodes[i];
-            if (n.layoutKey && hiddenNodes[n.layoutKey])
-                continue;
-            var pos = nodePositions[n.id];
-            if (!pos)
-                continue;
-            var h = calculateNodeHeight(n);
-            var nx = pos.x;
-            var ny = pos.y;
-            var nr = nx + getNodeWidth(n.id);
-            var nb = ny + h;
-            if (nx < rr && nr > rx && ny < rb && nb > ry) {
-                result[n.id] = nodeSig(n);
-            }
-        }
-        return result;
+        return HitTesting.findNodesInRect(graphView, sx1, sy1, sx2, sy2);
     }
 
     function deleteSelectedLinks() {
-        var ids = [];
-        for (var linkId in selectedLinks) {
-            var lid = parseInt(linkId);
-            if (linkMatchesSig(findLinkData(lid), selectedLinks[linkId]))
-                ids.push(lid);
-        }
-        if (disconnectLinks(ids) > 0) {
-            selectedLinks = {};
-            canvas.requestPaint();
-        }
+        return Selection.deleteSelectedLinks(graphView);
     }
 
     property var nodeCues: ({})
@@ -6951,106 +1277,23 @@ Item {
     property var edgeMarkers: []
 
     function quietCues() {
-        cueQuiet = true;
-        nodeCues = {};
-        edgeMarkers = [];
-        cueQuietTimer.restart();
+        return Viewport.quietCues(graphView);
     }
 
     function noteAppeared(ids) {
-        if (ids.length === 0)
-            return;
-        if (cueQuiet) {
-            cueQuietTimer.restart();
-            return;
-        }
-        if (ids.length > 4)
-            return;
-        var now = Date.now();
-        var added = false;
-        for (var i = 0; i < ids.length; i++) {
-            var n = findNodeData(ids[i]);
-            if (!n || ids[i] === placingNodeId || (n.layoutKey && hiddenNodes[n.layoutKey]))
-                continue;
-            nodeCues[ids[i]] = {
-                born: now,
-                t: now
-            };
-            added = true;
-        }
-        if (added) {
-            nodeCues = nodeCues;
-            cueTimer.start();
-        }
+        return Viewport.noteAppeared(graphView, ids);
     }
 
     function nodeOnScreen(node) {
-        var p = nodePositions[node.id];
-        if (!p)
-            return false;
-        var a = toScreen(p.x, p.y);
-        var b = toScreen(p.x + getNodeWidth(node.id), p.y + calculateNodeHeight(node));
-        return b.x > 0 && a.x < width && b.y > 0 && a.y < height;
+        return Viewport.nodeOnScreen(graphView, node);
     }
 
     function updateCues() {
-        var now = Date.now();
-        var markers = [];
-        var pulsing = false;
-        var left = 0;
-        for (var id in nodeCues) {
-            var cue = nodeCues[id];
-            var n = findNodeData(parseInt(id));
-            if (!n || (n.layoutKey && hiddenNodes[n.layoutKey])) {
-                delete nodeCues[id];
-                continue;
-            }
-            var onScreen = nodeOnScreen(n);
-            if (onScreen ? now - cue.t > cuePulseMs : now - cue.born > cueMarkerMs) {
-                delete nodeCues[id];
-                continue;
-            }
-            left++;
-            if (onScreen) {
-                pulsing = true;
-                continue;
-            }
-            cue.t = now;
-            var p = nodePositions[n.id];
-            var c = toScreen(p.x + getNodeWidth(n.id) / 2, p.y + calculateNodeHeight(n) / 2);
-            var mx = Math.max(90, Math.min(width - 90, c.x));
-            var my = Math.max(70, Math.min(height - 64, c.y));
-            markers.push({
-                id: n.id,
-                name: n.name || "",
-                x: Math.round(mx),
-                y: Math.round(my),
-                angle: Math.round(Math.atan2(c.y - my, c.x - mx) * 180 / Math.PI)
-            });
-        }
-        if (JSON.stringify(markers) !== JSON.stringify(edgeMarkers))
-            edgeMarkers = markers;
-        if (pulsing)
-            canvas.requestPaint();
-        if (left === 0)
-            cueTimer.stop();
+        return Viewport.updateCues(graphView);
     }
 
     function revealNode(nodeId) {
-        var n = findNodeData(nodeId);
-        var p = n ? nodePositions[nodeId] : null;
-        if (!p)
-            return;
-        panX = width / 2 - (p.x + getNodeWidth(nodeId) / 2) * zoom;
-        panY = height / 2 - (p.y + calculateNodeHeight(n) / 2) * zoom;
-        clampPan();
-        nodeCues[nodeId] = {
-            born: Date.now(),
-            t: Date.now()
-        };
-        nodeCues = nodeCues;
-        cueTimer.start();
-        canvas.requestPaint();
+        return Viewport.revealNode(graphView, nodeId);
     }
 
     Timer {
@@ -7074,350 +1317,91 @@ Item {
     readonly property bool canRedo: redoStack.length > 0
 
     function pushUndo(entry) {
-        var st = undoStack.slice();
-        st.push(entry);
-        if (st.length > undoLimit)
-            st.shift();
-        undoStack = st;
-        redoStack = [];
+        return History.pushUndo(graphView, entry);
     }
 
     function clearUndo() {
-        undoStack = [];
-        redoStack = [];
+        return History.clearUndo(graphView);
     }
 
     function plural(n, one, many) {
-        return n === 1 ? one : n + " " + many;
+        return History.plural(graphView, n, one, many);
     }
     function counted(n, one, many) {
-        return n + " " + (n === 1 ? one : many);
+        return History.counted(graphView, n, one, many);
     }
 
     function nodeIdForKey(key) {
-        for (var id in uniqueKeyById) {
-            if (uniqueKeyById[id] === key)
-                return parseInt(id);
-        }
-        return -1;
+        return History.nodeIdForKey(graphView, key);
     }
 
     function markHandPlaced(nodeId) {
-        delete autoPlaced[nodeId];
-        delete placedKeyById[nodeId];
-        delete awaitingLinkPlacement[nodeId];
+        return History.markHandPlaced(graphView, nodeId);
     }
 
     function recordMove(verb, fromById) {
-        var entry = moveEntry(verb, fromById);
-        if (entry)
-            pushUndo(entry);
-        return entry;
+        return History.recordMove(graphView, verb, fromById);
     }
 
     function moveEntry(verb, fromById) {
-        var items = [];
-        for (var id in fromById) {
-            var nid = parseInt(id);
-            var from = fromById[id];
-            var to = nodePositions[nid];
-            var key = uniqueKeyById[nid];
-            if (!from || !to || !key || (from.x === to.x && from.y === to.y))
-                continue;
-            items.push({
-                key: key,
-                from: {
-                    x: from.x,
-                    y: from.y
-                },
-                to: {
-                    x: to.x,
-                    y: to.y
-                }
-            });
-        }
-        if (items.length === 0)
-            return null;
-        return {
-            kind: "move",
-            label: verb + " " + plural(items.length, "node", "nodes"),
-            items: items
-        };
+        return History.moveEntry(graphView, verb, fromById);
     }
 
     function portLinkRecord(outPort, inPort) {
-        return {
-            o: outPort,
-            i: inPort,
-            onKey: uniqueKeyById[getPortNodeId(outPort)] || "",
-            innKey: uniqueKeyById[getPortNodeId(inPort)] || ""
-        };
+        return History.portLinkRecord(graphView, outPort, inPort);
     }
 
     function insertRewireEntry(linkId, nodeId) {
-        var plan = null;
-        try {
-            var json = controller.insert_on_link_preview_json(linkId, nodeId);
-            plan = json ? JSON.parse(json) : null;
-        } catch (e) {
-            plan = null;
-        }
-        if (!plan)
-            return null;
-        var removed = [];
-        for (var ri = 0; ri < plan.remove.length; ri++) {
-            var l = findLinkData(plan.remove[ri]);
-            if (l)
-                removed.push(linkRecord(l));
-        }
-        var added = [];
-        for (var ai = 0; ai < plan.add.length; ai++)
-            added.push(portLinkRecord(plan.add[ai][0], plan.add[ai][1]));
-        if (removed.length === 0 && added.length === 0)
-            return null;
-        return {
-            kind: "rewire",
-            label: "insert node",
-            removed: removed,
-            added: added
-        };
+        return History.insertRewireEntry(graphView, linkId, nodeId);
     }
 
     function applyLinkRecords(recs, make) {
-        var done = 0;
-        for (var li = 0; li < recs.length; li++) {
-            var rec = recs[li];
-            if (!linkRecordValid(rec))
-                continue;
-            var live = findLinkByPorts(rec.o, rec.i);
-            if (make && !live) {
-                controller.connect_ports(rec.o, rec.i);
-                done++;
-            } else if (!make && live) {
-                controller.disconnect_link(live.id);
-                done++;
-            }
-        }
-        return done;
+        return History.applyLinkRecords(graphView, recs, make);
     }
 
     function linkRecord(link) {
-        return {
-            o: link.outputPortId,
-            i: link.inputPortId,
-            onKey: uniqueKeyById[link.outputNodeId] || "",
-            innKey: uniqueKeyById[link.inputNodeId] || ""
-        };
+        return History.linkRecord(graphView, link);
     }
 
     function linkRecordValid(rec) {
-        var on = getPortNodeId(rec.o);
-        var inn = getPortNodeId(rec.i);
-        return on >= 0 && inn >= 0 && (uniqueKeyById[on] || "") === rec.onKey && (uniqueKeyById[inn] || "") === rec.innKey;
+        return History.linkRecordValid(graphView, rec);
     }
 
     function findLinkByPorts(outPort, inPort) {
-        for (var i = 0; i < links.length; i++) {
-            if (links[i].outputPortId === outPort && links[i].inputPortId === inPort)
-                return links[i];
-        }
-        return null;
+        return History.findLinkByPorts(graphView, outPort, inPort);
     }
 
     function connectPorts(outPort, inPort) {
-        var on = getPortNodeId(outPort);
-        var inn = getPortNodeId(inPort);
-        markHandPlaced(on);
-        markHandPlaced(inn);
-        controller.connect_ports(outPort, inPort);
-        pushUndo({
-            kind: "connect",
-            label: "connect",
-            links: [
-                {
-                    o: outPort,
-                    i: inPort,
-                    onKey: uniqueKeyById[on] || "",
-                    innKey: uniqueKeyById[inn] || ""
-                }
-            ]
-        });
+        return History.connectPorts(graphView, outPort, inPort);
     }
 
     function disconnectLinks(ids) {
-        var recs = [];
-        for (var i = 0; i < ids.length; i++) {
-            var l = findLinkData(ids[i]);
-            if (!l)
-                continue;
-            recs.push(linkRecord(l));
-            controller.disconnect_link(l.id);
-        }
-        if (recs.length > 0)
-            pushUndo({
-                kind: "disconnect",
-                label: "disconnect " + plural(recs.length, "wire", "wires"),
-                links: recs
-            });
-        return recs.length;
+        return History.disconnectLinks(graphView, ids);
     }
 
     function applyHistory(entry, undoing) {
-        var done = 0;
-        if (entry.kind === "move") {
-            for (var mi = 0; mi < entry.items.length; mi++) {
-                var it = entry.items[mi];
-                var nid = nodeIdForKey(it.key);
-                if (nid < 0)
-                    continue;
-                var target = undoing ? it.from : it.to;
-                nodePositions[nid] = {
-                    x: target.x,
-                    y: target.y
-                };
-                markHandPlaced(nid);
-                done++;
-            }
-            if (done > 0)
-                persistLayout();
-        } else if (entry.kind === "hide") {
-            for (var hi = 0; hi < entry.keys.length; hi++) {
-                if (undoing)
-                    delete hiddenNodes[entry.keys[hi]];
-                else
-                    hiddenNodes[entry.keys[hi]] = true;
-                done++;
-            }
-            hiddenNodes = hiddenNodes;
-            persistHidden();
-        } else if (entry.kind === "snap") {
-            var snapTo = undoing ? (entry.side ? "" : entry.prevSide) : entry.side;
-            setMeterSnapped(entry.key, snapTo || "");
-            done++;
-        } else if (entry.kind === "group") {
-            for (var pi = 0; pi < entry.parts.length; pi++) {
-                var part = entry.parts[undoing ? entry.parts.length - 1 - pi : pi];
-                done += applyHistory(part, undoing);
-            }
-        } else if (entry.kind === "rewire") {
-            if (undoing) {
-                done += applyLinkRecords(entry.added, false);
-                done += applyLinkRecords(entry.removed, true);
-            } else {
-                done += applyLinkRecords(entry.removed, false);
-                done += applyLinkRecords(entry.added, true);
-            }
-        } else {
-            var make = (entry.kind === "disconnect") === undoing;
-            done += applyLinkRecords(entry.links, make);
-        }
-        canvas.requestPaint();
-        return done;
+        return History.applyHistory(graphView, entry, undoing);
     }
 
     function undo() {
-        if (undoStack.length === 0) {
-            showToast("Nothing to undo");
-            return;
-        }
-        var st = undoStack.slice();
-        var entry = st.pop();
-        undoStack = st;
-        if (applyHistory(entry, true) > 0) {
-            var rs = redoStack.slice();
-            rs.push(entry);
-            redoStack = rs;
-            showToast("Undo: " + entry.label);
-        } else {
-            showToast("Can\u2019t undo \u201c" + entry.label + "\u201d: it is no longer there");
-        }
+        return History.undo(graphView);
     }
 
     function redo() {
-        if (redoStack.length === 0) {
-            showToast("Nothing to redo");
-            return;
-        }
-        var rs = redoStack.slice();
-        var entry = rs.pop();
-        redoStack = rs;
-        if (applyHistory(entry, false) > 0) {
-            var st = undoStack.slice();
-            st.push(entry);
-            undoStack = st;
-            showToast("Redo: " + entry.label);
-        } else {
-            showToast("Can\u2019t redo \u201c" + entry.label + "\u201d: it is no longer there");
-        }
+        return History.redo(graphView);
     }
 
     function selectedNodeIds() {
-        var ids = [];
-        for (var k in selectedNodes) {
-            var n = findNodeData(parseInt(k));
-            if (n && selectedNodes[k] && selectedNodes[k].key === (n.layoutKey || ""))
-                ids.push(n.id);
-        }
-        return ids;
+        return History.selectedNodeIds(graphView);
     }
 
     function selectAll() {
-        var allNodes = {};
-        for (var i = 0; i < nodes.length; i++) {
-            var n = nodes[i];
-            if ((n.layoutKey && hiddenNodes[n.layoutKey]) || !nodePositions[n.id])
-                continue;
-            allNodes[n.id] = nodeSig(n);
-        }
-        var allLinks = {};
-        for (var li = 0; li < links.length; li++) {
-            var l = links[li];
-            if (portPositions[l.outputPortId] && portPositions[l.inputPortId] && !isSnapInternal(portPositions[l.outputPortId], portPositions[l.inputPortId]))
-                allLinks[l.id] = linkSig(l);
-        }
-        selectedNodes = allNodes;
-        selectedLinks = allLinks;
-        canvas.requestPaint();
+        return History.selectAll(graphView);
     }
 
     property var nudgeEntry: null
     function nudgeSelection(dx, dy, big) {
-        var ids = selectedNodeIds();
-        if (ids.length === 0)
-            return false;
-        var step = snapToGrid ? gridSize : (big ? 10 : 1);
-        var from = {};
-        for (var i = 0; i < ids.length; i++) {
-            var p = nodePositions[ids[i]];
-            if (!p)
-                continue;
-            from[ids[i]] = {
-                x: p.x,
-                y: p.y
-            };
-            nodePositions[ids[i]] = {
-                x: p.x + dx * step,
-                y: p.y + dy * step
-            };
-            markHandPlaced(ids[i]);
-        }
-        var last = undoStack.length > 0 ? undoStack[undoStack.length - 1] : null;
-        if (nudgeTimer.running && nudgeEntry !== null && last === nudgeEntry) {
-            for (var ni = 0; ni < nudgeEntry.items.length; ni++) {
-                var it = nudgeEntry.items[ni];
-                var nid = nodeIdForKey(it.key);
-                if (nid >= 0 && nodePositions[nid])
-                    it.to = {
-                        x: nodePositions[nid].x,
-                        y: nodePositions[nid].y
-                    };
-            }
-        } else {
-            nudgeEntry = recordMove("move", from);
-        }
-        nudgeTimer.restart();
-        canvas.requestPaint();
-        return true;
+        return Selection.nudgeSelection(graphView, dx, dy, big);
     }
 
     Timer {
@@ -7431,334 +1415,72 @@ Item {
 
     property var deletePlan: null
     function deleteSelection() {
-        var plan = {
-            links: [],
-            plugins: [],
-            subgraphs: [],
-            vdevs: [],
-            hide: [],
-            blocks: []
-        };
-        var removed = {};
-        var ids = selectedNodeIds();
-        for (var i = 0; i < ids.length; i++) {
-            var n = findNodeData(ids[i]);
-            if (n.type === "Plugin") {
-                plan.plugins.push(n);
-                removed[n.id] = true;
-            } else if (n.type === "Subgraph") {
-                plan.subgraphs.push(n);
-                removed[n.id] = true;
-            } else if (n.vdevId) {
-                plan.vdevs.push(n);
-                removed[n.id] = true;
-            } else if (n.type !== "SubgraphInput" && n.type !== "SubgraphOutput" && n.layoutKey) {
-                plan.hide.push(n);
-            }
-        }
-        for (var linkId in selectedLinks) {
-            var l = findLinkData(parseInt(linkId));
-            if (linkMatchesSig(l, selectedLinks[linkId]) && !removed[l.outputNodeId] && !removed[l.inputNodeId])
-                plan.links.push(l.id);
-        }
-        for (var bk in selectedBlocks) {
-            var sb = selectedBlocks[bk];
-            for (var bi2 = 0; bi2 < blockedPairs.length; bi2++) {
-                var live = blockedPairs[bi2];
-                if (live.ruleId === sb.ruleId && live.source === sb.source && live.target === sb.target) {
-                    var seen = false;
-                    for (var ri = 0; ri < plan.blocks.length; ri++) {
-                        if (plan.blocks[ri].ruleId === live.ruleId)
-                            seen = true;
-                    }
-                    if (!seen)
-                        plan.blocks.push({
-                            ruleId: live.ruleId,
-                            label: live.label
-                        });
-                }
-            }
-        }
-        var destructive = plan.plugins.length + plan.subgraphs.length + plan.vdevs.length;
-        if (destructive + plan.hide.length + plan.links.length + plan.blocks.length === 0)
-            return;
-        deletePlan = plan;
-        if (destructive > 0)
-            deleteSelectionDialog.open();
-        else
-            performDelete();
+        return Selection.deleteSelection(graphView);
     }
 
     function deletePlanLines() {
-        var plan = deletePlan;
-        if (!plan)
-            return [];
-        var lines = [];
-        if (plan.plugins.length > 0)
-            lines.push("Remove " + counted(plan.plugins.length, "plugin", "plugins"));
-        if (plan.subgraphs.length > 0)
-            lines.push("Delete " + counted(plan.subgraphs.length, "subgraph", "subgraphs") + " and the plugins inside");
-        if (plan.vdevs.length > 0)
-            lines.push("Remove " + counted(plan.vdevs.length, "virtual device", "virtual devices"));
-        if (plan.hide.length > 0)
-            lines.push("Hide " + counted(plan.hide.length, "node", "nodes") + " (devices and app streams can\u2019t be removed)");
-        if (plan.links.length > 0)
-            lines.push("Disconnect " + counted(plan.links.length, "wire", "wires"));
-        if (plan.blocks.length > 0)
-            lines.push("Remove " + counted(plan.blocks.length, "do-not-connect rule", "do-not-connect rules"));
-        return lines;
+        return Selection.deletePlanLines(graphView);
     }
 
     function performDelete() {
-        var plan = deletePlan;
-        deletePlan = null;
-        if (!plan)
-            return;
-        disconnectLinks(plan.links);
-        if (plan.hide.length > 0) {
-            var keys = [];
-            for (var hi = 0; hi < plan.hide.length; hi++) {
-                hiddenNodes[plan.hide[hi].layoutKey] = true;
-                keys.push(plan.hide[hi].layoutKey);
-            }
-            hiddenNodes = hiddenNodes;
-            persistHidden();
-            pushUndo({
-                kind: "hide",
-                label: "hide " + plural(keys.length, "node", "nodes"),
-                keys: keys
-            });
-        }
-        for (var pi = 0; pi < plan.plugins.length; pi++) {
-            forgetMeterWhenGone(findNodeData(plan.plugins[pi].id));
-            controller.remove_plugin(plan.plugins[pi].id);
-        }
-        for (var si = 0; si < plan.subgraphs.length; si++)
-            controller.delete_subgraph(plan.subgraphs[si].subgraphId);
-        for (var vi = 0; vi < plan.vdevs.length; vi++)
-            controller.remove_virtual_device(plan.vdevs[vi].vdevId);
-        if (plan.blocks.length > 0) {
-            var others = 0;
-            for (var oi = 0; oi < blockedPairs.length; oi++) {
-                for (var rj = 0; rj < plan.blocks.length; rj++) {
-                    if (blockedPairs[oi].ruleId === plan.blocks[rj].ruleId && !selectedBlocks[blockKey(blockedPairs[oi])])
-                        others++;
-                }
-            }
-            for (var bj = 0; bj < plan.blocks.length; bj++)
-                controller.remove_rule(plan.blocks[bj].ruleId);
-            showToast("Removed " + (plan.blocks.length === 1 ? "the rule \u201c" + plan.blocks[0].label + "\u201d" : counted(plan.blocks.length, "do-not-connect rule", "do-not-connect rules")) + (others > 0 ? " (it also unblocks " + counted(others, "other pair", "other pairs") + ")" : "") + ".");
-        }
-        selectedNodes = {};
-        selectedLinks = {};
-        selectedBlocks = {};
-        if (plan.hide.length > 0)
-            showToast("Hid " + counted(plan.hide.length, "node", "nodes") + ". Ctrl+Z or right-click \u203a Unhide all brings them back.");
-        canvas.requestPaint();
+        return Selection.performDelete(graphView);
     }
 
     function blockedReasonFor(fromPort, fromDir, toPort) {
-        return fromDir === "Output" ? controller.blocked_reason(fromPort, toPort) : controller.blocked_reason(toPort, fromPort);
+        return Selection.blockedReasonFor(graphView, fromPort, fromDir, toPort);
     }
 
     function blockLinks(linkIds) {
-        var pairs = {};
-        for (var i = 0; i < linkIds.length; i++) {
-            var l = findLinkData(linkIds[i]);
-            if (!l)
-                continue;
-            var key = l.outputNodeId + ">" + l.inputNodeId;
-            if (pairs[key])
-                continue;
-            pairs[key] = true;
-            controller.block_link(l.id);
-        }
-        selectedLinks = {};
-        canvas.requestPaint();
+        return Selection.blockLinks(graphView, linkIds);
     }
 
     function blockSelectedLinks() {
-        var ids = [];
-        for (var linkId in selectedLinks) {
-            var lid = parseInt(linkId);
-            if (linkMatchesSig(findLinkData(lid), selectedLinks[linkId]))
-                ids.push(lid);
-        }
-        if (ids.length > 0)
-            blockLinks(ids);
+        return Selection.blockSelectedLinks(graphView);
     }
 
     function hasSelection() {
-        for (var k in selectedLinks)
-            return true;
-        for (var k2 in selectedNodes)
-            return true;
-        for (var k3 in selectedBlocks)
-            return true;
-        return false;
+        return Subgraphs.hasSelection(graphView);
     }
 
     function selectedPluginIds() {
-        var ids = [];
-        for (var k in selectedNodes) {
-            var n = findNodeData(parseInt(k));
-            if (n && n.type === "Plugin")
-                ids.push(n.id);
-        }
-        return ids;
+        return Subgraphs.selectedPluginIds(graphView);
     }
 
     function subgraphInfo(id) {
-        try {
-            var list = JSON.parse(controller.get_subgraphs_json()).subgraphs;
-            for (var i = 0; i < list.length; i++)
-                if (list[i].id === id)
-                    return list[i];
-        } catch (e) {}
-        return null;
+        return Subgraphs.subgraphInfo(graphView, id);
     }
 
     property var groupAnchor: null
     function groupIntoSubgraph(nodeId) {
-        var ids = selectedPluginIds();
-        if (nodeId >= 0 && ids.indexOf(nodeId) < 0)
-            ids = [nodeId];
-        if (ids.length === 0)
-            return;
-        var minX = Infinity, minY = Infinity;
-        for (var i = 0; i < ids.length; i++) {
-            var p = nodePositions[ids[i]];
-            if (p) {
-                minX = Math.min(minX, p.x);
-                minY = Math.min(minY, p.y);
-            }
-        }
-        groupAnchor = isFinite(minX) ? gridPos({
-            x: minX,
-            y: minY
-        }) : null;
-        var io = {};
-        try {
-            io = JSON.parse(controller.infer_subgraph_io(JSON.stringify(ids)));
-        } catch (e) {}
-        subgraphDialog.mode = "create";
-        subgraphDialog.nodeIds = ids;
-        subgraphDialog.pluginCount = io.plugins || ids.length;
-        subgraphDialog.load(io);
-        subgraphDialog.open();
+        return Subgraphs.groupIntoSubgraph(graphView, nodeId);
     }
 
     function openSubgraphEditor(id) {
-        var info = subgraphInfo(id);
-        if (!info)
-            return;
-        subgraphDialog.mode = "edit";
-        subgraphDialog.subgraphId = id;
-        subgraphDialog.load(info);
-        subgraphDialog.open();
+        return Subgraphs.openSubgraphEditor(graphView, id);
     }
 
     function openVdevEditor(id) {
-        vdevDialog.vdevId = id;
-        vdevDialog.deviceName = "Virtual Sink";
-        vdevDialog.channels = 2;
-        vdevDialog.kindIndex = 0;
-        if (id !== "") {
-            try {
-                var list = JSON.parse(controller.get_virtual_devices_json());
-                for (var i = 0; i < list.length; i++) {
-                    if (list[i].id === id) {
-                        vdevDialog.deviceName = list[i].name;
-                        vdevDialog.channels = list[i].channels;
-                        vdevDialog.kindIndex = list[i].kind === "source" ? 1 : 0;
-                    }
-                }
-            } catch (e) {}
-        }
-        vdevDialog.open();
+        return Subgraphs.openVdevEditor(graphView, id);
     }
 
     function applyInsertedLayout(resultJson) {
-        try {
-            var r = JSON.parse(resultJson);
-            for (var key in r.layout)
-                savedLayout[key] = r.layout[key];
-            controller.save_layout(JSON.stringify(savedLayout));
-            return r.subgraphId;
-        } catch (e) {
-            return "";
-        }
+        return Subgraphs.applyInsertedLayout(graphView, resultJson);
     }
 
     function duplicateSubgraph(node) {
-        var p = nodePositions[node.id] || {
-            x: 0,
-            y: 0
-        };
-        var at = gridPos({
-            x: p.x + getNodeWidth(node.id) + 40,
-            y: p.y
-        });
-        applyInsertedLayout(controller.duplicate_subgraph(node.subgraphId, at.x, at.y));
+        return Subgraphs.duplicateSubgraph(graphView, node);
     }
 
     function insertTemplate(file) {
-        var at = pendingPluginPosition || toCanvas(width / 2, height / 2);
-        pendingPluginPosition = null;
-        pendingPluginName = "";
-        at = gridPos({
-            x: at.x,
-            y: at.y
-        });
-        applyInsertedLayout(controller.insert_subgraph_template(file, at.x, at.y));
+        return Subgraphs.insertTemplate(graphView, file);
     }
 
     function enterSubgraph(id) {
-        if (!id || id === currentSubgraph)
-            return;
-        var info = subgraphInfo(id);
-        if (!info)
-            return;
-        if (currentSubgraph === "")
-            mainViewport = {
-                panX: panX,
-                panY: panY,
-                zoom: zoom
-            };
-        clearSelection();
-        clearUndo();
-        quietCues();
-        currentSubgraph = id;
-        currentSubgraphName = info.name;
-        fitAfterRefresh = !(info.view && info.view.zoom);
-        if (!fitAfterRefresh) {
-            zoom = info.view.zoom;
-            panX = info.view.panX;
-            panY = info.view.panY;
-        }
-        controller.set_subgraph_view(id);
+        return Subgraphs.enterSubgraph(graphView, id);
     }
 
     function exitSubgraph() {
-        if (currentSubgraph === "")
-            return;
-        controller.save_subgraph_view_state(currentSubgraph, JSON.stringify({
-            panX: panX,
-            panY: panY,
-            zoom: zoom
-        }));
-        clearSelection();
-        clearUndo();
-        quietCues();
-        currentSubgraph = "";
-        currentSubgraphName = "";
-        fitAfterRefresh = false;
-        if (mainViewport) {
-            zoom = mainViewport.zoom;
-            panX = mainViewport.panX;
-            panY = mainViewport.panY;
-        }
-        controller.set_subgraph_view("");
+        return Subgraphs.exitSubgraph(graphView);
     }
 
     Connections {
@@ -7777,11 +1499,6 @@ Item {
     }
 
     function clearSelection() {
-        if (hasSelection()) {
-            selectedLinks = {};
-            selectedNodes = {};
-            selectedBlocks = {};
-            canvas.requestPaint();
-        }
+        return Selection.clearSelection(graphView);
     }
 }

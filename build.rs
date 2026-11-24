@@ -26,6 +26,9 @@ fn main() {
         QmlModule::new("ZestBay")
             .qml_file("qml/main.qml")
             .qml_file("qml/GraphView.qml")
+            .qml_file("qml/GraphMenus.qml")
+            .qml_file("qml/GraphTools.qml")
+            .qml_file("qml/GraphMeters.qml")
             .qml_file("qml/PluginBrowser.qml")
             .qml_file("qml/PluginParams.qml")
             .qml_file("qml/RuleEditor.qml")
@@ -64,6 +67,21 @@ fn main() {
             .qml_file(QmlFile::from("qml/Glyphs.qml").singleton(true)),
     )
     .qrc_resources(["qml/qmldir"])
+    .qrc_resources([
+        "qml/graph/Data.js",
+        "qml/graph/Drawing.js",
+        "qml/graph/History.js",
+        "qml/graph/HitTesting.js",
+        "qml/graph/Input.js",
+        "qml/graph/Meters.js",
+        "qml/graph/Nodes.js",
+        "qml/graph/Paint.js",
+        "qml/graph/Placement.js",
+        "qml/graph/Selection.js",
+        "qml/graph/Subgraphs.js",
+        "qml/graph/Viewport.js",
+        "qml/graph/Wires.js",
+    ])
     .qrc_resources([
         "fonts/IBMPlexMono-Medium.ttf",
         "fonts/IBMPlexMono-Regular.ttf",

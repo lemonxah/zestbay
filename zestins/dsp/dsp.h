@@ -142,6 +142,22 @@ static inline uint32_t midi_out_begin(LV2_Atom_Sequence *out, LV2_URID sequence_
     return capacity;
 }
 
+static inline bool midi_message_valid(const uint8_t *msg, uint32_t size) {
+    if (!msg || size == 0 || msg[0] < 0x80)
+        return false;
+    if (msg[0] >= 0xF0)
+        return true;
+    uint8_t type = msg[0] & 0xF0;
+    uint32_t expected = type == 0xC0 || type == 0xD0 ? 2 : 3;
+    if (size != expected)
+        return false;
+    for (uint32_t i = 1; i < size; i++) {
+        if (msg[i] >= 0x80)
+            return false;
+    }
+    return true;
+}
+
 static inline void midi_out_write(LV2_Atom_Sequence *out, uint32_t capacity, LV2_URID midi_type,
                                   int64_t frames, const uint8_t *msg, uint32_t size) {
     struct {

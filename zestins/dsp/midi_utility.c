@@ -51,6 +51,8 @@ static void run(LV2_Handle h, uint32_t n) {
             if (ev->body.type != m->midi_event || ev->body.size == 0)
                 continue;
             const uint8_t *src = (const uint8_t *)(ev + 1);
+            if (!midi_message_valid(src, ev->body.size))
+                continue;
             uint8_t status = src[0];
             if (status >= 0xF0 || ev->body.size > 3) {
                 lv2_atom_sequence_append_event(out, capacity, ev);

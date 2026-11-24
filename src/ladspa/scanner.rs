@@ -159,6 +159,8 @@ pub(super) unsafe fn describe(path: &Path, desc: &Descriptor) -> Option<PluginIn
         } else {
             PluginCategory::from_class_label(&name)
         };
+        #[allow(clippy::unnecessary_cast)]
+        let unique_id = desc.unique_id as u64;
         Some(PluginInfo {
             uri: plugin_uri(path, &label),
             name,
@@ -175,7 +177,7 @@ pub(super) unsafe fn describe(path: &Path, desc: &Descriptor) -> Option<PluginIn
             has_ui: false,
             library_path: path.to_string_lossy().into_owned(),
             ladspa_ids: if desc.unique_id != 0 {
-                vec![desc.unique_id as u64]
+                vec![unique_id]
             } else {
                 Vec::new()
             },

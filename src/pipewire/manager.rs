@@ -1411,10 +1411,10 @@ impl Host {
             display_name: req.display_name.clone(),
             audio_inputs: plugin_info.audio_inputs,
             audio_outputs: plugin_info.audio_outputs,
-            sample_rate: sr as u32,
             has_midi_in,
             midi_outputs,
             enabled: req.enabled,
+            midi_ports: true,
         };
         let filter = crate::lv2::filter::Lv2FilterNode::new(
             &self.core,
@@ -1465,6 +1465,7 @@ impl Host {
             has_midi_in: inst.has_midi_in,
             midi_outputs: inst.midi_output_names.clone(),
             enabled: req.enabled,
+            midi_ports: true,
         };
         let instance_rc = Rc::new(RefCell::new(inst));
         let filter = crate::clap::filter::ClapFilterNode::new(
@@ -1516,6 +1517,7 @@ impl Host {
             has_midi_in: inst.has_midi_in,
             midi_outputs: inst.midi_output_names.clone(),
             enabled: req.enabled,
+            midi_ports: true,
         };
         let instance_rc = Rc::new(RefCell::new(inst));
         let filter = crate::vst3::filter::Vst3FilterNode::new(
@@ -1567,6 +1569,7 @@ impl Host {
             has_midi_in: inst.has_midi_in,
             midi_outputs: Vec::new(),
             enabled: req.enabled,
+            midi_ports: true,
         };
         let instance_rc = Rc::new(RefCell::new(inst));
         let filter = crate::vst2::filter::Vst2FilterNode::new(

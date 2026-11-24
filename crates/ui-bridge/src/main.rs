@@ -128,18 +128,20 @@ struct LV2Feature {
     data: *mut c_void,
 }
 
+type InstantiateUi = unsafe extern "C" fn(
+    descriptor: *const LV2UI_Descriptor,
+    plugin_uri: *const c_char,
+    bundle_path: *const c_char,
+    write_function: unsafe extern "C" fn(*mut c_void, c_uint, c_uint, c_uint, *const c_void),
+    controller: *mut c_void,
+    widget: *mut *mut c_void,
+    features: *const *const LV2Feature,
+) -> *mut c_void;
+
 #[repr(C)]
 struct LV2UI_Descriptor {
     uri: *const c_char,
-    instantiate: Option<unsafe extern "C" fn(
-        descriptor: *const LV2UI_Descriptor,
-        plugin_uri: *const c_char,
-        bundle_path: *const c_char,
-        write_function: unsafe extern "C" fn(*mut c_void, c_uint, c_uint, c_uint, *const c_void),
-        controller: *mut c_void,
-        widget: *mut *mut c_void,
-        features: *const *const LV2Feature,
-    ) -> *mut c_void>,
+    instantiate: Option<InstantiateUi>,
     cleanup: Option<unsafe extern "C" fn(handle: *mut c_void)>,
     port_event: Option<unsafe extern "C" fn(*mut c_void, c_uint, c_uint, c_uint, *const c_void)>,
     extension_data: Option<unsafe extern "C" fn(*const c_char) -> *const c_void>,
