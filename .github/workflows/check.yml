@@ -25,7 +25,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config cmake clang libclang-dev \
             libpipewire-0.3-dev qt6-base-dev qt6-base-private-dev qt6-declarative-dev \
-            qt6-declarative-private-dev qt6-declarative-dev-tools liblilv-dev lv2-dev \
+            qt6-declarative-private-dev qt6-declarative-dev-tools liblilv-dev lv2-dev ladspa-sdk \
             libsuil-dev libdbus-1-dev libx11-dev libgtk-3-dev qml6-module-qtquick \
             qml6-module-qtquick-controls qml6-module-qtquick-layouts qml6-module-qtquick-window \
             qml6-module-qtquick-templates qml6-module-qtqml-workerscript qml6-module-qttest
