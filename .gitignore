@@ -10,3 +10,5 @@
 /pkg/deb/ppa/
 /docs/ppa/
 /zestins/build/
+__pycache__/
+*.py[cod]

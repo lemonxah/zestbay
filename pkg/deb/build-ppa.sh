@@ -34,7 +34,7 @@ if [ ! -f "$ORIG" ]; then
         --exclude=./.flatpak-builder --exclude=./repo --exclude=./dist --exclude='./.*' \
         --exclude=./debian --exclude=./pkg/deb/ppa --exclude='./pkg/deb/*.deb' \
         --exclude='./pkg/deb/zestbay_*' --exclude=./pkg/rpm/rpmbuild --exclude=./vendor \
-        --exclude=./zestins/build \
+        --exclude=./zestins/build --exclude='__pycache__' --exclude='*.py[cod]' \
         . | tar -x -C "$SRC"
     (cd "$SRC" && cargo vendor --locked vendor >/dev/null)
     python3 - "$SRC/vendor" <<'PY'

@@ -57,8 +57,7 @@ ZestBay is a visual audio routing tool for PipeWire on Linux. It lets you see ev
   <img src="docs/screenshots/main-light.png" alt="ZestBay patchbay (light theme)" width="100%">
 </p>
 
-<sub>Screenshots are rendered from the real UI with sample data by
-<code>design/screenshots/render.sh</code>.</sub>
+<sub>Screenshots show the application UI with sample data.</sub>
 
 ## How it differs from other tools
 
