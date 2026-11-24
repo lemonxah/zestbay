@@ -17,8 +17,8 @@ import QtQuick.Controls
 Item {
     id: graphView
 
-    readonly property var theme: Theme
-    readonly property var glyphs: Glyphs
+    readonly property QtObject theme: Theme
+    readonly property QtObject glyphs: Glyphs
     readonly property var elements: ({
         autoLayoutAllDialog: autoLayoutAllDialog,
         blockContextMenu: graphMenus.elements.blockContextMenu,
