@@ -1,5 +1,5 @@
 pkgname=zestbay
-pkgver=1.2.11
+pkgver=1.2.12
 pkgrel=1
 pkgdesc="A PipeWire patchbay and audio routing manager with LV2/CLAP/VST3 plugin hosting"
 arch=('x86_64')

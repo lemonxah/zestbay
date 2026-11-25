@@ -1,5 +1,5 @@
 Name:           zestins
-Version:        1.2.11
+Version:        1.2.12
 Release:        1%{?dist}
 Summary:        LV2 plugins from ZestBay
 
