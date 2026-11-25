@@ -14,7 +14,7 @@ ZbWindow {
     required property var controller
 
     readonly property string sourceUrl: "https://github.com/lemonxah/zestbay"
-    readonly property string websiteUrl: "https://lemonxah.github.io/zestbay/"
+    readonly property string websiteUrl: "https://zestworx.com/zestbay"
     readonly property string issuesUrl: sourceUrl + "/issues"
 
     function bugReportUrl() {
@@ -168,7 +168,7 @@ ZbWindow {
 
                     LinkText {
                         width: parent.width
-                        text: "lemonxah.github.io/zestbay"
+                        text: "zestworx.com/zestbay"
                         url: aboutWindow.websiteUrl
                     }
                 }

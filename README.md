@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="https://lemonxah.github.io/zestbay/"><strong>Website</strong></a>
+  <a href="https://zestworx.com/zestbay"><strong>Website</strong></a>
   &middot; <a href="#installation">Install</a>
   &middot; <a href="https://github.com/lemonxah/zestbay/releases/latest">Releases</a>
 </p>
@@ -557,7 +557,7 @@ Subgraph and virtual device files from older versions are upgraded when ZestBay 
 
 ## Installation
 
-The [official website](https://lemonxah.github.io/zestbay/) has the same install steps with a short overview of the features.
+The [official website](https://zestworx.com/zestbay) has the same install steps with a short overview of the features.
 
 ### Ubuntu (PPA)
 
@@ -807,7 +807,7 @@ ZestBay uses a multi-threaded architecture with clean separation between compone
 
 ## Feedback
 
-Found a bug or want a feature? Open an issue on [GitHub](https://github.com/lemonxah/zestbay/issues). **About ZestBay** (menu) has **Report an issue** and **Request a feature** buttons that open a new issue in your browser, with your version filled in for bug reports. Project page: [lemonxah.github.io/zestbay](https://lemonxah.github.io/zestbay/).
+Found a bug or want a feature? Open an issue on [GitHub](https://github.com/lemonxah/zestbay/issues). **About ZestBay** (menu) has **Report an issue** and **Request a feature** buttons that open a new issue in your browser, with your version filled in for bug reports. Project page: [zestworx.com/zestbay](https://zestworx.com/zestbay).
 
 ## License
 
